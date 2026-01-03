@@ -1,0 +1,33 @@
+# ───────────────────────────────────────────────
+# HPB–TCT v17.3 FastAPI Server Requirements
+# ───────────────────────────────────────────────
+
+# Core framework
+fastapi==0.109.2
+uvicorn==0.29.0
+
+# Machine learning / numerical stack
+numpy==1.26.4
+pandas==2.2.2
+scipy==1.12.0
+matplotlib==3.8.3
+
+# Reinforcement learning + trading environment
+tensortrade==1.0.3
+gymnasium==0.29.1
+
+# Optional — for time series + data manipulation
+pytz==2023.3
+python-dateutil==2.8.2
+
+# Optional — for asynchronous requests (OKX/Bybit plugins)
+httpx==0.27.0
+requests==2.31.0
+
+# Optional — for JSON handling and validation
+pydantic==2.6.1
+
+# ───────────────────────────────────────────────
+# End of Requirements
+# ───────────────────────────────────────────────
+
