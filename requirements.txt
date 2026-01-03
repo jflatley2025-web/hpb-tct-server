@@ -13,7 +13,7 @@ scipy==1.12.0
 matplotlib==3.8.3
 
 # Reinforcement learning + trading environment
-tensortrade==1.0.3
+# tensortrade==1.0.3  ← Disabled for Render compatibility
 gymnasium==0.29.1
 
 # Optional — for time series + data manipulation
