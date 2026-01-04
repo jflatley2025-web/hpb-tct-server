@@ -7,6 +7,7 @@ wheel==0.43.0
 
 # Core framework
 fastapi==0.110.0
+gymnasium==0.29.1
 uvicorn==0.29.0
 
 # Async + requests
