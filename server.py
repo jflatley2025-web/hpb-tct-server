@@ -132,17 +132,23 @@ import asyncio
 latest_dashboard_html = "<h3>Initializing dashboard...</h3>"
 
 async def fetch_ohlc(symbol="BTC-USDT", interval="1H", limit=200):
-    """Fetch OHLC data from OKX."""
+    """Fetch OHLC data from OKX (handles variable column count)."""
     url = f"https://www.okx.com/api/v5/market/candles?instId={symbol}-SWAP&bar={interval}&limit={limit}"
     async with httpx.AsyncClient() as client:
         resp = await client.get(url)
     data = resp.json().get("data", [])
     if not data:
         return pd.DataFrame()
-    df = pd.DataFrame(data, columns=["ts", "o", "h", "l", "c", "v"])
-    df = df.astype({"o": float, "h": float, "l": float, "c": float})
+
+    # OKX returns 9 columns per candle (timestamp, o, h, l, c, vol, volCcy, volQuote, confirm)
+    # Only the first 6 are needed for charting
+    df = pd.DataFrame(data).iloc[:, :6]
+    df.columns = ["ts", "o", "h", "l", "c", "v"]
+
+    df = df.astype({"o": float, "h": float, "l": float, "c": float, "v": float})
     df["ts"] = pd.to_datetime(df["ts"], unit="ms")
     return df.sort_values("ts")
+
 
 def plot_range_chart(df: pd.DataFrame, title: str):
     if df.empty:
