@@ -267,6 +267,19 @@ def plot_range_chart(df: pd.DataFrame, title: str):
             liquidity_segments.append((time_seg, smooth_y))
 
     # ───────────────────────────────────────────────
+    # Step 6.5 — Debug Diagnostics (Print to Render Logs)
+    # ───────────────────────────────────────────────
+    print(f"[TCT] ---- {title} ----")
+    print(f"[TCT] phase: {phase}")
+    print(f"[TCT] primary_lows: {primary_lows}")
+    print(f"[TCT] primary_highs: {primary_highs}")
+    print(f"[TCT] valid_accum: {valid_accum}, valid_dist: {valid_dist}")
+    print(f"[TCT] pivots used: {len(pivots)}")
+    print(f"[TCT] segments generated: {len(liquidity_segments)}")
+
+
+
+    # ───────────────────────────────────────────────
     # Step 7. Plotly visualization
     # ───────────────────────────────────────────────
     fig = go.Figure()
