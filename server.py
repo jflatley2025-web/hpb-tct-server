@@ -211,7 +211,7 @@ def plot_range_chart(df: pd.DataFrame, title: str):
         if len(idx) < 2:
             return False
         ups = sum(values[idx[i + 1]] > values[idx[i]] for i in range(len(idx) - 1))
-        return ups / (len(idx) - 1) > 0.6  # allow 60% of pivots to rise
+        return ups / (len(idx) - 1) > 0.4  # allow 40% of pivots to rise
 
     def is_lower_high_seq(idx, values):
         if len(idx) < 2:
@@ -226,7 +226,7 @@ def plot_range_chart(df: pd.DataFrame, title: str):
     # ───────────────────────────────────────────────
     # Step 5. Price-near-liquidity filter (TCT condition)
     # ───────────────────────────────────────────────
-    def near_liquidity(df, pivot_i, window=6, tol=0.005):
+    def near_liquidity(df, pivot_i, window=8, tol=0.007):
         price = df["c"].iloc[pivot_i]
         nearby = df["c"].iloc[max(0, pivot_i - window):pivot_i + window]
         return (abs(nearby - price) / price < tol).sum() > window / 2
