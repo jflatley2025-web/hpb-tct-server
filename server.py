@@ -153,21 +153,67 @@ async def fetch_ohlc(symbol="BTC-USDT", interval="1H", limit=200):
 def plot_range_chart(df: pd.DataFrame, title: str):
     if df.empty:
         return go.Figure().update_layout(title=f"{title} – No data", template="plotly_dark")
+
+    import numpy as np
+    import scipy.signal as sig
+    from scipy.interpolate import make_interp_spline
+
+    # Basic range stats
     high, low = df["h"].max(), df["l"].min()
     eq = (high + low) / 2
     x = np.arange(len(df))
-    curve = np.poly1d(np.polyfit(x, df["l"].rolling(5).mean(), 2))
-    curve_y = curve(x)
 
+    # --- Detect swing pivots ---
+    lows = df["l"].to_numpy()
+    highs = df["h"].to_numpy()
+    swing_low_idx, _ = sig.find_peaks(-lows, distance=5)
+    swing_high_idx, _ = sig.find_peaks(highs, distance=5)
+
+    # --- Determine trend direction ---
+    slope = np.polyfit(x[-min(len(df), 40):], df["c"].values[-min(len(df), 40):], 1)[0]
+    use_lows = slope >= 0  # if trend up → accumulation curve
+    pivots_idx = swing_low_idx if use_lows else swing_high_idx
+    pivots_y = lows[pivots_idx] if use_lows else highs[pivots_idx]
+
+    # --- Smooth spline through pivots ---
+    if len(pivots_idx) >= 3:
+        # make sure pivot indices are strictly increasing
+        pivots_idx = np.sort(pivots_idx)
+        spline_x = np.linspace(pivots_idx.min(), pivots_idx.max(), 200)
+        spline_y = make_interp_spline(pivots_idx, pivots_y, k=3)(spline_x)
+        # convert spline_x → actual timestamps
+        spline_t = np.interp(spline_x, x, df["ts"].astype("int64"))
+        spline_t = pd.to_datetime(spline_t)
+    else:
+        # fallback: rolling quadratic fit
+        spline_t = df["ts"]
+        spline_y = np.poly1d(np.polyfit(x, df["l"].rolling(5).mean(), 2))(x)
+
+    # --- Plotly chart ---
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
-        x=df["ts"], open=df["o"], high=df["h"], low=df["l"], close=df["c"], name="Price"
+        x=df["ts"],
+        open=df["o"],
+        high=df["h"],
+        low=df["l"],
+        close=df["c"],
+        name="Price"
     ))
+
+    # Range lines
     fig.add_hline(y=high, line=dict(color="red", dash="dash"), annotation_text="Range High")
     fig.add_hline(y=low, line=dict(color="green", dash="dash"), annotation_text="Range Low")
     fig.add_hline(y=eq, line=dict(color="orange", dash="dot"), annotation_text="EQ")
-    fig.add_trace(go.Scatter(x=df["ts"], y=curve_y, mode="lines",
-                             line=dict(color="blue", width=2), name="Liquidity Curve"))
+
+    # --- Liquidity Curve (blue) ---
+    fig.add_trace(go.Scatter(
+        x=spline_t,
+        y=spline_y,
+        mode="lines",
+        line=dict(color="blue", width=3),
+        name="Liquidity Curve"
+    ))
+
     fig.update_layout(
         title=title,
         template="plotly_dark",
@@ -176,6 +222,7 @@ def plot_range_chart(df: pd.DataFrame, title: str):
         margin=dict(l=30, r=30, t=60, b=30)
     )
     return fig
+
 
 async def generate_dashboard():
     """Regenerate the multi-timeframe dashboard HTML."""

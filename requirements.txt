@@ -1,9 +1,9 @@
 # ───────────────────────────────────────────────
 # HPB–TCT v17.3 FastAPI Server (Render Stable)
 # ───────────────────────────────────────────────
-pip==25.1.1
 setuptools==70.0.0
 wheel==0.43.0
+pip==25.1.1
 
 # Core framework
 fastapi==0.95.2
@@ -29,6 +29,7 @@ pytz==2023.3
 # ─── New additions for /dashboard ───
 plotly==5.18.0        # interactive HTF/MTF/LTF charts
 apscheduler==3.10.4   # background scheduler for daily auto-refresh
+scipy==1.11.4   # render will need it for find_peaks and make_interp_spline
 
 
 
