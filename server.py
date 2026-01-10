@@ -1,8 +1,8 @@
 """
 server.py
 ────────────────────────────────────────────
-HPB–TCT v17.3 Server
-Integrates TensorTrade v1.0.3 Environment + HPB Gate Logic
+HPM–TCT v19 RIG EXTENDED Server
+Integrates TensorTrade v1.0.3 Environment + HPB Gate Logic + Algo Overlays
 ────────────────────────────────────────────
 """
 
@@ -12,103 +12,80 @@ import os
 import json
 import traceback
 from datetime import datetime
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse, HTMLResponse
 
 from tensortrade_config_ext import AUTO_INIT, TENSORTRADE_CONFIG, snapshot_environment
-from High_Probability_Model_v17.validate_gates import validate_gates
+from High_Probability_Model_v17_RIG.validate_gates import validate_gates
+
+import pandas as pd
+import numpy as np
+import plotly.graph_objs as go
+import httpx
+from apscheduler.schedulers.background import BackgroundScheduler
+import asyncio
 
 # ───────────────────────────────────────────────
 # Server setup
 # ───────────────────────────────────────────────
-app = FastAPI(title="HPB–TCT v17.3 Server", version="1.0")
-
-# Auto-initialize environment
+app = FastAPI(title="HPM–TCT v19 RIG EXTENDED Server", version="1.0")
 ENV = AUTO_INIT()
-
 
 @app.get("/")
 def home():
     return {
         "status": "OK",
-        "message": "HPB–TCT v17.3 Server Running",
+        "message": "HPM–TCT v19 RIG EXTENDED Server Running",
         "timestamp": datetime.utcnow().isoformat(),
         "symbol": TENSORTRADE_CONFIG["symbol"],
         "interval": TENSORTRADE_CONFIG["interval"],
     }
 
+# ───────────────────────────────────────────────
+# Validation & Backtest Endpoints
+# ───────────────────────────────────────────────
 from pydantic import BaseModel
 
-# Define the request body schema
 class ValidateRequest(BaseModel):
     symbol: str = "BTC-USDT-SWAP"
     interval: str = "1H"
 
-# ───────────────────────────────────────────────
-# Validate endpoint (Gate 1A–1D chain)
-# ───────────────────────────────────────────────
 @app.post("/validate")
 async def validate(request: ValidateRequest):
     try:
-        symbol = request.symbol
-        interval = request.interval
-
-        context = {"symbol": symbol, "interval": interval}
+        context = {"symbol": request.symbol, "interval": request.interval}
         gates = validate_gates(context)
-
-        response = {
+        return JSONResponse({
             "timestamp": datetime.utcnow().isoformat(),
             "mode": "live",
-            "symbol": symbol,
-            "interval": interval,
+            "symbol": request.symbol,
+            "interval": request.interval,
             "gates": gates.get("gates", {}),
             "Session_Info": gates.get("Session_Info", {}),
             "ExecutionConfidence_Total": gates.get("ExecutionConfidence_Total", 0.0),
             "Reward_Summary": gates.get("Reward_Summary", "N/A"),
-        }
-        return JSONResponse(response)
-
+        })
     except Exception as e:
         traceback.print_exc()
-        return JSONResponse(
-            {"error": str(e), "trace": traceback.format_exc()}, status_code=500
-        )
+        return JSONResponse({"error": str(e), "trace": traceback.format_exc()}, status_code=500)
 
-
-# Define request model for /backtest
 class BacktestRequest(BaseModel):
-    episodes: int = 10  # default value for testing
+    episodes: int = 10
 
-
-# ───────────────────────────────────────────────
-# Backtest endpoint (RL reward simulation)
-# ───────────────────────────────────────────────
 @app.post("/backtest")
 async def backtest(request: BacktestRequest):
     try:
-        episodes = request.episodes
-        print(f"[BACKTEST] Running {episodes} episodes...")
-
-        ENV.simulate_training(episodes=episodes)
-
-        return JSONResponse(
-            {
-                "timestamp": datetime.utcnow().isoformat(),
-                "mode": "backtest",
-                "episodes": episodes,
-                "message": "Backtest completed successfully.",
-            }
-        )
+        ENV.simulate_training(episodes=request.episodes)
+        return JSONResponse({
+            "timestamp": datetime.utcnow().isoformat(),
+            "mode": "backtest",
+            "episodes": request.episodes,
+            "message": "Backtest completed successfully.",
+        })
     except Exception as e:
         traceback.print_exc()
-        return JSONResponse(
-            {"error": str(e), "trace": traceback.format_exc()}, status_code=500
-        )
+        return JSONResponse({"error": str(e), "trace": traceback.format_exc()}, status_code=500)
 
-
-# ───────────────────────────────────────────────
-# Status endpoint
-# ───────────────────────────────────────────────
 @app.get("/status")
 def status():
     try:
@@ -118,18 +95,18 @@ def status():
         return {"status": "error", "message": str(e)}
 
 # ───────────────────────────────────────────────
-# HPB–TCT AUTO VISUAL DASHBOARD (HTF / MTF / LTF)
+# Fetch + Algo Link
 # ───────────────────────────────────────────────
-from fastapi.responses import HTMLResponse
-import pandas as pd
-import numpy as np
-import plotly.graph_objs as go
-import httpx
-from apscheduler.schedulers.background import BackgroundScheduler
-import asyncio
-
-# store the latest rendered dashboard HTML
-latest_dashboard_html = "<h3>Initializing dashboard...</h3>"
+async def fetch_algo_context(symbol="BTC-USDT-SWAP", interval="1H"):
+    """Fetch latest gate/validation context from algo core."""
+    try:
+        context = {"symbol": symbol, "interval": interval}
+        gates = validate_gates(context)
+        print(f"[ALGO] Gates fetched successfully for {symbol} ({interval})")
+        return gates
+    except Exception as e:
+        print(f"[ALGO ERROR] {e}")
+        return {"error": str(e)}
 
 async def fetch_ohlc(symbol="BTC-USDT", interval="1H", limit=200):
     """Fetch OHLC data from OKX (handles variable column count)."""
@@ -139,48 +116,31 @@ async def fetch_ohlc(symbol="BTC-USDT", interval="1H", limit=200):
     data = resp.json().get("data", [])
     if not data:
         return pd.DataFrame()
-
-    # OKX returns 9 columns per candle (timestamp, o, h, l, c, vol, volCcy, volQuote, confirm)
-    # Only the first 6 are needed for charting
     df = pd.DataFrame(data).iloc[:, :6]
     df.columns = ["ts", "o", "h", "l", "c", "v"]
-
     df = df.astype({"o": float, "h": float, "l": float, "c": float, "v": float})
-    df["ts"] = pd.to_datetime(df["ts"], unit="ms")
+    df["ts"] = pd.to_datetime(pd.to_numeric(df["ts"]), unit="ms")
     return df.sort_values("ts")
 
-def plot_range_chart(df: pd.DataFrame, title: str):
-    """
-    TCT-aware liquidity visualization.
-    Only draws liquidity arcs when structure confirms valid accumulation/distribution ranges
-    as defined in 2025 Liquidity-1_E_REVIEW & Liquidity-1_T_REVIEW.
-    """
-
+# ───────────────────────────────────────────────
+# Chart Renderer (Algo-aware)
+# ───────────────────────────────────────────────
+def plot_range_chart(df: pd.DataFrame, title: str, algo_data=None):
     if df.empty:
         return go.Figure().update_layout(title=f"{title} – No data", template="plotly_dark")
 
-    import numpy as np
     import scipy.signal as sig
     from scipy.interpolate import make_interp_spline
 
-    # ───────────────────────────────────────────────
-    # Step 1. Basic range metrics
-    # ───────────────────────────────────────────────
     high, low = df["h"].max(), df["l"].min()
     eq = (high + low) / 2
     x = np.arange(len(df))
-
     lows = df["l"].to_numpy()
     highs = df["h"].to_numpy()
 
-    # Detect swing highs/lows
     swing_low_idx, _ = sig.find_peaks(-lows, distance=5)
     swing_high_idx, _ = sig.find_peaks(highs, distance=5)
 
-    # ───────────────────────────────────────────────
-    # Step 2. Classify pivots: primary vs internal
-    # (based on local dominance strength)
-    # ───────────────────────────────────────────────
     def classify_pivots(values, idx, window=5):
         prim, internal = [], []
         for i in idx:
@@ -194,138 +154,102 @@ def plot_range_chart(df: pd.DataFrame, title: str):
                 internal.append(i)
         return prim, internal
 
-    primary_highs, internal_highs = classify_pivots(highs, swing_high_idx)
-    primary_lows, internal_lows = classify_pivots(-lows, swing_low_idx)  # invert for lows
+    primary_highs, _ = classify_pivots(highs, swing_high_idx)
+    primary_lows, _ = classify_pivots(-lows, swing_low_idx)
 
-    # ───────────────────────────────────────────────
-    # Step 3. Determine structure phase (TCT logic)
-    # ───────────────────────────────────────────────
-    # Calculate short-term slope to estimate structural bias
     slope = np.polyfit(x[-min(len(df), 40):], df["c"].values[-min(len(df), 40):], 1)[0]
     phase = "accumulation" if slope >= 0 else "distribution"
 
-    # ───────────────────────────────────────────────
-    # Step 4. Validate TCT structural conditions
-    # ───────────────────────────────────────────────
     def is_higher_low_seq(idx, values):
-        if len(idx) < 2:
-            return False
-        ups = sum(values[idx[i + 1]] > values[idx[i]] for i in range(len(idx) - 1))
-        return ups / (len(idx) - 1) > 0.4  # allow 40% of pivots to rise
+        return len(idx) >= 2 and sum(values[idx[i + 1]] > values[idx[i]] for i in range(len(idx) - 1)) / (len(idx) - 1) > 0.4
 
     def is_lower_high_seq(idx, values):
-        if len(idx) < 2:
-            return False
-        downs = sum(values[idx[i + 1]] < values[idx[i]] for i in range(len(idx) - 1))
-        return downs / (len(idx) - 1) > 0.6
+        return len(idx) >= 2 and sum(values[idx[i + 1]] < values[idx[i]] for i in range(len(idx) - 1)) / (len(idx) - 1) > 0.6
 
     valid_accum = is_higher_low_seq(primary_lows, -lows)
     valid_dist = is_lower_high_seq(primary_highs, highs)
 
-
-    # ───────────────────────────────────────────────
-    # Step 5. Price-near-liquidity filter (TCT condition)
-    # ───────────────────────────────────────────────
-    def near_liquidity(df, pivot_i, window=8, tol=0.007):
-        price = df["c"].iloc[pivot_i]
-        nearby = df["c"].iloc[max(0, pivot_i - window):pivot_i + window]
-        return (abs(nearby - price) / price < tol).sum() > window / 2
-
-    # ───────────────────────────────────────────────
-    # Step 6. Generate TCT-valid liquidity arcs
-    # ───────────────────────────────────────────────
     liquidity_segments = []
-
-    if phase == "accumulation" and valid_accum:
-        pivots = primary_lows
-        values = lows
-    elif phase == "distribution" and valid_dist:
-        pivots = primary_highs
-        values = highs
-    else:
-        pivots = []
-        values = []
-
-    if len(pivots) >= 2:
+    if (phase == "accumulation" and valid_accum) or (phase == "distribution" and valid_dist):
+        pivots = primary_lows if phase == "accumulation" else primary_highs
+        values = lows if phase == "accumulation" else highs
         for i in range(len(pivots) - 1):
             p1, p2 = pivots[i], pivots[i + 1]
-            if not (near_liquidity(df, p1) and near_liquidity(df, p2)):
-                continue
-
-            # fit parabolic arc between pivots
             x_seg = np.arange(p1, p2 + 1)
             y_seg = values[x_seg]
             if len(x_seg) < 3:
                 continue
-
             coeffs = np.polyfit(x_seg, y_seg, 2)
             poly = np.poly1d(coeffs)
             smooth_x = np.linspace(p1, p2, 60)
             smooth_y = poly(smooth_x)
             time_seg = np.interp(smooth_x, x, df["ts"].astype("int64"))
             time_seg = pd.to_datetime(time_seg)
-
             liquidity_segments.append((time_seg, smooth_y))
 
-    # ───────────────────────────────────────────────
-    # Step 6.5 — Debug Diagnostics (Print to Render Logs)
-    # ───────────────────────────────────────────────
-    print(f"[TCT] ---- {title} ----")
-    print(f"[TCT] phase: {phase}")
-    print(f"[TCT] primary_lows: {primary_lows}")
-    print(f"[TCT] primary_highs: {primary_highs}")
-    print(f"[TCT] valid_accum: {valid_accum}, valid_dist: {valid_dist}")
-    print(f"[TCT] pivots used: {len(pivots)}")
-    print(f"[TCT] segments generated: {len(liquidity_segments)}")
-
-
-
-    # ───────────────────────────────────────────────
-    # Step 7. Plotly visualization
-    # ───────────────────────────────────────────────
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
         x=df["ts"], open=df["o"], high=df["h"], low=df["l"], close=df["c"], name="Price"
     ))
-
     fig.add_hline(y=high, line=dict(color="red", dash="dash"), annotation_text="Range High")
     fig.add_hline(y=low, line=dict(color="green", dash="dash"), annotation_text="Range Low")
     fig.add_hline(y=eq, line=dict(color="orange", dash="dot"), annotation_text="EQ")
 
     for t_seg, y_seg in liquidity_segments:
         fig.add_trace(go.Scatter(
-            x=t_seg,
-            y=y_seg,
-            mode="lines",
-            line=dict(color="blue", width=3),
-            name="Liquidity Curve",
-            showlegend=False
+            x=t_seg, y=y_seg, mode="lines", line=dict(color="blue", width=3),
+            name="Liquidity Curve", showlegend=False
         ))
+
+    # Overlay Algo Structural Data
+    if algo_data:
+        exec_conf = algo_data.get("ExecutionConfidence_Total", 0)
+        rcm = algo_data.get("RCM", {})
+        rig = algo_data.get("RIG", {})
+        phase_label = algo_data.get("1A", {}).get("bias", "Neutral").title()
+        fig.add_annotation(text=f"ExecutionConfidence: {exec_conf:.2f}",
+                           xref="paper", yref="paper", x=0.98, y=0.98,
+                           showarrow=False, font=dict(size=14, color="cyan"),
+                           bgcolor="rgba(0,0,0,0.6)")
+        if not rig.get("passed", True):
+            fig.add_annotation(text=f"⚠️ RIG Blocked ({rig.get('reason','')})",
+                               xref="paper", yref="paper", x=0.98, y=0.93,
+                               showarrow=False, font=dict(size=12, color="red"),
+                               bgcolor="rgba(0,0,0,0.6)")
+        if rcm.get("valid", False):
+            range_high, range_low = rcm.get("range_high"), rcm.get("range_low")
+            if range_high and range_low:
+                fig.add_hrect(y0=range_low, y1=range_high, line_width=0,
+                              fillcolor="rgba(0,128,255,0.2)",
+                              annotation_text=f"RCM Valid Range ({phase_label})",
+                              annotation_position="top left")
 
     fig.update_layout(
         title=f"{title} | {phase.title()} Structure" if liquidity_segments else f"{title} | No TCT Curve",
-        template="plotly_dark",
-        height=600,
-        xaxis_rangeslider_visible=False,
+        template="plotly_dark", height=600, xaxis_rangeslider_visible=False,
         margin=dict(l=30, r=30, t=60, b=30)
     )
     return fig
 
+# ───────────────────────────────────────────────
+# Dashboard Generator
+# ───────────────────────────────────────────────
+latest_dashboard_html = "<h3>Initializing dashboard...</h3>"
 
 async def generate_dashboard():
-    """Regenerate the multi-timeframe dashboard HTML."""
     global latest_dashboard_html
     try:
+        algo_context = await fetch_algo_context("BTC-USDT-SWAP", "1H")
         htf_df = await fetch_ohlc(interval="4H")
         mtf_df = await fetch_ohlc(interval="1H")
         ltf_df = await fetch_ohlc(interval="15m")
 
-        htf_fig = plot_range_chart(htf_df, "HTF Range (4H)")
-        mtf_fig = plot_range_chart(mtf_df, "MTF Range (1H)")
-        ltf_fig = plot_range_chart(ltf_df, "LTF Range (15m)")
+        htf_fig = plot_range_chart(htf_df, "HTF Range (4H)", algo_context)
+        mtf_fig = plot_range_chart(mtf_df, "MTF Range (1H)", algo_context)
+        ltf_fig = plot_range_chart(ltf_df, "LTF Range (15m)", algo_context)
 
         html = (
-            f"<h2>HPB–TCT Range Dashboard</h2>"
+            f"<h2>HPM–TCT v19 RIG EXTENDED Dashboard</h2>"
             f"<p>Updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC</p>"
             + htf_fig.to_html(full_html=False, include_plotlyjs="cdn")
             + mtf_fig.to_html(full_html=False, include_plotlyjs=False)
@@ -339,12 +263,8 @@ async def generate_dashboard():
 
 @app.get("/dashboard", response_class=HTMLResponse)
 async def get_dashboard():
-    """Return the latest dashboard HTML."""
     return latest_dashboard_html
 
-# ───────────────────────────────────────────────
-# Scheduler – auto-refresh dashboard every 24h
-# ───────────────────────────────────────────────
 scheduler = BackgroundScheduler()
 scheduler.add_job(lambda: asyncio.run(generate_dashboard()), "interval", hours=24)
 scheduler.start()
@@ -355,10 +275,9 @@ async def startup_event():
     await generate_dashboard()
 
 # ───────────────────────────────────────────────
-# Run Uvicorn (for Replit)
+# Run Server
 # ───────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
-
     port = int(os.environ.get("PORT", 8080))
     uvicorn.run("server:app", host="0.0.0.0", port=port, reload=False)
