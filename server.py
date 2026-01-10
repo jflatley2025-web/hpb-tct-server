@@ -149,8 +149,13 @@ async def fetch_ohlc(symbol="BTC-USDT", interval="1H", limit=200):
     df["ts"] = pd.to_datetime(df["ts"], unit="ms")
     return df.sort_values("ts")
 
-
 def plot_range_chart(df: pd.DataFrame, title: str):
+    """
+    TCT-aware liquidity visualization.
+    Only draws liquidity arcs when structure confirms valid accumulation/distribution ranges
+    as defined in 2025 Liquidity-1_E_REVIEW & Liquidity-1_T_REVIEW.
+    """
+
     if df.empty:
         return go.Figure().update_layout(title=f"{title} – No data", template="plotly_dark")
 
@@ -158,64 +163,133 @@ def plot_range_chart(df: pd.DataFrame, title: str):
     import scipy.signal as sig
     from scipy.interpolate import make_interp_spline
 
-    # Basic range stats
+    # ───────────────────────────────────────────────
+    # Step 1. Basic range metrics
+    # ───────────────────────────────────────────────
     high, low = df["h"].max(), df["l"].min()
     eq = (high + low) / 2
     x = np.arange(len(df))
 
-    # --- Detect swing pivots ---
     lows = df["l"].to_numpy()
     highs = df["h"].to_numpy()
+
+    # Detect swing highs/lows
     swing_low_idx, _ = sig.find_peaks(-lows, distance=5)
     swing_high_idx, _ = sig.find_peaks(highs, distance=5)
 
-    # --- Determine trend direction ---
+    # ───────────────────────────────────────────────
+    # Step 2. Classify pivots: primary vs internal
+    # (based on local dominance strength)
+    # ───────────────────────────────────────────────
+    def classify_pivots(values, idx, window=5):
+        prim, internal = [], []
+        for i in idx:
+            left = values[max(0, i - window):i]
+            right = values[i + 1:i + 1 + window]
+            if len(left) == 0 or len(right) == 0:
+                continue
+            if values[i] == max(np.concatenate([left, [values[i]], right])):
+                prim.append(i)
+            else:
+                internal.append(i)
+        return prim, internal
+
+    primary_highs, internal_highs = classify_pivots(highs, swing_high_idx)
+    primary_lows, internal_lows = classify_pivots(-lows, swing_low_idx)  # invert for lows
+
+    # ───────────────────────────────────────────────
+    # Step 3. Determine structure phase (TCT logic)
+    # ───────────────────────────────────────────────
+    # Calculate short-term slope to estimate structural bias
     slope = np.polyfit(x[-min(len(df), 40):], df["c"].values[-min(len(df), 40):], 1)[0]
-    use_lows = slope >= 0  # if trend up → accumulation curve
-    pivots_idx = swing_low_idx if use_lows else swing_high_idx
-    pivots_y = lows[pivots_idx] if use_lows else highs[pivots_idx]
+    phase = "accumulation" if slope >= 0 else "distribution"
 
-    # --- Smooth spline through pivots ---
-    if len(pivots_idx) >= 3:
-        # make sure pivot indices are strictly increasing
-        pivots_idx = np.sort(pivots_idx)
-        spline_x = np.linspace(pivots_idx.min(), pivots_idx.max(), 200)
-        spline_y = make_interp_spline(pivots_idx, pivots_y, k=3)(spline_x)
-        # convert spline_x → actual timestamps
-        spline_t = np.interp(spline_x, x, df["ts"].astype("int64"))
-        spline_t = pd.to_datetime(spline_t)
+    # ───────────────────────────────────────────────
+    # Step 4. Validate TCT structural conditions
+    # ───────────────────────────────────────────────
+    def is_higher_low_seq(idx, values):
+        if len(idx) < 2:
+            return False
+        seq = all(values[idx[i + 1]] > values[idx[i]] for i in range(len(idx) - 1))
+        return seq
+
+    def is_lower_high_seq(idx, values):
+        if len(idx) < 2:
+            return False
+        seq = all(values[idx[i + 1]] < values[idx[i]] for i in range(len(idx) - 1))
+        return seq
+
+    valid_accum = is_higher_low_seq(primary_lows, -lows)
+    valid_dist = is_lower_high_seq(primary_highs, highs)
+
+    # ───────────────────────────────────────────────
+    # Step 5. Price-near-liquidity filter (TCT condition)
+    # ───────────────────────────────────────────────
+    def near_liquidity(df, pivot_i, window=5, tol=0.002):
+        price = df["c"].iloc[pivot_i]
+        nearby = df["c"].iloc[max(0, pivot_i - window):pivot_i + window]
+        return (abs(nearby - price) / price < tol).sum() > window / 2
+
+    # ───────────────────────────────────────────────
+    # Step 6. Generate TCT-valid liquidity arcs
+    # ───────────────────────────────────────────────
+    liquidity_segments = []
+
+    if phase == "accumulation" and valid_accum:
+        pivots = primary_lows
+        values = lows
+    elif phase == "distribution" and valid_dist:
+        pivots = primary_highs
+        values = highs
     else:
-        # fallback: rolling quadratic fit
-        spline_t = df["ts"]
-        spline_y = np.poly1d(np.polyfit(x, df["l"].rolling(5).mean(), 2))(x)
+        pivots = []
+        values = []
 
-    # --- Plotly chart ---
+    if len(pivots) >= 2:
+        for i in range(len(pivots) - 1):
+            p1, p2 = pivots[i], pivots[i + 1]
+            if not (near_liquidity(df, p1) and near_liquidity(df, p2)):
+                continue
+
+            # fit parabolic arc between pivots
+            x_seg = np.arange(p1, p2 + 1)
+            y_seg = values[x_seg]
+            if len(x_seg) < 3:
+                continue
+
+            coeffs = np.polyfit(x_seg, y_seg, 2)
+            poly = np.poly1d(coeffs)
+            smooth_x = np.linspace(p1, p2, 60)
+            smooth_y = poly(smooth_x)
+            time_seg = np.interp(smooth_x, x, df["ts"].astype("int64"))
+            time_seg = pd.to_datetime(time_seg)
+
+            liquidity_segments.append((time_seg, smooth_y))
+
+    # ───────────────────────────────────────────────
+    # Step 7. Plotly visualization
+    # ───────────────────────────────────────────────
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
-        x=df["ts"],
-        open=df["o"],
-        high=df["h"],
-        low=df["l"],
-        close=df["c"],
-        name="Price"
+        x=df["ts"], open=df["o"], high=df["h"], low=df["l"], close=df["c"], name="Price"
     ))
 
-    # Range lines
     fig.add_hline(y=high, line=dict(color="red", dash="dash"), annotation_text="Range High")
     fig.add_hline(y=low, line=dict(color="green", dash="dash"), annotation_text="Range Low")
     fig.add_hline(y=eq, line=dict(color="orange", dash="dot"), annotation_text="EQ")
 
-    # --- Liquidity Curve (blue) ---
-    fig.add_trace(go.Scatter(
-        x=spline_t,
-        y=spline_y,
-        mode="lines",
-        line=dict(color="blue", width=3),
-        name="Liquidity Curve"
-    ))
+    for t_seg, y_seg in liquidity_segments:
+        fig.add_trace(go.Scatter(
+            x=t_seg,
+            y=y_seg,
+            mode="lines",
+            line=dict(color="blue", width=3),
+            name="Liquidity Curve",
+            showlegend=False
+        ))
 
     fig.update_layout(
-        title=title,
+        title=f"{title} | {phase.title()} Structure" if liquidity_segments else f"{title} | No TCT Curve",
         template="plotly_dark",
         height=600,
         xaxis_rangeslider_visible=False,
