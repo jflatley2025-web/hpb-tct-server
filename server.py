@@ -210,22 +210,23 @@ def plot_range_chart(df: pd.DataFrame, title: str):
     def is_higher_low_seq(idx, values):
         if len(idx) < 2:
             return False
-        seq = all(values[idx[i + 1]] > values[idx[i]] for i in range(len(idx) - 1))
-        return seq
+        ups = sum(values[idx[i + 1]] > values[idx[i]] for i in range(len(idx) - 1))
+        return ups / (len(idx) - 1) > 0.6  # allow 60% of pivots to rise
 
     def is_lower_high_seq(idx, values):
         if len(idx) < 2:
             return False
-        seq = all(values[idx[i + 1]] < values[idx[i]] for i in range(len(idx) - 1))
-        return seq
+        downs = sum(values[idx[i + 1]] < values[idx[i]] for i in range(len(idx) - 1))
+        return downs / (len(idx) - 1) > 0.6
 
     valid_accum = is_higher_low_seq(primary_lows, -lows)
     valid_dist = is_lower_high_seq(primary_highs, highs)
 
+
     # ───────────────────────────────────────────────
     # Step 5. Price-near-liquidity filter (TCT condition)
     # ───────────────────────────────────────────────
-    def near_liquidity(df, pivot_i, window=5, tol=0.002):
+    def near_liquidity(df, pivot_i, window=6, tol=0.005):
         price = df["c"].iloc[pivot_i]
         nearby = df["c"].iloc[max(0, pivot_i - window):pivot_i + window]
         return (abs(nearby - price) / price < tol).sum() > window / 2
