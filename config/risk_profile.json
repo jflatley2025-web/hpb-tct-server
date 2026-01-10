@@ -1,0 +1,8 @@
+{
+  "max_exposure_usdt": 5000,
+  "risk_per_trade_pct": 1.0,
+  "max_open_positions": 2,
+  "stop_loss_pct": 1.2,
+  "take_profit_pct": 2.4,
+  "mode": "shadow"
+}

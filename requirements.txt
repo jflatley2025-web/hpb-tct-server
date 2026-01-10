@@ -1,35 +1,53 @@
 # ───────────────────────────────────────────────
-# HPB–TCT v17.3 FastAPI Server (Render Stable)
+# HPM–TCT v19 RIG EXTENDED Server (Render Stable)
+# Unified multi-phase pipeline (RCM + MSCE + RIG + NCR + DEM + QSA)
 # ───────────────────────────────────────────────
+
+# Core packaging
 setuptools==70.0.0
 wheel==0.43.0
 pip==25.1.1
 
-# Core framework
+# ─── Core Framework ───
 fastapi==0.95.2
 uvicorn==0.22.0
 
-# Reinforcement / environment
-gymnasium==0.29.1
-
-# Async + requests
+# ─── Async + Requests ───
 httpx==0.24.1
 requests==2.31.0
+aiofiles==23.2.1   # for async file handling (bias/log/metrics persistence)
 
-# Validation (Pydantic v1 stable)
-pydantic==1.10.13
-
-# Data + math stack
+# ─── Data Science Stack ───
 numpy==1.26.4
 pandas==2.1.4
-
-# Utilities
+scipy==1.11.4
+scikit-learn==1.3.2  # used for regime modeling + QFT validation
 python-dateutil==2.8.2
 pytz==2023.3
-# ─── New additions for /dashboard ───
-plotly==5.18.0        # interactive HTF/MTF/LTF charts
-apscheduler==3.10.4   # background scheduler for daily auto-refresh
-scipy==1.11.4   # render will need it for find_peaks and make_interp_spline
 
+# ─── Visualization / Dashboards ───
+plotly==5.18.0        # HTF/MTF/LTF charts
+matplotlib==3.8.2     # auxiliary debugging plots
+apscheduler==3.10.4   # background scheduler for auto-refresh
 
+# ─── Environment + Reinforcement ───
+gymnasium==0.29.1
+stable-baselines3==2.3.2   # optional RL testing integration
 
+# ─── Crypto API Connectors ───
+pycoingecko==3.1.0
+python-binance==1.0.19
+ccxt==4.2.97              # unified Bybit/OKX REST API adapter
+
+# ─── Utilities ───
+loguru==0.7.2             # advanced logging (for /logs pipeline)
+cachetools==5.3.2         # bias-memory cache support
+colorama==0.4.6           # console color output
+
+# ─── Optional Diagnostics ───
+psutil==5.9.8             # resource tracking
+rich==13.6.0              # improved CLI print for RIG diagnostics
+
+# ───────────────────────────────────────────────
+# END OF REQUIREMENTS
+# ───────────────────────────────────────────────
