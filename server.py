@@ -2,7 +2,7 @@
 server.py
 ────────────────────────────────────────────
 HPM–TCT v19 RIG EXTENDED Server
-Integrates TensorTrade v1.0.3 Environment + HPB Gate Logic + Algo Overlays
+Integrates TensorTrade v1.0.3 Environment + HPB Gate Logic + Live Context + Dashboard
 ────────────────────────────────────────────
 """
 
@@ -11,25 +11,30 @@ import gym_fix  # must be first
 import os
 import json
 import traceback
+import asyncio
+import subprocess
+import time
+import threading
 from datetime import datetime
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse, HTMLResponse
-
-from tensortrade_config_ext import AUTO_INIT, TENSORTRADE_CONFIG, snapshot_environment
-from High_Probability_Model_v17_RIG.validate_gates import validate_gates
-
 import pandas as pd
 import numpy as np
 import plotly.graph_objs as go
 import httpx
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse, HTMLResponse
+from pydantic import BaseModel
 from apscheduler.schedulers.background import BackgroundScheduler
-import asyncio
+
+from tensortrade_config_ext import AUTO_INIT, TENSORTRADE_CONFIG, snapshot_environment
+from High_Probability_Model_v17_RIG.validate_gates import validate_gates
+
 
 # ───────────────────────────────────────────────
-# Server setup
+# SERVER INITIALIZATION
 # ───────────────────────────────────────────────
 app = FastAPI(title="HPM–TCT v19 RIG EXTENDED Server", version="1.0")
 ENV = AUTO_INIT()
+
 
 @app.get("/")
 def home():
@@ -41,36 +46,52 @@ def home():
         "interval": TENSORTRADE_CONFIG["interval"],
     }
 
+
 # ───────────────────────────────────────────────
-# Validation & Backtest Endpoints
+# LIVE CONTEXT CACHE (auto-updated every 60s)
 # ───────────────────────────────────────────────
-from pydantic import BaseModel
+live_context_cache = {
+    "last_update": None,
+    "symbol": "BTC-USDT-SWAP",
+    "interval": "1H",
+    "gates": {},
+    "ExecutionConfidence_Total": 0.0,
+    "Reward_Summary": "INIT"
+}
 
-class ValidateRequest(BaseModel):
-    symbol: str = "BTC-USDT-SWAP"
-    interval: str = "1H"
 
-@app.post("/validate")
-async def validate(request: ValidateRequest):
-    try:
-        context = {"symbol": request.symbol, "interval": request.interval}
-        gates = validate_gates(context)
-        return JSONResponse({
-            "timestamp": datetime.utcnow().isoformat(),
-            "mode": "live",
-            "symbol": request.symbol,
-            "interval": request.interval,
-            "gates": gates.get("gates", {}),
-            "Session_Info": gates.get("Session_Info", {}),
-            "ExecutionConfidence_Total": gates.get("ExecutionConfidence_Total", 0.0),
-            "Reward_Summary": gates.get("Reward_Summary", "N/A"),
-        })
-    except Exception as e:
-        traceback.print_exc()
-        return JSONResponse({"error": str(e), "trace": traceback.format_exc()}, status_code=500)
+async def update_live_context():
+    """
+    Continuously updates the live algo validation cache every 60s.
+    This ensures /dashboard and /validate() always reflect current data.
+    """
+    global live_context_cache
+    while True:
+        try:
+            symbol = live_context_cache["symbol"]
+            interval = live_context_cache["interval"]
+            context = {"symbol": symbol, "interval": interval}
 
+            gates = validate_gates(context)
+            live_context_cache.update({
+                "last_update": datetime.utcnow().isoformat(),
+                "gates": gates,
+                "ExecutionConfidence_Total": gates.get("ExecutionConfidence_Total", 0.0),
+                "Reward_Summary": gates.get("Reward_Summary", "N/A"),
+            })
+            print(f"[LIVE UPDATE] Refreshed gate context at {live_context_cache['last_update']}")
+        except Exception as e:
+            print(f"[LIVE UPDATE ERROR] {e}")
+
+        await asyncio.sleep(60)  # every 60s
+
+
+# ───────────────────────────────────────────────
+# VALIDATION / BACKTEST / STATUS ENDPOINTS
+# ───────────────────────────────────────────────
 class BacktestRequest(BaseModel):
     episodes: int = 10
+
 
 @app.post("/backtest")
 async def backtest(request: BacktestRequest):
@@ -86,6 +107,7 @@ async def backtest(request: BacktestRequest):
         traceback.print_exc()
         return JSONResponse({"error": str(e), "trace": traceback.format_exc()}, status_code=500)
 
+
 @app.get("/status")
 def status():
     try:
@@ -94,22 +116,27 @@ def status():
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-# ───────────────────────────────────────────────
-# Fetch + Algo Link
-# ───────────────────────────────────────────────
-async def fetch_algo_context(symbol="BTC-USDT-SWAP", interval="1H"):
-    """Fetch latest gate/validation context from algo core."""
-    try:
-        context = {"symbol": symbol, "interval": interval}
-        gates = validate_gates(context)
-        print(f"[ALGO] Gates fetched successfully for {symbol} ({interval})")
-        return gates
-    except Exception as e:
-        print(f"[ALGO ERROR] {e}")
-        return {"error": str(e)}
 
+@app.get("/validate")
+async def get_latest_validation():
+    """Return the latest cached validation result (auto-updated every 60s)."""
+    return JSONResponse({
+        "timestamp": datetime.utcnow().isoformat(),
+        "mode": "live",
+        "symbol": live_context_cache["symbol"],
+        "interval": live_context_cache["interval"],
+        "gates": live_context_cache["gates"],
+        "ExecutionConfidence_Total": live_context_cache["ExecutionConfidence_Total"],
+        "Reward_Summary": live_context_cache["Reward_Summary"],
+        "last_update": live_context_cache["last_update"]
+    })
+
+
+# ───────────────────────────────────────────────
+# FETCH OHLC + CHART GENERATION
+# ───────────────────────────────────────────────
 async def fetch_ohlc(symbol="BTC-USDT", interval="1H", limit=200):
-    """Fetch OHLC data from OKX (handles variable column count)."""
+    """Fetch OHLC data from OKX."""
     url = f"https://www.okx.com/api/v5/market/candles?instId={symbol}-SWAP&bar={interval}&limit={limit}"
     async with httpx.AsyncClient() as client:
         resp = await client.get(url)
@@ -122,15 +149,13 @@ async def fetch_ohlc(symbol="BTC-USDT", interval="1H", limit=200):
     df["ts"] = pd.to_datetime(pd.to_numeric(df["ts"]), unit="ms")
     return df.sort_values("ts")
 
-# ───────────────────────────────────────────────
-# Chart Renderer (Algo-aware)
-# ───────────────────────────────────────────────
+
 def plot_range_chart(df: pd.DataFrame, title: str, algo_data=None):
+    """TCT-aware liquidity visualization with structural overlays."""
     if df.empty:
         return go.Figure().update_layout(title=f"{title} – No data", template="plotly_dark")
 
     import scipy.signal as sig
-    from scipy.interpolate import make_interp_spline
 
     high, low = df["h"].max(), df["l"].min()
     eq = (high + low) / 2
@@ -231,15 +256,18 @@ def plot_range_chart(df: pd.DataFrame, title: str, algo_data=None):
     )
     return fig
 
+
 # ───────────────────────────────────────────────
-# Dashboard Generator
+# DASHBOARD GENERATION
 # ───────────────────────────────────────────────
 latest_dashboard_html = "<h3>Initializing dashboard...</h3>"
 
+
 async def generate_dashboard():
+    """Refresh the dashboard with latest algo overlays."""
     global latest_dashboard_html
     try:
-        algo_context = await fetch_algo_context("BTC-USDT-SWAP", "1H")
+        algo_context = live_context_cache["gates"]
         htf_df = await fetch_ohlc(interval="4H")
         mtf_df = await fetch_ohlc(interval="1H")
         ltf_df = await fetch_ohlc(interval="15m")
@@ -261,30 +289,33 @@ async def generate_dashboard():
         latest_dashboard_html = f"<h3>Error generating dashboard:</h3><pre>{e}</pre>"
         print(f"[HPB-ERROR] Dashboard generation failed: {e}")
 
+
 @app.get("/dashboard", response_class=HTMLResponse)
 async def get_dashboard():
     return latest_dashboard_html
 
+
+# ───────────────────────────────────────────────
+# SCHEDULER & STARTUP TASKS
+# ───────────────────────────────────────────────
 scheduler = BackgroundScheduler()
 scheduler.add_job(lambda: asyncio.run(generate_dashboard()), "interval", hours=24)
 scheduler.start()
+
 
 @app.on_event("startup")
 async def startup_event():
     print("[HPB] Initializing dashboard...")
     await generate_dashboard()
+    asyncio.create_task(update_live_context())
+    print("[HPB] Live data updater launched (refreshes every 60s).")
 
 
-import subprocess
-import time
-import threading
-from datetime import datetime  # make sure this is imported at the top
-
+# ───────────────────────────────────────────────
+# KEEPALIVE THREAD
+# ───────────────────────────────────────────────
 def touch_keepalive():
-    """
-    Periodically touches a file on disk to keep Render from idling.
-    This works by refreshing the mtime of a temp file every 10 minutes.
-    """
+    """Refresh file timestamp every 10m to prevent Render idling."""
     while True:
         try:
             keepalive_file = "/tmp/render_keepalive.flag"
@@ -292,16 +323,14 @@ def touch_keepalive():
             print(f"[KEEPALIVE] Refreshed {keepalive_file} at {datetime.utcnow().isoformat()}")
         except Exception as e:
             print(f"[KEEPALIVE ERROR] {e}")
-        time.sleep(600)  # every 10 minutes
+        time.sleep(600)
 
-# Run in background thread
+
 threading.Thread(target=touch_keepalive, daemon=True).start()
 
 
-
-
 # ───────────────────────────────────────────────
-# Run Server
+# RUN SERVER
 # ───────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
