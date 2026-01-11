@@ -58,7 +58,7 @@ def status():
 async def get_signals():
     """Generate a live risk-weighted signal."""
     try:
-        profile = compute_risk_profile(live_context_cache)
+        profile = await compute_risk_profile(live_context_cache)
 
         # Append to local signals log
         os.makedirs("logs", exist_ok=True)
