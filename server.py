@@ -314,19 +314,19 @@ async def startup_event():
 # ───────────────────────────────────────────────
 # KEEPALIVE THREAD
 # ───────────────────────────────────────────────
-def touch_keepalive():
-    """Refresh file timestamp every 10m to prevent Render idling."""
-    while True:
-        try:
-            keepalive_file = "/tmp/render_keepalive.flag"
-            subprocess.run(["touch", keepalive_file], check=True)
-            print(f"[KEEPALIVE] Refreshed {keepalive_file} at {datetime.utcnow().isoformat()}")
-        except Exception as e:
-            print(f"[KEEPALIVE ERROR] {e}")
-        time.sleep(600)
+# def touch_keepalive():
+#   """Refresh file timestamp every 10m to prevent Render idling."""
+#   while True:
+#      try:
+#          keepalive_file = "/tmp/render_keepalive.flag"
+#           subprocess.run(["touch", keepalive_file], check=True)
+#          print(f"[KEEPALIVE] Refreshed {keepalive_file} at {datetime.utcnow().isoformat()}")
+#      except Exception as e:
+#          print(f"[KEEPALIVE ERROR] {e}")
+#      time.sleep(600)
 
 
-threading.Thread(target=touch_keepalive, daemon=True).start()
+# threading.Thread(target=touch_keepalive, daemon=True).start()
 
 
 # ───────────────────────────────────────────────
