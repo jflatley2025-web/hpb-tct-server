@@ -274,6 +274,32 @@ async def startup_event():
     print("[HPB] Initializing dashboard...")
     await generate_dashboard()
 
+
+import subprocess
+import time
+import threading
+from datetime import datetime  # make sure this is imported at the top
+
+def touch_keepalive():
+    """
+    Periodically touches a file on disk to keep Render from idling.
+    This works by refreshing the mtime of a temp file every 10 minutes.
+    """
+    while True:
+        try:
+            keepalive_file = "/tmp/render_keepalive.flag"
+            subprocess.run(["touch", keepalive_file], check=True)
+            print(f"[KEEPALIVE] Refreshed {keepalive_file} at {datetime.utcnow().isoformat()}")
+        except Exception as e:
+            print(f"[KEEPALIVE ERROR] {e}")
+        time.sleep(600)  # every 10 minutes
+
+# Run in background thread
+threading.Thread(target=touch_keepalive, daemon=True).start()
+
+
+
+
 # ───────────────────────────────────────────────
 # Run Server
 # ───────────────────────────────────────────────
