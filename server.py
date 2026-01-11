@@ -1,225 +1,182 @@
-"""
-server.py — HPM–TCT v19 RIG EXTENDED (Phase 9.1)
-────────────────────────────────────────────────────────────
-Integrates:
-  • TensorTrade Environment
-  • Risk Management Layer
-  • P03 Confluence Model
-  • Simulated Trade Execution
-  • Dashboard & API Endpoints
-────────────────────────────────────────────────────────────
-"""
-
-import gym_fix  # must remain first
-import os, json, asyncio, subprocess, time, threading, traceback
+import os
+import json
+import time
+import threading
+import asyncio
 from datetime import datetime
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse, HTMLResponse
-
-# Local modules
-from tensortrade_config_ext import AUTO_INIT
-from High_Probability_Model_v17_RIG.validate_gates import validate_gates
-from risk_model import compute_risk_profile
-from p03_model import compute_p03_confluence
-
-import pandas as pd, numpy as np, httpx, plotly.graph_objs as go
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, JSONResponse
+import ccxt
+import pandas as pd
+import plotly.graph_objects as go
 from apscheduler.schedulers.background import BackgroundScheduler
 
-# ───────────────────────────────────────────────
-#  Initialize app + environment
-# ───────────────────────────────────────────────
-app = FastAPI(title="HPM–TCT v19 RIG EXTENDED (Phase 9.1)", version="9.1")
-ENV = AUTO_INIT()
-latest_dashboard_html = "<h3>Initializing dashboard...</h3>"
+app = FastAPI(title="HPB–TCT v19 RIG EXTENDED (Phase 9)")
 
-# ───────────────────────────────────────────────
-#  Execution state
-# ───────────────────────────────────────────────
-trade_state = {
-    "position": "FLAT",
-    "entry_price": None,
-    "pnl": 0.0,
-    "trades": [],
-}
+# ────────────────────────────────
+# ENVIRONMENT CONFIGURATION
+# ────────────────────────────────
+BINANCE_KEY = os.getenv("BINANCE_KEY")
+BINANCE_SECRET = os.getenv("BINANCE_SECRET")
+BINANCE_MODE = os.getenv("BINANCE_MODE", "testnet").lower()
 
-# ───────────────────────────────────────────────
-#  Data fetchers
-# ───────────────────────────────────────────────
-async def fetch_algo_context(symbol="BTC-USDT-SWAP", interval="1H"):
+exchange = None
+
+def init_exchange():
+    """Initialize Binance client based on environment (testnet/live)."""
+    global exchange
     try:
-        return validate_gates({"symbol": symbol, "interval": interval})
+        if BINANCE_MODE == "testnet":
+            exchange = ccxt.binance({
+                "apiKey": BINANCE_KEY,
+                "secret": BINANCE_SECRET,
+                "enableRateLimit": True,
+            })
+            exchange.set_sandbox_mode(True)
+            print("[EXCHANGE] Connected to Binance Testnet")
+        else:
+            exchange = ccxt.binance({
+                "apiKey": BINANCE_KEY,
+                "secret": BINANCE_SECRET,
+                "enableRateLimit": True,
+            })
+            print("[EXCHANGE] Connected to Binance Live Environment")
+
+        print(f"[HPB] Environment: {BINANCE_MODE.upper()} active")
+        return True
     except Exception as e:
-        return {"error": str(e)}
+        print(f"[EXCHANGE ERROR] {e}")
+        return False
 
-async def fetch_ohlc(symbol="BTC-USDT", interval="1H", limit=200):
-    url = f"https://www.okx.com/api/v5/market/candles?instId={symbol}-SWAP&bar={interval}&limit={limit}"
-    async with httpx.AsyncClient() as c:
-        r = await c.get(url)
-    data = r.json().get("data", [])
-    if not data:
-        return pd.DataFrame()
-    df = pd.DataFrame(data).iloc[:, :6]
-    df.columns = ["ts","o","h","l","c","v"]
-    df = df.astype({"o":float,"h":float,"l":float,"c":float,"v":float})
-    df["ts"] = pd.to_datetime(pd.to_numeric(df["ts"]), unit="ms")
-    return df.sort_values("ts")
-
-# ───────────────────────────────────────────────
-#  Core bundle functions
-# ───────────────────────────────────────────────
-async def get_signal_bundle():
-    algo = await fetch_algo_context("BTC-USDT-SWAP", "1H")
-    risk = await compute_risk_profile(algo)
-    p03  = await compute_p03_confluence(risk)
-    return {"algo": algo, "risk": risk, "p03": p03}
-
-# ───────────────────────────────────────────────
-#  Trade decision logic
-# ───────────────────────────────────────────────
-def evaluate_trade_decision(bundle):
-    bias = bundle["p03"].get("execution_bias","NEUTRAL")
-    rr   = bundle["p03"].get("expected_reward_ratio",1.0)
-    conf = bundle["p03"]["confidence_matrix"].get("Bullish_Transition",0)
-    price = bundle["risk"].get("current_price",0)
-    vol = bundle["risk"].get("volatility_score",0)
-
-    if rr < 1.0 or vol > 0.015:
-        return "HOLD"
-    if bias == "LONG" and conf > 0.6:
-        return "BUY"
-    if bias == "SHORT" and conf > 0.6:
-        return "SELL"
-    return "HOLD"
-
-# ───────────────────────────────────────────────
-#  Trade execution simulation
-# ───────────────────────────────────────────────
-@app.post("/execute")
-async def execute_trade():
-    """Phase 9 – Simulated Trade Execution"""
-    global trade_state
-    try:
-        bundle = await get_signal_bundle()
-        decision = evaluate_trade_decision(bundle)
-        price = bundle["risk"].get("current_price",0)
-
-        if decision=="BUY" and trade_state["position"]!="LONG":
-            trade_state.update(position="LONG", entry_price=price)
-            trade_state["trades"].append({"side":"BUY","price":price,"time":datetime.utcnow().isoformat()})
-
-        elif decision=="SELL" and trade_state["position"]!="SHORT":
-            trade_state.update(position="SHORT", entry_price=price)
-            trade_state["trades"].append({"side":"SELL","price":price,"time":datetime.utcnow().isoformat()})
-
-        elif decision=="HOLD" and trade_state["position"]!="FLAT":
-            entry = trade_state["entry_price"] or price
-            pnl = (price - entry) * (1 if trade_state["position"]=="LONG" else -1)
-            trade_state["pnl"] += pnl
-            trade_state["trades"].append({"side":"CLOSE","price":price,"pnl":round(pnl,2),"time":datetime.utcnow().isoformat()})
-            trade_state.update(position="FLAT", entry_price=None)
-
-        summary = {
-            "decision": decision,
-            "position": trade_state["position"],
-            "entry_price": trade_state["entry_price"],
-            "pnl_total": round(trade_state["pnl"],2),
-            "trades": trade_state["trades"][-5:],
-            "risk": bundle["risk"],
-            "p03": bundle["p03"],
-        }
-        print(f"[EXEC] {decision} @ {price} | pos={trade_state['position']} | pnl={trade_state['pnl']:.2f}")
-        return JSONResponse(summary)
-
-    except Exception as e:
-        traceback.print_exc()
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-# ───────────────────────────────────────────────
-#  Additional API Endpoints (/signals + / p03)
-# ───────────────────────────────────────────────
-@app.get("/signals")
-async def get_signals():
-    bundle = await get_signal_bundle()
-    risk = bundle["risk"]
-    return {
-        "signal": risk.get("signal"),
-        "risk": risk.get("risk_score"),
-        "volatility": risk.get("volatility_score"),
-        "price": risk.get("current_price"),
-        "timestamp": datetime.utcnow().isoformat(),
-    }
-
-@app.get("/p03")
-async def get_p03():
-    bundle = await get_signal_bundle()
-    return bundle["p03"]
-
-# ───────────────────────────────────────────────
-#  Dashboard HTML
-# ───────────────────────────────────────────────
-def plot_range_chart(df, title):
-    if df.empty:
-        return go.Figure().update_layout(title=f"{title} – No data", template="plotly_dark")
-    fig = go.Figure(go.Candlestick(x=df["ts"], open=df["o"], high=df["h"], low=df["l"], close=df["c"]))
-    fig.update_layout(title=title, template="plotly_dark", height=600, xaxis_rangeslider_visible=False)
-    return fig
-
-async def generate_dashboard():
-    global latest_dashboard_html
-    try:
-        bundle = await get_signal_bundle()
-        htf, mtf, ltf = await fetch_ohlc("BTC-USDT","4H"), await fetch_ohlc("BTC-USDT","1H"), await fetch_ohlc("BTC-USDT","15m")
-        htf_fig, mtf_fig, ltf_fig = plot_range_chart(htf,"HTF 4H"), plot_range_chart(mtf,"MTF 1H"), plot_range_chart(ltf,"LTF 15m")
-        p03, risk = bundle["p03"], bundle["risk"]
-
-        html = (
-            f"<h2>HPM–TCT v19 RIG EXTENDED Dashboard (Phase 9.1)</h2>"
-            f"<p>Updated @ {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC</p>"
-            f"<p><b>Signal:</b> {risk.get('signal')} | <b>Risk:</b> {risk.get('risk_score')} | "
-            f"<b>Vol:</b> {risk.get('volatility_score')} | <b>Price:</b> {risk.get('current_price')}</p>"
-            f"<h3>🧠 P03 Confluence</h3><pre>{json.dumps(p03.get('confidence_matrix',{}), indent=2)}</pre>"
-            f"<p><b>Phase:</b> {p03.get('phase')} | <b>Bias:</b> {p03.get('execution_bias')} | "
-            f"<b>Expected RR:</b> {p03.get('expected_reward_ratio')}</p>"
-            f"<h3>⚙️ Execution State</h3>"
-            f"<p><b>Position:</b> {trade_state['position']} | <b>PNL:</b> {round(trade_state['pnl'], 2)}</p>"
-            + htf_fig.to_html(full_html=False, include_plotlyjs="cdn")
-            + mtf_fig.to_html(full_html=False, include_plotlyjs=False)
-            + ltf_fig.to_html(full_html=False, include_plotlyjs=False)
-        )
-        latest_dashboard_html = html
-    except Exception as e:
-        latest_dashboard_html = f"<h3>Error generating dashboard:</h3><pre>{e}</pre>"
-
-@app.get("/dashboard", response_class=HTMLResponse)
-async def get_dashboard():
-    return latest_dashboard_html
-
-# ───────────────────────────────────────────────
-#  Keep-alive + Startup
-# ───────────────────────────────────────────────
+# ────────────────────────────────
+# KEEPALIVE THREAD (Render Free Tier)
+# ────────────────────────────────
 def touch_keepalive():
+    """Prevents Render free dyno from sleeping."""
     while True:
         try:
-            f = "/tmp/render_keepalive.flag"
-            subprocess.run(["touch", f], check=True)
-            print(f"[KEEPALIVE] Touched {f} @ {datetime.utcnow().isoformat()}")
+            keepalive_file = "/tmp/render_keepalive.flag"
+            with open(keepalive_file, "a"):
+                os.utime(keepalive_file, None)
+            print(f"[KEEPALIVE] Touched {keepalive_file} @ {datetime.utcnow().isoformat()}")
         except Exception as e:
-            print(f"[KEEPALIVE ERR] {e}")
-        time.sleep(600)
+            print(f"[KEEPALIVE ERROR] {e}")
+        time.sleep(600)  # every 10 minutes
 
 threading.Thread(target=touch_keepalive, daemon=True).start()
 
+# ────────────────────────────────
+# DATA FETCHING + DASHBOARD
+# ────────────────────────────────
+def fetch_price_data(symbol="BTC/USDT", timeframe="1h", limit=200):
+    try:
+        candles = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        df = pd.DataFrame(candles, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+        return df
+    except Exception as e:
+        print(f"[FETCH ERROR] {e}")
+        return pd.DataFrame()
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard():
+    try:
+        df = fetch_price_data()
+        if df.empty:
+            return HTMLResponse("<h3>No data available.</h3>")
+
+        fig = go.Figure(
+            data=[go.Candlestick(
+                x=df["timestamp"],
+                open=df["open"],
+                high=df["high"],
+                low=df["low"],
+                close=df["close"]
+            )]
+        )
+        fig.update_layout(
+            title="HTF Range (4H) | Distribution Structure",
+            xaxis_title="Time",
+            yaxis_title="Price (USDT)",
+            template="plotly_dark",
+            height=600
+        )
+        graph_html = fig.to_html(include_plotlyjs="cdn")
+
+        return HTMLResponse(f"""
+        <h2>HPM–TCT v19 RIG EXTENDED Dashboard (Phase 9)</h2>
+        <p>Updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC</p>
+        <p><b>Mode:</b> {BINANCE_MODE.upper()}</p>
+        {graph_html}
+        """)
+    except Exception as e:
+        return HTMLResponse(f"<h3>Error generating dashboard: {e}</h3>")
+
+# ────────────────────────────────
+# STATUS + TRADE EXECUTION
+# ────────────────────────────────
+@app.get("/status")
+async def status():
+    """Check exchange connection."""
+    try:
+        ticker = exchange.fetch_ticker("BTC/USDT")
+        return JSONResponse({
+            "exchange": "binance-testnet" if BINANCE_MODE == "testnet" else "binance-live",
+            "status": "connected",
+            "mode": BINANCE_MODE,
+            "symbol": ticker["symbol"],
+            "price": ticker["last"],
+            "time": datetime.utcnow().isoformat()
+        })
+    except Exception as e:
+        return JSONResponse({"status": "error", "details": str(e)})
+
+@app.get("/execute")
+async def execute_trade(symbol: str = "BTC/USDT", side: str = "buy", size: float = 0.001):
+    """Simulate or execute a trade depending on mode."""
+    try:
+        if BINANCE_MODE == "testnet":
+            print(f"[TRADE TEST] Simulating {side.upper()} {size} {symbol}")
+            return JSONResponse({
+                "mode": "testnet",
+                "status": "simulated",
+                "action": side,
+                "size": size,
+                "symbol": symbol,
+                "time": datetime.utcnow().isoformat()
+            })
+        else:
+            order = exchange.create_market_order(symbol, side, size)
+            print(f"[TRADE LIVE] {side.upper()} order executed: {order}")
+            return JSONResponse({
+                "mode": "live",
+                "status": "executed",
+                "order": order
+            })
+    except Exception as e:
+        print(f"[TRADE ERROR] {e}")
+        return JSONResponse({"status": "error", "details": str(e)})
+
+# ────────────────────────────────
+# BACKGROUND REFRESHER
+# ────────────────────────────────
+def refresh_loop():
+    """Periodic data fetch to keep system warm."""
+    while True:
+        try:
+            df = fetch_price_data()
+            if not df.empty:
+                print(f"[REFRESH] Updated market data at {datetime.utcnow().isoformat()}")
+        except Exception as e:
+            print(f"[REFRESH ERROR] {e}")
+        time.sleep(60)
+
+threading.Thread(target=refresh_loop, daemon=True).start()
+
+# ────────────────────────────────
+# STARTUP
+# ────────────────────────────────
 @app.on_event("startup")
 async def startup_event():
-    print("[HPB] Initializing dashboard + scheduler (Phase 9.1)")
-    await generate_dashboard()
-    sched = BackgroundScheduler()
-    sched.add_job(lambda: asyncio.run(generate_dashboard()), "interval", hours=24)
-    sched.start()
-
-# ───────────────────────────────────────────────
-#  Run locally
-# ───────────────────────────────────────────────
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("server:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8080)), reload=False)
+    print("[INIT] Starting HPB–TCT Server (Phase 9)")
+    init_exchange()
