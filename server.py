@@ -65,13 +65,14 @@ def init_exchange():
 
         if OKX_MODE == "testnet":
             exchange.set_sandbox_mode(True)
-            # ✅ full override with 'rest' key included
+            # ✅ Proper nested URL override
             exchange.urls["api"] = {
-                "rest": "https://www.okx.com",
-                "public": "https://www.okx.com/api/v5",
-                "private": "https://www.okx.com/api/v5"
+                "rest": {
+                    "public": "https://www.okx.com/api/v5",
+                    "private": "https://www.okx.com/api/v5"
+                }
             }
-            print("[EXCHANGE] Connected to OKX Testnet (URL override with REST endpoint)")
+            print("[EXCHANGE] Connected to OKX Testnet (nested REST override)")
         else:
             print("[EXCHANGE] Connected to OKX Live")
 
@@ -81,6 +82,7 @@ def init_exchange():
     except Exception as e:
         print(f"[EXCHANGE ERROR] {e}")
         return False
+
 
 
 
