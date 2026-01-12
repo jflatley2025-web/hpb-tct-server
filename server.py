@@ -9,7 +9,7 @@ import ccxt
 import pandas as pd
 import plotly.graph_objects as go
 
-app = FastAPI(title="HPB–TCT v19 RIG EXTENDED (Phase 9.4g OKX Debug Stable)")
+app = FastAPI(title="HPB–TCT v19 RIG EXTENDED (Phase 9.4h OKX REST Stable)")
 
 # ───────────────────────────────
 # CONFIG
@@ -63,21 +63,31 @@ def init_exchange():
             "enableRateLimit": True,
         })
 
+        # ✅ Load markets FIRST
+        exchange.load_markets()
+
         if OKX_MODE == "testnet":
             exchange.set_sandbox_mode(True)
-            # ✅ FINAL URL OVERRIDE STRUCTURE
-            exchange.urls["api"]["rest"] = "https://www.okx.com"
+            # ✅ Apply override *after* load_markets to prevent ccxt reset
+            exchange.urls["api"]["rest"] = exchange.urls["api"].get("rest") or "https://www.okx.com"
             exchange.urls["api"]["public"] = "https://www.okx.com/api/v5"
             exchange.urls["api"]["private"] = "https://www.okx.com/api/v5"
-
             print("[EXCHANGE] Connected to OKX Testnet (final REST override applied)")
-            print(f"[DEBUG] REST base URL: {exchange.urls['api']['rest']}")
-            print(f"[DEBUG] Public API URL: {exchange.urls['api']['public']}")
-            print(f"[DEBUG] Private API URL: {exchange.urls['api']['private']}")
         else:
             print("[EXCHANGE] Connected to OKX Live")
 
-        exchange.load_markets()
+        # ✅ Double check all keys exist
+        if not exchange.urls["api"].get("rest"):
+            exchange.urls["api"]["rest"] = "https://www.okx.com"
+        if not exchange.urls["api"].get("public"):
+            exchange.urls["api"]["public"] = "https://www.okx.com/api/v5"
+        if not exchange.urls["api"].get("private"):
+            exchange.urls["api"]["private"] = "https://www.okx.com/api/v5"
+
+        print(f"[DEBUG] REST base URL: {exchange.urls['api']['rest']}")
+        print(f"[DEBUG] Public API URL: {exchange.urls['api']['public']}")
+        print(f"[DEBUG] Private API URL: {exchange.urls['api']['private']}")
+
         print(f"[HPB] Environment: {OKX_MODE.upper()} active")
         return True
     except Exception as e:
@@ -148,7 +158,7 @@ async def dashboard():
     fig.update_layout(template="plotly_dark", title="OKX BTC/USDT 1h", height=600)
     html = fig.to_html(include_plotlyjs="cdn")
     return HTMLResponse(f"""
-    <h2>HPB–TCT Phase 9.4g OKX Debug Dashboard</h2>
+    <h2>HPB–TCT Phase 9.4h OKX REST Dashboard</h2>
     <p>Updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC</p>
     <p>Mode: {OKX_MODE.upper()} | Position: {trade_state['position']} | PNL: {trade_state['pnl']:.4f}</p>
     {html}
@@ -253,7 +263,7 @@ def refresh_loop():
 # ───────────────────────────────
 @app.on_event("startup")
 async def startup_event():
-    print("[INIT] Starting HPB–TCT Server (Phase 9.4g OKX Debug Stable)")
+    print("[INIT] Starting HPB–TCT Server (Phase 9.4h OKX REST Stable)")
     load_state()
     if init_exchange():
         threading.Thread(target=refresh_loop, daemon=True).start()
