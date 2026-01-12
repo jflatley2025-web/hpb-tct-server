@@ -9,7 +9,7 @@ import ccxt
 import pandas as pd
 import plotly.graph_objects as go
 
-app = FastAPI(title="HPB–TCT v19 RIG EXTENDED (Phase 9.4b OKX Stable)")
+app = FastAPI(title="HPB–TCT v19 RIG EXTENDED (Phase 9.4g OKX Debug Stable)")
 
 # ───────────────────────────────
 # CONFIG
@@ -65,14 +65,15 @@ def init_exchange():
 
         if OKX_MODE == "testnet":
             exchange.set_sandbox_mode(True)
-            # ✅ Proper nested URL override
-            exchange.urls["api"] = {
-                "rest": {
-                    "public": "https://www.okx.com/api/v5",
-                    "private": "https://www.okx.com/api/v5"
-                }
-            }
-            print("[EXCHANGE] Connected to OKX Testnet (nested REST override)")
+            # ✅ FINAL URL OVERRIDE STRUCTURE
+            exchange.urls["api"]["rest"] = "https://www.okx.com"
+            exchange.urls["api"]["public"] = "https://www.okx.com/api/v5"
+            exchange.urls["api"]["private"] = "https://www.okx.com/api/v5"
+
+            print("[EXCHANGE] Connected to OKX Testnet (final REST override applied)")
+            print(f"[DEBUG] REST base URL: {exchange.urls['api']['rest']}")
+            print(f"[DEBUG] Public API URL: {exchange.urls['api']['public']}")
+            print(f"[DEBUG] Private API URL: {exchange.urls['api']['private']}")
         else:
             print("[EXCHANGE] Connected to OKX Live")
 
@@ -82,9 +83,6 @@ def init_exchange():
     except Exception as e:
         print(f"[EXCHANGE ERROR] {e}")
         return False
-
-
-
 
 # ───────────────────────────────
 # KEEPALIVE THREAD
@@ -103,30 +101,25 @@ def keepalive():
 threading.Thread(target=keepalive, daemon=True).start()
 
 # ───────────────────────────────
-# PRICE FETCHING (FIXED)
+# PRICE FETCHING
 # ───────────────────────────────
 def fetch_price_data(symbol="BTC-USDT", timeframe="1h", limit=200):
-    """
-    OKX uses hyphen-based symbols. We handle missing markets gracefully.
-    """
+    """OKX uses hyphen-based symbols."""
     try:
         if not exchange:
             raise Exception("Exchange not initialized.")
 
         exchange.load_markets()
 
-        # ✅ ensure valid symbol
         if symbol not in exchange.markets:
-            print(f"[WARN] {symbol} not found, trying spot format BTC/USDT ...")
+            print(f"[WARN] {symbol} not found, trying BTC/USDT …")
             if "BTC/USDT" in exchange.markets:
                 symbol = "BTC/USDT"
             else:
                 symbol = "BTC-USDT"
 
         market = exchange.market(symbol)
-        if not market:
-            raise Exception("Invalid market returned by OKX.")
-
+        print(f"[DEBUG] Fetching OHLCV for {market['symbol']} via {exchange.urls['api']['public']}")
         candles = exchange.fetch_ohlcv(market["symbol"], timeframe=timeframe, limit=limit)
         df = pd.DataFrame(candles, columns=["timestamp", "open", "high", "low", "close", "volume"])
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
@@ -155,7 +148,7 @@ async def dashboard():
     fig.update_layout(template="plotly_dark", title="OKX BTC/USDT 1h", height=600)
     html = fig.to_html(include_plotlyjs="cdn")
     return HTMLResponse(f"""
-    <h2>HPB–TCT Phase 9.4b OKX Dashboard</h2>
+    <h2>HPB–TCT Phase 9.4g OKX Debug Dashboard</h2>
     <p>Updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC</p>
     <p>Mode: {OKX_MODE.upper()} | Position: {trade_state['position']} | PNL: {trade_state['pnl']:.4f}</p>
     {html}
@@ -167,7 +160,9 @@ async def dashboard():
 @app.get("/status")
 async def status():
     try:
+        print(f"[DEBUG] Fetching ticker via {exchange.urls['api']['public']}")
         ticker = exchange.fetch_ticker("BTC-USDT")
+        print(f"[DEBUG] Ticker Response: {ticker}")
         return JSONResponse({
             "exchange": "okx",
             "mode": OKX_MODE,
@@ -176,6 +171,7 @@ async def status():
             "connected": True
         })
     except Exception as e:
+        print(f"[STATUS ERROR] {e}")
         return JSONResponse({"connected": False, "error": str(e)})
 
 # ───────────────────────────────
@@ -184,6 +180,7 @@ async def status():
 @app.get("/execute")
 async def execute_trade(symbol: str = "BTC-USDT", side: str = "buy", size: float = 0.001):
     try:
+        print(f"[DEBUG] Executing {side.upper()} {size} {symbol}")
         price = exchange.fetch_ticker(symbol)["last"] if exchange else 0.0
         trade = {
             "symbol": symbol,
@@ -256,7 +253,7 @@ def refresh_loop():
 # ───────────────────────────────
 @app.on_event("startup")
 async def startup_event():
-    print("[INIT] Starting HPB–TCT Server (Phase 9.4b OKX Stable)")
+    print("[INIT] Starting HPB–TCT Server (Phase 9.4g OKX Debug Stable)")
     load_state()
     if init_exchange():
         threading.Thread(target=refresh_loop, daemon=True).start()
