@@ -53,7 +53,7 @@ def save_state():
 # EXCHANGE INITIALIZATION
 # ───────────────────────────────
 def init_exchange():
-    """Initialize OKX Exchange (Testnet or Live)."""
+    """Initialize OKX Exchange (Testnet or Live)"""
     global exchange
     try:
         exchange = ccxt.okx({
@@ -62,17 +62,25 @@ def init_exchange():
             "password": OKX_PASSPHRASE,
             "enableRateLimit": True,
         })
+
         if OKX_MODE == "testnet":
             exchange.set_sandbox_mode(True)
-            print("[EXCHANGE] Connected to OKX Testnet")
+            # 🩵 override ccxt broken testnet urls
+            exchange.urls["api"] = {
+                "public": "https://www.okx.com/api/v5",
+                "private": "https://www.okx.com/api/v5"
+            }
+            print("[EXCHANGE] Connected to OKX Testnet (manual URL override)")
         else:
             print("[EXCHANGE] Connected to OKX Live")
+
         exchange.load_markets()
         print(f"[HPB] Environment: {OKX_MODE.upper()} active")
         return True
     except Exception as e:
         print(f"[EXCHANGE ERROR] {e}")
         return False
+
 
 # ───────────────────────────────
 # KEEPALIVE THREAD
