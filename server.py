@@ -9,16 +9,19 @@ import ccxt
 import pandas as pd
 import plotly.graph_objects as go
 
-app = FastAPI(title="HPB–TCT v19 RIG EXTENDED (Phase 9.2)")
+app = FastAPI(title="HPB–TCT v19 RIG EXTENDED (Phase 9.3 OKX)")
 
 # ───────────────────────────────
-# ENVIRONMENT CONFIGURATION
+# CONFIGURATION
 # ───────────────────────────────
-BINANCE_KEY = os.getenv("BINANCE_KEY")
-BINANCE_SECRET = os.getenv("BINANCE_SECRET")
-BINANCE_MODE = os.getenv("BINANCE_MODE", "testnet").lower()
+OKX_KEY = os.getenv("OKX_KEY", "")
+OKX_SECRET = os.getenv("OKX_SECRET", "")
+OKX_PASSPHRASE = os.getenv("OKX_PASSPHRASE", "")
+OKX_MODE = os.getenv("OKX_MODE", "testnet").lower()
 
+STATE_FILE = "/tmp/trade_state.json"
 exchange = None
+
 trade_state = {
     "position": "FLAT",
     "entry_price": None,
@@ -27,56 +30,75 @@ trade_state = {
 }
 
 # ───────────────────────────────
-# INITIALIZE BINANCE CONNECTION
+# STATE HANDLING
+# ───────────────────────────────
+def load_state():
+    global trade_state
+    try:
+        if os.path.exists(STATE_FILE):
+            with open(STATE_FILE, "r") as f:
+                trade_state.update(json.load(f))
+            print("[STATE] Loaded trade state.")
+    except Exception as e:
+        print(f"[STATE ERROR] {e}")
+
+def save_state():
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(trade_state, f)
+    except Exception as e:
+        print(f"[STATE SAVE ERROR] {e}")
+
+# ───────────────────────────────
+# EXCHANGE INITIALIZATION
 # ───────────────────────────────
 def init_exchange():
-    """Initialize Binance (Testnet or Live)."""
+    """Initialize OKX connection."""
     global exchange
     try:
-        if BINANCE_MODE == "testnet":
-            exchange = ccxt.binance({
-                "apiKey": BINANCE_KEY,
-                "secret": BINANCE_SECRET,
-                "enableRateLimit": True,
-            })
+        exchange = ccxt.okx({
+            "apiKey": OKX_KEY,
+            "secret": OKX_SECRET,
+            "password": OKX_PASSPHRASE,
+            "enableRateLimit": True
+        })
+        if OKX_MODE == "testnet":
             exchange.set_sandbox_mode(True)
-            print("[EXCHANGE] Connected to Binance Testnet")
+            print("[EXCHANGE] Connected to OKX Testnet")
         else:
-            exchange = ccxt.binance({
-                "apiKey": BINANCE_KEY,
-                "secret": BINANCE_SECRET,
-                "enableRateLimit": True,
-            })
-            print("[EXCHANGE] Connected to Binance Live")
-        print(f"[HPB] Environment: {BINANCE_MODE.upper()} active")
+            print("[EXCHANGE] Connected to OKX Live")
+        print(f"[HPB] Environment: {OKX_MODE.upper()} active")
         return True
     except Exception as e:
         print(f"[EXCHANGE ERROR] {e}")
         return False
 
 # ───────────────────────────────
-# KEEPALIVE (Render Free Tier)
+# KEEPALIVE THREAD
 # ───────────────────────────────
-def touch_keepalive():
+def keepalive():
     while True:
         try:
-            f = "/tmp/render_keepalive.flag"
-            with open(f, "a"):
-                os.utime(f, None)
-            print(f"[KEEPALIVE] Touched {f} @ {datetime.utcnow().isoformat()}")
+            flag_path = "/tmp/render_keepalive.flag"
+            with open(flag_path, "a"):
+                os.utime(flag_path, None)
+            print(f"[KEEPALIVE] Updated flag @ {datetime.utcnow().isoformat()}")
         except Exception as e:
             print(f"[KEEPALIVE ERROR] {e}")
         time.sleep(600)
 
-threading.Thread(target=touch_keepalive, daemon=True).start()
+threading.Thread(target=keepalive, daemon=True).start()
 
 # ───────────────────────────────
-# MARKET DATA
+# DATA FETCHING
 # ───────────────────────────────
 def fetch_price_data(symbol="BTC/USDT", timeframe="1h", limit=200):
     try:
         candles = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-        df = pd.DataFrame(candles, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        df = pd.DataFrame(
+            candles,
+            columns=["timestamp", "open", "high", "low", "close", "volume"]
+        )
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
         return df
     except Exception as e:
@@ -84,34 +106,35 @@ def fetch_price_data(symbol="BTC/USDT", timeframe="1h", limit=200):
         return pd.DataFrame()
 
 # ───────────────────────────────
-# DASHBOARD
+# DASHBOARD ENDPOINT
 # ───────────────────────────────
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard():
     try:
         df = fetch_price_data()
         if df.empty:
-            return HTMLResponse("<h3>No data available (Exchange uninitialized).</h3>")
+            return HTMLResponse("<h3>No data available (Exchange uninitialized or restricted).</h3>")
 
-        fig = go.Figure(
-            data=[go.Candlestick(
+        fig = go.Figure(data=[
+            go.Candlestick(
                 x=df["timestamp"],
                 open=df["open"],
                 high=df["high"],
                 low=df["low"],
                 close=df["close"]
-            )]
-        )
+            )
+        ])
         fig.update_layout(
-            title="HTF 4H | Distribution Structure",
+            title="HTF 4H | Distribution Structure (OKX)",
             template="plotly_dark",
             height=600
         )
+
         html = fig.to_html(include_plotlyjs="cdn")
         return HTMLResponse(f"""
-        <h2>HPM–TCT v19 RIG EXTENDED Dashboard (Phase 9.2)</h2>
+        <h2>HPM–TCT v19 RIG EXTENDED Dashboard (Phase 9.3 OKX)</h2>
         <p>Updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC</p>
-        <p><b>Mode:</b> {BINANCE_MODE.upper()}</p>
+        <p><b>Mode:</b> {OKX_MODE.upper()}</p>
         <p><b>Position:</b> {trade_state['position']} | <b>PNL:</b> {trade_state['pnl']:.4f}</p>
         {html}
         """)
@@ -119,15 +142,15 @@ async def dashboard():
         return HTMLResponse(f"<h3>Error: {e}</h3>")
 
 # ───────────────────────────────
-# STATUS
+# STATUS ENDPOINT
 # ───────────────────────────────
 @app.get("/status")
 async def status():
     try:
         ticker = exchange.fetch_ticker("BTC/USDT")
         return JSONResponse({
-            "exchange": "binance-testnet" if BINANCE_MODE == "testnet" else "binance-live",
-            "mode": BINANCE_MODE,
+            "exchange": "okx-testnet" if OKX_MODE == "testnet" else "okx-live",
+            "mode": OKX_MODE,
             "symbol": ticker["symbol"],
             "price": ticker["last"],
             "connected": True,
@@ -137,7 +160,7 @@ async def status():
         return JSONResponse({"connected": False, "error": str(e)})
 
 # ───────────────────────────────
-# TRADE EXECUTION / SIMULATION
+# EXECUTION ENDPOINT
 # ───────────────────────────────
 @app.get("/execute")
 async def execute_trade(symbol: str = "BTC/USDT", side: str = "buy", size: float = 0.001):
@@ -151,26 +174,25 @@ async def execute_trade(symbol: str = "BTC/USDT", side: str = "buy", size: float
             "time": datetime.utcnow().isoformat()
         }
 
-        # Simulated mode logic
-        if BINANCE_MODE == "testnet":
+        if OKX_MODE == "testnet":
             print(f"[TRADE TEST] Simulating {side.upper()} {size} {symbol} @ {price}")
-
             if side.lower() == "buy":
                 trade_state["position"] = "LONG"
                 trade_state["entry_price"] = price
-            elif side.lower() == "sell":
-                if trade_state["position"] == "LONG":
-                    entry = trade_state["entry_price"]
-                    trade_state["pnl"] = (price - entry) / entry
-                    trade_state["position"] = "FLAT"
-                    trade_state["entry_price"] = None
+            elif side.lower() == "sell" and trade_state["position"] == "LONG":
+                entry = trade_state["entry_price"]
+                trade_state["pnl"] = (price - entry) / entry
+                trade_state["position"] = "FLAT"
+                trade_state["entry_price"] = None
 
             trade_state["trades"].append(trade)
+            save_state()
             return JSONResponse({"mode": "testnet", "trade": trade, "state": trade_state})
 
-        # Live mode (actual order)
+        # live mode (if connected to real OKX)
         order = exchange.create_market_order(symbol, side, size)
         trade_state["trades"].append(order)
+        save_state()
         return JSONResponse({"mode": "live", "order": order})
 
     except Exception as e:
@@ -178,45 +200,45 @@ async def execute_trade(symbol: str = "BTC/USDT", side: str = "buy", size: float
         return JSONResponse({"status": "error", "details": str(e)})
 
 # ───────────────────────────────
-# TRADE STATE ENDPOINT
+# STATE ENDPOINT
 # ───────────────────────────────
 @app.get("/state")
 async def get_state():
-    """Return current simulated position and PnL."""
     return JSONResponse({
         "position": trade_state["position"],
         "entry_price": trade_state["entry_price"],
         "pnl": trade_state["pnl"],
         "trade_count": len(trade_state["trades"]),
-        "trades": trade_state["trades"][-5:]  # recent 5
+        "recent_trades": trade_state["trades"][-5:]
     })
 
 # ───────────────────────────────
-# REFRESH THREAD (after init)
+# BACKGROUND REFRESH LOOP
 # ───────────────────────────────
 def refresh_loop():
     while True:
         try:
-            if exchange is not None:
+            if exchange:
                 df = fetch_price_data()
                 if not df.empty:
-                    print(f"[REFRESH] Updated market data @ {datetime.utcnow().isoformat()}")
+                    print(f"[REFRESH] Market data updated @ {datetime.utcnow().isoformat()}")
             else:
-                print("[REFRESH] Waiting for exchange init…")
+                print("[REFRESH] Waiting for exchange init...")
         except Exception as e:
             print(f"[REFRESH ERROR] {e}")
         time.sleep(60)
 
 # ───────────────────────────────
-# STARTUP
+# STARTUP EVENT
 # ───────────────────────────────
 @app.on_event("startup")
 async def startup_event():
-    print("[INIT] Starting HPB–TCT Server (Phase 9.2)")
+    print("[INIT] Starting HPB–TCT Server (Phase 9.3 OKX)")
+    load_state()
     ok = init_exchange()
     if ok:
         threading.Thread(target=refresh_loop, daemon=True).start()
         print("[SYSTEM] Market refresh thread started.")
     else:
-        print("[SYSTEM] Exchange init failed; retrying background mode.")
+        print("[SYSTEM] Exchange init failed; retry scheduled.")
         threading.Thread(target=init_exchange, daemon=True).start()
