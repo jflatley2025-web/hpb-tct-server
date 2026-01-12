@@ -3,13 +3,13 @@ import json
 import time
 import threading
 from datetime import datetime
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 import ccxt
 import pandas as pd
 import plotly.graph_objects as go
 
-app = FastAPI(title="HPB–TCT v19 RIG EXTENDED (Phase 9.3 OKX)")
+app = FastAPI(title="HPB–TCT v19 RIG EXTENDED (Phase 9.4 OKX)")
 
 # ───────────────────────────────
 # CONFIGURATION
@@ -90,10 +90,19 @@ def keepalive():
 threading.Thread(target=keepalive, daemon=True).start()
 
 # ───────────────────────────────
-# DATA FETCHING
+# DATA FETCHING (FIXED SYMBOL FORMAT)
 # ───────────────────────────────
-def fetch_price_data(symbol="BTC/USDT", timeframe="1h", limit=200):
+def fetch_price_data(symbol="BTC-USDT", timeframe="1h", limit=200):
+    """
+    OKX uses hyphen-separated symbols (e.g. BTC-USDT).
+    """
     try:
+        if exchange is None:
+            raise Exception("Exchange not initialized.")
+        markets = exchange.load_markets()
+        if symbol not in markets:
+            print(f"[WARN] {symbol} not found. Falling back to BTC-USDT.")
+            symbol = "BTC-USDT"
         candles = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
         df = pd.DataFrame(
             candles,
@@ -132,7 +141,7 @@ async def dashboard():
 
         html = fig.to_html(include_plotlyjs="cdn")
         return HTMLResponse(f"""
-        <h2>HPM–TCT v19 RIG EXTENDED Dashboard (Phase 9.3 OKX)</h2>
+        <h2>HPM–TCT v19 RIG EXTENDED Dashboard (Phase 9.4 OKX)</h2>
         <p>Updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC</p>
         <p><b>Mode:</b> {OKX_MODE.upper()}</p>
         <p><b>Position:</b> {trade_state['position']} | <b>PNL:</b> {trade_state['pnl']:.4f}</p>
@@ -147,7 +156,7 @@ async def dashboard():
 @app.get("/status")
 async def status():
     try:
-        ticker = exchange.fetch_ticker("BTC/USDT")
+        ticker = exchange.fetch_ticker("BTC-USDT")
         return JSONResponse({
             "exchange": "okx-testnet" if OKX_MODE == "testnet" else "okx-live",
             "mode": OKX_MODE,
@@ -163,7 +172,7 @@ async def status():
 # EXECUTION ENDPOINT
 # ───────────────────────────────
 @app.get("/execute")
-async def execute_trade(symbol: str = "BTC/USDT", side: str = "buy", size: float = 0.001):
+async def execute_trade(symbol: str = "BTC-USDT", side: str = "buy", size: float = 0.001):
     try:
         price = exchange.fetch_ticker(symbol)["last"] if exchange else 0.0
         trade = {
@@ -189,7 +198,7 @@ async def execute_trade(symbol: str = "BTC/USDT", side: str = "buy", size: float
             save_state()
             return JSONResponse({"mode": "testnet", "trade": trade, "state": trade_state})
 
-        # live mode (if connected to real OKX)
+        # live mode
         order = exchange.create_market_order(symbol, side, size)
         trade_state["trades"].append(order)
         save_state()
@@ -197,6 +206,36 @@ async def execute_trade(symbol: str = "BTC/USDT", side: str = "buy", size: float
 
     except Exception as e:
         print(f"[TRADE ERROR] {e}")
+        return JSONResponse({"status": "error", "details": str(e)})
+
+# ───────────────────────────────
+# SIGNALS ENDPOINT (NEW)
+# ───────────────────────────────
+@app.post("/signals")
+async def signal_handler(request: Request):
+    """
+    Receives JSON payloads for automated trade signals.
+    Example:
+    {
+        "symbol": "BTC-USDT",
+        "action": "buy",
+        "size": 0.002
+    }
+    """
+    try:
+        data = await request.json()
+        symbol = data.get("symbol", "BTC-USDT")
+        action = data.get("action", "").lower()
+        size = float(data.get("size", 0.001))
+
+        if action not in ["buy", "sell"]:
+            return JSONResponse({"status": "error", "message": "Invalid action"})
+
+        print(f"[SIGNAL] Received: {action.upper()} {size} {symbol}")
+        response = await execute_trade(symbol, action, size)
+        return response
+    except Exception as e:
+        print(f"[SIGNAL ERROR] {e}")
         return JSONResponse({"status": "error", "details": str(e)})
 
 # ───────────────────────────────
@@ -233,7 +272,7 @@ def refresh_loop():
 # ───────────────────────────────
 @app.on_event("startup")
 async def startup_event():
-    print("[INIT] Starting HPB–TCT Server (Phase 9.3 OKX)")
+    print("[INIT] Starting HPB–TCT Server (Phase 9.4 OKX)")
     load_state()
     ok = init_exchange()
     if ok:
