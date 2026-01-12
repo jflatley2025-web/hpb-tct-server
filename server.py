@@ -9,10 +9,10 @@ import ccxt
 import pandas as pd
 import plotly.graph_objects as go
 
-app = FastAPI(title="HPB–TCT v19 RIG EXTENDED (Phase 9.4 OKX)")
+app = FastAPI(title="HPB–TCT v19 RIG EXTENDED (Phase 9.4b OKX Stable)")
 
 # ───────────────────────────────
-# CONFIGURATION
+# CONFIG
 # ───────────────────────────────
 OKX_KEY = os.getenv("OKX_KEY", "")
 OKX_SECRET = os.getenv("OKX_SECRET", "")
@@ -30,7 +30,7 @@ trade_state = {
 }
 
 # ───────────────────────────────
-# STATE HANDLING
+# STATE MANAGEMENT
 # ───────────────────────────────
 def load_state():
     global trade_state
@@ -53,20 +53,21 @@ def save_state():
 # EXCHANGE INITIALIZATION
 # ───────────────────────────────
 def init_exchange():
-    """Initialize OKX connection."""
+    """Initialize OKX Exchange (Testnet or Live)."""
     global exchange
     try:
         exchange = ccxt.okx({
             "apiKey": OKX_KEY,
             "secret": OKX_SECRET,
             "password": OKX_PASSPHRASE,
-            "enableRateLimit": True
+            "enableRateLimit": True,
         })
         if OKX_MODE == "testnet":
             exchange.set_sandbox_mode(True)
             print("[EXCHANGE] Connected to OKX Testnet")
         else:
             print("[EXCHANGE] Connected to OKX Live")
+        exchange.load_markets()
         print(f"[HPB] Environment: {OKX_MODE.upper()} active")
         return True
     except Exception as e:
@@ -79,9 +80,9 @@ def init_exchange():
 def keepalive():
     while True:
         try:
-            flag_path = "/tmp/render_keepalive.flag"
-            with open(flag_path, "a"):
-                os.utime(flag_path, None)
+            path = "/tmp/render_keepalive.flag"
+            with open(path, "a"):
+                os.utime(path, None)
             print(f"[KEEPALIVE] Updated flag @ {datetime.utcnow().isoformat()}")
         except Exception as e:
             print(f"[KEEPALIVE ERROR] {e}")
@@ -90,24 +91,32 @@ def keepalive():
 threading.Thread(target=keepalive, daemon=True).start()
 
 # ───────────────────────────────
-# DATA FETCHING (FIXED SYMBOL FORMAT)
+# PRICE FETCHING (FIXED)
 # ───────────────────────────────
 def fetch_price_data(symbol="BTC-USDT", timeframe="1h", limit=200):
     """
-    OKX uses hyphen-separated symbols (e.g. BTC-USDT).
+    OKX uses hyphen-based symbols. We handle missing markets gracefully.
     """
     try:
-        if exchange is None:
+        if not exchange:
             raise Exception("Exchange not initialized.")
-        markets = exchange.load_markets()
-        if symbol not in markets:
-            print(f"[WARN] {symbol} not found. Falling back to BTC-USDT.")
-            symbol = "BTC-USDT"
-        candles = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-        df = pd.DataFrame(
-            candles,
-            columns=["timestamp", "open", "high", "low", "close", "volume"]
-        )
+
+        exchange.load_markets()
+
+        # ✅ ensure valid symbol
+        if symbol not in exchange.markets:
+            print(f"[WARN] {symbol} not found, trying spot format BTC/USDT ...")
+            if "BTC/USDT" in exchange.markets:
+                symbol = "BTC/USDT"
+            else:
+                symbol = "BTC-USDT"
+
+        market = exchange.market(symbol)
+        if not market:
+            raise Exception("Invalid market returned by OKX.")
+
+        candles = exchange.fetch_ohlcv(market["symbol"], timeframe=timeframe, limit=limit)
+        df = pd.DataFrame(candles, columns=["timestamp", "open", "high", "low", "close", "volume"])
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
         return df
     except Exception as e:
@@ -115,61 +124,50 @@ def fetch_price_data(symbol="BTC-USDT", timeframe="1h", limit=200):
         return pd.DataFrame()
 
 # ───────────────────────────────
-# DASHBOARD ENDPOINT
+# DASHBOARD
 # ───────────────────────────────
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard():
-    try:
-        df = fetch_price_data()
-        if df.empty:
-            return HTMLResponse("<h3>No data available (Exchange uninitialized or restricted).</h3>")
-
-        fig = go.Figure(data=[
-            go.Candlestick(
-                x=df["timestamp"],
-                open=df["open"],
-                high=df["high"],
-                low=df["low"],
-                close=df["close"]
-            )
-        ])
-        fig.update_layout(
-            title="HTF 4H | Distribution Structure (OKX)",
-            template="plotly_dark",
-            height=600
+    df = fetch_price_data()
+    if df.empty:
+        return HTMLResponse("<h3>No data available (exchange uninitialized or restricted).</h3>")
+    fig = go.Figure(data=[
+        go.Candlestick(
+            x=df["timestamp"],
+            open=df["open"],
+            high=df["high"],
+            low=df["low"],
+            close=df["close"]
         )
-
-        html = fig.to_html(include_plotlyjs="cdn")
-        return HTMLResponse(f"""
-        <h2>HPM–TCT v19 RIG EXTENDED Dashboard (Phase 9.4 OKX)</h2>
-        <p>Updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC</p>
-        <p><b>Mode:</b> {OKX_MODE.upper()}</p>
-        <p><b>Position:</b> {trade_state['position']} | <b>PNL:</b> {trade_state['pnl']:.4f}</p>
-        {html}
-        """)
-    except Exception as e:
-        return HTMLResponse(f"<h3>Error: {e}</h3>")
+    ])
+    fig.update_layout(template="plotly_dark", title="OKX BTC/USDT 1h", height=600)
+    html = fig.to_html(include_plotlyjs="cdn")
+    return HTMLResponse(f"""
+    <h2>HPB–TCT Phase 9.4b OKX Dashboard</h2>
+    <p>Updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC</p>
+    <p>Mode: {OKX_MODE.upper()} | Position: {trade_state['position']} | PNL: {trade_state['pnl']:.4f}</p>
+    {html}
+    """)
 
 # ───────────────────────────────
-# STATUS ENDPOINT
+# STATUS
 # ───────────────────────────────
 @app.get("/status")
 async def status():
     try:
         ticker = exchange.fetch_ticker("BTC-USDT")
         return JSONResponse({
-            "exchange": "okx-testnet" if OKX_MODE == "testnet" else "okx-live",
+            "exchange": "okx",
             "mode": OKX_MODE,
-            "symbol": ticker["symbol"],
-            "price": ticker["last"],
-            "connected": True,
-            "timestamp": datetime.utcnow().isoformat()
+            "price": ticker.get("last"),
+            "timestamp": datetime.utcnow().isoformat(),
+            "connected": True
         })
     except Exception as e:
         return JSONResponse({"connected": False, "error": str(e)})
 
 # ───────────────────────────────
-# EXECUTION ENDPOINT
+# EXECUTE TRADE
 # ───────────────────────────────
 @app.get("/execute")
 async def execute_trade(symbol: str = "BTC-USDT", side: str = "buy", size: float = 0.001):
@@ -184,72 +182,49 @@ async def execute_trade(symbol: str = "BTC-USDT", side: str = "buy", size: float
         }
 
         if OKX_MODE == "testnet":
-            print(f"[TRADE TEST] Simulating {side.upper()} {size} {symbol} @ {price}")
-            if side.lower() == "buy":
+            print(f"[TRADE TEST] Simulated {side.upper()} {size} {symbol} @ {price}")
+            if side == "buy":
                 trade_state["position"] = "LONG"
                 trade_state["entry_price"] = price
-            elif side.lower() == "sell" and trade_state["position"] == "LONG":
-                entry = trade_state["entry_price"]
+            elif side == "sell" and trade_state["position"] == "LONG":
+                entry = trade_state["entry_price"] or price
                 trade_state["pnl"] = (price - entry) / entry
                 trade_state["position"] = "FLAT"
                 trade_state["entry_price"] = None
-
             trade_state["trades"].append(trade)
             save_state()
             return JSONResponse({"mode": "testnet", "trade": trade, "state": trade_state})
-
-        # live mode
-        order = exchange.create_market_order(symbol, side, size)
-        trade_state["trades"].append(order)
-        save_state()
-        return JSONResponse({"mode": "live", "order": order})
-
+        else:
+            order = exchange.create_market_order(symbol, side, size)
+            trade_state["trades"].append(order)
+            save_state()
+            return JSONResponse({"mode": "live", "order": order})
     except Exception as e:
         print(f"[TRADE ERROR] {e}")
-        return JSONResponse({"status": "error", "details": str(e)})
+        return JSONResponse({"error": str(e)})
 
 # ───────────────────────────────
-# SIGNALS ENDPOINT (NEW)
+# SIGNALS ENDPOINT
 # ───────────────────────────────
 @app.post("/signals")
 async def signal_handler(request: Request):
-    """
-    Receives JSON payloads for automated trade signals.
-    Example:
-    {
-        "symbol": "BTC-USDT",
-        "action": "buy",
-        "size": 0.002
-    }
-    """
     try:
         data = await request.json()
         symbol = data.get("symbol", "BTC-USDT")
         action = data.get("action", "").lower()
         size = float(data.get("size", 0.001))
-
-        if action not in ["buy", "sell"]:
-            return JSONResponse({"status": "error", "message": "Invalid action"})
-
-        print(f"[SIGNAL] Received: {action.upper()} {size} {symbol}")
-        response = await execute_trade(symbol, action, size)
-        return response
+        print(f"[SIGNAL] {action.upper()} {size} {symbol}")
+        return await execute_trade(symbol, action, size)
     except Exception as e:
         print(f"[SIGNAL ERROR] {e}")
-        return JSONResponse({"status": "error", "details": str(e)})
+        return JSONResponse({"error": str(e)})
 
 # ───────────────────────────────
 # STATE ENDPOINT
 # ───────────────────────────────
 @app.get("/state")
 async def get_state():
-    return JSONResponse({
-        "position": trade_state["position"],
-        "entry_price": trade_state["entry_price"],
-        "pnl": trade_state["pnl"],
-        "trade_count": len(trade_state["trades"]),
-        "recent_trades": trade_state["trades"][-5:]
-    })
+    return JSONResponse(trade_state)
 
 # ───────────────────────────────
 # BACKGROUND REFRESH LOOP
@@ -257,12 +232,9 @@ async def get_state():
 def refresh_loop():
     while True:
         try:
-            if exchange:
-                df = fetch_price_data()
-                if not df.empty:
-                    print(f"[REFRESH] Market data updated @ {datetime.utcnow().isoformat()}")
-            else:
-                print("[REFRESH] Waiting for exchange init...")
+            df = fetch_price_data()
+            if not df.empty:
+                print(f"[REFRESH] Market data updated @ {datetime.utcnow().isoformat()}")
         except Exception as e:
             print(f"[REFRESH ERROR] {e}")
         time.sleep(60)
@@ -272,12 +244,8 @@ def refresh_loop():
 # ───────────────────────────────
 @app.on_event("startup")
 async def startup_event():
-    print("[INIT] Starting HPB–TCT Server (Phase 9.4 OKX)")
+    print("[INIT] Starting HPB–TCT Server (Phase 9.4b OKX Stable)")
     load_state()
-    ok = init_exchange()
-    if ok:
+    if init_exchange():
         threading.Thread(target=refresh_loop, daemon=True).start()
         print("[SYSTEM] Market refresh thread started.")
-    else:
-        print("[SYSTEM] Exchange init failed; retry scheduled.")
-        threading.Thread(target=init_exchange, daemon=True).start()
