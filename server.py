@@ -10,9 +10,10 @@ from fastapi.responses import JSONResponse, HTMLResponse
 from loguru import logger
 
 # ───────────────────────────────
-# CONFIG
+# CONFIGURATION
 # ───────────────────────────────
 EXCHANGE = os.getenv("EXCHANGE", "mexc").lower()
+TRADE_MODE = os.getenv("TRADE_MODE", "paper").lower()  # 'paper' or 'live'
 
 # OKX
 OKX_KEY = os.getenv("OKX_KEY", "")
@@ -28,16 +29,16 @@ MEXC_SECRET = os.getenv("MEXC_SECRET", "")
 BINANCE_KEY = os.getenv("BINANCE_KEY", "")
 BINANCE_SECRET = os.getenv("BINANCE_SECRET", "")
 
-app = FastAPI(title="HPB–TCT Server", version="9.7 Unified Pro+Dashboard")
+app = FastAPI(title="HPB–TCT Server", version="9.8 Unified Pro Hybrid")
 
 # ───────────────────────────────
-# GLOBALS
+# GLOBAL STATE
 # ───────────────────────────────
 exchange = None
 startup_log = []
 event_log = []
 MAX_LOG = 25
-trade_state = {"mode": "paper", "open": False, "entry": None, "pnl": 0.0}
+trade_state = {"mode": TRADE_MODE, "open": False, "entry": None, "side": None, "pnl": 0.0}
 
 def log_event(msg):
     ts = datetime.utcnow().isoformat()
@@ -48,7 +49,7 @@ def log_event(msg):
     logger.info(msg)
 
 # ───────────────────────────────
-# EXCHANGE CONNECTION + FAILOVER
+# CONNECT + FAILOVER
 # ───────────────────────────────
 def connect_exchange():
     global startup_log
@@ -122,13 +123,14 @@ def failover_loop():
         time.sleep(60)
 
 # ───────────────────────────────
-# API ENDPOINTS
+# BASIC ROUTES
 # ───────────────────────────────
 @app.get("/")
 def root():
     return {
-        "message": "HPB–TCT Unified Pro running",
+        "message": "HPB–TCT Unified Pro Hybrid running",
         "exchange": exchange.id if exchange else None,
+        "trade_mode": TRADE_MODE,
         "timestamp": datetime.utcnow().isoformat(),
     }
 
@@ -148,13 +150,12 @@ def status():
         return {"exchange": exchange.id, "connected": False, "error": str(e)}
 
 # ───────────────────────────────
-# DASHBOARD ENDPOINT
+# DASHBOARD
 # ───────────────────────────────
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard():
     if not exchange:
         return HTMLResponse("<h3>No active exchange connection.</h3>")
-
     try:
         candles = exchange.fetch_ohlcv("BTC/USDT", timeframe="1h", limit=100)
         df = pd.DataFrame(candles, columns=["timestamp", "open", "high", "low", "close", "volume"])
@@ -173,14 +174,14 @@ async def dashboard():
         html = fig.to_html(include_plotlyjs="cdn")
         return HTMLResponse(f"""
         <h2>HPB–TCT Dashboard – {exchange.id.upper()}</h2>
-        <p>Updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC</p>
+        <p>Mode: <b>{TRADE_MODE.upper()}</b> | Updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC</p>
         {html}
         """)
     except Exception as e:
         return HTMLResponse(f"<h3>Error generating dashboard: {e}</h3>")
 
 # ───────────────────────────────
-# PAPER-TRADE SIMULATOR
+# PAPER TRADING
 # ───────────────────────────────
 @app.post("/signals")
 async def signals(req: Request):
@@ -207,20 +208,49 @@ async def signals(req: Request):
     return JSONResponse({"trade_state": trade_state})
 
 # ───────────────────────────────
-# DEBUG LOGS ENDPOINT
+# LIVE TRADE EXECUTION
+# ───────────────────────────────
+@app.post("/realtrade")
+async def realtrade(req: Request):
+    global trade_state
+    if TRADE_MODE != "live":
+        return JSONResponse({"error": "TRADE_MODE is set to paper — no live trades executed."})
+    if not exchange:
+        return JSONResponse({"error": "Exchange not connected."})
+
+    data = await req.json()
+    symbol = data.get("symbol", "BTC/USDT")
+    side = data.get("action", "").lower()
+    size = float(data.get("size", 0.001))
+
+    try:
+        order = exchange.create_market_order(symbol, side, size)
+        trade_state.update({
+            "last_order": order,
+            "last_side": side,
+            "symbol": symbol,
+            "size": size,
+            "timestamp": datetime.utcnow().isoformat(),
+        })
+        log_event(f"[LIVE] {side.upper()} {size} {symbol} – Executed")
+        return JSONResponse({"status": "success", "order": order})
+    except Exception as e:
+        log_event(f"[LIVE ERROR] {e}")
+        return JSONResponse({"status": "error", "error": str(e)})
+
+# ───────────────────────────────
+# DEBUG + DIAGNOSTICS
 # ───────────────────────────────
 @app.get("/debug/logs")
 def debug_logs():
     return JSONResponse({"count": len(event_log), "entries": event_log})
 
-# ───────────────────────────────
-# DIAGNOSTICS
-# ───────────────────────────────
 @app.get("/diagnostics/full")
 def diagnostics():
     diag = {
-        "phase": "9.7 Unified Pro+Dashboard",
+        "phase": "9.8 Unified Pro Hybrid",
         "exchange_connected": exchange.id if exchange else None,
+        "trade_mode": TRADE_MODE,
         "okx_mode": OKX_MODE,
         "available_keys": {
             "okx": bool(OKX_KEY),
@@ -238,7 +268,7 @@ def diagnostics():
 @app.on_event("startup")
 async def startup_event():
     global exchange
-    log_event("[INIT] Startup event triggered")
+    log_event(f"[INIT] Startup event triggered (Mode: {TRADE_MODE})")
     exchange = connect_exchange()
     threading.Thread(target=failover_loop, daemon=True).start()
     log_event("[SYSTEM] Failover monitor started")
