@@ -2,9 +2,11 @@ import os
 import ccxt
 import threading
 import time
+import pandas as pd
+import plotly.graph_objects as go
 from datetime import datetime
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from loguru import logger
 
 # ───────────────────────────────
@@ -26,14 +28,14 @@ MEXC_SECRET = os.getenv("MEXC_SECRET", "")
 BINANCE_KEY = os.getenv("BINANCE_KEY", "")
 BINANCE_SECRET = os.getenv("BINANCE_SECRET", "")
 
-app = FastAPI(title="HPB–TCT Server", version="9.6 Unified Pro")
+app = FastAPI(title="HPB–TCT Server", version="9.7 Unified Pro+Dashboard")
 
 # ───────────────────────────────
 # GLOBALS
 # ───────────────────────────────
 exchange = None
 startup_log = []
-event_log = []        # rolling event buffer for /debug/logs
+event_log = []
 MAX_LOG = 25
 trade_state = {"mode": "paper", "open": False, "entry": None, "pnl": 0.0}
 
@@ -49,10 +51,6 @@ def log_event(msg):
 # EXCHANGE CONNECTION + FAILOVER
 # ───────────────────────────────
 def connect_exchange():
-    """
-    Attempt to connect in priority order: OKX → MEXC → Binance.
-    Returns active exchange and connection log.
-    """
     global startup_log
     startup_log = []
     connected = None
@@ -103,7 +101,6 @@ def connect_exchange():
                 startup_log.append(f"[BINANCE] ❌ {e}")
         return None
 
-    # priority order
     connected = try_okx() or try_mexc() or try_binance()
     if connected:
         log_event(f"[EXCHANGE] Connected to {connected.id.upper()} (REST verified)")
@@ -112,14 +109,12 @@ def connect_exchange():
     return connected
 
 def failover_loop():
-    """Continuously checks connection; auto-reconnects if lost."""
     global exchange
     while True:
         try:
             if not exchange:
                 exchange = connect_exchange()
             else:
-                # verify ticker call
                 exchange.fetch_ticker("BTC/USDT")
         except Exception as e:
             log_event(f"[FAILOVER] Connection lost: {e}")
@@ -153,6 +148,38 @@ def status():
         return {"exchange": exchange.id, "connected": False, "error": str(e)}
 
 # ───────────────────────────────
+# DASHBOARD ENDPOINT
+# ───────────────────────────────
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard():
+    if not exchange:
+        return HTMLResponse("<h3>No active exchange connection.</h3>")
+
+    try:
+        candles = exchange.fetch_ohlcv("BTC/USDT", timeframe="1h", limit=100)
+        df = pd.DataFrame(candles, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+
+        fig = go.Figure(
+            data=[go.Candlestick(
+                x=df["timestamp"],
+                open=df["open"],
+                high=df["high"],
+                low=df["low"],
+                close=df["close"]
+            )]
+        )
+        fig.update_layout(template="plotly_dark", title=f"{exchange.id.upper()} BTC/USDT (1h)", height=600)
+        html = fig.to_html(include_plotlyjs="cdn")
+        return HTMLResponse(f"""
+        <h2>HPB–TCT Dashboard – {exchange.id.upper()}</h2>
+        <p>Updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC</p>
+        {html}
+        """)
+    except Exception as e:
+        return HTMLResponse(f"<h3>Error generating dashboard: {e}</h3>")
+
+# ───────────────────────────────
 # PAPER-TRADE SIMULATOR
 # ───────────────────────────────
 @app.post("/signals")
@@ -162,11 +189,11 @@ async def signals(req: Request):
     side = data.get("action", "").lower()
     size = float(data.get("size", 0.001))
     symbol = data.get("symbol", "BTC/USDT")
-    price = None
+    price = 0.0
     try:
         price = exchange.fetch_ticker(symbol)["last"]
     except Exception:
-        price = 0.0
+        pass
 
     if side == "buy":
         trade_state.update({"open": True, "entry": price, "side": "LONG"})
@@ -184,7 +211,6 @@ async def signals(req: Request):
 # ───────────────────────────────
 @app.get("/debug/logs")
 def debug_logs():
-    """Return the last 25 log entries."""
     return JSONResponse({"count": len(event_log), "entries": event_log})
 
 # ───────────────────────────────
@@ -193,7 +219,7 @@ def debug_logs():
 @app.get("/diagnostics/full")
 def diagnostics():
     diag = {
-        "phase": "9.6 Unified Pro",
+        "phase": "9.7 Unified Pro+Dashboard",
         "exchange_connected": exchange.id if exchange else None,
         "okx_mode": OKX_MODE,
         "available_keys": {
