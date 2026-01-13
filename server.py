@@ -1,9 +1,11 @@
 import os
 import ccxt
-from fastapi import FastAPI
+import threading
+import time
+from datetime import datetime
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from loguru import logger
-from datetime import datetime
 
 # ───────────────────────────────
 # CONFIG
@@ -24,93 +26,119 @@ MEXC_SECRET = os.getenv("MEXC_SECRET", "")
 BINANCE_KEY = os.getenv("BINANCE_KEY", "")
 BINANCE_SECRET = os.getenv("BINANCE_SECRET", "")
 
-app = FastAPI(title="HPB–TCT Server", version="9.5-unified")
+app = FastAPI(title="HPB–TCT Server", version="9.6 Unified Pro")
 
 # ───────────────────────────────
-# EXCHANGE CONNECTOR
+# GLOBALS
+# ───────────────────────────────
+exchange = None
+startup_log = []
+event_log = []        # rolling event buffer for /debug/logs
+MAX_LOG = 25
+trade_state = {"mode": "paper", "open": False, "entry": None, "pnl": 0.0}
+
+def log_event(msg):
+    ts = datetime.utcnow().isoformat()
+    entry = f"[{ts}] {msg}"
+    event_log.append(entry)
+    if len(event_log) > MAX_LOG:
+        event_log.pop(0)
+    logger.info(msg)
+
+# ───────────────────────────────
+# EXCHANGE CONNECTION + FAILOVER
 # ───────────────────────────────
 def connect_exchange():
     """
-    Try to connect to OKX, MEXC, then Binance — in that order.
-    Returns an active ccxt exchange instance and a connection summary.
+    Attempt to connect in priority order: OKX → MEXC → Binance.
+    Returns active exchange and connection log.
     """
-    active_exchange = None
-    connection_log = []
+    global startup_log
+    startup_log = []
+    connected = None
 
-    # 1️⃣ Try OKX
-    if OKX_KEY and OKX_SECRET and OKX_PASSPHRASE:
-        try:
-            okx = ccxt.okx({
-                "apiKey": OKX_KEY,
-                "secret": OKX_SECRET,
-                "password": OKX_PASSPHRASE,
-                "enableRateLimit": True,
-            })
-            # Force a simple API call to validate connection
-            okx.fetch_ticker("BTC/USDT")
-            connection_log.append("[OKX] ✅ Connected successfully")
-            active_exchange = okx
-        except Exception as e:
-            msg = str(e)
-            connection_log.append(f"[OKX] ❌ Failed: {msg}")
+    def try_okx():
+        if OKX_KEY and OKX_SECRET and OKX_PASSPHRASE:
+            try:
+                okx = ccxt.okx({
+                    "apiKey": OKX_KEY,
+                    "secret": OKX_SECRET,
+                    "password": OKX_PASSPHRASE,
+                    "enableRateLimit": True,
+                })
+                okx.fetch_ticker("BTC/USDT")
+                startup_log.append("[OKX] ✅ Connected successfully")
+                return okx
+            except Exception as e:
+                startup_log.append(f"[OKX] ❌ {e}")
+        return None
 
-    # 2️⃣ Try MEXC
-    if not active_exchange and MEXC_KEY and MEXC_SECRET:
-        try:
-            mexc = ccxt.mexc({
-                "apiKey": MEXC_KEY,
-                "secret": MEXC_SECRET,
-                "enableRateLimit": True,
-            })
-            mexc.fetch_ticker("BTC/USDT")
-            connection_log.append("[MEXC] ✅ Connected successfully")
-            active_exchange = mexc
-        except Exception as e:
-            msg = str(e)
-            connection_log.append(f"[MEXC] ❌ Failed: {msg}")
+    def try_mexc():
+        if MEXC_KEY and MEXC_SECRET:
+            try:
+                mexc = ccxt.mexc({
+                    "apiKey": MEXC_KEY,
+                    "secret": MEXC_SECRET,
+                    "enableRateLimit": True,
+                })
+                mexc.fetch_ticker("BTC/USDT")
+                startup_log.append("[MEXC] ✅ Connected successfully")
+                return mexc
+            except Exception as e:
+                startup_log.append(f"[MEXC] ❌ {e}")
+        return None
 
-    # 3️⃣ Try Binance
-    if not active_exchange and BINANCE_KEY and BINANCE_SECRET:
-        try:
-            binance = ccxt.binance({
-                "apiKey": BINANCE_KEY,
-                "secret": BINANCE_SECRET,
-                "enableRateLimit": True,
-            })
-            binance.fetch_ticker("BTC/USDT")
-            connection_log.append("[BINANCE] ✅ Connected successfully")
-            active_exchange = binance
-        except Exception as e:
-            msg = str(e)
-            connection_log.append(f"[BINANCE] ❌ Failed: {msg}")
+    def try_binance():
+        if BINANCE_KEY and BINANCE_SECRET:
+            try:
+                binance = ccxt.binance({
+                    "apiKey": BINANCE_KEY,
+                    "secret": BINANCE_SECRET,
+                    "enableRateLimit": True,
+                })
+                binance.fetch_ticker("BTC/USDT")
+                startup_log.append("[BINANCE] ✅ Connected successfully")
+                return binance
+            except Exception as e:
+                startup_log.append(f"[BINANCE] ❌ {e}")
+        return None
 
-    if active_exchange:
-        logger.info(f"[EXCHANGE] Connected to {active_exchange.id.upper()} (REST verified)")
+    # priority order
+    connected = try_okx() or try_mexc() or try_binance()
+    if connected:
+        log_event(f"[EXCHANGE] Connected to {connected.id.upper()} (REST verified)")
     else:
-        logger.warning("[EXCHANGE] ❌ No valid exchange connection available")
+        log_event("[EXCHANGE] ❌ No valid connection")
+    return connected
 
-    return active_exchange, connection_log
-
-# initialize at startup
-exchange, startup_log = connect_exchange()
+def failover_loop():
+    """Continuously checks connection; auto-reconnects if lost."""
+    global exchange
+    while True:
+        try:
+            if not exchange:
+                exchange = connect_exchange()
+            else:
+                # verify ticker call
+                exchange.fetch_ticker("BTC/USDT")
+        except Exception as e:
+            log_event(f"[FAILOVER] Connection lost: {e}")
+            exchange = connect_exchange()
+        time.sleep(60)
 
 # ───────────────────────────────
 # API ENDPOINTS
 # ───────────────────────────────
-
 @app.get("/")
 def root():
     return {
-        "message": "HPB–TCT Server Active",
-        "exchange": exchange.id if exchange else "none",
+        "message": "HPB–TCT Unified Pro running",
+        "exchange": exchange.id if exchange else None,
         "timestamp": datetime.utcnow().isoformat(),
     }
 
 @app.get("/status")
 def status():
-    """
-    Check current exchange connectivity and BTC/USDT ticker
-    """
     if not exchange:
         return {"connected": False, "error": "No active exchange"}
     try:
@@ -119,30 +147,59 @@ def status():
             "exchange": exchange.id,
             "connected": True,
             "price": ticker.get("last"),
-            "timestamp": datetime.utcnow().isoformat(),
+            "utc": datetime.utcnow().isoformat(),
         }
     except Exception as e:
         return {"exchange": exchange.id, "connected": False, "error": str(e)}
 
 # ───────────────────────────────
-# Optional Diagnostic Tool
+# PAPER-TRADE SIMULATOR
+# ───────────────────────────────
+@app.post("/signals")
+async def signals(req: Request):
+    global trade_state
+    data = await req.json()
+    side = data.get("action", "").lower()
+    size = float(data.get("size", 0.001))
+    symbol = data.get("symbol", "BTC/USDT")
+    price = None
+    try:
+        price = exchange.fetch_ticker(symbol)["last"]
+    except Exception:
+        price = 0.0
+
+    if side == "buy":
+        trade_state.update({"open": True, "entry": price, "side": "LONG"})
+        log_event(f"[PAPER] BUY {size} {symbol} @ {price}")
+    elif side == "sell" and trade_state["open"]:
+        pnl = (price - trade_state["entry"]) / trade_state["entry"]
+        trade_state.update({"open": False, "pnl": pnl})
+        log_event(f"[PAPER] SELL {size} {symbol} @ {price} | PNL {pnl:.4%}")
+    else:
+        log_event(f"[PAPER] Invalid action '{side}'")
+    return JSONResponse({"trade_state": trade_state})
+
+# ───────────────────────────────
+# DEBUG LOGS ENDPOINT
+# ───────────────────────────────
+@app.get("/debug/logs")
+def debug_logs():
+    """Return the last 25 log entries."""
+    return JSONResponse({"count": len(event_log), "entries": event_log})
+
+# ───────────────────────────────
+# DIAGNOSTICS
 # ───────────────────────────────
 @app.get("/diagnostics/full")
 def diagnostics():
-    """
-    Returns environment overview (safe, no secrets)
-    """
     diag = {
-        "phase": "9.5 Unified Exchange Diagnostics",
-        "exchange_selected": EXCHANGE,
+        "phase": "9.6 Unified Pro",
         "exchange_connected": exchange.id if exchange else None,
-        "modes": {
-            "okx_mode": OKX_MODE,
-        },
-        "available_exchanges": {
-            "okx_key": bool(OKX_KEY),
-            "mexc_key": bool(MEXC_KEY),
-            "binance_key": bool(BINANCE_KEY),
+        "okx_mode": OKX_MODE,
+        "available_keys": {
+            "okx": bool(OKX_KEY),
+            "mexc": bool(MEXC_KEY),
+            "binance": bool(BINANCE_KEY),
         },
         "startup_log": startup_log,
         "utc": datetime.utcnow().isoformat(),
@@ -150,9 +207,12 @@ def diagnostics():
     return JSONResponse(diag)
 
 # ───────────────────────────────
-# KEEPALIVE + STARTUP EVENTS
+# STARTUP
 # ───────────────────────────────
 @app.on_event("startup")
 async def startup_event():
-    logger.info("[INIT] Startup event triggered")
-    logger.info(f"[KEEPALIVE] Updated flag @ {datetime.utcnow().isoformat()}")
+    global exchange
+    log_event("[INIT] Startup event triggered")
+    exchange = connect_exchange()
+    threading.Thread(target=failover_loop, daemon=True).start()
+    log_event("[SYSTEM] Failover monitor started")
