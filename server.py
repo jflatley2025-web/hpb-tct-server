@@ -1,133 +1,158 @@
-# ───────────────────────────────
-# server.py  |  HPB–TCT  Phase 9.4j OKX REST Live/Testnet Fix + Diagnostics
-# ───────────────────────────────
 import os
-import asyncio
-from datetime import datetime
+import ccxt
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
-import ccxt
 from loguru import logger
+from datetime import datetime
 
 # ───────────────────────────────
-# CONFIG (Render environment variables)
+# CONFIG
 # ───────────────────────────────
+EXCHANGE = os.getenv("EXCHANGE", "mexc").lower()
+
+# OKX
 OKX_KEY = os.getenv("OKX_KEY", "")
 OKX_SECRET = os.getenv("OKX_SECRET", "")
 OKX_PASSPHRASE = os.getenv("OKX_PASSPHRASE", "")
-OKX_MODE = os.getenv("OKX_MODE", "testnet").lower()
+OKX_MODE = os.getenv("OKX_MODE", "live").lower()
+
+# MEXC
+MEXC_KEY = os.getenv("MEXC_KEY", "")
+MEXC_SECRET = os.getenv("MEXC_SECRET", "")
+
+# BINANCE
+BINANCE_KEY = os.getenv("BINANCE_KEY", "")
+BINANCE_SECRET = os.getenv("BINANCE_SECRET", "")
+
+app = FastAPI(title="HPB–TCT Server", version="9.5-unified")
 
 # ───────────────────────────────
-# FastAPI app setup
+# EXCHANGE CONNECTOR
 # ───────────────────────────────
-app = FastAPI(title="HPB–TCT Server", version="9.4j")
+def connect_exchange():
+    """
+    Try to connect to OKX, MEXC, then Binance — in that order.
+    Returns an active ccxt exchange instance and a connection summary.
+    """
+    active_exchange = None
+    connection_log = []
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+    # 1️⃣ Try OKX
+    if OKX_KEY and OKX_SECRET and OKX_PASSPHRASE:
+        try:
+            okx = ccxt.okx({
+                "apiKey": OKX_KEY,
+                "secret": OKX_SECRET,
+                "password": OKX_PASSPHRASE,
+                "enableRateLimit": True,
+            })
+            # Force a simple API call to validate connection
+            okx.fetch_ticker("BTC/USDT")
+            connection_log.append("[OKX] ✅ Connected successfully")
+            active_exchange = okx
+        except Exception as e:
+            msg = str(e)
+            connection_log.append(f"[OKX] ❌ Failed: {msg}")
 
-# ───────────────────────────────
-# Initialize exchange
-# ───────────────────────────────
-logger.info(f"[INIT] Starting HPB–TCT Server (Phase 9.4j OKX REST {OKX_MODE.upper()})")
+    # 2️⃣ Try MEXC
+    if not active_exchange and MEXC_KEY and MEXC_SECRET:
+        try:
+            mexc = ccxt.mexc({
+                "apiKey": MEXC_KEY,
+                "secret": MEXC_SECRET,
+                "enableRateLimit": True,
+            })
+            mexc.fetch_ticker("BTC/USDT")
+            connection_log.append("[MEXC] ✅ Connected successfully")
+            active_exchange = mexc
+        except Exception as e:
+            msg = str(e)
+            connection_log.append(f"[MEXC] ❌ Failed: {msg}")
 
-try:
-    exchange = ccxt.okx({
-        "apiKey": OKX_KEY,
-        "secret": OKX_SECRET,
-        "password": OKX_PASSPHRASE,
-        "enableRateLimit": True,
-    })
+    # 3️⃣ Try Binance
+    if not active_exchange and BINANCE_KEY and BINANCE_SECRET:
+        try:
+            binance = ccxt.binance({
+                "apiKey": BINANCE_KEY,
+                "secret": BINANCE_SECRET,
+                "enableRateLimit": True,
+            })
+            binance.fetch_ticker("BTC/USDT")
+            connection_log.append("[BINANCE] ✅ Connected successfully")
+            active_exchange = binance
+        except Exception as e:
+            msg = str(e)
+            connection_log.append(f"[BINANCE] ❌ Failed: {msg}")
 
-    # Force-correct the REST URLs
-    if OKX_MODE == "testnet":
-        exchange.set_sandbox_mode(True)
-        exchange.urls["api"]["rest"] = "https://www.okx.com"
-        exchange.urls["api"]["public"] = "https://www.okx.com/api/v5"
-        exchange.urls["api"]["private"] = "https://www.okx.com/api/v5"
-        logger.info("[EXCHANGE] Connected to OKX Testnet (override applied)")
+    if active_exchange:
+        logger.info(f"[EXCHANGE] Connected to {active_exchange.id.upper()} (REST verified)")
     else:
-        exchange.set_sandbox_mode(False)
-        exchange.urls["api"]["rest"] = "https://www.okx.com"
-        exchange.urls["api"]["public"] = "https://www.okx.com/api/v5"
-        exchange.urls["api"]["private"] = "https://www.okx.com/api/v5"
-        logger.info("[EXCHANGE] Connected to OKX Live (REST override applied)")
+        logger.warning("[EXCHANGE] ❌ No valid exchange connection available")
 
-except Exception as e:
-    logger.error(f"[EXCHANGE INIT ERROR] {e}")
-    exchange = None
+    return active_exchange, connection_log
+
+# initialize at startup
+exchange, startup_log = connect_exchange()
 
 # ───────────────────────────────
-# Diagnostic endpoint
+# API ENDPOINTS
 # ───────────────────────────────
-@app.get("/debug/urls")
-async def debug_urls():
-    try:
-        return JSONResponse({
-            "mode": OKX_MODE,
-            "sandbox_mode": getattr(exchange, "sandbox", False),
-            "urls": exchange.urls.get("api", {}) if exchange else None,
-            "key_prefix": OKX_KEY[:6] + "..." if OKX_KEY else None
-        })
-    except Exception as e:
-        return JSONResponse({"error": str(e)})
 
-# ───────────────────────────────
-# Status endpoint
-# ───────────────────────────────
+@app.get("/")
+def root():
+    return {
+        "message": "HPB–TCT Server Active",
+        "exchange": exchange.id if exchange else "none",
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
 @app.get("/status")
-async def status():
+def status():
+    """
+    Check current exchange connectivity and BTC/USDT ticker
+    """
+    if not exchange:
+        return {"connected": False, "error": "No active exchange"}
     try:
         ticker = exchange.fetch_ticker("BTC/USDT")
-        return JSONResponse({
-            "exchange": "okx",
-            "mode": OKX_MODE,
+        return {
+            "exchange": exchange.id,
             "connected": True,
-            "price": ticker["last"],
-            "timestamp": datetime.utcnow().isoformat()
-        })
+            "price": ticker.get("last"),
+            "timestamp": datetime.utcnow().isoformat(),
+        }
     except Exception as e:
-        logger.error(f"[STATUS ERROR] {e}")
-        return JSONResponse({
-            "exchange": "okx",
-            "mode": OKX_MODE,
-            "connected": False,
-            "error": str(e)
-        })
+        return {"exchange": exchange.id, "connected": False, "error": str(e)}
 
 # ───────────────────────────────
-# Keepalive
+# Optional Diagnostic Tool
 # ───────────────────────────────
-async def keepalive():
-    while True:
-        logger.info(f"[KEEPALIVE] Updated flag @ {datetime.utcnow().isoformat()}")
-        await asyncio.sleep(180)
+@app.get("/diagnostics/full")
+def diagnostics():
+    """
+    Returns environment overview (safe, no secrets)
+    """
+    diag = {
+        "phase": "9.5 Unified Exchange Diagnostics",
+        "exchange_selected": EXCHANGE,
+        "exchange_connected": exchange.id if exchange else None,
+        "modes": {
+            "okx_mode": OKX_MODE,
+        },
+        "available_exchanges": {
+            "okx_key": bool(OKX_KEY),
+            "mexc_key": bool(MEXC_KEY),
+            "binance_key": bool(BINANCE_KEY),
+        },
+        "startup_log": startup_log,
+        "utc": datetime.utcnow().isoformat(),
+    }
+    return JSONResponse(diag)
 
+# ───────────────────────────────
+# KEEPALIVE + STARTUP EVENTS
+# ───────────────────────────────
 @app.on_event("startup")
 async def startup_event():
     logger.info("[INIT] Startup event triggered")
-    asyncio.create_task(keepalive())
-
-# ───────────────────────────────
-# Root route
-# ───────────────────────────────
-@app.get("/")
-async def root():
-    return JSONResponse({
-        "message": "HPB–TCT Server OK (Phase 9.4j)",
-        "docs": "/docs",
-        "status": "/status",
-        "debug": "/debug/urls"
-    })
-
-# ───────────────────────────────
-# Entrypoint (Render)
-# ───────────────────────────────
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("server:app", host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+    logger.info(f"[KEEPALIVE] Updated flag @ {datetime.utcnow().isoformat()}")
