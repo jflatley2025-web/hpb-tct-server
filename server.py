@@ -1,5 +1,5 @@
 # ───────────────────────────────
-# server.py  |  HPB–TCT  Phase 9.4i OKX REST Stable + Diagnostics
+# server.py  |  HPB–TCT  Phase 9.4j OKX REST Live/Testnet Fix + Diagnostics
 # ───────────────────────────────
 import os
 import asyncio
@@ -11,7 +11,7 @@ import ccxt
 from loguru import logger
 
 # ───────────────────────────────
-# CONFIG (values come from Render Environment Variables)
+# CONFIG (Render environment variables)
 # ───────────────────────────────
 OKX_KEY = os.getenv("OKX_KEY", "")
 OKX_SECRET = os.getenv("OKX_SECRET", "")
@@ -21,7 +21,7 @@ OKX_MODE = os.getenv("OKX_MODE", "testnet").lower()
 # ───────────────────────────────
 # FastAPI app setup
 # ───────────────────────────────
-app = FastAPI(title="HPB–TCT Server", version="9.4i")
+app = FastAPI(title="HPB–TCT Server", version="9.4j")
 
 app.add_middleware(
     CORSMiddleware,
@@ -34,7 +34,7 @@ app.add_middleware(
 # ───────────────────────────────
 # Initialize exchange
 # ───────────────────────────────
-logger.info("[INIT] Starting HPB–TCT Server (Phase 9.4i OKX REST Stable)")
+logger.info(f"[INIT] Starting HPB–TCT Server (Phase 9.4j OKX REST {OKX_MODE.upper()})")
 
 try:
     exchange = ccxt.okx({
@@ -44,30 +44,29 @@ try:
         "enableRateLimit": True,
     })
 
+    # Force-correct the REST URLs
     if OKX_MODE == "testnet":
         exchange.set_sandbox_mode(True)
-        # override sandbox URLs to official okx.com testnet REST
         exchange.urls["api"]["rest"] = "https://www.okx.com"
         exchange.urls["api"]["public"] = "https://www.okx.com/api/v5"
         exchange.urls["api"]["private"] = "https://www.okx.com/api/v5"
-        logger.info("[EXCHANGE] Connected to OKX Testnet (final REST override applied)")
+        logger.info("[EXCHANGE] Connected to OKX Testnet (override applied)")
     else:
         exchange.set_sandbox_mode(False)
-        logger.info("[EXCHANGE] Connected to OKX Live")
+        exchange.urls["api"]["rest"] = "https://www.okx.com"
+        exchange.urls["api"]["public"] = "https://www.okx.com/api/v5"
+        exchange.urls["api"]["private"] = "https://www.okx.com/api/v5"
+        logger.info("[EXCHANGE] Connected to OKX Live (REST override applied)")
 
 except Exception as e:
     logger.error(f"[EXCHANGE INIT ERROR] {e}")
     exchange = None
 
 # ───────────────────────────────
-# Optional Diagnostic Tool
+# Diagnostic endpoint
 # ───────────────────────────────
 @app.get("/debug/urls")
 async def debug_urls():
-    """
-    Returns current mode, sandbox flag, and API URL configuration.
-    Helps confirm whether app is using live or testnet endpoints.
-    """
     try:
         return JSONResponse({
             "mode": OKX_MODE,
@@ -79,7 +78,7 @@ async def debug_urls():
         return JSONResponse({"error": str(e)})
 
 # ───────────────────────────────
-# Status Endpoint
+# Status endpoint
 # ───────────────────────────────
 @app.get("/status")
 async def status():
@@ -102,35 +101,32 @@ async def status():
         })
 
 # ───────────────────────────────
-# Keepalive Task
+# Keepalive
 # ───────────────────────────────
 async def keepalive():
     while True:
         logger.info(f"[KEEPALIVE] Updated flag @ {datetime.utcnow().isoformat()}")
         await asyncio.sleep(180)
 
-# ───────────────────────────────
-# Startup Event
-# ───────────────────────────────
 @app.on_event("startup")
 async def startup_event():
     logger.info("[INIT] Startup event triggered")
     asyncio.create_task(keepalive())
 
 # ───────────────────────────────
-# Root Fallback
+# Root route
 # ───────────────────────────────
 @app.get("/")
 async def root():
     return JSONResponse({
-        "message": "HPB–TCT Server OK (Phase 9.4i)",
+        "message": "HPB–TCT Server OK (Phase 9.4j)",
         "docs": "/docs",
         "status": "/status",
         "debug": "/debug/urls"
     })
 
 # ───────────────────────────────
-# Main entrypoint (Render uses this)
+# Entrypoint (Render)
 # ───────────────────────────────
 if __name__ == "__main__":
     import uvicorn
