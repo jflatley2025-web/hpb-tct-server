@@ -1,189 +1,145 @@
-# ───────────────────────────────
-# HPB–TCT Server  •  Phase 9.9 AutoHedge Hybrid (Safe Simulation)
-# ───────────────────────────────
-import os, csv, requests, asyncio
+import os
+import json
 from datetime import datetime
 from fastapi import FastAPI, Request
-from loguru import logger
+from fastapi.responses import JSONResponse
+import httpx
 import ccxt
-
-app = FastAPI(title="HPB–TCT Server", version="9.9-AutoHedge")
+import pandas as pd
 
 # ───────────────────────────────
-# CONFIG
+# CONFIG & ENVIRONMENT
 # ───────────────────────────────
 TRADE_MODE = os.getenv("TRADE_MODE", "paper").lower()
-HEDGE_RATIO = float(os.getenv("HEDGE_RATIO", 0.5))
-LOG_PATH = os.getenv("LOG_PATH", "./logs")
-SLACK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
-os.makedirs(LOG_PATH, exist_ok=True)
-LOG_FILE = os.path.join(LOG_PATH, "trades.csv")
-
-OKX_KEY = os.getenv("OKX_KEY", "")
-OKX_SECRET = os.getenv("OKX_SECRET", "")
-OKX_PASSPHRASE = os.getenv("OKX_PASSPHRASE", "")
-OKX_MODE = os.getenv("OKX_MODE", "testnet").lower()
+EXCHANGE = os.getenv("EXCHANGE", "mexc").lower()
 
 MEXC_KEY = os.getenv("MEXC_KEY", "")
 MEXC_SECRET = os.getenv("MEXC_SECRET", "")
+OKX_KEY = os.getenv("OKX_KEY", "")
+OKX_SECRET = os.getenv("OKX_SECRET", "")
+OKX_PASSPHRASE = os.getenv("OKX_PASSPHRASE", "")
+OKX_MODE = os.getenv("OKX_MODE", "live").lower()
 
-BINANCE_KEY = os.getenv("BINANCE_KEY", "")
-BINANCE_SECRET = os.getenv("BINANCE_SECRET", "")
-
-# ───────────────────────────────
-# GLOBALS
-# ───────────────────────────────
-exchange = None
-trade_state = {"open": False, "entry": 0.0, "side": None}
-
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # ───────────────────────────────
-# HELPERS
+# INITIALIZE APP
 # ───────────────────────────────
-def log_event(msg: str):
-    logger.info(msg)
+app = FastAPI(title="HPB-TCT Phase 10.0 AutoHedge Hybrid")
 
-def slack_alert(msg: str):
-    if not SLACK_URL:
-        return
+# ───────────────────────────────
+# TELEGRAM UTILS
+# ───────────────────────────────
+async def send_telegram_message(text: str):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return {"status": "skipped", "reason": "Telegram not configured"}
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
     try:
-        requests.post(SLACK_URL, json={"text": msg})
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(url, json=payload)
+        return {"status": "sent"}
     except Exception as e:
-        logger.warning(f"[SLACK ERROR] {e}")
-
-def write_log(row):
-    new = not os.path.exists(LOG_FILE)
-    with open(LOG_FILE, "a", newline="") as f:
-        w = csv.writer(f)
-        if new:
-            w.writerow(["utc", "symbol", "side", "size", "price", "pnl", "note"])
-        w.writerow(row)
+        return {"status": "error", "detail": str(e)}
 
 # ───────────────────────────────
-# EXCHANGE CONNECTION
+# EXCHANGE INITIALIZATION
 # ───────────────────────────────
 def connect_exchange():
-    global exchange
     try:
-        if MEXC_KEY and MEXC_SECRET:
-            exchange = ccxt.mexc({
-                "apiKey": MEXC_KEY,
-                "secret": MEXC_SECRET,
-                "enableRateLimit": True
-            })
-            log_event("[EXCHANGE] Connected to MEXC (REST verified)")
-            return "mexc"
-        elif OKX_KEY and OKX_SECRET:
-            exchange = ccxt.okx({
+        if EXCHANGE == "mexc":
+            ex = ccxt.mexc({"apiKey": MEXC_KEY, "secret": MEXC_SECRET})
+        elif EXCHANGE == "okx":
+            ex = ccxt.okx({
                 "apiKey": OKX_KEY,
                 "secret": OKX_SECRET,
                 "password": OKX_PASSPHRASE,
-                "enableRateLimit": True
+                "options": {"defaultType": "spot" if OKX_MODE == "live" else "sandbox"}
             })
-            log_event("[EXCHANGE] Connected to OKX (REST verified)")
-            return "okx"
-        elif BINANCE_KEY and BINANCE_SECRET:
-            exchange = ccxt.binance({
-                "apiKey": BINANCE_KEY,
-                "secret": BINANCE_SECRET,
-                "enableRateLimit": True
-            })
-            log_event("[EXCHANGE] Connected to Binance (REST verified)")
-            return "binance"
         else:
-            log_event("[EXCHANGE ERROR] No exchange keys found")
-            return None
+            raise ValueError("Unsupported exchange")
+        ex.load_markets()
+        return ex
     except Exception as e:
-        log_event(f"[EXCHANGE ERROR] {e}")
-        return None
+        return str(e)
 
-
-# ───────────────────────────────
-# KEEPALIVE + STARTUP
-# ───────────────────────────────
-@app.on_event("startup")
-async def startup_event():
-    log_event(f"[INIT] HPB–TCT Server Phase 9.9 (TRADE_MODE={TRADE_MODE})")
-    connect_exchange()
-    log_event(f"[KEEPALIVE] Updated flag @ {datetime.utcnow().isoformat()}")
-    slack_alert("🟢 HPB–TCT 9.9 AutoHedge Server started")
-
+exchange = connect_exchange()
 
 # ───────────────────────────────
-# ROUTES
+# DIAGNOSTICS & DEBUG
 # ───────────────────────────────
 @app.get("/")
 async def root():
-    return {"status": "HPB–TCT Server 9.9 running", "mode": TRADE_MODE}
-
+    return {"phase": "10.0 AutoHedge Hybrid", "status": "running", "mode": TRADE_MODE}
 
 @app.get("/diagnostics/full")
-async def diagnostics():
+async def diagnostics_full():
     return {
-        "phase": "9.9 AutoHedge Hybrid",
+        "phase": "10.0 AutoHedge Hybrid",
         "mode": TRADE_MODE,
-        "exchange": type(exchange).__name__ if exchange else None,
-        "log_path": LOG_PATH,
-        "hedge_ratio": HEDGE_RATIO,
-        "slack_enabled": bool(SLACK_URL),
+        "exchange": EXCHANGE,
+        "connected": isinstance(exchange, ccxt.Exchange),
         "utc": datetime.utcnow().isoformat(),
     }
 
-
-# ───────────────────────────────
-# AUTOHEDGE LOGIC (SIMULATION)
-# ───────────────────────────────
-def simulate_hedge(entry_side, entry_price, symbol, size):
-    hedge_side = "sell" if entry_side == "buy" else "buy"
-    hedge_size = size * HEDGE_RATIO
-    hedge_price = entry_price * (1.001 if hedge_side == "sell" else 0.999)
-    note = f"Simulated hedge {hedge_side} {hedge_size} {symbol}@{hedge_price}"
-    log_event(f"[AUTOHEDGE] {note}")
-    write_log([datetime.utcnow().isoformat(), symbol, hedge_side,
-               hedge_size, hedge_price, "", "hedge"])
-    slack_alert(f"🤖 AutoHedge: {note}")
-
-
-@app.post("/autotrade")
-async def autotrade(req: Request):
-    """Simulated trade + automatic hedge + CSV logging"""
-    data = await req.json()
-    symbol = data.get("symbol", "BTC/USDT")
-    side = data.get("action", "buy").lower()
-    size = float(data.get("size", 0.001))
-    price = 0.0
-    if exchange:
-        try:
-            ticker = exchange.fetch_ticker(symbol)
-            price = ticker.get("last", 0.0)
-        except Exception as e:
-            log_event(f"[PRICE ERROR] {e}")
-
-    trade_state.update({"open": True, "entry": price, "side": side})
-    pnl = 0.0
-    write_log([datetime.utcnow().isoformat(), symbol, side, size, price, pnl, "entry"])
-    log_event(f"[AUTO] {side.upper()} {size} {symbol}@{price}")
-    slack_alert(f"🚀 AutoTrade: {side.upper()} {size} {symbol}@{price}")
-
-    simulate_hedge(side, price, symbol, size)
-    return {"status": "ok", "symbol": symbol, "side": side, "price": price}
-
-
-# ───────────────────────────────
-# DIAGNOSTICS TOOL (OPTIONAL)
-# ───────────────────────────────
 @app.get("/debug/logs")
-async def read_logs():
-    if not os.path.exists(LOG_FILE):
-        return {"logs": []}
-    with open(LOG_FILE, "r") as f:
-        rows = f.readlines()[-10:]
-    return {"recent": rows}
-
+async def debug_logs():
+    log_path = "./logs/recent_trades.csv"
+    if os.path.exists(log_path):
+        df = pd.read_csv(log_path)
+        return {"recent": df.tail(5).to_dict(orient="records")}
+    else:
+        return {"recent": []}
 
 # ───────────────────────────────
-# RUN LOCAL
+# PAPER TRADE EXECUTION
 # ───────────────────────────────
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+@app.post("/autotrade")
+async def autotrade(request: Request):
+    data = await request.json()
+    symbol = data.get("symbol", "BTC/USDT")
+    action = data.get("action", "buy").lower()
+    size = float(data.get("size", 0.001))
+    note = data.get("note", "")
+
+    try:
+        price = exchange.fetch_ticker(symbol)["last"] if isinstance(exchange, ccxt.Exchange) else 0
+        entry = {
+            "utc": datetime.utcnow().isoformat(),
+            "symbol": symbol,
+            "side": action,
+            "size": size,
+            "price": price,
+            "note": note or ("live" if TRADE_MODE == "live" else "paper"),
+        }
+
+        os.makedirs("logs", exist_ok=True)
+        log_path = "./logs/recent_trades.csv"
+        header = not os.path.exists(log_path)
+        pd.DataFrame([entry]).to_csv(log_path, mode="a", index=False, header=header)
+
+        await send_telegram_message(
+            f"📈 <b>{symbol}</b> | <b>{action.upper()}</b> {size}\n💰 Price: {price}\n🧠 Mode: {TRADE_MODE}"
+        )
+
+        return JSONResponse({"status": "ok", "trade": entry})
+    except Exception as e:
+        await send_telegram_message(f"⚠️ Trade error: {str(e)}")
+        return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
+
+# ───────────────────────────────
+# TELEGRAM WEBHOOK + TEST ENDPOINT
+# ───────────────────────────────
+@app.post("/notify/test")
+async def notify_test():
+    msg = "✅ HPB-TCT Phase 10.0 is Online\nExchange: " + EXCHANGE + f"\nMode: {TRADE_MODE}"
+    result = await send_telegram_message(msg)
+    return {"telegram": result, "message": msg}
+
+# ───────────────────────────────
+# OPTIONAL HEALTH CHECK
+# ───────────────────────────────
+@app.get("/healthz")
+async def healthz():
+    return {"ok": True, "utc": datetime.utcnow().isoformat()}
