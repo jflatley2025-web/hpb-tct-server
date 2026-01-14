@@ -19,7 +19,7 @@ OKX_PASSPHRASE = os.getenv("OKX_PASSPHRASE", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 RISK_LIMIT = float(os.getenv("RISK_LIMIT", "0.03"))   # per-trade %
-DAILY_DRAWDOWN = float(os.getenv("DAILY_DRAWDOWN", "0.10"))  # 10% daily cap
+DAILY_DRAWDOWN = float(os.getenv("DAILY_DRAWDOWN", "0.10"))  # 10 % daily cap
 
 # ───────────────────────────────
 # INIT
@@ -33,6 +33,7 @@ reset_day = datetime.utcnow().date()
 # TELEGRAM UTILITIES
 # ───────────────────────────────
 async def tg_send(text: str):
+    """Send message to Telegram bot"""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -80,7 +81,7 @@ def reset_daily_loss():
         reset_day = datetime.utcnow().date()
 
 # ───────────────────────────────
-# ENDPOINTS
+# BASIC ROUTES
 # ───────────────────────────────
 @app.get("/")
 async def root():
@@ -128,13 +129,12 @@ async def autotrade(request: Request):
         }
         log_trade(entry)
 
-        # Simulated P&L
         pnl = price * size * (0.001 if side == "buy" else -0.001)
         daily_loss += abs(pnl)
 
         if daily_loss > DAILY_DRAWDOWN:
             lock_trading = True
-            await tg_send(f"⚠️ Daily drawdown limit reached. Trading locked for the day.")
+            await tg_send("⚠️ Daily drawdown limit reached. Trading locked for the day.")
 
         await tg_send(f"📈 <b>{symbol}</b> {side.upper()} {size}\n💰 {price}\nMode: {TRADE_MODE}")
         return {"status": "ok", "trade": entry, "daily_loss": round(daily_loss, 4)}
@@ -148,6 +148,8 @@ async def autotrade(request: Request):
 # ───────────────────────────────
 @app.post(f"/webhook/{TELEGRAM_BOT_TOKEN}")
 async def tg_webhook(request: Request):
+    global lock_trading  # ✅ moved here to fix SyntaxError
+
     body = await request.json()
     message = body.get("message", {})
     text = message.get("text", "").strip().lower()
@@ -159,11 +161,13 @@ async def tg_webhook(request: Request):
     if text == "/status":
         msg = f"🧠 Phase 10.5 Status\nMode: {TRADE_MODE}\nLocked: {lock_trading}\nDaily Loss: {daily_loss:.3f}"
     elif text == "/balance":
-        bal = exchange.fetch_balance()
-        usd = bal['total'].get('USDT', 0)
-        msg = f"💰 Balance: {usd} USDT"
+        try:
+            bal = exchange.fetch_balance()
+            usd = bal['total'].get('USDT', 0)
+            msg = f"💰 Balance: {usd} USDT"
+        except Exception as e:
+            msg = f"Error fetching balance: {e}"
     elif text == "/stop":
-        global lock_trading
         lock_trading = True
         msg = "🛑 Trading manually stopped."
     elif text == "/mode":
