@@ -1,9 +1,9 @@
 # ================================================================
-# server.py — HPB–TCT v19 AutoLearn Runtime Entry Point (Persistent)
+# server.py — HPB–TCT v19 AutoLearn Runtime (Fixed + Extended)
 # ================================================================
-# • Auto-initializes HPB TensorTrade environment
-# • Tracks training state across restarts (/data/hpb_autolearn_state.json)
-# • Safe for Render / Uvicorn deployment
+# • Dynamic environment support (TensorTrade / HPB)
+# • AutoLearn state persistence
+# • Compatible with Render (port binding + health checks)
 # ================================================================
 
 import os
@@ -20,11 +20,10 @@ from tensortrade_env import HPB_TensorTrade_Env
 from tensortrade_config_ext import AUTO_INIT, TENSORTRADE_CONFIG
 from hpb_rig_validator import range_integrity_validator
 
-# Backward-compatible alias
-TensorTradeEnv = HPB_TensorTrade_Env
+TensorTradeEnv = HPB_TensorTrade_Env  # backward compatibility alias
 
 # ────────────────────────────────────────────────────────────────
-# Logging
+# Logging setup
 # ────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -34,9 +33,9 @@ logging.basicConfig(
 logger = logging.getLogger("HPB-TCT-Server")
 
 # ────────────────────────────────────────────────────────────────
-# FastAPI Setup
+# FastAPI setup
 # ────────────────────────────────────────────────────────────────
-app = FastAPI(title="HPB–TCT AutoLearn v19", version="1.0.1")
+app = FastAPI(title="HPB–TCT AutoLearn v19", version="1.0.3")
 
 app.add_middleware(
     CORSMiddleware,
@@ -47,7 +46,7 @@ app.add_middleware(
 )
 
 # ────────────────────────────────────────────────────────────────
-# AutoLearn State Persistence
+# Persistent AutoLearn state
 # ────────────────────────────────────────────────────────────────
 STATE_FILE = os.path.join(os.getcwd(), "hpb_autolearn_state.json")
 
@@ -92,7 +91,7 @@ except Exception as e:
     env = None
 
 # ────────────────────────────────────────────────────────────────
-# Routes
+# API ROUTES
 # ────────────────────────────────────────────────────────────────
 
 @app.get("/")
@@ -107,21 +106,69 @@ async def root():
         "last_confidence": state.get("last_confidence"),
     }
 
+@app.head("/")
+async def head_root():
+    """Handle Render HEAD request health checks."""
+    return {"status": "ok"}
 
+@app.get("/status")
+async def status():
+    """Operational server status summary."""
+    return {
+        "server": "HPB–TCT v19",
+        "initialized": env is not None,
+        "last_state_update": state.get("last_timestamp"),
+        "train_cycles": state.get("train_cycles_completed", 0),
+        "bias": state.get("last_bias"),
+        "confidence": state.get("last_confidence"),
+        "RIG_status": state.get("last_RIG_status"),
+    }
+
+@app.get("/dashboard")
+async def dashboard():
+    """Returns summarized AutoLearn + RIG overview."""
+    return {
+        "version": "HPB–TCT v19",
+        "bias": state.get("last_bias"),
+        "confidence": state.get("last_confidence"),
+        "RIG_status": state.get("last_RIG_status"),
+        "train_cycles_completed": state.get("train_cycles_completed", 0),
+    }
+
+# ────────────────────────────────────────────────────────────────
+# FETCH CONTEXT (Fixed)
+# ────────────────────────────────────────────────────────────────
 @app.get("/fetch_context")
 async def fetch_context():
-    """Fetch current BTC/USDT context for gate evaluation."""
+    """Fetch latest available context or observation from HPB TensorTrade environment."""
     try:
-        data = env.get_price_context(["BTC-USDT", "ETH-USDT", "SOL-USDT"])
-        return {"context": data}
+        if not env:
+            return {"error": "Environment not initialized."}
+
+        # Fallback logic — use whatever structure exists
+        context_data = {}
+        if hasattr(env, "price_feed"):
+            context_data = env.price_feed
+        elif hasattr(env, "exchange"):
+            context_data = env.exchange.__dict__
+        elif hasattr(env, "observation_space"):
+            context_data = str(env.observation_space)
+        elif hasattr(env, "current_step"):
+            context_data = {"step": env.current_step}
+        else:
+            context_data = {"warning": "No context or feed attribute found in environment."}
+
+        return {"context": context_data}
     except Exception as e:
         logger.error(f"Context fetch error: {e}")
         return {"error": str(e)}
 
-
+# ────────────────────────────────────────────────────────────────
+# VALIDATE GATES
+# ────────────────────────────────────────────────────────────────
 @app.get("/validate_gates")
 async def validate_gates():
-    """Run RIG validation and store results persistently."""
+    """Run Range Integrity Gate validation and persist result."""
     try:
         context = {
             "gates": {
@@ -133,20 +180,24 @@ async def validate_gates():
             "local_range_displacement": 0.12,
         }
         result = range_integrity_validator(context)
-        # Save to state
+
+        # Save to persistent state
         state.update({
             "last_timestamp": datetime.utcnow().isoformat(),
-            "last_RIG_status": result["status"],
-            "last_bias": result["htf_bias"],
-            "last_confidence": result["confidence"],
+            "last_RIG_status": result.get("status"),
+            "last_bias": result.get("htf_bias"),
+            "last_confidence": result.get("confidence"),
         })
         save_state(state)
+
         return {"RIG_Validation": result}
     except Exception as e:
         logger.error(f"Gate validation error: {e}")
         return {"error": str(e)}
 
-
+# ────────────────────────────────────────────────────────────────
+# TRAIN (Fixed)
+# ────────────────────────────────────────────────────────────────
 @app.get("/train")
 async def train_agent(episodes: int = 5):
     """Run AutoLearn training cycles and update persistent state."""
@@ -154,10 +205,19 @@ async def train_agent(episodes: int = 5):
         return {"error": "Environment not initialized."}
     try:
         logger.info(f"🚀 Starting AutoLearn training for {episodes} episodes...")
-        for i in range(episodes):
-            env.build_environment()
-            # Placeholder for RL / Reward logic
-            logger.info(f"✅ Completed training episode {i+1}/{episodes}")
+
+        # Try known training methods
+        if hasattr(env, "auto_train"):
+            env.auto_train(episodes=episodes)
+        elif hasattr(env, "train"):
+            env.train(episodes)
+        elif hasattr(env, "simulate"):
+            env.simulate(episodes)
+        elif hasattr(env, "run"):
+            env.run(episodes)
+        else:
+            logger.warning("⚠️ No recognized training function found in HPB_TensorTrade_Env.")
+            return {"warning": "No training function found on environment."}
 
         state["train_cycles_completed"] = state.get("train_cycles_completed", 0) + episodes
         state["last_timestamp"] = datetime.utcnow().isoformat()
@@ -169,11 +229,32 @@ async def train_agent(episodes: int = 5):
         return {"error": str(e)}
 
 # ────────────────────────────────────────────────────────────────
-# Entry Point (Render / Local)
+# STATE MANAGEMENT
+# ────────────────────────────────────────────────────────────────
+@app.get("/state")
+async def get_state():
+    """Return current AutoLearn state JSON."""
+    return state
+
+@app.post("/reset_state")
+async def reset_state():
+    """Reset persistent AutoLearn state."""
+    global state
+    state = {
+        "last_timestamp": None,
+        "train_cycles_completed": 0,
+        "last_RIG_status": None,
+        "last_bias": None,
+        "last_confidence": None,
+    }
+    save_state(state)
+    return {"status": "reset", "state": state}
+
+# ────────────────────────────────────────────────────────────────
+# ENTRY POINT
 # ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
-
     port = int(os.environ.get("PORT", 8000))
     logger.info(f"🚀 Starting HPB–TCT AutoLearn v19 server on port {port} ...")
     uvicorn.run("server:app", host="0.0.0.0", port=port, reload=False)
