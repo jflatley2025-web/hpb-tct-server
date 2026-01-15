@@ -1,9 +1,9 @@
 # ================================================================
-# server.py — HPB–TCT v19 AutoLearn Runtime (Fixed + Extended)
+# server.py — HPB–TCT v19.1 AutoLearn Runtime (Render + Telegram Safe)
 # ================================================================
-# • Dynamic environment support (TensorTrade / HPB)
-# • AutoLearn state persistence
-# • Compatible with Render (port binding + health checks)
+# • Dynamic environment + RIG validation + AutoLearn persistence
+# • Render-compatible port binding & /status health path
+# • Telegram bot–safe responses (non-null /dashboard, /context)
 # ================================================================
 
 import os
@@ -20,7 +20,8 @@ from tensortrade_env import HPB_TensorTrade_Env
 from tensortrade_config_ext import AUTO_INIT, TENSORTRADE_CONFIG
 from hpb_rig_validator import range_integrity_validator
 
-TensorTradeEnv = HPB_TensorTrade_Env  # backward compatibility alias
+# Backward compatibility alias
+TensorTradeEnv = HPB_TensorTrade_Env
 
 # ────────────────────────────────────────────────────────────────
 # Logging setup
@@ -35,7 +36,7 @@ logger = logging.getLogger("HPB-TCT-Server")
 # ────────────────────────────────────────────────────────────────
 # FastAPI setup
 # ────────────────────────────────────────────────────────────────
-app = FastAPI(title="HPB–TCT AutoLearn v19", version="1.0.3")
+app = FastAPI(title="HPB–TCT AutoLearn v19.1", version="1.0.4")
 
 app.add_middleware(
     CORSMiddleware,
@@ -57,8 +58,8 @@ def load_state():
             "last_timestamp": None,
             "train_cycles_completed": 0,
             "last_RIG_status": None,
-            "last_bias": None,
-            "last_confidence": None,
+            "last_bias": "neutral",
+            "last_confidence": 0.0,
         }
     try:
         with open(STATE_FILE, "r") as f:
@@ -99,53 +100,72 @@ async def root():
     """Health check + environment confirmation"""
     return {
         "status": "running",
-        "environment": "HPB–TCT v19 AutoLearn",
+        "environment": "HPB–TCT v19.1 AutoLearn",
         "initialized": env is not None,
         "train_cycles_completed": state.get("train_cycles_completed", 0),
-        "last_bias": state.get("last_bias"),
-        "last_confidence": state.get("last_confidence"),
+        "last_bias": state.get("last_bias", "neutral"),
+        "last_confidence": state.get("last_confidence", 0.0),
     }
 
 @app.head("/")
 async def head_root():
-    """Handle Render HEAD request health checks."""
+    """Render health check compatibility."""
     return {"status": "ok"}
 
 @app.get("/status")
 async def status():
     """Operational server status summary."""
     return {
-        "server": "HPB–TCT v19",
+        "server": "HPB–TCT v19.1",
         "initialized": env is not None,
         "last_state_update": state.get("last_timestamp"),
         "train_cycles": state.get("train_cycles_completed", 0),
-        "bias": state.get("last_bias"),
-        "confidence": state.get("last_confidence"),
-        "RIG_status": state.get("last_RIG_status"),
+        "bias": state.get("last_bias", "neutral"),
+        "confidence": state.get("last_confidence", 0.0),
+        "RIG_status": state.get("last_RIG_status", "UNKNOWN"),
     }
 
 @app.get("/dashboard")
 async def dashboard():
-    """Returns summarized AutoLearn + RIG overview."""
+    """Returns summarized AutoLearn + RIG overview (Telegram safe)."""
+    bias = state.get("last_bias", "neutral")
+    confidence = state.get("last_confidence", 0.0)
+    rig_status = state.get("last_RIG_status", "UNKNOWN")
+    train_cycles = state.get("train_cycles_completed", 0)
     return {
-        "version": "HPB–TCT v19",
-        "bias": state.get("last_bias"),
-        "confidence": state.get("last_confidence"),
-        "RIG_status": state.get("last_RIG_status"),
-        "train_cycles_completed": state.get("train_cycles_completed", 0),
+        "version": "HPB–TCT v19.1",
+        "bias": bias,
+        "confidence": confidence,
+        "RIG_status": rig_status,
+        "train_cycles_completed": train_cycles,
+        "timestamp": state.get("last_timestamp"),
+    }
+
+@app.get("/help")
+async def help_info():
+    """Display available API routes (for Telegram)."""
+    return {
+        "routes": [
+            "/status",
+            "/dashboard",
+            "/train?episodes=5",
+            "/validate_gates",
+            "/fetch_context",
+            "/reset_state",
+        ],
+        "note": "HPB–TCT v19.1 AutoLearn Server (Render)",
     }
 
 # ────────────────────────────────────────────────────────────────
-# FETCH CONTEXT (Fixed)
+# FETCH CONTEXT (Safe fallback)
 # ────────────────────────────────────────────────────────────────
 @app.get("/fetch_context")
 async def fetch_context():
-    """Fetch latest available context or observation from HPB TensorTrade environment."""
+    """Fetch latest environment or synthetic context snapshot."""
     try:
         if not env:
             return {"error": "Environment not initialized."}
 
-        # Fallback logic — use whatever structure exists
         context_data = {}
         if hasattr(env, "price_feed"):
             context_data = env.price_feed
@@ -155,8 +175,15 @@ async def fetch_context():
             context_data = str(env.observation_space)
         elif hasattr(env, "current_step"):
             context_data = {"step": env.current_step}
-        else:
-            context_data = {"warning": "No context or feed attribute found in environment."}
+
+        # Always return a synthetic fallback
+        if not context_data:
+            context_data = {
+                "symbol": getattr(env, "symbol", "BTC-USDT"),
+                "interval": getattr(env, "interval", "1H"),
+                "window_size": getattr(env, "window_size", 100),
+                "timestamp": datetime.utcnow().isoformat(),
+            }
 
         return {"context": context_data}
     except Exception as e:
@@ -184,9 +211,9 @@ async def validate_gates():
         # Save to persistent state
         state.update({
             "last_timestamp": datetime.utcnow().isoformat(),
-            "last_RIG_status": result.get("status"),
-            "last_bias": result.get("htf_bias"),
-            "last_confidence": result.get("confidence"),
+            "last_RIG_status": result.get("status", "OK"),
+            "last_bias": result.get("htf_bias", "neutral"),
+            "last_confidence": result.get("confidence", 0.0),
         })
         save_state(state)
 
@@ -196,7 +223,7 @@ async def validate_gates():
         return {"error": str(e)}
 
 # ────────────────────────────────────────────────────────────────
-# TRAIN (Fixed)
+# TRAIN (AutoLearn)
 # ────────────────────────────────────────────────────────────────
 @app.get("/train")
 async def train_agent(episodes: int = 5):
@@ -206,7 +233,6 @@ async def train_agent(episodes: int = 5):
     try:
         logger.info(f"🚀 Starting AutoLearn training for {episodes} episodes...")
 
-        # Try known training methods
         if hasattr(env, "auto_train"):
             env.auto_train(episodes=episodes)
         elif hasattr(env, "train"):
@@ -243,9 +269,9 @@ async def reset_state():
     state = {
         "last_timestamp": None,
         "train_cycles_completed": 0,
-        "last_RIG_status": None,
-        "last_bias": None,
-        "last_confidence": None,
+        "last_RIG_status": "UNKNOWN",
+        "last_bias": "neutral",
+        "last_confidence": 0.0,
     }
     save_state(state)
     return {"status": "reset", "state": state}
@@ -256,5 +282,5 @@ async def reset_state():
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
-    logger.info(f"🚀 Starting HPB–TCT AutoLearn v19 server on port {port} ...")
+    logger.info(f"🚀 Starting HPB–TCT AutoLearn v19.1 server on port {port} ...")
     uvicorn.run("server:app", host="0.0.0.0", port=port, reload=False)
