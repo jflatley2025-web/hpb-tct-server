@@ -1,12 +1,10 @@
 # ============================================================
-# HPB–TCT Server | Phase 11 – Self-Learning Paper Trading
+# HPB–TCT Server | Phase 11.5 – Live TCT Signal Integration (Paper)
 # ============================================================
 
 import os
 import json
-import time
 import asyncio
-import random
 import pandas as pd
 import numpy as np
 import torch
@@ -15,18 +13,19 @@ import torch.optim as optim
 from datetime import datetime
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from loguru import logger
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from loguru import logger
 import httpx
 import ccxt
 
 # ───────────────────────────────
-# CONFIG & PATHS
+# CONFIGURATION
 # ───────────────────────────────
 MODE = os.getenv("TRADE_MODE", "paper")
 EXCHANGE = os.getenv("EXCHANGE", "mexc").lower()
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+SYMBOL = "BTC/USDT"
 
 # Folders for logs and models
 os.makedirs("data", exist_ok=True)
@@ -35,7 +34,7 @@ TRADE_LOG = "data/trade_log.csv"
 MODEL_PATH = "models/tct_model.pt"
 
 # ───────────────────────────────
-# SIMPLE NEURAL LEARNER
+# SIMPLE TENSOR MODEL (LEARNING)
 # ───────────────────────────────
 class TCTModel(nn.Module):
     def __init__(self, input_size=3, hidden_size=16):
@@ -46,17 +45,16 @@ class TCTModel(nn.Module):
             nn.Linear(hidden_size, 1),
             nn.Tanh()
         )
-
     def forward(self, x):
         return self.net(x)
 
 model = TCTModel()
-optimizer = optim.Adam(model.parameters(), lr=0.001)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 criterion = nn.MSELoss()
 
 if os.path.exists(MODEL_PATH):
     model.load_state_dict(torch.load(MODEL_PATH))
-    logger.info("Loaded existing TCT model weights")
+    logger.info("Loaded previous model weights")
 
 # ───────────────────────────────
 # TELEGRAM UTILITIES
@@ -93,8 +91,6 @@ def get_exchange():
                 "apiKey": os.getenv("BINANCE_KEY", ""),
                 "secret": os.getenv("BINANCE_SECRET", "")
             })
-        else:
-            raise Exception("Unsupported exchange")
     except Exception as e:
         logger.error(f"Exchange init failed: {e}")
         return None
@@ -102,43 +98,78 @@ def get_exchange():
 exchange = get_exchange()
 
 # ───────────────────────────────
-# CORE PAPER TRADING LOGIC
+# MARKET DATA FUNCTIONS
 # ───────────────────────────────
-async def get_price(symbol="BTC/USDT"):
+async def get_ohlcv(symbol=SYMBOL, timeframe="15m", limit=100):
     try:
-        ticker = exchange.fetch_ticker(symbol)
+        data = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        df = pd.DataFrame(data, columns=["time","open","high","low","close","volume"])
+        df["time"] = pd.to_datetime(df["time"], unit="ms")
+        return df
+    except Exception as e:
+        logger.warning(f"OHLCV fetch failed: {e}")
+        return None
+
+# ───────────────────────────────
+# TCT SIGNAL DETECTION (LOCAL)
+# ───────────────────────────────
+async def detect_tct_signal():
+    """
+    Combines 15m and 1h structural bias for TCT-style directional signal
+    """
+    short_df = await get_ohlcv(SYMBOL, "15m", 50)
+    long_df = await get_ohlcv(SYMBOL, "1h", 50)
+    if short_df is None or long_df is None:
+        return "hold"
+
+    short_ma = short_df["close"].tail(10).mean()
+    long_ma = long_df["close"].tail(10).mean()
+    current = short_df["close"].iloc[-1]
+
+    # Calculate momentum & volatility bias
+    momentum = (current - short_ma) / short_ma
+    volatility = (short_df["high"].max() - short_df["low"].min()) / short_ma
+
+    # TCT-style directional bias
+    if momentum > 0.002 and long_ma < current:
+        signal = "buy"
+    elif momentum < -0.002 and long_ma > current:
+        signal = "sell"
+    else:
+        signal = "hold"
+
+    logger.info(f"[TCT] Signal {signal.upper()} | Momentum={momentum:.5f} | Vol={volatility:.5f}")
+    return signal
+
+# ───────────────────────────────
+# PAPER TRADING CORE
+# ───────────────────────────────
+async def get_price():
+    try:
+        ticker = exchange.fetch_ticker(SYMBOL)
         return float(ticker["last"])
     except Exception as e:
         logger.warning(f"Price fetch failed: {e}")
         return None
 
-async def generate_signal(price):
-    """Placeholder for real TCT signal logic"""
-    if random.random() < 0.33:
-        return "buy"
-    elif random.random() < 0.66:
-        return "sell"
-    return "hold"
-
-async def execute_trade(symbol="BTC/USDT"):
-    price = await get_price(symbol)
+async def execute_trade():
+    price = await get_price()
     if not price:
         return None
 
-    signal = await generate_signal(price)
-    size = 0.001
-
+    signal = await detect_tct_signal()
     if signal == "hold":
         return None
 
+    size = 0.001
     entry = {
         "utc": datetime.utcnow().isoformat(),
-        "symbol": symbol,
+        "symbol": SYMBOL,
         "side": signal,
         "size": size,
         "price": price,
         "pnl": 0.0,
-        "note": "paper"
+        "note": "TCT"
     }
 
     df = pd.DataFrame([entry])
@@ -147,9 +178,8 @@ async def execute_trade(symbol="BTC/USDT"):
     else:
         df.to_csv(TRADE_LOG, index=False)
 
-    await telegram_send(f"📈 <b>Paper {signal.upper()}</b> {symbol} @ {price:.2f}")
-
-    return entry
+    await telegram_send(f"📊 <b>TCT {signal.upper()}</b> {SYMBOL} @ {price:.2f}")
+    logger.info(f"[TRADE] Paper {signal.upper()} @ {price:.2f}")
 
 async def update_pnl():
     if not os.path.exists(TRADE_LOG):
@@ -169,8 +199,7 @@ async def train_model():
     df = pd.read_csv(TRADE_LOG)
     if len(df) < 10:
         return
-
-    x = torch.tensor(df[["price", "size", "pnl"]].values, dtype=torch.float32)
+    x = torch.tensor(df[["price","size","pnl"]].values, dtype=torch.float32)
     y = torch.tensor(df["pnl"].values, dtype=torch.float32).unsqueeze(1)
 
     model.train()
@@ -179,23 +208,23 @@ async def train_model():
     loss = criterion(out, y)
     loss.backward()
     optimizer.step()
-
     torch.save(model.state_dict(), MODEL_PATH)
-    logger.info(f"[LEARN] Model trained – loss={loss.item():.6f}")
-    await telegram_send(f"🧠 Model updated | loss={loss.item():.6f}")
+
+    logger.info(f"[LEARN] Model updated – loss={loss.item():.6f}")
+    await telegram_send(f"🧠 Model trained | loss={loss.item():.6f}")
 
 # ───────────────────────────────
 # FASTAPI APP
 # ───────────────────────────────
-app = FastAPI(title="HPB–TCT Phase 11")
+app = FastAPI(title="HPB–TCT Phase 11.5")
 
 @app.get("/")
 async def root():
-    return {"phase": "11", "mode": MODE, "exchange": EXCHANGE, "status": "running"}
+    return {"phase": "11.5", "mode": MODE, "symbol": SYMBOL, "exchange": EXCHANGE}
 
 @app.get("/diagnostics")
 async def diagnostics():
-    return {"exchange": EXCHANGE, "mode": MODE, "model_loaded": os.path.exists(MODEL_PATH)}
+    return {"exchange": EXCHANGE, "mode": MODE, "symbol": SYMBOL, "model": os.path.exists(MODEL_PATH)}
 
 @app.get("/status")
 async def status():
@@ -210,16 +239,16 @@ async def telegram_webhook(token: str, req: Request):
     if token != BOT_TOKEN:
         return JSONResponse({"error": "Invalid token"}, status_code=403)
     data = await req.json()
-    message = data.get("message", {}).get("text", "")
-    if "/learn" in message:
-        await train_model()
-        return {"msg": "Training triggered"}
-    elif "/status" in message:
+    msg = data.get("message", {}).get("text", "")
+    if "/status" in msg:
         s = await status()
-        await telegram_send(f"📊 Status: {json.dumps(s, indent=2)}")
+        await telegram_send(f"📊 Status:\n{json.dumps(s, indent=2)}")
         return {"msg": "Status sent"}
+    elif "/learn" in msg:
+        await train_model()
+        return {"msg": "Model retrained"}
     else:
-        await telegram_send("🤖 Commands:\n/status – show info\n/learn – retrain model")
+        await telegram_send("Commands:\n/status – show PnL\n/learn – retrain model")
     return {"ok": True}
 
 # ───────────────────────────────
@@ -227,26 +256,25 @@ async def telegram_webhook(token: str, req: Request):
 # ───────────────────────────────
 scheduler = AsyncIOScheduler()
 
-@scheduler.scheduled_job("interval", minutes=2)
+@scheduler.scheduled_job("interval", minutes=3)
 async def trade_loop():
-    entry = await execute_trade()
-    if entry:
-        pnl = await update_pnl()
-        if pnl is not None:
-            logger.info(f"Trade executed {entry['side']} @ {entry['price']:.2f} | PnL {pnl:.5f}")
-            await train_model()
+    await execute_trade()
+    pnl = await update_pnl()
+    if pnl is not None:
+        logger.info(f"PNL Update: {pnl:.6f}")
+        await train_model()
 
 @app.on_event("startup")
-async def on_startup():
-    logger.info(f"[INIT] HPB–TCT Phase 11 started in {MODE.upper()} mode")
+async def startup_event():
     scheduler.start()
-    await telegram_send("✅ HPB–TCT Phase 11 initialized successfully.")
+    logger.info(f"🚀 Phase 11.5 (Paper) launched for {SYMBOL}")
+    await telegram_send(f"🚀 HPB–TCT Phase 11.5 started in {MODE.upper()} mode for {SYMBOL}")
 
 @app.on_event("shutdown")
-async def on_shutdown():
+async def shutdown_event():
     scheduler.shutdown()
-    logger.info("[STOP] Server shutdown")
+    logger.info("🛑 Server stopped")
 
-# ───────────────────────────────
+# ============================================================
 # END OF FILE
-# ───────────────────────────────
+# ============================================================
