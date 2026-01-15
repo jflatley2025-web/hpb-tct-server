@@ -1,26 +1,30 @@
 # ================================================================
-# server.py — HPB–TCT v19 AutoLearn Runtime Entry Point
+# server.py — HPB–TCT v19 AutoLearn Runtime Entry Point (Persistent)
 # ================================================================
-# Purpose:
-#  • Start HPB-TensorTrade live environment (v19 compatible)
-#  • Auto-initialize HPB_TensorTrade_Env with AutoLearn extensions
-#  • Maintain backward compatibility for older references (TensorTradeEnv)
+# • Auto-initializes HPB TensorTrade environment
+# • Tracks training state across restarts (/data/hpb_autolearn_state.json)
+# • Safe for Render / Uvicorn deployment
 # ================================================================
 
 import os
+import json
 import logging
+from datetime import datetime
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 # ────────────────────────────────────────────────────────────────
-# Imports (AutoLearn + Environment)
+# Imports (Environment + Validator)
 # ────────────────────────────────────────────────────────────────
-from tensortrade_env import HPB_TensorTrade_Env as TensorTradeEnv
+from tensortrade_env import HPB_TensorTrade_Env
 from tensortrade_config_ext import AUTO_INIT, TENSORTRADE_CONFIG
 from hpb_rig_validator import range_integrity_validator
 
+# Backward-compatible alias
+TensorTradeEnv = HPB_TensorTrade_Env
+
 # ────────────────────────────────────────────────────────────────
-# Logging Configuration
+# Logging
 # ────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -30,9 +34,9 @@ logging.basicConfig(
 logger = logging.getLogger("HPB-TCT-Server")
 
 # ────────────────────────────────────────────────────────────────
-# FastAPI App Setup
+# FastAPI Setup
 # ────────────────────────────────────────────────────────────────
-app = FastAPI(title="HPB–TCT AutoLearn v19", version="1.0.0")
+app = FastAPI(title="HPB–TCT AutoLearn v19", version="1.0.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -43,21 +47,52 @@ app.add_middleware(
 )
 
 # ────────────────────────────────────────────────────────────────
-# AutoLearn Environment Initialization
+# AutoLearn State Persistence
+# ────────────────────────────────────────────────────────────────
+STATE_FILE = os.path.join(os.getcwd(), "hpb_autolearn_state.json")
+
+def load_state():
+    if not os.path.exists(STATE_FILE):
+        logger.info("🧠 No prior AutoLearn state found, creating new file.")
+        return {
+            "last_timestamp": None,
+            "train_cycles_completed": 0,
+            "last_RIG_status": None,
+            "last_bias": None,
+            "last_confidence": None,
+        }
+    try:
+        with open(STATE_FILE, "r") as f:
+            state = json.load(f)
+            logger.info("✅ Loaded AutoLearn persistent state.")
+            return state
+    except Exception as e:
+        logger.error(f"⚠️ Failed to load state: {e}")
+        return {}
+
+def save_state(state: dict):
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(state, f, indent=2)
+        logger.info("💾 AutoLearn state saved successfully.")
+    except Exception as e:
+        logger.error(f"❌ Failed to save state: {e}")
+
+state = load_state()
+
+# ────────────────────────────────────────────────────────────────
+# Environment Initialization
 # ────────────────────────────────────────────────────────────────
 logger.info("🔧 Initializing HPB–TCT TensorTrade Environment...")
 try:
-    env = AUTO_INIT()  # builds and returns a live environment
+    env = AUTO_INIT()
     logger.info(f"✅ Environment initialized successfully with config: {TENSORTRADE_CONFIG}")
 except Exception as e:
     logger.error(f"❌ Failed to initialize HPB environment: {e}")
     env = None
 
-# Optional backward alias for older code expecting TensorTradeEnv
-TensorTradeEnv = HPB_TensorTrade_Env
-
 # ────────────────────────────────────────────────────────────────
-# API ROUTES
+# Routes
 # ────────────────────────────────────────────────────────────────
 
 @app.get("/")
@@ -67,6 +102,9 @@ async def root():
         "status": "running",
         "environment": "HPB–TCT v19 AutoLearn",
         "initialized": env is not None,
+        "train_cycles_completed": state.get("train_cycles_completed", 0),
+        "last_bias": state.get("last_bias"),
+        "last_confidence": state.get("last_confidence"),
     }
 
 
@@ -83,9 +121,8 @@ async def fetch_context():
 
 @app.get("/validate_gates")
 async def validate_gates():
-    """Run RIG validation logic for live HPB context."""
+    """Run RIG validation and store results persistently."""
     try:
-        # Dummy example of current context (replace with live gate state)
         context = {
             "gates": {
                 "1A": {"bias": "bearish"},
@@ -96,6 +133,14 @@ async def validate_gates():
             "local_range_displacement": 0.12,
         }
         result = range_integrity_validator(context)
+        # Save to state
+        state.update({
+            "last_timestamp": datetime.utcnow().isoformat(),
+            "last_RIG_status": result["status"],
+            "last_bias": result["htf_bias"],
+            "last_confidence": result["confidence"],
+        })
+        save_state(state)
         return {"RIG_Validation": result}
     except Exception as e:
         logger.error(f"Gate validation error: {e}")
@@ -104,22 +149,27 @@ async def validate_gates():
 
 @app.get("/train")
 async def train_agent(episodes: int = 5):
-    """Run AutoLearn training cycles for v19."""
+    """Run AutoLearn training cycles and update persistent state."""
     if env is None:
         return {"error": "Environment not initialized."}
     try:
         logger.info(f"🚀 Starting AutoLearn training for {episodes} episodes...")
         for i in range(episodes):
             env.build_environment()
-            # Here you would trigger your RL agent training or reward updates
+            # Placeholder for RL / Reward logic
             logger.info(f"✅ Completed training episode {i+1}/{episodes}")
-        return {"status": "completed", "episodes": episodes}
+
+        state["train_cycles_completed"] = state.get("train_cycles_completed", 0) + episodes
+        state["last_timestamp"] = datetime.utcnow().isoformat()
+        save_state(state)
+
+        return {"status": "completed", "episodes": episodes, "state": state}
     except Exception as e:
         logger.error(f"Training error: {e}")
         return {"error": str(e)}
 
 # ────────────────────────────────────────────────────────────────
-# Local Run Entry Point (for Render/Uvicorn)
+# Entry Point (Render / Local)
 # ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
