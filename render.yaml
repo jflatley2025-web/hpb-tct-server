@@ -1,10 +1,8 @@
 # ===============================================================
-# render.yaml — HPB–TCT v19.1 AutoLearn Runtime (Render Stable)
+# render.yaml — HPB–TCT v19.2 AutoLearn + Telegram Integration
 # ===============================================================
-# • Binds to correct Render dynamic port ($PORT)
-# • Includes healthCheckPath (/status) to prevent 405 errors
-# • Auto deploys on git push
-# • Configured for Python FastAPI + Uvicorn
+# • Adds bot credentials and API endpoint URL
+# • Health checks + extended timeouts
 # ===============================================================
 
 services:
@@ -16,23 +14,21 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT
 
-    # Health check ensures Render detects service is alive
     healthCheckPath: /status
-
-    # Optional: adjust health check timings (recommended for heavy startup)
     healthCheckInterval: 30
     healthCheckTimeout: 20
     healthCheckGracePeriod: 120
 
-    # Optional environment variables
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.8
       - key: LOG_LEVEL
         value: info
+      - key: BOT_TOKEN
+        sync: false
+      - key: API_URL
+        value: https://hpb-tct-server.onrender.com
       - key: AUTO_TRAIN_DEFAULT_EPISODES
         value: 5
 
-    # Automatically redeploy when repo changes
     autoDeploy: true
-
