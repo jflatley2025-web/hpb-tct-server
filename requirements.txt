@@ -13,9 +13,12 @@ fastapi==0.95.2
 uvicorn==0.22.0
 
 # ─── Async + Requests ───
-httpx==0.24.1
+httpx==0.26.0
 requests==2.31.0
 aiofiles==23.2.1   # for async file handling (bias/log/metrics persistence)
+
+# ─── Telegram Bot Bridge ───
+python-telegram-bot==20.8
 
 # ─── Data Science Stack ───
 numpy==1.26.4
@@ -43,11 +46,13 @@ ccxt==4.2.97              # unified Bybit/OKX REST API adapter
 loguru==0.7.2             # advanced logging (for /logs pipeline)
 cachetools==5.3.2         # bias-memory cache support
 colorama==0.4.6           # console color output
-python-telegram-bot==20.8
+
 
 # ─── Optional Diagnostics ───
 psutil==5.9.8             # resource tracking
 rich==13.6.0              # improved CLI print for RIG diagnostics
+
+
 
 # ───────────────────────────────────────────────
 # END OF REQUIREMENTS

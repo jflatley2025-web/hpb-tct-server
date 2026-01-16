@@ -1,11 +1,14 @@
 # ===============================================================
 # render.yaml — HPB–TCT v19.2 AutoLearn + Telegram Integration
 # ===============================================================
-# • Adds bot credentials and API endpoint URL
-# • Health checks + extended timeouts
+# • Web API: HPB–TCT TensorTrade AutoLearn environment
+# • Worker: Telegram Bot Bridge (continuous polling)
 # ===============================================================
 
 services:
+  # ───────────────────────────────────────────────
+  # Main Web Service (HPB–TCT Server)
+  # ───────────────────────────────────────────────
   - type: web
     name: hpb-tct-server
     env: python
@@ -24,7 +27,7 @@ services:
         value: 3.11.8
       - key: LOG_LEVEL
         value: info
-      - key: BOT_TOKEN
+      - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: API_URL
         value: https://hpb-tct-server.onrender.com
@@ -32,3 +35,22 @@ services:
         value: 5
 
     autoDeploy: true
+
+  # ───────────────────────────────────────────────
+  # Telegram Bot Worker (runs 24/7 polling)
+  # ───────────────────────────────────────────────
+  - type: worker
+    name: hpb-tct-telegram
+    env: python
+    plan: free
+
+    buildCommand: pip install -r requirements.txt
+    startCommand: python telegram_bot.py
+
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: API_BASE
+        value: https://hpb-tct-server.onrender.com
+
+
