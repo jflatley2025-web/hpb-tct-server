@@ -1,16 +1,23 @@
 """
-range_scanner.py — HPB–TCT v19.3 Range Finder (Stable)
-Robust Bybit HTF/LTF scanner with safe error handling.
+range_scanner.py — HPB–TCT v19.4 Range Finder (Stable)
+Robust Bybit HTF/LTF scanner with safe error handling + pause/resume support.
 """
 
-import asyncio, math, statistics, httpx
+import asyncio
+import math
+import statistics
+import httpx
+import logging
 from datetime import datetime
 
 BYBIT_URL = "https://api.bybit.com/v5/market/kline"
 
-# Timeframes supported by Bybit v5 linear category
+# Timeframes supported by Bybit v5
 LTF_INTERVALS = ["1", "3", "5", "15", "30", "60"]
-HTF_INTERVALS = ["120", "240", "360", "720", "D", "W"]  # dropped M for stability
+HTF_INTERVALS = ["120", "240", "360", "720", "D", "W"]  # Monthly dropped for stability
+
+logger = logging.getLogger("HPB-TCT-RangeScanner")
+
 
 class RangeCandidate:
     def __init__(self, tf, high, low, candles):
@@ -21,6 +28,7 @@ class RangeCandidate:
         self.candles = candles
         self.score = 0.0
 
+
 class BybitRangeScanner:
     def __init__(self, symbol="BTCUSDT", category="linear", limit=200):
         self.symbol = symbol
@@ -30,43 +38,48 @@ class BybitRangeScanner:
         self.paused = False
         self.current_tf = None
 
+    # ------------------------------------------------------------
+    # Safe candle fetcher with category fallbacks
+    # ------------------------------------------------------------
     async def fetch_klines(self, tf):
-        """Fetch OHLC data safely from Bybit API"""
-        params = {
-            "category": self.category,
-            "symbol": self.symbol,
-            "interval": tf,
-            "limit": self.limit,
-        }
+        params = {"symbol": self.symbol, "interval": tf, "limit": self.limit}
+        headers = {"User-Agent": "HPB-TCT-v19.4/Enhanced"}
+        data = []
         try:
-            async with httpx.AsyncClient(timeout=30) as c:
+            async with httpx.AsyncClient(timeout=30, headers=headers) as c:
+                # Try linear first
+                params["category"] = "linear"
                 r = await c.get(BYBIT_URL, params=params)
-                r.raise_for_status()
-                res = r.json()
-                data = res.get("result", {}).get("list")
-                if not data:
-                    print(f"[WARN] No data for tf {tf}")
-                    return []
-        except Exception as e:
-            print(f"[ERROR] fetch_klines({tf}) failed → {e}")
-            return []
+                data = r.json().get("result", {}).get("list", [])
 
-        # Parse [open_time, open, high, low, close, volume]
-        try:
+                # Try inverse if no result
+                if not data:
+                    params["category"] = "inverse"
+                    r2 = await c.get(BYBIT_URL, params=params)
+                    data = r2.json().get("result", {}).get("list", [])
+
+                # Try spot as final fallback
+                if not data:
+                    params["category"] = "spot"
+                    r3 = await c.get(BYBIT_URL, params=params)
+                    data = r3.json().get("result", {}).get("list", [])
+
+            if not data:
+                logger.warning(f"[BYBIT_EMPTY] No kline data for {self.symbol} {tf}")
+                return []
+
             candles = [
-                {
-                    "t": int(x[0]),
-                    "h": float(x[2]),
-                    "l": float(x[3]),
-                    "c": float(x[4]),
-                }
+                {"t": int(x[0]), "h": float(x[2]), "l": float(x[3]), "c": float(x[4])}
                 for x in data
             ]
-            return candles[::-1]  # chronological order
+            return candles[::-1]
         except Exception as e:
-            print(f"[PARSE ERROR] {tf}: {e}")
+            logger.error(f"[FETCH_ERROR] {tf}: {e}")
             return []
 
+    # ------------------------------------------------------------
+    # Range detection + scoring
+    # ------------------------------------------------------------
     def detect_range(self, candles):
         """Identify basic range high/low from recent candles"""
         if not candles:
@@ -76,7 +89,7 @@ class BybitRangeScanner:
         return max(highs), min(lows)
 
     def score_range(self, candles, high, low):
-        """Basic RCM-compatible smoothness + displacement scoring"""
+        """Basic smoothness + displacement scoring"""
         if not candles:
             return 0.0
         eq = (high + low) / 2
@@ -87,11 +100,14 @@ class BybitRangeScanner:
         score = 0.5 * smoothness + 0.5 * t_disp
         return round(score, 3)
 
+    # ------------------------------------------------------------
+    # Core scan loop
+    # ------------------------------------------------------------
     async def scan_timeframes(self, group_name, tfs):
         for tf in tfs:
             if self.paused:
                 self.current_tf = tf
-                print(f"[PAUSE] Paused at {tf}")
+                logger.info(f"[PAUSE] Scanner paused at {tf}")
                 return
             candles = await self.fetch_klines(tf)
             if not candles:
@@ -104,7 +120,8 @@ class BybitRangeScanner:
             rc = RangeCandidate(tf, high, low, candles)
             rc.score = sc
             self.results[group_name].append(rc)
-            await asyncio.sleep(1.5)  # avoid rate limit
+            logger.info(f"[SCAN] {group_name} {tf} | Score={sc}")
+            await asyncio.sleep(1.5)  # avoid rate-limit issues
 
         self.results[group_name].sort(key=lambda x: x.score, reverse=True)
         self.results[group_name] = self.results[group_name][:3]
@@ -114,10 +131,15 @@ class BybitRangeScanner:
             self.scan_timeframes("LTF", LTF_INTERVALS),
             self.scan_timeframes("HTF", HTF_INTERVALS),
         )
+        logger.info("[SCAN_COMPLETE] Range scan completed successfully.")
         return self.results
 
+    # ------------------------------------------------------------
+    # Pause/resume logic
+    # ------------------------------------------------------------
     def pause(self):
         self.paused = True
+        logger.info("[PAUSE] Scanner paused manually.")
 
     async def resume(self):
         self.paused = False
@@ -125,4 +147,5 @@ class BybitRangeScanner:
             idx = (LTF_INTERVALS + HTF_INTERVALS).index(self.current_tf)
             remaining = (LTF_INTERVALS + HTF_INTERVALS)[idx:]
             group = "LTF" if self.current_tf in LTF_INTERVALS else "HTF"
+            logger.info(f"[RESUME] Resuming from {self.current_tf}")
             await self.scan_timeframes(group, remaining)
