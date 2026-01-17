@@ -303,11 +303,28 @@ async def verify_routes():
     logger.info(f"[ROUTE_REGISTERED] {route_list}")
 
 # ================================================================
-# ENTRY POINT
+# ENTRY POINT (FOR RENDER DEPLOYMENT)
 # ================================================================
 if __name__ == "__main__":
     import uvicorn
-    print(">>> LOADED FROM:", os.getcwd())
-    print(">>> ROUTES:", [r.path for r in app.routes])
+
+    cwd = os.getcwd()
+    print(">>> LOADED FROM DIRECTORY:", cwd)
+    print(">>> ROUTES LOADED:", [r.path for r in app.routes])
+
+    # Force absolute app directory for Render path alignment
+    app_dir = "/opt/render/project/src"
+    app_module = "server:app"
+
     port = int(os.environ.get("PORT", 8080))
-    uvicorn.run("server:app", host="0.0.0.0", port=port, reload=False)
+
+    print(f">>> STARTING UVICORN from {app_dir} on port {port} ...")
+
+    uvicorn.run(
+        app_module,
+        host="0.0.0.0",
+        port=port,
+        reload=False,
+        app_dir=app_dir,
+    )
+
