@@ -1,9 +1,5 @@
 # ================================================================
-# server.py — HPB–TCT v19.3 AutoLearn + Telegram + Summary Support
-# ================================================================
-# • Adds bias/confidence trend tracking + /summary endpoint
-# • Keeps Telegram bot integration, persistent AutoLearn state
-# • Simulates training if env has no trainable method
+# server.py — HPB–TCT v19.3 AutoLearn + Range Scanner Dashboard
 # ================================================================
 
 import os
@@ -12,11 +8,15 @@ import logging
 from datetime import datetime
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, HTMLResponse
+import asyncio
+
 from tensortrade_env import HPB_TensorTrade_Env
 from tensortrade_config_ext import AUTO_INIT, TENSORTRADE_CONFIG
 from hpb_rig_validator import range_integrity_validator
 
-TensorTradeEnv = HPB_TensorTrade_Env
+# Range Scanner Integration
+from range_scanner import BybitRangeScanner
 
 # ────────────────────────────────────────────────────────────────
 # Logging setup
@@ -124,19 +124,82 @@ async def status():
         "heartbeat": datetime.utcnow().isoformat(),
     }
 
-@app.get("/dashboard")
-async def dashboard():
-    return {
-        "version": "HPB–TCT v19.3",
-        "bias": state.get("last_bias"),
-        "confidence": state.get("last_confidence"),
-        "RIG_status": state.get("last_RIG_status"),
-        "train_cycles_completed": state.get("train_cycles_completed", 0),
-        "heartbeat": datetime.utcnow().isoformat(),
+# ────────────────────────────────────────────────────────────────
+# RANGE SCANNER API + DASHBOARD
+# ────────────────────────────────────────────────────────────────
+@app.get("/api/ranges")
+async def get_ranges():
+    """Returns top 3 LTF and HTF ranges from Bybit scan"""
+    scanner = BybitRangeScanner()
+    results = await scanner.run_scan()
+    data = {
+        "LTF": [
+            {"timeframe": r.timeframe, "range_high": r.range_high,
+             "range_low": r.range_low, "eq": r.eq, "score": r.score}
+            for r in results["LTF"]
+        ],
+        "HTF": [
+            {"timeframe": r.timeframe, "range_high": r.range_high,
+             "range_low": r.range_low, "eq": r.eq, "score": r.score}
+            for r in results["HTF"]
+        ]
     }
+    return JSONResponse(content=data)
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard():
+    html = """
+    <html>
+      <head>
+        <title>HPB–TCT v19.3 Range Dashboard</title>
+        <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+        <style>
+          body {font-family:sans-serif;background:#0d1117;color:#eee;margin:2em;}
+          .chart{width:100%;height:400px;margin-bottom:3em;}
+          button{margin:4px;padding:6px 10px;background:#1f6feb;color:white;border:0;border-radius:6px;}
+        </style>
+      </head>
+      <body>
+        <h1>📊 Market Structure Range Dashboard</h1>
+        <div id="ltf" class="chart"></div>
+        <button onclick="loadExtra('LTF',2)">Show LTF #2</button>
+        <button onclick="loadExtra('LTF',3)">Show LTF #3</button>
+        <hr>
+        <div id="htf" class="chart"></div>
+        <button onclick="loadExtra('HTF',2)">Show HTF #2</button>
+        <button onclick="loadExtra('HTF',3)">Show HTF #3</button>
+
+        <script>
+          async function fetchRanges(){return await fetch('/api/ranges').then(r=>r.json());}
+          function plotRange(div, data){
+              const r = data[0];
+              const trace = {x:['Low','EQ','High'],y:[r.range_low,r.eq,r.range_high],
+                             type:'scatter',mode:'lines+markers',line:{color:'#00ccff'}};
+              Plotly.newPlot(div,[trace],{title:`${div.toUpperCase()} Best Range (${r.timeframe}) | Score ${r.score}`});
+          }
+          async function init(){
+              const data = await fetchRanges();
+              plotRange('ltf', data.LTF);
+              plotRange('htf', data.HTF);
+              window._ranges=data;
+          }
+          function loadExtra(group,n){
+              const arr=window._ranges[group];
+              if(!arr[n-1])return;
+              const r=arr[n-1];
+              const trace={x:['Low','EQ','High'],y:[r.range_low,r.eq,r.range_high],
+                           type:'scatter',mode:'lines+markers',line:{color:'#ffcc00'}};
+              Plotly.addTraces(group.toLowerCase(),trace);
+          }
+          init();
+        </script>
+      </body>
+    </html>
+    """
+    return HTMLResponse(content=html)
 
 # ────────────────────────────────────────────────────────────────
-# TRAIN
+# TRAIN + GATE VALIDATION + SUMMARY (unchanged)
 # ────────────────────────────────────────────────────────────────
 @app.get("/train")
 async def train_agent(episodes: int = 5):
@@ -144,7 +207,6 @@ async def train_agent(episodes: int = 5):
         return {"error": "Environment not initialized."}
     try:
         logger.info(f"🚀 Starting AutoLearn training for {episodes} episodes...")
-
         if hasattr(env, "auto_train"):
             env.auto_train(episodes=episodes)
         elif hasattr(env, "train"):
@@ -159,22 +221,17 @@ async def train_agent(episodes: int = 5):
 
         state["train_cycles_completed"] = state.get("train_cycles_completed", 0) + episodes
         state["last_timestamp"] = datetime.utcnow().isoformat()
-        # Keep bias/confidence trend history
         bias = state.get("last_bias", "neutral")
         conf = state.get("last_confidence", 0.0)
         history = state.get("bias_history", [])
         history.append({"bias": bias, "confidence": conf, "ts": state["last_timestamp"]})
         state["bias_history"] = history[-10:]
         save_state(state)
-
         return {"status": "completed", "episodes": episodes, "state": state}
     except Exception as e:
         logger.error(f"Training error: {e}")
         return {"error": str(e)}
 
-# ────────────────────────────────────────────────────────────────
-# VALIDATE GATES
-# ────────────────────────────────────────────────────────────────
 @app.get("/validate_gates")
 async def validate_gates():
     try:
@@ -199,82 +256,6 @@ async def validate_gates():
     except Exception as e:
         logger.error(f"Gate validation error: {e}")
         return {"error": str(e)}
-
-# ────────────────────────────────────────────────────────────────
-# SUMMARY ENDPOINT
-# ────────────────────────────────────────────────────────────────
-@app.get("/summary")
-async def summary():
-    history = state.get("bias_history", [])
-    avg_conf = round(sum(h.get("confidence", 0.0) for h in history) / max(len(history), 1), 4)
-    trend = [h.get("bias") for h in history[-5:]]
-    return {
-        "summary": {
-            "bias_trend": trend,
-            "avg_confidence": avg_conf,
-            "total_cycles": state.get("train_cycles_completed", 0),
-            "last_RIG": state.get("last_RIG_status"),
-            "updated": state.get("last_timestamp"),
-        }
-    }
-
-# ────────────────────────────────────────────────────────────────
-# STATE MANAGEMENT
-# ────────────────────────────────────────────────────────────────
-@app.get("/state")
-async def get_state():
-    return state
-
-@app.post("/reset_state")
-async def reset_state():
-    global state
-    state = {
-        "last_timestamp": None,
-        "train_cycles_completed": 0,
-        "last_RIG_status": None,
-        "last_bias": None,
-        "last_confidence": None,
-        "bias_history": [],
-    }
-    save_state(state)
-    return {"status": "reset", "state": state}
-
-# ────────────────────────────────────────────────────────────────
-# TELEGRAM BOT ENDPOINTS
-# ────────────────────────────────────────────────────────────────
-@app.get("/bot/ping")
-async def bot_ping():
-    return {"server": "HPB–TCT v19.3", "bot_status": "online", "heartbeat": datetime.utcnow().isoformat()}
-
-@app.get("/bot/status")
-async def bot_status():
-    return {
-        "bias": state.get("last_bias"),
-        "confidence": state.get("last_confidence"),
-        "RIG_status": state.get("last_RIG_status"),
-        "train_cycles_completed": state.get("train_cycles_completed", 0),
-        "heartbeat": datetime.utcnow().isoformat(),
-    }
-
-@app.get("/bot/train")
-async def bot_train(episodes: int = 5):
-    return await train_agent(episodes)
-
-@app.get("/bot/summary")
-async def bot_summary():
-    """Compact Telegram-readable summary"""
-    s = await summary()
-    sdata = s.get("summary", {})
-    return {
-        "message": (
-            f"📊 *HPB–TCT Summary*\n"
-            f"Bias Trend: {', '.join(sdata.get('bias_trend', []))}\n"
-            f"Avg Confidence: {sdata.get('avg_confidence')}\n"
-            f"RIG: {sdata.get('last_RIG')}\n"
-            f"Cycles: {sdata.get('total_cycles')}\n"
-            f"Updated: {sdata.get('updated')}"
-        )
-    }
 
 # ────────────────────────────────────────────────────────────────
 # ENTRY POINT
