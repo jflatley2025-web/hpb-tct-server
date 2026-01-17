@@ -1,5 +1,5 @@
 # ================================================================
-# server.py — HPB–TCT v19.4 AutoLearn + Range Scanner Dashboard (Enhanced Logic Build)
+# server.py — HPB–TCT v19.4 AutoLearn + Range Scanner Dashboard (Fixed Render Route Version)
 # ================================================================
 
 import os
@@ -77,61 +77,43 @@ if env is not None and not any(hasattr(env, fn) for fn in ["auto_train", "train"
     env.train = dummy_train
 
 # ================================================================
-# ENHANCED LOGIC MODULES
+# HELPER LOGIC MODULES
 # ================================================================
-
 def context_compression(input_text: str, max_tokens: int = 2048) -> str:
-    """Remove redundant lines and keep high-entropy context."""
     lines = input_text.splitlines()
-    unique = list(dict.fromkeys(lines))  # remove duplicates
+    unique = list(dict.fromkeys(lines))
     compressed = "\n".join(unique[:max_tokens // 50])
-    logger.debug(f"[CTX_COMPRESSION] Reduced {len(lines)} → {len(compressed.splitlines())} lines.")
     return compressed
 
 def freshness_gate(context_timestamp: str, freshness_window_minutes: int = 90) -> bool:
-    """Reject stale data older than freshness window."""
     try:
         dt = datetime.fromisoformat(context_timestamp)
         age = (datetime.utcnow() - dt).total_seconds() / 60
-        is_fresh = age <= freshness_window_minutes
-        if not is_fresh:
-            logger.warning(f"[FRESHNESS_GATE] Context too old: {age:.1f} min > {freshness_window_minutes} min")
-        return is_fresh
+        return age <= freshness_window_minutes
     except Exception:
         return True
 
 def variance_stabilizer(values):
-    """Reduce confidence volatility using variance normalization."""
     if not values:
         return 0.0
     mean = statistics.mean(values)
     var = statistics.pvariance(values)
     stabilized = max(0.0, 1 - math.tanh(var))
-    logger.debug(f"[VAR_STABILIZER] mean={mean:.4f}, var={var:.4f}, output={stabilized:.4f}")
     return stabilized
 
 def active_reasoning_verifier(result_dict: dict) -> dict:
-    """Final self-check before confirming reasoning output."""
     try:
-        if result_dict.get("status") == "BLOCK":
-            result_dict["verified"] = True
-            result_dict["reasoning_quality"] = "conservative"
-        else:
-            result_dict["verified"] = True
-            result_dict["reasoning_quality"] = "high"
+        result_dict["verified"] = True
+        result_dict["reasoning_quality"] = "high" if result_dict.get("status") != "BLOCK" else "conservative"
         return result_dict
     except Exception as e:
-        logger.error(f"[ACTIVE_REASONING] Verification failed: {e}")
         return {"verified": False, "error": str(e)}
 
-# Simple ephemeral buffer for recent context
 EPHEMERAL_MEMORY = []
-
 def remember_context(entry: dict, max_entries: int = 10):
     EPHEMERAL_MEMORY.append(entry)
     if len(EPHEMERAL_MEMORY) > max_entries:
         EPHEMERAL_MEMORY.pop(0)
-    logger.debug(f"[MEMORY] Stored {len(EPHEMERAL_MEMORY)} entries.")
 
 # ================================================================
 # RANGE SCANNER
@@ -254,69 +236,78 @@ async def get_ranges():
     }
     return JSONResponse(content=data)
 
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard_page():
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Market Structure Range Dashboard</title>
+        <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+        <style>
+            body { font-family: Arial; background-color: #0d1117; color: #eee; margin: 30px; }
+            .chart { width: 100%; height: 400px; margin-bottom: 40px; }
+            button { background-color: #1f6feb; border: none; padding: 8px 12px; color: white; border-radius: 5px; margin: 5px; cursor: pointer; }
+            button:hover { background-color: #388bfd; }
+        </style>
+    </head>
+    <body>
+        <h1>📊 Market Structure Range Dashboard</h1>
+        <div id="ltf" class="chart"></div>
+        <button onclick="loadExtra('LTF',2)">Show LTF #2</button>
+        <button onclick="loadExtra('LTF',3)">Show LTF #3</button>
+        <hr style="margin:40px 0;">
+        <div id="htf" class="chart"></div>
+        <button onclick="loadExtra('HTF',2)">Show HTF #2</button>
+        <button onclick="loadExtra('HTF',3)">Show HTF #3</button>
+
+        <script>
+            async function fetchRanges(){
+                const res = await fetch('/api/ranges');
+                return res.json();
+            }
+            function plotRange(div, data){
+                if(!data.length){Plotly.newPlot(div, [], {title:'No range data found'});return;}
+                const r = data[0];
+                const trace = {x:['Low','EQ','High'],y:[r.range_low,r.eq,r.range_high],
+                               type:'scatter',mode:'lines+markers',line:{color:'#00ccff'}};
+                Plotly.newPlot(div,[trace],{title:`${div.toUpperCase()} Best Range (${r.timeframe}) | Score ${r.score}`});
+            }
+            async function init(){
+                const data = await fetchRanges();
+                plotRange('ltf', data.LTF);
+                plotRange('htf', data.HTF);
+                window._ranges=data;
+            }
+            function loadExtra(group,n){
+                const arr=window._ranges[group];
+                if(!arr[n-1])return;
+                const r=arr[n-1];
+                const trace={x:['Low','EQ','High'],y:[r.range_low,r.eq,r.range_high],
+                             type:'scatter',mode:'lines+markers',line:{color:'#ffcc00'}};
+                Plotly.addTraces(group.toLowerCase(),trace);
+            }
+            init();
+        </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html)
+
 # ================================================================
-# TRAINING / VALIDATION WITH ENHANCED LOGIC
+# STARTUP DEBUG (VERIFY ROUTES)
 # ================================================================
-@app.get("/train")
-async def train_agent(episodes: int = 5):
-    if env is None:
-        return {"error": "Environment not initialized."}
-    try:
-        logger.info(f"🚀 Starting AutoLearn training for {episodes} episodes...")
-        if hasattr(env, "auto_train"):
-            env.auto_train(episodes=episodes)
-        elif hasattr(env, "train"):
-            env.train(episodes)
-        elif hasattr(env, "simulate"):
-            env.simulate(episodes)
-        elif hasattr(env, "run"):
-            env.run(episodes)
-
-        state["train_cycles_completed"] = state.get("train_cycles_completed", 0) + episodes
-        state["last_timestamp"] = datetime.utcnow().isoformat()
-        save_state(state)
-        return {"status": "completed", "episodes": episodes, "state": state}
-    except Exception as e:
-        logger.error(f"[TRAIN_ERROR] {e}")
-        return {"error": str(e)}
-
-@app.get("/validate_gates")
-async def validate_gates():
-    try:
-        context = {
-            "gates": {"1A": {"bias": "bearish"}, "RCM": {"valid": True}, "MSCE": {"session_bias": "bullish"}},
-            "local_range_displacement": 0.12,
-        }
-        # Apply freshness and compression pre-checks
-        if not freshness_gate(datetime.utcnow().isoformat()):
-            return {"error": "Stale context rejected by freshness gate."}
-
-        compact_context = context_compression(json.dumps(context))
-        result = range_integrity_validator(json.loads(compact_context))
-
-        # Post-processing logic
-        result = active_reasoning_verifier(result)
-        confidence_series = [state.get("last_confidence", 0.5), result.get("confidence", 0.5)]
-        stabilized_conf = variance_stabilizer(confidence_series)
-
-        state.update({
-            "last_timestamp": datetime.utcnow().isoformat(),
-            "last_RIG_status": result.get("status"),
-            "last_bias": result.get("htf_bias"),
-            "last_confidence": stabilized_conf,
-        })
-        remember_context(state)
-        save_state(state)
-
-        return {"RIG_Validation": result, "Stabilized_Confidence": stabilized_conf}
-    except Exception as e:
-        logger.error(f"[GATE_VALIDATION_ERROR] {e}")
-        return {"error": str(e)}
+@app.on_event("startup")
+async def verify_routes():
+    route_list = [r.path for r in app.routes]
+    logger.info(f"[ROUTE_REGISTERED] {route_list}")
 
 # ================================================================
 # ENTRY POINT
 # ================================================================
 if __name__ == "__main__":
     import uvicorn
+    print(">>> LOADED FROM:", os.getcwd())
+    print(">>> ROUTES:", [r.path for r in app.routes])
     port = int(os.environ.get("PORT", 8080))
     uvicorn.run("server:app", host="0.0.0.0", port=port, reload=False)
