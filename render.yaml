@@ -17,10 +17,8 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT
 
+    # ✅ Only healthCheckPath is now supported in Render 2026 YAML spec
     healthCheckPath: /status
-    healthCheckInterval: 30
-    healthCheckTimeout: 20
-    healthCheckGracePeriod: 120
 
     envVars:
       - key: PYTHON_VERSION
@@ -52,5 +50,3 @@ services:
         sync: false
       - key: API_BASE
         value: https://hpb-tct-server.onrender.com
-
-
