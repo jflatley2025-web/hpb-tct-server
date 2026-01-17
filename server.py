@@ -1,22 +1,22 @@
 # ================================================================
-# server.py — HPB–TCT v19.3 AutoLearn + Range Scanner Dashboard
+# server.py — HPB–TCT v19.3 AutoLearn + Range Scanner Dashboard (Stable Build)
 # ================================================================
 
 import os
 import json
 import logging
+import asyncio
+import statistics
+import httpx
 from datetime import datetime
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, HTMLResponse
-import asyncio
 
 from tensortrade_env import HPB_TensorTrade_Env
 from tensortrade_config_ext import AUTO_INIT, TENSORTRADE_CONFIG
 from hpb_rig_validator import range_integrity_validator
 
-# Range Scanner Integration
-from range_scanner import BybitRangeScanner
 
 # ────────────────────────────────────────────────────────────────
 # Logging setup
@@ -31,7 +31,7 @@ logger = logging.getLogger("HPB-TCT-Server")
 # ────────────────────────────────────────────────────────────────
 # FastAPI setup
 # ────────────────────────────────────────────────────────────────
-app = FastAPI(title="HPB–TCT AutoLearn v19.3", version="1.0.5")
+app = FastAPI(title="HPB–TCT AutoLearn v19.3", version="1.0.6")
 
 app.add_middleware(
     CORSMiddleware,
@@ -48,7 +48,6 @@ STATE_FILE = os.path.join(os.getcwd(), "hpb_autolearn_state.json")
 
 def load_state():
     if not os.path.exists(STATE_FILE):
-        logger.info("🧠 Creating new AutoLearn state file.")
         return {
             "last_timestamp": None,
             "train_cycles_completed": 0,
@@ -60,17 +59,12 @@ def load_state():
     try:
         with open(STATE_FILE, "r") as f:
             return json.load(f)
-    except Exception as e:
-        logger.error(f"⚠️ Failed to load state: {e}")
+    except Exception:
         return {}
 
 def save_state(state: dict):
-    try:
-        with open(STATE_FILE, "w") as f:
-            json.dump(state, f, indent=2)
-        logger.info("💾 AutoLearn state saved successfully.")
-    except Exception as e:
-        logger.error(f"❌ Failed to save state: {e}")
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f, indent=2)
 
 state = load_state()
 
@@ -85,16 +79,127 @@ except Exception as e:
     logger.error(f"❌ Failed to initialize HPB environment: {e}")
     env = None
 
-# Dummy fallback training if env has none
 if env is not None and not any(hasattr(env, fn) for fn in ["auto_train", "train", "simulate", "run"]):
     def dummy_train(episodes=5):
         logger.info(f"[DUMMY_TRAIN] Simulating {episodes} pseudo-episodes.")
         return {"episodes": episodes, "reward": 0.0}
     env.train = dummy_train
 
-# ────────────────────────────────────────────────────────────────
-# Core Routes
-# ────────────────────────────────────────────────────────────────
+
+# ================================================================
+# RANGE SCANNER IMPLEMENTATION (INTEGRATED)
+# ================================================================
+BYBIT_URL = "https://api.bybit.com/v5/market/kline"
+LTF_INTERVALS = ["1", "3", "5", "15", "30", "60"]
+HTF_INTERVALS = ["120", "240", "360", "720", "D", "W"]  # no 'M' for stability
+
+class RangeCandidate:
+    def __init__(self, tf, high, low, candles):
+        self.timeframe = tf
+        self.range_high = high
+        self.range_low = low
+        self.eq = (high + low) / 2
+        self.candles = candles
+        self.score = 0.0
+
+class BybitRangeScanner:
+    def __init__(self, symbol="BTCUSDT", category="linear", limit=200):
+        self.symbol = symbol
+        self.category = category
+        self.limit = limit
+        self.results = {"LTF": [], "HTF": []}
+        self.paused = False
+        self.current_tf = None
+
+    async def fetch_klines(self, tf):
+        """Fetch OHLC data safely from Bybit API (with fallback + user-agent)"""
+        params = {
+            "category": self.category,
+            "symbol": self.symbol,
+            "interval": tf,
+            "limit": self.limit,
+        }
+        headers = {"User-Agent": "HPB-TCT-v19.3/Render"}
+        try:
+            async with httpx.AsyncClient(timeout=30, headers=headers) as c:
+                r = await c.get(BYBIT_URL, params=params)
+                res = r.json()
+                data = res.get("result", {}).get("list")
+
+                # Fallback: retry with category=spot if no data
+                if not data:
+                    print(f"[WARN] No data for {tf} ({self.category}), trying spot fallback.")
+                    params["category"] = "spot"
+                    r2 = await c.get(BYBIT_URL, params=params)
+                    res = r2.json()
+                    data = res.get("result", {}).get("list", [])
+                    if not data:
+                        print(f"[FAIL] Still no data for {tf} in spot fallback.")
+                        return []
+        except Exception as e:
+            print(f"[ERROR] fetch_klines({tf}) failed → {e}")
+            return []
+
+        try:
+            candles = [
+                {"t": int(x[0]), "h": float(x[2]), "l": float(x[3]), "c": float(x[4])}
+                for x in data
+            ]
+            print(f"[OK] {tf} fetched {len(candles)} candles.")
+            return candles[::-1]
+        except Exception as e:
+            print(f"[PARSE ERROR] {tf}: {e}")
+            return []
+
+    def detect_range(self, candles):
+        if not candles:
+            return None
+        highs = [c["h"] for c in candles]
+        lows = [c["l"] for c in candles]
+        return max(highs), min(lows)
+
+    def score_range(self, candles, high, low):
+        if not candles:
+            return 0.0
+        eq = (high + low) / 2
+        diffs = [abs(c["c"] - eq) for c in candles]
+        disp = statistics.pstdev(diffs) / (high - low + 1e-9)
+        smoothness = 1 - min(disp, 1)
+        t_disp = min(len(candles) / 300, 1)
+        return round(0.5 * smoothness + 0.5 * t_disp, 3)
+
+    async def scan_timeframes(self, group_name, tfs):
+        for tf in tfs:
+            if self.paused:
+                self.current_tf = tf
+                print(f"[PAUSE] Paused at {tf}")
+                return
+            candles = await self.fetch_klines(tf)
+            if not candles:
+                continue
+            rng = self.detect_range(candles)
+            if not rng:
+                continue
+            high, low = rng
+            sc = self.score_range(candles, high, low)
+            rc = RangeCandidate(tf, high, low, candles)
+            rc.score = sc
+            self.results[group_name].append(rc)
+            await asyncio.sleep(1.5)
+        self.results[group_name].sort(key=lambda x: x.score, reverse=True)
+        self.results[group_name] = self.results[group_name][:3]
+
+    async def run_scan(self):
+        await asyncio.gather(
+            self.scan_timeframes("LTF", LTF_INTERVALS),
+            self.scan_timeframes("HTF", HTF_INTERVALS),
+        )
+        return self.results
+
+
+# ================================================================
+# API ROUTES
+# ================================================================
 @app.get("/")
 async def root():
     return {
@@ -106,30 +211,18 @@ async def root():
         "last_confidence": state.get("last_confidence"),
     }
 
-@app.head("/")
-async def head_root():
-    return {"status": "ok"}
-
 @app.get("/status")
 async def status():
-    """Server + AutoLearn state overview"""
     return {
         "server": "HPB–TCT v19.3",
         "initialized": env is not None,
-        "last_state_update": state.get("last_timestamp"),
         "train_cycles_completed": state.get("train_cycles_completed", 0),
-        "bias": state.get("last_bias"),
-        "confidence": state.get("last_confidence"),
-        "RIG_status": state.get("last_RIG_status"),
+        "last_RIG_status": state.get("last_RIG_status"),
         "heartbeat": datetime.utcnow().isoformat(),
     }
 
-# ────────────────────────────────────────────────────────────────
-# RANGE SCANNER API + DASHBOARD
-# ────────────────────────────────────────────────────────────────
 @app.get("/api/ranges")
 async def get_ranges():
-    """Returns top 3 LTF and HTF ranges from Bybit scan"""
     scanner = BybitRangeScanner()
     results = await scanner.run_scan()
     data = {
@@ -146,12 +239,16 @@ async def get_ranges():
     }
     return JSONResponse(content=data)
 
+
+# ================================================================
+# DASHBOARD VISUALIZATION
+# ================================================================
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard():
     html = """
     <html>
       <head>
-        <title>HPB–TCT v19.3 Range Dashboard</title>
+        <title>📊 Market Structure Range Dashboard</title>
         <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
         <style>
           body {font-family:sans-serif;background:#0d1117;color:#eee;margin:2em;}
@@ -170,8 +267,14 @@ async def dashboard():
         <button onclick="loadExtra('HTF',3)">Show HTF #3</button>
 
         <script>
-          async function fetchRanges(){return await fetch('/api/ranges').then(r=>r.json());}
+          async function fetchRanges(){
+              const res = await fetch('/api/ranges');
+              const data = await res.json();
+              console.log("Fetched:", data);
+              return data;
+          }
           function plotRange(div, data){
+              if (!data.length){Plotly.newPlot(div, [], {title:'No range data available'});return;}
               const r = data[0];
               const trace = {x:['Low','EQ','High'],y:[r.range_low,r.eq,r.range_high],
                              type:'scatter',mode:'lines+markers',line:{color:'#00ccff'}};
@@ -198,9 +301,10 @@ async def dashboard():
     """
     return HTMLResponse(content=html)
 
-# ────────────────────────────────────────────────────────────────
-# TRAIN + GATE VALIDATION + SUMMARY (unchanged)
-# ────────────────────────────────────────────────────────────────
+
+# ================================================================
+# TRAINING AND VALIDATION ROUTES
+# ================================================================
 @app.get("/train")
 async def train_agent(episodes: int = 5):
     if env is None:
@@ -216,16 +320,9 @@ async def train_agent(episodes: int = 5):
         elif hasattr(env, "run"):
             env.run(episodes)
         else:
-            logger.warning("⚠️ No recognized training function found.")
             return {"warning": "No training function available."}
-
         state["train_cycles_completed"] = state.get("train_cycles_completed", 0) + episodes
         state["last_timestamp"] = datetime.utcnow().isoformat()
-        bias = state.get("last_bias", "neutral")
-        conf = state.get("last_confidence", 0.0)
-        history = state.get("bias_history", [])
-        history.append({"bias": bias, "confidence": conf, "ts": state["last_timestamp"]})
-        state["bias_history"] = history[-10:]
         save_state(state)
         return {"status": "completed", "episodes": episodes, "state": state}
     except Exception as e:
@@ -236,12 +333,7 @@ async def train_agent(episodes: int = 5):
 async def validate_gates():
     try:
         context = {
-            "gates": {
-                "1A": {"bias": "bearish"},
-                "RCM": {"valid": True, "range_duration_hours": 36},
-                "MSCE": {"session_bias": "bullish", "session": "NY"},
-                "1D": {"score": 0.85},
-            },
+            "gates": {"1A": {"bias": "bearish"}, "RCM": {"valid": True}, "MSCE": {"session_bias": "bullish"}},
             "local_range_displacement": 0.12,
         }
         result = range_integrity_validator(context)
@@ -257,11 +349,10 @@ async def validate_gates():
         logger.error(f"Gate validation error: {e}")
         return {"error": str(e)}
 
-# ────────────────────────────────────────────────────────────────
+# ================================================================
 # ENTRY POINT
-# ────────────────────────────────────────────────────────────────
+# ================================================================
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8080))
-    logger.info(f"🚀 Starting HPB–TCT v19.3 server on port {port} ...")
     uvicorn.run("server:app", host="0.0.0.0", port=port, reload=False)
