@@ -1,5 +1,5 @@
 # ================================================================
-# server.py — HPB–TCT v19.6 (OKX Auth + Auto Refresh Dashboard)
+# server.py — HPB–TCT v19.7 (OKX Auth Fix + Status Dashboard)
 # ================================================================
 
 import os
@@ -25,8 +25,10 @@ from hpb_rig_validator import range_integrity_validator
 OKX_API_KEY = os.getenv("OKX_API_KEY", "")
 OKX_SECRET_KEY = os.getenv("OKX_SECRET_KEY", "")
 OKX_PASSPHRASE = os.getenv("OKX_PASSPHRASE", "")
-OKX_URL = "https://www.okx.com/api/v5/market/candles"
 SYMBOL = "BTC-USDT-SWAP"
+
+OKX_BASE = "https://www.okx.com"
+OKX_PATH = "/api/v5/market/candles"
 
 LTF_INTERVALS = ["1m", "3m", "5m", "15m", "30m", "1H"]
 HTF_INTERVALS = ["2H", "4H", "6H", "12H", "1D", "1W"]
@@ -34,7 +36,7 @@ HTF_INTERVALS = ["2H", "4H", "6H", "12H", "1D", "1W"]
 # ================================================================
 # FASTAPI APP
 # ================================================================
-app = FastAPI(title="HPB–TCT AutoLearn v19.6", version="1.3.0")
+app = FastAPI(title="HPB–TCT v19.7", version="1.4.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True,
@@ -44,20 +46,20 @@ app.add_middleware(
 # ================================================================
 # ENV INITIALIZATION
 # ================================================================
-print("🔧 Initializing HPB–TCT Environment (v19.6 Enhanced Logic)...")
+print("🔧 Initializing HPB–TCT Environment (v19.7)...")
 try:
     env = AUTO_INIT()
     print(f"✅ Environment initialized successfully with config: {TENSORTRADE_CONFIG}")
 except Exception as e:
-    print(f"❌ Failed to initialize environment: {e}")
+    print(f"⚠️ Environment initialization failed: {e}")
     env = None
 
 # ================================================================
-# OKX REQUEST SIGNING
+# OKX SIGNING & AUTH
 # ================================================================
-def okx_headers(path, method="GET"):
+def okx_headers(method, path, query=""):
     ts = datetime.utcnow().isoformat("T", "milliseconds") + "Z"
-    msg = f"{ts}{method}{path}"
+    msg = f"{ts}{method}{path}{query}"
     sign = base64.b64encode(
         hmac.new(OKX_SECRET_KEY.encode(), msg.encode(), hashlib.sha256).digest()
     ).decode()
@@ -67,8 +69,18 @@ def okx_headers(path, method="GET"):
         "OK-ACCESS-TIMESTAMP": ts,
         "OK-ACCESS-PASSPHRASE": OKX_PASSPHRASE,
         "Content-Type": "application/json",
-        "User-Agent": "HPB-TCT-v19.6/Hybrid",
+        "User-Agent": "HPB-TCT-v19.7",
     }
+
+async def verify_okx_auth():
+    """Check if OKX API key works."""
+    test_path = "/api/v5/account/config"
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(f"{OKX_BASE}{test_path}", headers=okx_headers("GET", test_path))
+            return r.status_code == 200
+    except Exception:
+        return False
 
 # ================================================================
 # RANGE SCANNER
@@ -89,18 +101,17 @@ class RangeScanner:
         self.results = {"LTF": [], "HTF": []}
 
     async def fetch_okx(self, tf):
-        params = {"instId": self.symbol, "bar": tf, "limit": str(self.limit)}
-        path = f"/api/v5/market/candles?instId={self.symbol}&bar={tf}&limit={self.limit}"
+        query = f"?instId={self.symbol}&bar={tf}&limit={self.limit}"
         try:
             async with httpx.AsyncClient(timeout=20) as c:
-                r = await c.get(OKX_URL, params=params, headers=okx_headers(path))
+                r = await c.get(f"{OKX_BASE}{OKX_PATH}{query}", headers=okx_headers("GET", OKX_PATH, query))
                 if r.status_code != 200:
-                    print(f"[OKX_FAIL] {tf} — HTTP {r.status_code}")
+                    print(f"[OKX_FAIL] {tf} — HTTP {r.status_code}: {r.text}")
                     return []
                 j = r.json()
                 data = j.get("data", [])
                 if not data:
-                    print(f"[OKX_EMPTY] {tf} — No data returned.")
+                    print(f"[OKX_EMPTY] {tf}")
                     return []
                 candles = [
                     {"t": int(x[0]), "h": float(x[2]), "l": float(x[3]), "c": float(x[4])}
@@ -142,7 +153,7 @@ class RangeScanner:
             rc.score = sc
             self.results[group].append(rc)
             print(f"[SCAN] {group} {tf} | Score={sc}")
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.8)
         self.results[group].sort(key=lambda x: x.score, reverse=True)
         self.results[group] = self.results[group][:3]
 
@@ -151,7 +162,7 @@ class RangeScanner:
             self.scan("LTF", LTF_INTERVALS),
             self.scan("HTF", HTF_INTERVALS),
         )
-        print("[SCAN_COMPLETE] ✅ Range scan completed successfully.")
+        print("[SCAN_COMPLETE] ✅ Range scan completed.")
         return self.results
 
 # ================================================================
@@ -159,11 +170,17 @@ class RangeScanner:
 # ================================================================
 @app.get("/")
 async def root():
-    return {"status": "running", "environment": "HPB–TCT v19.6"}
+    return {"status": "running", "version": "19.7"}
 
 @app.get("/status")
 async def status():
-    return {"server": "HPB–TCT v19.6", "heartbeat": datetime.utcnow().isoformat()}
+    verified = await verify_okx_auth()
+    return {
+        "server": "HPB–TCT v19.7",
+        "okx_auth": "✅ Verified" if verified else "❌ Invalid",
+        "symbol": SYMBOL,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
 
 @app.get("/api/ranges")
 async def get_ranges():
@@ -184,39 +201,37 @@ async def dashboard_page():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Market Structure Range Dashboard (v19.6)</title>
+        <title>📊 HPB–TCT Dashboard v19.7</title>
         <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
         <style>
-            body { font-family: Arial; background-color: #0d1117; color: #eee; margin: 30px; }
+            body { background-color: #0d1117; color: #eee; font-family: Arial; margin: 30px; }
+            #status { background:#161b22; padding:10px; border-radius:10px; margin-bottom:20px; }
             .chart { width: 100%; height: 400px; margin-bottom: 40px; }
-            button { background-color: #1f6feb; border: none; padding: 8px 12px; color: white; border-radius: 5px; margin: 5px; cursor: pointer; }
-            button:hover { background-color: #388bfd; }
-            #status { margin-top: 10px; font-size: 14px; color: #ccc; }
         </style>
     </head>
     <body>
-        <h1>📊 Market Structure Range Dashboard (v19.6)</h1>
-        <div id="status">Loading data...</div>
+        <h1>📈 Market Structure Range Dashboard (v19.7)</h1>
+        <div id="status">Checking OKX Auth...</div>
         <div id="ltf" class="chart"></div>
         <div id="htf" class="chart"></div>
+
         <script>
-            async function fetchRanges(){
-                const res = await fetch('/api/ranges');
-                return res.json();
-            }
+            async function fetchStatus(){ return fetch('/status').then(r=>r.json()); }
+            async function fetchRanges(){ return fetch('/api/ranges').then(r=>r.json()); }
             function plotRange(div, data){
-                if(!data.length){Plotly.newPlot(div, [], {title:'No range data found'});return;}
+                if(!data.length){Plotly.newPlot(div,[],{title:'No range data found'});return;}
                 const r=data[0];
                 const trace={x:['Low','EQ','High'],y:[r.range_low,r.eq,r.range_high],
                              type:'scatter',mode:'lines+markers',line:{color:'#00ccff'}};
                 Plotly.newPlot(div,[trace],{title:`${div.toUpperCase()} | ${r.timeframe} | Score ${r.score}`});
             }
             async function refresh(){
-                document.getElementById('status').innerText='⏳ Updating... '+new Date().toLocaleTimeString();
-                const data=await fetchRanges();
-                plotRange('ltf',data.LTF);
-                plotRange('htf',data.HTF);
-                document.getElementById('status').innerText='✅ Updated '+new Date().toLocaleTimeString();
+                const s=await fetchStatus();
+                document.getElementById('status').innerHTML=
+                    `<b>Server:</b> ${s.server}<br><b>Symbol:</b> ${s.symbol}<br><b>OKX Auth:</b> ${s.okx_auth}<br><b>Last Updated:</b> ${new Date().toLocaleTimeString()}`;
+                const d=await fetchRanges();
+                plotRange('ltf',d.LTF);
+                plotRange('htf',d.HTF);
             }
             refresh();
             setInterval(refresh,60000);
@@ -232,4 +247,4 @@ async def dashboard_page():
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8080))
-    uvicorn.run("server:app", host="0.0.0.0", port=port, reload=False)
+    uvicorn.run("server:app", host="0.0.0.0", port=port)
