@@ -1,5 +1,5 @@
 # ================================================================
-# server.py — HPB–TCT v19.7 (OKX Auth Fix + Status Dashboard)
+# server.py — HPB–TCT v19.8 (OKX Auth Fix + Cached Ranges)
 # ================================================================
 
 import os
@@ -33,10 +33,13 @@ OKX_PATH = "/api/v5/market/candles"
 LTF_INTERVALS = ["1m", "3m", "5m", "15m", "30m", "1H"]
 HTF_INTERVALS = ["2H", "4H", "6H", "12H", "1D", "1W"]
 
+# Cached last successful range data
+CACHE_FILE = "range_cache.json"
+
 # ================================================================
 # FASTAPI APP
 # ================================================================
-app = FastAPI(title="HPB–TCT v19.7", version="1.4.0")
+app = FastAPI(title="HPB–TCT v19.8", version="1.5.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True,
@@ -46,7 +49,7 @@ app.add_middleware(
 # ================================================================
 # ENV INITIALIZATION
 # ================================================================
-print("🔧 Initializing HPB–TCT Environment (v19.7)...")
+print("🔧 Initializing HPB–TCT Environment (v19.8)...")
 try:
     env = AUTO_INIT()
     print(f"✅ Environment initialized successfully with config: {TENSORTRADE_CONFIG}")
@@ -55,10 +58,10 @@ except Exception as e:
     env = None
 
 # ================================================================
-# OKX SIGNING & AUTH
+# OKX SIGNING (improved millisecond precision)
 # ================================================================
 def okx_headers(method, path, query=""):
-    ts = datetime.utcnow().isoformat("T", "milliseconds") + "Z"
+    ts = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
     msg = f"{ts}{method}{path}{query}"
     sign = base64.b64encode(
         hmac.new(OKX_SECRET_KEY.encode(), msg.encode(), hashlib.sha256).digest()
@@ -69,17 +72,23 @@ def okx_headers(method, path, query=""):
         "OK-ACCESS-TIMESTAMP": ts,
         "OK-ACCESS-PASSPHRASE": OKX_PASSPHRASE,
         "Content-Type": "application/json",
-        "User-Agent": "HPB-TCT-v19.7",
+        "User-Agent": "HPB-TCT-v19.8",
     }
 
 async def verify_okx_auth():
-    """Check if OKX API key works."""
-    test_path = "/api/v5/account/config"
+    """Check if OKX API key works using /account/balance."""
+    path = "/api/v5/account/balance"
+    query = "?ccy=USDT"
     try:
         async with httpx.AsyncClient(timeout=10) as c:
-            r = await c.get(f"{OKX_BASE}{test_path}", headers=okx_headers("GET", test_path))
-            return r.status_code == 200
-    except Exception:
+            r = await c.get(f"{OKX_BASE}{path}{query}", headers=okx_headers("GET", path, query))
+            if r.status_code == 200:
+                return True
+            else:
+                print(f"[OKX_AUTH_FAIL] HTTP {r.status_code}: {r.text}")
+                return False
+    except Exception as e:
+        print(f"[OKX_AUTH_ERROR] {e}")
         return False
 
 # ================================================================
@@ -166,17 +175,37 @@ class RangeScanner:
         return self.results
 
 # ================================================================
+# CACHE HANDLING
+# ================================================================
+def save_cache(data):
+    try:
+        with open(CACHE_FILE, "w") as f:
+            json.dump(data, f)
+    except Exception as e:
+        print(f"[CACHE_WRITE_ERROR] {e}")
+
+def load_cache():
+    if not os.path.exists(CACHE_FILE):
+        return {"LTF": [], "HTF": []}
+    try:
+        with open(CACHE_FILE, "r") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"[CACHE_READ_ERROR] {e}")
+        return {"LTF": [], "HTF": []}
+
+# ================================================================
 # ROUTES
 # ================================================================
 @app.get("/")
 async def root():
-    return {"status": "running", "version": "19.7"}
+    return {"status": "running", "version": "19.8"}
 
 @app.get("/status")
 async def status():
     verified = await verify_okx_auth()
     return {
-        "server": "HPB–TCT v19.7",
+        "server": "HPB–TCT v19.8",
         "okx_auth": "✅ Verified" if verified else "❌ Invalid",
         "symbol": SYMBOL,
         "timestamp": datetime.utcnow().isoformat(),
@@ -185,15 +214,21 @@ async def status():
 @app.get("/api/ranges")
 async def get_ranges():
     scanner = RangeScanner()
-    results = await scanner.run_scan()
-    data = {
-        g: [
-            {"timeframe": r.timeframe, "range_high": r.range_high, "range_low": r.range_low, "eq": r.eq, "score": r.score}
-            for r in results[g]
-        ]
-        for g in results
-    }
-    return JSONResponse(content=data)
+    try:
+        results = await scanner.run_scan()
+        data = {
+            g: [
+                {"timeframe": r.timeframe, "range_high": r.range_high, "range_low": r.range_low, "eq": r.eq, "score": r.score}
+                for r in results[g]
+            ]
+            for g in results
+        }
+        save_cache(data)
+        return JSONResponse(content=data)
+    except Exception as e:
+        print(f"[SCAN_ERROR] {e}")
+        cached = load_cache()
+        return JSONResponse(content=cached)
 
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard_page():
@@ -201,7 +236,7 @@ async def dashboard_page():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>📊 HPB–TCT Dashboard v19.7</title>
+        <title>📊 HPB–TCT Dashboard v19.8</title>
         <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
         <style>
             body { background-color: #0d1117; color: #eee; font-family: Arial; margin: 30px; }
@@ -210,7 +245,7 @@ async def dashboard_page():
         </style>
     </head>
     <body>
-        <h1>📈 Market Structure Range Dashboard (v19.7)</h1>
+        <h1>📈 Market Structure Range Dashboard (v19.8)</h1>
         <div id="status">Checking OKX Auth...</div>
         <div id="ltf" class="chart"></div>
         <div id="htf" class="chart"></div>
