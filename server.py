@@ -1,5 +1,5 @@
 # ================================================================
-# server.py — HPB–TCT v19.8 (OKX Auth Fix + Cached Ranges)
+# server.py — HPB–TCT v19.8b (Env Compatibility + OKX Auth Fix)
 # ================================================================
 
 import os
@@ -22,24 +22,24 @@ from hpb_rig_validator import range_integrity_validator
 # ================================================================
 # CONFIGURATION
 # ================================================================
-OKX_API_KEY = os.getenv("OKX_API_KEY", "")
-OKX_SECRET_KEY = os.getenv("OKX_SECRET_KEY", "")
+# 🔧 Auto-detect both naming styles for Render or local environments
+OKX_API_KEY = os.getenv("OKX_API_KEY") or os.getenv("OKX_KEY", "")
+OKX_SECRET_KEY = os.getenv("OKX_SECRET_KEY") or os.getenv("OKX_SECRET", "")
 OKX_PASSPHRASE = os.getenv("OKX_PASSPHRASE", "")
-SYMBOL = "BTC-USDT-SWAP"
 
+SYMBOL = "BTC-USDT-SWAP"
 OKX_BASE = "https://www.okx.com"
 OKX_PATH = "/api/v5/market/candles"
 
 LTF_INTERVALS = ["1m", "3m", "5m", "15m", "30m", "1H"]
 HTF_INTERVALS = ["2H", "4H", "6H", "12H", "1D", "1W"]
 
-# Cached last successful range data
 CACHE_FILE = "range_cache.json"
 
 # ================================================================
 # FASTAPI APP
 # ================================================================
-app = FastAPI(title="HPB–TCT v19.8", version="1.5.0")
+app = FastAPI(title="HPB–TCT v19.8b", version="1.5.1")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True,
@@ -49,7 +49,7 @@ app.add_middleware(
 # ================================================================
 # ENV INITIALIZATION
 # ================================================================
-print("🔧 Initializing HPB–TCT Environment (v19.8)...")
+print("🔧 Initializing HPB–TCT Environment (v19.8b)...")
 try:
     env = AUTO_INIT()
     print(f"✅ Environment initialized successfully with config: {TENSORTRADE_CONFIG}")
@@ -58,7 +58,7 @@ except Exception as e:
     env = None
 
 # ================================================================
-# OKX SIGNING (improved millisecond precision)
+# OKX SIGNING (millisecond precision)
 # ================================================================
 def okx_headers(method, path, query=""):
     ts = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
@@ -72,7 +72,7 @@ def okx_headers(method, path, query=""):
         "OK-ACCESS-TIMESTAMP": ts,
         "OK-ACCESS-PASSPHRASE": OKX_PASSPHRASE,
         "Content-Type": "application/json",
-        "User-Agent": "HPB-TCT-v19.8",
+        "User-Agent": "HPB-TCT-v19.8b",
     }
 
 async def verify_okx_auth():
@@ -199,13 +199,13 @@ def load_cache():
 # ================================================================
 @app.get("/")
 async def root():
-    return {"status": "running", "version": "19.8"}
+    return {"status": "running", "version": "19.8b"}
 
 @app.get("/status")
 async def status():
     verified = await verify_okx_auth()
     return {
-        "server": "HPB–TCT v19.8",
+        "server": "HPB–TCT v19.8b",
         "okx_auth": "✅ Verified" if verified else "❌ Invalid",
         "symbol": SYMBOL,
         "timestamp": datetime.utcnow().isoformat(),
@@ -236,7 +236,7 @@ async def dashboard_page():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>📊 HPB–TCT Dashboard v19.8</title>
+        <title>📊 HPB–TCT Dashboard v19.8b</title>
         <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
         <style>
             body { background-color: #0d1117; color: #eee; font-family: Arial; margin: 30px; }
@@ -245,7 +245,7 @@ async def dashboard_page():
         </style>
     </head>
     <body>
-        <h1>📈 Market Structure Range Dashboard (v19.8)</h1>
+        <h1>📈 Market Structure Range Dashboard (v19.8b)</h1>
         <div id="status">Checking OKX Auth...</div>
         <div id="ltf" class="chart"></div>
         <div id="htf" class="chart"></div>
