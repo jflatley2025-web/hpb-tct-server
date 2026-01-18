@@ -1,5 +1,5 @@
 # ================================================================
-# server.py — HPB–TCT v19.4 AutoLearn + Range Scanner Dashboard (Fixed Render Route Version)
+# server.py — HPB–TCT v19.4 AutoLearn + Range Scanner Dashboard (Stable Render Build)
 # ================================================================
 
 import os
@@ -17,7 +17,6 @@ from fastapi.responses import JSONResponse, HTMLResponse
 from tensortrade_env import HPB_TensorTrade_Env
 from tensortrade_config_ext import AUTO_INIT, TENSORTRADE_CONFIG
 from hpb_rig_validator import range_integrity_validator
-
 
 # ================================================================
 # LOGGING
@@ -77,13 +76,12 @@ if env is not None and not any(hasattr(env, fn) for fn in ["auto_train", "train"
     env.train = dummy_train
 
 # ================================================================
-# HELPER LOGIC MODULES
+# HELPER MODULES
 # ================================================================
 def context_compression(input_text: str, max_tokens: int = 2048) -> str:
     lines = input_text.splitlines()
     unique = list(dict.fromkeys(lines))
-    compressed = "\n".join(unique[:max_tokens // 50])
-    return compressed
+    return "\n".join(unique[:max_tokens // 50])
 
 def freshness_gate(context_timestamp: str, freshness_window_minutes: int = 90) -> bool:
     try:
@@ -96,10 +94,8 @@ def freshness_gate(context_timestamp: str, freshness_window_minutes: int = 90) -
 def variance_stabilizer(values):
     if not values:
         return 0.0
-    mean = statistics.mean(values)
     var = statistics.pvariance(values)
-    stabilized = max(0.0, 1 - math.tanh(var))
-    return stabilized
+    return max(0.0, 1 - math.tanh(var))
 
 def active_reasoning_verifier(result_dict: dict) -> dict:
     try:
@@ -116,7 +112,7 @@ def remember_context(entry: dict, max_entries: int = 10):
         EPHEMERAL_MEMORY.pop(0)
 
 # ================================================================
-# RANGE SCANNER
+# RANGE SCANNER (Stable Version with Fallbacks)
 # ================================================================
 BYBIT_URL = "https://api.bybit.com/v5/market/kline"
 LTF_INTERVALS = ["1", "3", "5", "15", "30", "60"]
@@ -141,17 +137,36 @@ class BybitRangeScanner:
         self.current_tf = None
 
     async def fetch_klines(self, tf):
-        params = {"category": self.category, "symbol": self.symbol, "interval": tf, "limit": self.limit}
+        params = {"symbol": self.symbol, "interval": tf, "limit": self.limit}
         headers = {"User-Agent": "HPB-TCT-v19.4/Enhanced"}
+        data = []
         try:
             async with httpx.AsyncClient(timeout=30, headers=headers) as c:
+                # Try linear first
+                params["category"] = "linear"
                 r = await c.get(BYBIT_URL, params=params)
                 data = r.json().get("result", {}).get("list", [])
+
+                # Try inverse
                 if not data:
-                    params["category"] = "spot"
+                    params["category"] = "inverse"
                     r2 = await c.get(BYBIT_URL, params=params)
                     data = r2.json().get("result", {}).get("list", [])
-            candles = [{"t": int(x[0]), "h": float(x[2]), "l": float(x[3]), "c": float(x[4])} for x in data]
+
+                # Fallback to spot
+                if not data:
+                    params["category"] = "spot"
+                    r3 = await c.get(BYBIT_URL, params=params)
+                    data = r3.json().get("result", {}).get("list", [])
+
+            if not data:
+                logger.warning(f"[BYBIT_EMPTY] No kline data for {self.symbol} {tf}")
+                return []
+
+            candles = [
+                {"t": int(x[0]), "h": float(x[2]), "l": float(x[3]), "c": float(x[4])}
+                for x in data
+            ]
             return candles[::-1]
         except Exception as e:
             logger.error(f"[FETCH_ERROR] {tf}: {e}")
@@ -174,10 +189,11 @@ class BybitRangeScanner:
         t_disp = min(len(candles) / 300, 1)
         return round(0.5 * smoothness + 0.5 * t_disp, 3)
 
-    async def scan_timeframes(self, group, tfs):
+    async def scan_timeframes(self, group_name, tfs):
         for tf in tfs:
             if self.paused:
                 self.current_tf = tf
+                logger.info(f"[PAUSE] Scanner paused at {tf}")
                 return
             candles = await self.fetch_klines(tf)
             if not candles:
@@ -189,16 +205,19 @@ class BybitRangeScanner:
             sc = self.score_range(candles, high, low)
             rc = RangeCandidate(tf, high, low, candles)
             rc.score = sc
-            self.results[group].append(rc)
-            await asyncio.sleep(1.2)
-        self.results[group].sort(key=lambda x: x.score, reverse=True)
-        self.results[group] = self.results[group][:3]
+            self.results[group_name].append(rc)
+            logger.info(f"[SCAN] {group_name} {tf} | Score={sc}")
+            await asyncio.sleep(1.5)
+
+        self.results[group_name].sort(key=lambda x: x.score, reverse=True)
+        self.results[group_name] = self.results[group_name][:3]
 
     async def run_scan(self):
         await asyncio.gather(
             self.scan_timeframes("LTF", LTF_INTERVALS),
             self.scan_timeframes("HTF", HTF_INTERVALS),
         )
+        logger.info("[SCAN_COMPLETE] Range scan completed successfully.")
         return self.results
 
 # ================================================================
@@ -208,11 +227,9 @@ class BybitRangeScanner:
 async def root():
     return {
         "status": "running",
-        "environment": "HPB–TCT v19.4 Enhanced Logic",
+        "environment": "HPB–TCT v19.4",
         "initialized": env is not None,
         "train_cycles_completed": state.get("train_cycles_completed", 0),
-        "last_bias": state.get("last_bias"),
-        "last_confidence": state.get("last_confidence"),
     }
 
 @app.get("/status")
@@ -220,8 +237,6 @@ async def status():
     return {
         "server": "HPB–TCT v19.4",
         "initialized": env is not None,
-        "train_cycles_completed": state.get("train_cycles_completed", 0),
-        "last_RIG_status": state.get("last_RIG_status"),
         "heartbeat": datetime.utcnow().isoformat(),
     }
 
@@ -230,9 +245,17 @@ async def get_ranges():
     scanner = BybitRangeScanner()
     results = await scanner.run_scan()
     data = {
-        g: [{"timeframe": r.timeframe, "range_high": r.range_high,
-             "range_low": r.range_low, "eq": r.eq, "score": r.score}
-            for r in results[g]] for g in results
+        g: [
+            {
+                "timeframe": r.timeframe,
+                "range_high": r.range_high,
+                "range_low": r.range_low,
+                "eq": r.eq,
+                "score": r.score,
+            }
+            for r in results[g]
+        ]
+        for g in results
     }
     return JSONResponse(content=data)
 
@@ -295,36 +318,9 @@ async def dashboard_page():
     return HTMLResponse(content=html)
 
 # ================================================================
-# STARTUP DEBUG (VERIFY ROUTES)
-# ================================================================
-@app.on_event("startup")
-async def verify_routes():
-    route_list = [r.path for r in app.routes]
-    logger.info(f"[ROUTE_REGISTERED] {route_list}")
-
-# ================================================================
-# ENTRY POINT (FOR RENDER DEPLOYMENT)
+# ENTRY POINT
 # ================================================================
 if __name__ == "__main__":
     import uvicorn
-
-    cwd = os.getcwd()
-    print(">>> LOADED FROM DIRECTORY:", cwd)
-    print(">>> ROUTES LOADED:", [r.path for r in app.routes])
-
-    # Force absolute app directory for Render path alignment
-    app_dir = "/opt/render/project/src"
-    app_module = "server:app"
-
     port = int(os.environ.get("PORT", 8080))
-
-    print(f">>> STARTING UVICORN from {app_dir} on port {port} ...")
-
-    uvicorn.run(
-        app_module,
-        host="0.0.0.0",
-        port=port,
-        reload=False,
-        app_dir=app_dir,
-    )
-
+    uvicorn.run("server:app", host="0.0.0.0", port=port, reload=False)
