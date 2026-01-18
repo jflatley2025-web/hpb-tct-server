@@ -1,5 +1,5 @@
 # ================================================================
-# server.py — HPB–TCT v19.4 AutoLearn + Range Scanner Dashboard (Stable Render Build)
+# server.py — HPB–TCT v19.4 AutoLearn + Range Scanner Dashboard (Final Stable Build)
 # ================================================================
 
 import os
@@ -76,43 +76,7 @@ if env is not None and not any(hasattr(env, fn) for fn in ["auto_train", "train"
     env.train = dummy_train
 
 # ================================================================
-# HELPER MODULES
-# ================================================================
-def context_compression(input_text: str, max_tokens: int = 2048) -> str:
-    lines = input_text.splitlines()
-    unique = list(dict.fromkeys(lines))
-    return "\n".join(unique[:max_tokens // 50])
-
-def freshness_gate(context_timestamp: str, freshness_window_minutes: int = 90) -> bool:
-    try:
-        dt = datetime.fromisoformat(context_timestamp)
-        age = (datetime.utcnow() - dt).total_seconds() / 60
-        return age <= freshness_window_minutes
-    except Exception:
-        return True
-
-def variance_stabilizer(values):
-    if not values:
-        return 0.0
-    var = statistics.pvariance(values)
-    return max(0.0, 1 - math.tanh(var))
-
-def active_reasoning_verifier(result_dict: dict) -> dict:
-    try:
-        result_dict["verified"] = True
-        result_dict["reasoning_quality"] = "high" if result_dict.get("status") != "BLOCK" else "conservative"
-        return result_dict
-    except Exception as e:
-        return {"verified": False, "error": str(e)}
-
-EPHEMERAL_MEMORY = []
-def remember_context(entry: dict, max_entries: int = 10):
-    EPHEMERAL_MEMORY.append(entry)
-    if len(EPHEMERAL_MEMORY) > max_entries:
-        EPHEMERAL_MEMORY.pop(0)
-
-# ================================================================
-# RANGE SCANNER (Stable Version with Fallbacks)
+# RANGE SCANNER
 # ================================================================
 BYBIT_URL = "https://api.bybit.com/v5/market/kline"
 LTF_INTERVALS = ["1", "3", "5", "15", "30", "60"]
@@ -128,39 +92,45 @@ class RangeCandidate:
         self.score = 0.0
 
 class BybitRangeScanner:
-    def __init__(self, symbol="BTCUSDT", category="linear", limit=200):
+    def __init__(self, symbol="BTCUSDT", limit=200):
         self.symbol = symbol
-        self.category = category
         self.limit = limit
         self.results = {"LTF": [], "HTF": []}
         self.paused = False
         self.current_tf = None
 
     async def fetch_klines(self, tf):
-        params = {"symbol": self.symbol, "interval": tf, "limit": self.limit}
         headers = {"User-Agent": "HPB-TCT-v19.4/Enhanced"}
+        # Multiple fallback combinations
+        candidates = [
+            ("linear", self.symbol),
+            ("linear", self.symbol.replace("-", "")),
+            ("inverse", self.symbol.replace("USDT", "USD")),
+            ("spot", self.symbol.replace("-", "")),
+        ]
         data = []
         try:
             async with httpx.AsyncClient(timeout=30, headers=headers) as c:
-                # Try linear first
-                params["category"] = "linear"
-                r = await c.get(BYBIT_URL, params=params)
-                data = r.json().get("result", {}).get("list", [])
+                for category, sym in candidates:
+                    params = {"category": category, "symbol": sym, "interval": tf, "limit": self.limit}
+                    r = await c.get(BYBIT_URL, params=params)
+                    j = r.json()
 
-                # Try inverse
-                if not data:
-                    params["category"] = "inverse"
-                    r2 = await c.get(BYBIT_URL, params=params)
-                    data = r2.json().get("result", {}).get("list", [])
+                    logger.info(f"[BYBIT] {category.upper()} {sym} {tf} retCode={j.get('retCode')}")
+                    if j.get("retCode") != 0:
+                        continue
 
-                # Fallback to spot
-                if not data:
-                    params["category"] = "spot"
-                    r3 = await c.get(BYBIT_URL, params=params)
-                    data = r3.json().get("result", {}).get("list", [])
+                    d = j.get("result", {}).get("list", [])
+                    if d:
+                        data = d
+                        logger.info(f"[BYBIT_OK] ✅ {category.upper()} {sym} {tf} returned {len(d)} candles.")
+                        break
+                    else:
+                        logger.warning(f"[BYBIT_EMPTY] {category.upper()} {sym} {tf} no candles.")
+                    await asyncio.sleep(0.5)
 
             if not data:
-                logger.warning(f"[BYBIT_EMPTY] No kline data for {self.symbol} {tf}")
+                logger.warning(f"[BYBIT_FAIL] ❌ No data after all retries for {self.symbol} {tf}")
                 return []
 
             candles = [
@@ -189,7 +159,7 @@ class BybitRangeScanner:
         t_disp = min(len(candles) / 300, 1)
         return round(0.5 * smoothness + 0.5 * t_disp, 3)
 
-    async def scan_timeframes(self, group_name, tfs):
+    async def scan_timeframes(self, group, tfs):
         for tf in tfs:
             if self.paused:
                 self.current_tf = tf
@@ -205,19 +175,18 @@ class BybitRangeScanner:
             sc = self.score_range(candles, high, low)
             rc = RangeCandidate(tf, high, low, candles)
             rc.score = sc
-            self.results[group_name].append(rc)
-            logger.info(f"[SCAN] {group_name} {tf} | Score={sc}")
+            self.results[group].append(rc)
+            logger.info(f"[SCAN] {group} {tf} | Score={sc}")
             await asyncio.sleep(1.5)
-
-        self.results[group_name].sort(key=lambda x: x.score, reverse=True)
-        self.results[group_name] = self.results[group_name][:3]
+        self.results[group].sort(key=lambda x: x.score, reverse=True)
+        self.results[group] = self.results[group][:3]
 
     async def run_scan(self):
         await asyncio.gather(
             self.scan_timeframes("LTF", LTF_INTERVALS),
             self.scan_timeframes("HTF", HTF_INTERVALS),
         )
-        logger.info("[SCAN_COMPLETE] Range scan completed successfully.")
+        logger.info("[SCAN_COMPLETE] ✅ Range scan completed successfully.")
         return self.results
 
 # ================================================================
@@ -225,20 +194,11 @@ class BybitRangeScanner:
 # ================================================================
 @app.get("/")
 async def root():
-    return {
-        "status": "running",
-        "environment": "HPB–TCT v19.4",
-        "initialized": env is not None,
-        "train_cycles_completed": state.get("train_cycles_completed", 0),
-    }
+    return {"status": "running", "environment": "HPB–TCT v19.4"}
 
 @app.get("/status")
 async def status():
-    return {
-        "server": "HPB–TCT v19.4",
-        "initialized": env is not None,
-        "heartbeat": datetime.utcnow().isoformat(),
-    }
+    return {"server": "HPB–TCT v19.4", "heartbeat": datetime.utcnow().isoformat()}
 
 @app.get("/api/ranges")
 async def get_ranges():
@@ -246,13 +206,7 @@ async def get_ranges():
     results = await scanner.run_scan()
     data = {
         g: [
-            {
-                "timeframe": r.timeframe,
-                "range_high": r.range_high,
-                "range_low": r.range_low,
-                "eq": r.eq,
-                "score": r.score,
-            }
+            {"timeframe": r.timeframe, "range_high": r.range_high, "range_low": r.range_low, "eq": r.eq, "score": r.score}
             for r in results[g]
         ]
         for g in results
