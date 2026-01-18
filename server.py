@@ -1,5 +1,5 @@
 # ================================================================
-# server.py — HPB–TCT v19.4 AutoLearn + Range Scanner Dashboard (Final Stable Build)
+# server.py — HPB–TCT v19.5 (Bybit + OKX Hybrid Range Dashboard)
 # ================================================================
 
 import os
@@ -8,7 +8,6 @@ import logging
 import asyncio
 import statistics
 import httpx
-import math
 from datetime import datetime
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,7 +30,7 @@ logger = logging.getLogger("HPB-TCT-Server")
 # ================================================================
 # FASTAPI
 # ================================================================
-app = FastAPI(title="HPB–TCT AutoLearn v19.4", version="1.1.0")
+app = FastAPI(title="HPB–TCT AutoLearn v19.5", version="1.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True,
@@ -39,7 +38,7 @@ app.add_middleware(
 )
 
 # ================================================================
-# STATE HANDLING
+# STATE MANAGEMENT
 # ================================================================
 STATE_FILE = os.path.join(os.getcwd(), "hpb_autolearn_state.json")
 
@@ -61,7 +60,7 @@ state = load_state()
 # ================================================================
 # ENVIRONMENT INITIALIZATION
 # ================================================================
-logger.info("🔧 Initializing HPB–TCT Environment (v19.4 Enhanced Logic)...")
+logger.info("🔧 Initializing HPB–TCT Environment (v19.5 Enhanced Logic)...")
 try:
     env = AUTO_INIT()
     logger.info(f"✅ Environment initialized successfully with config: {TENSORTRADE_CONFIG}")
@@ -76,9 +75,11 @@ if env is not None and not any(hasattr(env, fn) for fn in ["auto_train", "train"
     env.train = dummy_train
 
 # ================================================================
-# RANGE SCANNER
+# RANGE SCANNER — BYBIT + OKX HYBRID
 # ================================================================
 BYBIT_URL = "https://api.bybit.com/v5/market/kline"
+OKX_URL = "https://www.okx.com/api/v5/market/candles"
+
 LTF_INTERVALS = ["1", "3", "5", "15", "30", "60"]
 HTF_INTERVALS = ["120", "240", "360", "720", "D", "W"]
 
@@ -91,7 +92,7 @@ class RangeCandidate:
         self.candles = candles
         self.score = 0.0
 
-class BybitRangeScanner:
+class RangeScanner:
     def __init__(self, symbol="BTCUSDT", limit=200):
         self.symbol = symbol
         self.limit = limit
@@ -100,46 +101,63 @@ class BybitRangeScanner:
         self.current_tf = None
 
     async def fetch_klines(self, tf):
-        headers = {"User-Agent": "HPB-TCT-v19.4/Enhanced"}
-        # Multiple fallback combinations
-        candidates = [
+        headers = {"User-Agent": "HPB-TCT-v19.5/Hybrid"}
+        BYBIT_CANDIDATES = [
             ("linear", self.symbol),
             ("linear", self.symbol.replace("-", "")),
             ("inverse", self.symbol.replace("USDT", "USD")),
-            ("spot", self.symbol.replace("-", "")),
         ]
         data = []
+
+        # --- Try Bybit first ---
         try:
-            async with httpx.AsyncClient(timeout=30, headers=headers) as c:
-                for category, sym in candidates:
+            async with httpx.AsyncClient(timeout=20, headers=headers) as c:
+                for category, sym in BYBIT_CANDIDATES:
                     params = {"category": category, "symbol": sym, "interval": tf, "limit": self.limit}
                     r = await c.get(BYBIT_URL, params=params)
-                    j = r.json()
-
-                    logger.info(f"[BYBIT] {category.upper()} {sym} {tf} retCode={j.get('retCode')}")
-                    if j.get("retCode") != 0:
-                        continue
-
-                    d = j.get("result", {}).get("list", [])
-                    if d:
-                        data = d
-                        logger.info(f"[BYBIT_OK] ✅ {category.upper()} {sym} {tf} returned {len(d)} candles.")
+                    if r.status_code == 403:
+                        logger.warning(f"[BYBIT_BLOCKED] {sym} {tf} — 403 Forbidden")
+                        data = []
                         break
-                    else:
-                        logger.warning(f"[BYBIT_EMPTY] {category.upper()} {sym} {tf} no candles.")
-                    await asyncio.sleep(0.5)
+                    j = r.json()
+                    if j.get("retCode") == 0:
+                        data = j.get("result", {}).get("list", [])
+                        if data:
+                            logger.info(f"[BYBIT_OK] ✅ {category.upper()} {sym} {tf} got {len(data)} candles.")
+                            break
+                    await asyncio.sleep(0.3)
+        except Exception as e:
+            logger.warning(f"[BYBIT_FAIL] {tf}: {e}")
+            data = []
 
-            if not data:
-                logger.warning(f"[BYBIT_FAIL] ❌ No data after all retries for {self.symbol} {tf}")
+        # --- If Bybit failed, use OKX fallback ---
+        if not data:
+            try:
+                okx_tf = {
+                    "1": "1m", "3": "3m", "5": "5m", "15": "15m",
+                    "30": "30m", "60": "1H", "120": "2H", "240": "4H",
+                    "360": "6H", "720": "12H", "D": "1D", "W": "1W"
+                }.get(tf, "1H")
+                params = {"instId": f"{self.symbol.replace('-', '')}-SWAP", "bar": okx_tf, "limit": str(self.limit)}
+                async with httpx.AsyncClient(timeout=20, headers=headers) as c:
+                    r = await c.get(OKX_URL, params=params)
+                    j = r.json()
+                    data = j.get("data", [])
+                    if data:
+                        logger.info(f"[OKX_OK] ✅ Fallback success: {len(data)} candles from OKX ({okx_tf}).")
+            except Exception as e:
+                logger.error(f"[OKX_FAIL] {tf}: {e}")
                 return []
 
+        # --- Parse candles ---
+        try:
             candles = [
                 {"t": int(x[0]), "h": float(x[2]), "l": float(x[3]), "c": float(x[4])}
                 for x in data
             ]
             return candles[::-1]
         except Exception as e:
-            logger.error(f"[FETCH_ERROR] {tf}: {e}")
+            logger.error(f"[PARSE_ERROR] {tf}: {e}")
             return []
 
     def detect_range(self, candles):
@@ -177,7 +195,7 @@ class BybitRangeScanner:
             rc.score = sc
             self.results[group].append(rc)
             logger.info(f"[SCAN] {group} {tf} | Score={sc}")
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(1)
         self.results[group].sort(key=lambda x: x.score, reverse=True)
         self.results[group] = self.results[group][:3]
 
@@ -194,15 +212,15 @@ class BybitRangeScanner:
 # ================================================================
 @app.get("/")
 async def root():
-    return {"status": "running", "environment": "HPB–TCT v19.4"}
+    return {"status": "running", "environment": "HPB–TCT v19.5"}
 
 @app.get("/status")
 async def status():
-    return {"server": "HPB–TCT v19.4", "heartbeat": datetime.utcnow().isoformat()}
+    return {"server": "HPB–TCT v19.5", "heartbeat": datetime.utcnow().isoformat()}
 
 @app.get("/api/ranges")
 async def get_ranges():
-    scanner = BybitRangeScanner()
+    scanner = RangeScanner()
     results = await scanner.run_scan()
     data = {
         g: [
@@ -229,7 +247,7 @@ async def dashboard_page():
         </style>
     </head>
     <body>
-        <h1>📊 Market Structure Range Dashboard</h1>
+        <h1>📊 Market Structure Range Dashboard (v19.5)</h1>
         <div id="ltf" class="chart"></div>
         <button onclick="loadExtra('LTF',2)">Show LTF #2</button>
         <button onclick="loadExtra('LTF',3)">Show LTF #3</button>
