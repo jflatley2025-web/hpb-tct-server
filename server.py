@@ -1,5 +1,5 @@
 # ================================================================
-# server.py — HPB–TCT v20.0-stable (Render + OKX Auth Verified)
+# server.py — HPB–TCT v20.1 (OKX Auth + Subaccount + Diagnostics)
 # ================================================================
 
 import os
@@ -18,11 +18,14 @@ from fastapi.responses import JSONResponse, HTMLResponse
 # ================================================================
 # CONFIGURATION
 # ================================================================
-# ✅ Read from your actual Render env vars first
 OKX_API_KEY = os.getenv("OKX_KEY") or os.getenv("OKX_API_KEY") or ""
 OKX_SECRET_KEY = os.getenv("OKX_SECRET") or os.getenv("OKX_SECRET_KEY") or ""
 OKX_PASSPHRASE = os.getenv("OKX_PASSPHRASE") or ""
-OKX_URL = "https://www.okx.com/api/v5/market/candles"
+OKX_SUBACCOUNT = os.getenv("OKX_SUBACCOUNT", "")
+OKX_MODE = os.getenv("OKX_MODE", "live").lower()  # live | demo
+
+OKX_URL_BASE = "https://www.okx.com" if OKX_MODE == "live" else "https://www.okx.com/demo"
+OKX_URL = f"{OKX_URL_BASE}/api/v5/market/candles"
 SYMBOL = os.getenv("SYMBOL", "BTC-USDT-SWAP")
 
 LTF_INTERVALS = ["1m", "3m", "5m", "15m", "30m", "1H"]
@@ -31,7 +34,7 @@ HTF_INTERVALS = ["2H", "4H", "6H", "12H", "1D", "1W"]
 # ================================================================
 # FASTAPI APP
 # ================================================================
-app = FastAPI(title="HPB–TCT v20.0-stable", version="1.4.0")
+app = FastAPI(title="HPB–TCT v20.1", version="1.5.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True,
@@ -47,26 +50,31 @@ def okx_headers(path, method="GET"):
     sign = base64.b64encode(
         hmac.new(OKX_SECRET_KEY.encode(), msg.encode(), hashlib.sha256).digest()
     ).decode()
-    return {
+    headers = {
         "OK-ACCESS-KEY": OKX_API_KEY,
         "OK-ACCESS-SIGN": sign,
         "OK-ACCESS-TIMESTAMP": ts,
         "OK-ACCESS-PASSPHRASE": OKX_PASSPHRASE,
         "Content-Type": "application/json",
-        "User-Agent": "HPB-TCT-v20/Render",
+        "User-Agent": "HPB-TCT-v20.1/Render",
     }
+    if OKX_SUBACCOUNT:
+        headers["OK-ACCESS-PROJECT"] = OKX_SUBACCOUNT
+    return headers
 
 async def verify_okx_auth():
-    """Check OKX auth by calling balance endpoint."""
-    url = "https://www.okx.com/api/v5/account/balance"
+    """Check OKX authentication validity."""
+    url = f"{OKX_URL_BASE}/api/v5/account/balance"
     path = "/api/v5/account/balance"
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             r = await client.get(url, headers=okx_headers(path))
             if r.status_code == 200 and "data" in r.json():
+                print("[OKX_AUTH] ✅ Verified OKX credentials.")
                 return True
-            print(f"[OKX_AUTH_FAIL] HTTP {r.status_code}: {r.text}")
-            return False
+            else:
+                print(f"[OKX_AUTH_FAIL] HTTP {r.status_code}: {r.text}")
+                return False
     except Exception as e:
         print(f"[OKX_AUTH_EXCEPTION] {e}")
         return False
@@ -161,11 +169,18 @@ class RangeScanner:
 async def root():
     auth_ok = await verify_okx_auth()
     return {
-        "server": "HPB–TCT v20.0-stable",
+        "server": "HPB–TCT v20.1",
         "okx_auth": "✅ Verified" if auth_ok else "❌ Invalid",
         "symbol": SYMBOL,
+        "subaccount": OKX_SUBACCOUNT or "main",
+        "mode": OKX_MODE,
         "timestamp": datetime.utcnow().isoformat()
     }
+
+@app.get("/debug/env")
+async def debug_env():
+    keys = ["OKX_API_KEY", "OKX_SECRET_KEY", "OKX_KEY", "OKX_SECRET", "OKX_PASSPHRASE", "OKX_SUBACCOUNT", "OKX_MODE"]
+    return {"loaded": {k: bool(os.getenv(k)) for k in keys}}
 
 @app.get("/status")
 async def status():
@@ -175,20 +190,10 @@ async def status():
 async def get_ranges():
     scanner = RangeScanner()
     results = await scanner.run_scan()
-    data = {
-        g: [
-            {"timeframe": r.timeframe, "range_high": r.range_high, "range_low": r.range_low, "eq": r.eq, "score": r.score}
-            for r in results[g]
-        ]
+    return JSONResponse(content={
+        g: [{"timeframe": r.timeframe, "range_high": r.range_high, "range_low": r.range_low, "eq": r.eq, "score": r.score} for r in results[g]]
         for g in results
-    }
-    return JSONResponse(content=data)
-
-@app.get("/debug/env")
-async def debug_env():
-    keys = ["OKX_API_KEY", "OKX_SECRET_KEY", "OKX_KEY", "OKX_SECRET", "OKX_PASSPHRASE"]
-    loaded = {k: bool(os.getenv(k)) for k in keys}
-    return {"loaded": loaded}
+    })
 
 # ================================================================
 # ENTRY POINT
