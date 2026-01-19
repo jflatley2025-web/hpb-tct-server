@@ -1,5 +1,5 @@
 # ================================================================
-# server.py — HPB–TCT v19.8b (Env Compatibility + OKX Auth Fix)
+# server.py — HPB–TCT v19.8-debug (OKX Env Check + Auth Validation)
 # ================================================================
 
 import os
@@ -15,31 +15,22 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, HTMLResponse
 
-from tensortrade_env import HPB_TensorTrade_Env
-from tensortrade_config_ext import AUTO_INIT, TENSORTRADE_CONFIG
-from hpb_rig_validator import range_integrity_validator
-
 # ================================================================
 # CONFIGURATION
 # ================================================================
-# 🔧 Auto-detect both naming styles for Render or local environments
-OKX_API_KEY = os.getenv("OKX_API_KEY") or os.getenv("OKX_KEY", "")
-OKX_SECRET_KEY = os.getenv("OKX_SECRET_KEY") or os.getenv("OKX_SECRET", "")
-OKX_PASSPHRASE = os.getenv("OKX_PASSPHRASE", "")
-
-SYMBOL = "BTC-USDT-SWAP"
-OKX_BASE = "https://www.okx.com"
-OKX_PATH = "/api/v5/market/candles"
+OKX_API_KEY = os.getenv("OKX_API_KEY") or os.getenv("OKX_KEY") or ""
+OKX_SECRET_KEY = os.getenv("OKX_SECRET_KEY") or os.getenv("OKX_SECRET") or ""
+OKX_PASSPHRASE = os.getenv("OKX_PASSPHRASE") or ""
+OKX_URL = "https://www.okx.com/api/v5/market/candles"
+SYMBOL = os.getenv("SYMBOL", "BTC-USDT-SWAP")
 
 LTF_INTERVALS = ["1m", "3m", "5m", "15m", "30m", "1H"]
 HTF_INTERVALS = ["2H", "4H", "6H", "12H", "1D", "1W"]
 
-CACHE_FILE = "range_cache.json"
-
 # ================================================================
 # FASTAPI APP
 # ================================================================
-app = FastAPI(title="HPB–TCT v19.8b", version="1.5.1")
+app = FastAPI(title="HPB–TCT AutoLearn v19.8-debug", version="1.3.1")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True,
@@ -47,22 +38,11 @@ app.add_middleware(
 )
 
 # ================================================================
-# ENV INITIALIZATION
+# OKX REQUEST SIGNING
 # ================================================================
-print("🔧 Initializing HPB–TCT Environment (v19.8b)...")
-try:
-    env = AUTO_INIT()
-    print(f"✅ Environment initialized successfully with config: {TENSORTRADE_CONFIG}")
-except Exception as e:
-    print(f"⚠️ Environment initialization failed: {e}")
-    env = None
-
-# ================================================================
-# OKX SIGNING (millisecond precision)
-# ================================================================
-def okx_headers(method, path, query=""):
-    ts = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
-    msg = f"{ts}{method}{path}{query}"
+def okx_headers(path, method="GET"):
+    ts = datetime.utcnow().isoformat("T", "milliseconds") + "Z"
+    msg = f"{ts}{method}{path}"
     sign = base64.b64encode(
         hmac.new(OKX_SECRET_KEY.encode(), msg.encode(), hashlib.sha256).digest()
     ).decode()
@@ -72,23 +52,22 @@ def okx_headers(method, path, query=""):
         "OK-ACCESS-TIMESTAMP": ts,
         "OK-ACCESS-PASSPHRASE": OKX_PASSPHRASE,
         "Content-Type": "application/json",
-        "User-Agent": "HPB-TCT-v19.8b",
+        "User-Agent": "HPB-TCT-v19.8/Render",
     }
 
 async def verify_okx_auth():
-    """Check if OKX API key works using /account/balance."""
+    """Check if OKX API credentials work by calling /api/v5/account/balance"""
+    url = "https://www.okx.com/api/v5/account/balance"
     path = "/api/v5/account/balance"
-    query = "?ccy=USDT"
     try:
-        async with httpx.AsyncClient(timeout=10) as c:
-            r = await c.get(f"{OKX_BASE}{path}{query}", headers=okx_headers("GET", path, query))
-            if r.status_code == 200:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(url, headers=okx_headers(path))
+            if r.status_code == 200 and "data" in r.json():
                 return True
-            else:
-                print(f"[OKX_AUTH_FAIL] HTTP {r.status_code}: {r.text}")
-                return False
+            print(f"[OKX_AUTH_FAIL] HTTP {r.status_code}: {r.text}")
+            return False
     except Exception as e:
-        print(f"[OKX_AUTH_ERROR] {e}")
+        print(f"[OKX_AUTH_EXCEPTION] {e}")
         return False
 
 # ================================================================
@@ -110,17 +89,17 @@ class RangeScanner:
         self.results = {"LTF": [], "HTF": []}
 
     async def fetch_okx(self, tf):
-        query = f"?instId={self.symbol}&bar={tf}&limit={self.limit}"
+        params = {"instId": self.symbol, "bar": tf, "limit": str(self.limit)}
+        path = f"/api/v5/market/candles?instId={self.symbol}&bar={tf}&limit={self.limit}"
         try:
             async with httpx.AsyncClient(timeout=20) as c:
-                r = await c.get(f"{OKX_BASE}{OKX_PATH}{query}", headers=okx_headers("GET", OKX_PATH, query))
+                r = await c.get(OKX_URL, params=params, headers=okx_headers(path))
                 if r.status_code != 200:
-                    print(f"[OKX_FAIL] {tf} — HTTP {r.status_code}: {r.text}")
+                    print(f"[OKX_FAIL] {tf} — HTTP {r.status_code}")
                     return []
-                j = r.json()
-                data = j.get("data", [])
+                data = r.json().get("data", [])
                 if not data:
-                    print(f"[OKX_EMPTY] {tf}")
+                    print(f"[OKX_EMPTY] {tf} — No data returned.")
                     return []
                 candles = [
                     {"t": int(x[0]), "h": float(x[2]), "l": float(x[3]), "c": float(x[4])}
@@ -162,7 +141,7 @@ class RangeScanner:
             rc.score = sc
             self.results[group].append(rc)
             print(f"[SCAN] {group} {tf} | Score={sc}")
-            await asyncio.sleep(0.8)
+            await asyncio.sleep(1)
         self.results[group].sort(key=lambda x: x.score, reverse=True)
         self.results[group] = self.results[group][:3]
 
@@ -175,106 +154,63 @@ class RangeScanner:
         return self.results
 
 # ================================================================
-# CACHE HANDLING
-# ================================================================
-def save_cache(data):
-    try:
-        with open(CACHE_FILE, "w") as f:
-            json.dump(data, f)
-    except Exception as e:
-        print(f"[CACHE_WRITE_ERROR] {e}")
-
-def load_cache():
-    if not os.path.exists(CACHE_FILE):
-        return {"LTF": [], "HTF": []}
-    try:
-        with open(CACHE_FILE, "r") as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"[CACHE_READ_ERROR] {e}")
-        return {"LTF": [], "HTF": []}
-
-# ================================================================
 # ROUTES
 # ================================================================
 @app.get("/")
 async def root():
-    return {"status": "running", "version": "19.8b"}
-
-@app.get("/status")
-async def status():
-    verified = await verify_okx_auth()
+    auth_ok = await verify_okx_auth()
     return {
-        "server": "HPB–TCT v19.8b",
-        "okx_auth": "✅ Verified" if verified else "❌ Invalid",
+        "server": "HPB–TCT v19.8-debug",
+        "okx_auth": "✅ Verified" if auth_ok else "❌ Invalid",
         "symbol": SYMBOL,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.utcnow().isoformat()
     }
 
 @app.get("/api/ranges")
 async def get_ranges():
     scanner = RangeScanner()
-    try:
-        results = await scanner.run_scan()
-        data = {
-            g: [
-                {"timeframe": r.timeframe, "range_high": r.range_high, "range_low": r.range_low, "eq": r.eq, "score": r.score}
-                for r in results[g]
-            ]
-            for g in results
-        }
-        save_cache(data)
-        return JSONResponse(content=data)
-    except Exception as e:
-        print(f"[SCAN_ERROR] {e}")
-        cached = load_cache()
-        return JSONResponse(content=cached)
+    results = await scanner.run_scan()
+    data = {
+        g: [
+            {"timeframe": r.timeframe, "range_high": r.range_high, "range_low": r.range_low, "eq": r.eq, "score": r.score}
+            for r in results[g]
+        ]
+        for g in results
+    }
+    return JSONResponse(content=data)
 
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard_page():
     html = """
     <!DOCTYPE html>
-    <html>
-    <head>
-        <title>📊 HPB–TCT Dashboard v19.8b</title>
-        <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
-        <style>
-            body { background-color: #0d1117; color: #eee; font-family: Arial; margin: 30px; }
-            #status { background:#161b22; padding:10px; border-radius:10px; margin-bottom:20px; }
-            .chart { width: 100%; height: 400px; margin-bottom: 40px; }
-        </style>
-    </head>
-    <body>
-        <h1>📈 Market Structure Range Dashboard (v19.8b)</h1>
-        <div id="status">Checking OKX Auth...</div>
-        <div id="ltf" class="chart"></div>
-        <div id="htf" class="chart"></div>
-
-        <script>
-            async function fetchStatus(){ return fetch('/status').then(r=>r.json()); }
-            async function fetchRanges(){ return fetch('/api/ranges').then(r=>r.json()); }
-            function plotRange(div, data){
-                if(!data.length){Plotly.newPlot(div,[],{title:'No range data found'});return;}
-                const r=data[0];
-                const trace={x:['Low','EQ','High'],y:[r.range_low,r.eq,r.range_high],
-                             type:'scatter',mode:'lines+markers',line:{color:'#00ccff'}};
-                Plotly.newPlot(div,[trace],{title:`${div.toUpperCase()} | ${r.timeframe} | Score ${r.score}`});
-            }
-            async function refresh(){
-                const s=await fetchStatus();
-                document.getElementById('status').innerHTML=
-                    `<b>Server:</b> ${s.server}<br><b>Symbol:</b> ${s.symbol}<br><b>OKX Auth:</b> ${s.okx_auth}<br><b>Last Updated:</b> ${new Date().toLocaleTimeString()}`;
-                const d=await fetchRanges();
-                plotRange('ltf',d.LTF);
-                plotRange('htf',d.HTF);
-            }
-            refresh();
-            setInterval(refresh,60000);
-        </script>
-    </body>
-    </html>
+    <html><head>
+    <title>Market Structure Range Dashboard (v19.8-debug)</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <style>body{font-family:Arial;background-color:#0d1117;color:#eee;margin:30px;}
+    .chart{width:100%;height:400px;margin-bottom:40px;}
+    button{background-color:#1f6feb;border:none;padding:8px 12px;color:white;border-radius:5px;margin:5px;cursor:pointer;}
+    button:hover{background-color:#388bfd;}
+    #status{margin-top:10px;font-size:14px;color:#ccc;}</style></head>
+    <body><h1>📊 Market Structure Range Dashboard (v19.8-debug)</h1>
+    <div id="status">Loading...</div><div id="ltf" class="chart"></div><div id="htf" class="chart"></div>
+    <script>
+    async function fetchRanges(){const r=await fetch('/api/ranges');return r.json();}
+    function plotRange(div,data){if(!data.length){Plotly.newPlot(div,[],{title:'No range data found'});return;}
+    const r=data[0];const trace={x:['Low','EQ','High'],y:[r.range_low,r.eq,r.range_high],
+    type:'scatter',mode:'lines+markers',line:{color:'#00ccff'}};Plotly.newPlot(div,[trace],{title:`${div.toUpperCase()} | ${r.timeframe} | Score ${r.score}`});}
+    async function refresh(){document.getElementById('status').innerText='⏳ Updating... '+new Date().toLocaleTimeString();
+    const d=await fetchRanges();plotRange('ltf',d.LTF);plotRange('htf',d.HTF);
+    document.getElementById('status').innerText='✅ Updated '+new Date().toLocaleTimeString();}
+    refresh();setInterval(refresh,60000);
+    </script></body></html>
     """
     return HTMLResponse(content=html)
+
+@app.get("/debug/env")
+async def debug_env():
+    keys = ["OKX_API_KEY", "OKX_SECRET_KEY", "OKX_KEY", "OKX_SECRET", "OKX_PASSPHRASE"]
+    loaded = {k: bool(os.getenv(k)) for k in keys}
+    return {"loaded": loaded}
 
 # ================================================================
 # ENTRY POINT
@@ -282,4 +218,4 @@ async def dashboard_page():
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8080))
-    uvicorn.run("server:app", host="0.0.0.0", port=port)
+    uvicorn.run("server:app", host="0.0.0.0", port=port, reload=False)
