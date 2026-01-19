@@ -1,5 +1,5 @@
 # ================================================================
-# server.py — HPB–TCT v19.8-debug (OKX Env Check + Auth Validation)
+# server.py — HPB–TCT v19.9-stabilized (OKX Env Check + Health Fix)
 # ================================================================
 
 import os
@@ -30,7 +30,7 @@ HTF_INTERVALS = ["2H", "4H", "6H", "12H", "1D", "1W"]
 # ================================================================
 # FASTAPI APP
 # ================================================================
-app = FastAPI(title="HPB–TCT AutoLearn v19.8-debug", version="1.3.1")
+app = FastAPI(title="HPB–TCT AutoLearn v19.9-stabilized", version="1.3.2")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True,
@@ -52,7 +52,7 @@ def okx_headers(path, method="GET"):
         "OK-ACCESS-TIMESTAMP": ts,
         "OK-ACCESS-PASSPHRASE": OKX_PASSPHRASE,
         "Content-Type": "application/json",
-        "User-Agent": "HPB-TCT-v19.8/Render",
+        "User-Agent": "HPB-TCT-v19.9/Render",
     }
 
 async def verify_okx_auth():
@@ -160,11 +160,16 @@ class RangeScanner:
 async def root():
     auth_ok = await verify_okx_auth()
     return {
-        "server": "HPB–TCT v19.8-debug",
+        "server": "HPB–TCT v19.9-stabilized",
         "okx_auth": "✅ Verified" if auth_ok else "❌ Invalid",
         "symbol": SYMBOL,
         "timestamp": datetime.utcnow().isoformat()
     }
+
+@app.get("/status")
+async def status():
+    """Simple heartbeat route for Render's health checks."""
+    return {"status": "ok", "time": datetime.utcnow().isoformat()}
 
 @app.get("/api/ranges")
 async def get_ranges():
@@ -178,33 +183,6 @@ async def get_ranges():
         for g in results
     }
     return JSONResponse(content=data)
-
-@app.get("/dashboard", response_class=HTMLResponse)
-async def dashboard_page():
-    html = """
-    <!DOCTYPE html>
-    <html><head>
-    <title>Market Structure Range Dashboard (v19.8-debug)</title>
-    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
-    <style>body{font-family:Arial;background-color:#0d1117;color:#eee;margin:30px;}
-    .chart{width:100%;height:400px;margin-bottom:40px;}
-    button{background-color:#1f6feb;border:none;padding:8px 12px;color:white;border-radius:5px;margin:5px;cursor:pointer;}
-    button:hover{background-color:#388bfd;}
-    #status{margin-top:10px;font-size:14px;color:#ccc;}</style></head>
-    <body><h1>📊 Market Structure Range Dashboard (v19.8-debug)</h1>
-    <div id="status">Loading...</div><div id="ltf" class="chart"></div><div id="htf" class="chart"></div>
-    <script>
-    async function fetchRanges(){const r=await fetch('/api/ranges');return r.json();}
-    function plotRange(div,data){if(!data.length){Plotly.newPlot(div,[],{title:'No range data found'});return;}
-    const r=data[0];const trace={x:['Low','EQ','High'],y:[r.range_low,r.eq,r.range_high],
-    type:'scatter',mode:'lines+markers',line:{color:'#00ccff'}};Plotly.newPlot(div,[trace],{title:`${div.toUpperCase()} | ${r.timeframe} | Score ${r.score}`});}
-    async function refresh(){document.getElementById('status').innerText='⏳ Updating... '+new Date().toLocaleTimeString();
-    const d=await fetchRanges();plotRange('ltf',d.LTF);plotRange('htf',d.HTF);
-    document.getElementById('status').innerText='✅ Updated '+new Date().toLocaleTimeString();}
-    refresh();setInterval(refresh,60000);
-    </script></body></html>
-    """
-    return HTMLResponse(content=html)
 
 @app.get("/debug/env")
 async def debug_env():
