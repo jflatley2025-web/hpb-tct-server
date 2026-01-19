@@ -1,5 +1,5 @@
 # ================================================================
-# server.py — HPB–TCT v19.9-stabilized (OKX Env Check + Health Fix)
+# server.py — HPB–TCT v20.0-stable (Render + OKX Auth Verified)
 # ================================================================
 
 import os
@@ -18,8 +18,9 @@ from fastapi.responses import JSONResponse, HTMLResponse
 # ================================================================
 # CONFIGURATION
 # ================================================================
-OKX_API_KEY = os.getenv("OKX_API_KEY") or os.getenv("OKX_KEY") or ""
-OKX_SECRET_KEY = os.getenv("OKX_SECRET_KEY") or os.getenv("OKX_SECRET") or ""
+# ✅ Read from your actual Render env vars first
+OKX_API_KEY = os.getenv("OKX_KEY") or os.getenv("OKX_API_KEY") or ""
+OKX_SECRET_KEY = os.getenv("OKX_SECRET") or os.getenv("OKX_SECRET_KEY") or ""
 OKX_PASSPHRASE = os.getenv("OKX_PASSPHRASE") or ""
 OKX_URL = "https://www.okx.com/api/v5/market/candles"
 SYMBOL = os.getenv("SYMBOL", "BTC-USDT-SWAP")
@@ -30,7 +31,7 @@ HTF_INTERVALS = ["2H", "4H", "6H", "12H", "1D", "1W"]
 # ================================================================
 # FASTAPI APP
 # ================================================================
-app = FastAPI(title="HPB–TCT AutoLearn v19.9-stabilized", version="1.3.2")
+app = FastAPI(title="HPB–TCT v20.0-stable", version="1.4.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True,
@@ -52,11 +53,11 @@ def okx_headers(path, method="GET"):
         "OK-ACCESS-TIMESTAMP": ts,
         "OK-ACCESS-PASSPHRASE": OKX_PASSPHRASE,
         "Content-Type": "application/json",
-        "User-Agent": "HPB-TCT-v19.9/Render",
+        "User-Agent": "HPB-TCT-v20/Render",
     }
 
 async def verify_okx_auth():
-    """Check if OKX API credentials work by calling /api/v5/account/balance"""
+    """Check OKX auth by calling balance endpoint."""
     url = "https://www.okx.com/api/v5/account/balance"
     path = "/api/v5/account/balance"
     try:
@@ -160,7 +161,7 @@ class RangeScanner:
 async def root():
     auth_ok = await verify_okx_auth()
     return {
-        "server": "HPB–TCT v19.9-stabilized",
+        "server": "HPB–TCT v20.0-stable",
         "okx_auth": "✅ Verified" if auth_ok else "❌ Invalid",
         "symbol": SYMBOL,
         "timestamp": datetime.utcnow().isoformat()
@@ -168,7 +169,6 @@ async def root():
 
 @app.get("/status")
 async def status():
-    """Simple heartbeat route for Render's health checks."""
     return {"status": "ok", "time": datetime.utcnow().isoformat()}
 
 @app.get("/api/ranges")
