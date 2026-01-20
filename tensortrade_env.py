@@ -1,8 +1,27 @@
+import os
 import pandas as pd
 import requests
 import numpy as np
 import random
 from datetime import datetime
+
+# ================================================================
+# GLOBAL CONFIG — MEXC integration
+# ================================================================
+MEXC_URL_BASE = os.getenv("MEXC_URL_BASE", "https://api.mexc.com")
+SYMBOL = os.getenv("SYMBOL", "BTCUSDT")
+MEXC_KEY = os.getenv("MEXC_KEY")
+MEXC_SECRET = os.getenv("MEXC_SECRET")
+AUTH_MODE = bool(MEXC_KEY and MEXC_SECRET)
+
+print(f"[INIT] HPB–TCT v21.2 TensorTrade Environment (Exchange=MEXC)")
+print(f"[MEXC] Auth Mode: {'🔒 PRIVATE' if AUTH_MODE else '🌐 PUBLIC'} | Symbol={SYMBOL}")
+
+VALID_INTERVALS = {
+    "1m","3m","5m","15m","30m","1h","2h","4h","6h","8h",
+    "12h","1d","3d","1w","1M"
+}
+
 
 # ================================================================
 # HPBContextualReward — lightweight reward computation
@@ -26,8 +45,9 @@ class HPBContextualReward:
 # HPB_TensorTrade_Env — unified simulation + training environment
 # ================================================================
 class HPB_TensorTrade_Env:
-    """Unified environment for HPB–TCT AutoLearn"""
-    def __init__(self, symbol="BTC-USDT-SWAP", interval="1H", window=100):
+    """Unified environment for HPB–TCT AutoLearn (MEXC Feed Version)."""
+
+    def __init__(self, symbol=SYMBOL, interval="1h", window=100):
         self.symbol = symbol
         self.interval = interval
         self.window = window
@@ -35,53 +55,92 @@ class HPB_TensorTrade_Env:
         self.reward_scheme = HPBContextualReward()
         self.current_step = 0
         self.total_episodes = 0
-        print(f"[INIT] HPB–TCT (Lite) Environment initialized ({symbol}, {interval})")
+        print(f"[INIT] HPB–TCT Environment initialized ({symbol}, {interval})")
 
     # ============================================================
-    # OKX Candle Fetch
+    # MEXC Candle Fetch
     # ============================================================
-    def okx_get_candles(self, limit=300):
-        """Fetch OHLCV candles from OKX."""
-        url = f"https://www.okx.com/api/v5/market/candles?instId={self.symbol}&bar={self.interval}&limit={limit}"
-        res = requests.get(url)
-        data = res.json()
+    def mexc_get_candles(self, limit=300):
+        """Fetch OHLCV candles from MEXC."""
+        interval = self.interval.lower()
+        if interval not in VALID_INTERVALS:
+            print(f"[MEXC] Unsupported interval '{interval}' — using 1h fallback.")
+            interval = "1h"
 
-        if "data" not in data:
-            raise ValueError(f"Invalid OKX response: {data}")
+        url = f"{MEXC_URL_BASE}/api/v3/klines"
+        params = {"symbol": self.symbol, "interval": interval, "limit": limit}
 
-        candles = list(reversed(data["data"]))
-        df = pd.DataFrame([c[:6] for c in candles],
-                          columns=["timestamp", "open", "high", "low", "close", "volume"])
-        df["timestamp"] = pd.to_datetime(df["timestamp"].astype(float), unit="ms", utc=True)
-        df = df.astype({"open": float, "high": float, "low": float, "close": float, "volume": float})
-        print(f"[OKX] Loaded {len(df)} candles from OKX.")
-        return df
+        try:
+            res = requests.get(url, params=params, timeout=15)
+            if res.status_code != 200:
+                print(f"[MEXC_FAIL] {interval} — HTTP {res.status_code}")
+                return None
+
+            data = res.json()
+            if not isinstance(data, list) or len(data) == 0:
+                print(f"[MEXC_WARN] Empty response for {self.symbol} {interval}")
+                return None
+
+            df = pd.DataFrame(data, columns=[
+                "open_time","open","high","low","close","volume",
+                "close_time","quote_vol","trades","taker_base",
+                "taker_quote","ignore"
+            ])
+            df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+            df["close_time"] = pd.to_datetime(df["close_time"], unit="ms", utc=True)
+            df = df.astype({
+                "open": float, "high": float, "low": float,
+                "close": float, "volume": float
+            })
+            df = df[["open_time","open","high","low","close","volume"]].sort_values("open_time")
+            print(f"[MEXC] Loaded {len(df)} candles ({self.symbol}, {interval})")
+            return df
+
+        except Exception as e:
+            print(f"[MEXC_ERR] {e}")
+            return None
 
     # ============================================================
     # Feed Builder
     # ============================================================
     def build_feed(self):
         """Creates and stores a DataFrame feed."""
-        df = self.okx_get_candles()
+        df = self.mexc_get_candles()
+        if df is None or df.empty:
+            raise ValueError("[BUILD_FEED] Failed to build feed from MEXC.")
         self.feed = df
-        print("[BUILD_FEED] Feed successfully built.")
+        print("[BUILD_FEED] Feed successfully built from MEXC.")
         return df
 
     # ============================================================
     # Live Price Fetch
     # ============================================================
     def fetch_live_price(self):
-        """Get current market price from OKX ticker."""
-        url = f"https://www.okx.com/api/v5/market/ticker?instId={self.symbol}"
+        """Get current market price from MEXC ticker."""
+        url = f"{MEXC_URL_BASE}/api/v3/ticker/price"
+        params = {"symbol": self.symbol}
         try:
-            res = requests.get(url)
+            res = requests.get(url, params=params, timeout=10)
             data = res.json()
-            price = float(data["data"][0]["last"])
+            price = float(data.get("price", 0))
             print(f"[LIVE] {self.symbol} price: {price}")
             return price
         except Exception as e:
             print(f"[LIVE] Failed to fetch live price: {e}")
             return None
+
+    # ============================================================
+    # Normalization Utility
+    # ============================================================
+    def normalize_feed(self, df):
+        """Normalize OHLCV columns to [0,1] for TensorTrade compatibility."""
+        if df is None or df.empty:
+            return np.zeros((1, 5))
+        arr = df[["open","high","low","close","volume"]].values
+        min_v = np.min(arr, axis=0)
+        max_v = np.max(arr, axis=0)
+        norm = (arr - min_v) / (max_v - min_v + 1e-9)
+        return norm
 
     # ============================================================
     # AutoLearn Core Training Entry Point
@@ -91,7 +150,7 @@ class HPB_TensorTrade_Env:
         HPB AutoLearn cycle runner.
         Called directly from /train and /bot/train endpoints.
         """
-        print(f"[AUTO_TRAIN] Starting {episodes} AutoLearn episodes...")
+        print(f"[AUTO_TRAIN] Starting {episodes} AutoLearn episodes (MEXC feed)...")
         if self.feed is None:
             self.build_feed()
 
