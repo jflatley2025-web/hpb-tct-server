@@ -1,5 +1,5 @@
 # ================================================================
-# server_mexc.py — HPB–TCT v21.1 (MEXC Feed + Auto Auth Detection)
+# server_mexc.py — HPB–TCT v21.2 (MEXC Feed + Auto Auth + Safe Intervals)
 # ================================================================
 
 import os
@@ -23,15 +23,20 @@ MEXC_KEY = os.getenv("MEXC_KEY")
 MEXC_SECRET = os.getenv("MEXC_SECRET")
 
 AUTH_MODE = bool(MEXC_KEY and MEXC_SECRET)
-print(f"[INIT] MEXC Auth Mode: {'🔒PRIVATE' if AUTH_MODE else '🌐PUBLIC'}")
+print(f"[INIT] MEXC Auth Mode: {'🔒 PRIVATE' if AUTH_MODE else '🌐 PUBLIC'}")
 
-LTF_INTERVALS = ["1m", "5m", "15m", "30m", "1h"]
-HTF_INTERVALS = ["4h", "6h", "12h", "1d", "1w"]
+# ✅ Supported MEXC timeframes
+VALID_INTERVALS = {
+    "1s","1m","3m","5m","15m","30m","1h","2h","4h",
+    "6h","8h","12h","1d","3d","1w","1M"
+}
+LTF_INTERVALS = ["1m","3m","5m","15m","30m","1h"]
+HTF_INTERVALS = ["2h","4h","6h","8h","12h","1d","3d","1w"]
 
 # ================================================================
 # FASTAPI APP
 # ================================================================
-app = FastAPI(title="HPB–TCT v21.1", version="2.1.1")
+app = FastAPI(title="HPB–TCT v21.2", version="2.1.2")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True,
@@ -42,13 +47,12 @@ app.add_middleware(
 # MEXC AUTH SIGNING (for private endpoints)
 # ================================================================
 def mexc_sign(params: dict, secret: str):
-    """Return query string + signature for MEXC private requests."""
     query = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
     signature = hmac.new(secret.encode(), query.encode(), hashlib.sha256).hexdigest()
     return query + "&signature=" + signature
 
 async def get_account_info():
-    """Fetch MEXC account info if keys available."""
+    """Return account info if API keys exist."""
     if not AUTH_MODE:
         return {"status": "PUBLIC_MODE", "note": "No API keys configured."}
     ts = int(datetime.utcnow().timestamp() * 1000)
@@ -66,7 +70,7 @@ async def get_account_info():
         return {"status": "EXCEPTION", "detail": str(e)}
 
 # ================================================================
-# RANGE SCANNER (Public)
+# RANGE SCANNER
 # ================================================================
 class RangeCandidate:
     def __init__(self, tf, high, low, candles):
@@ -77,7 +81,6 @@ class RangeCandidate:
         self.candles = candles
         self.score = 0.0
 
-
 class MEXCRangeScanner:
     def __init__(self, symbol=SYMBOL, limit=500):
         self.symbol = symbol
@@ -85,6 +88,10 @@ class MEXCRangeScanner:
         self.results = {"LTF": [], "HTF": []}
 
     async def fetch_mexc(self, tf):
+        """Fetch OHLCV candles safely; skip unsupported intervals."""
+        if tf not in VALID_INTERVALS:
+            print(f"[SKIP] {tf} unsupported by MEXC API.")
+            return []
         url = f"{MEXC_URL_BASE}/api/v3/klines"
         params = {"symbol": self.symbol, "interval": tf, "limit": self.limit}
         try:
@@ -95,6 +102,7 @@ class MEXCRangeScanner:
                     return []
                 data = r.json()
                 if not data:
+                    print(f"[MEXC_EMPTY] {tf} — no data returned.")
                     return []
                 candles = [
                     {"t": int(x[0]), "o": float(x[1]), "h": float(x[2]),
@@ -173,7 +181,7 @@ async def get_live_price(symbol=SYMBOL):
 async def root():
     price = await get_live_price()
     return {
-        "server": "HPB–TCT v21.1",
+        "server": "HPB–TCT v21.2",
         "exchange": "MEXC",
         "auth_mode": "PRIVATE" if AUTH_MODE else "PUBLIC",
         "symbol": SYMBOL,
@@ -201,7 +209,7 @@ async def get_account():
 
 @app.get("/debug/env")
 async def debug_env():
-    keys = ["MEXC_URL_BASE", "SYMBOL", "MEXC_KEY", "MEXC_SECRET"]
+    keys = ["MEXC_URL_BASE","SYMBOL","MEXC_KEY","MEXC_SECRET"]
     return {"loaded": {k: bool(os.getenv(k)) for k in keys}}
 
 # ================================================================
