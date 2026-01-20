@@ -1,6 +1,7 @@
 """
-range_scanner.py — HPB–TCT v19.4 Range Finder (Stable)
-Robust Bybit HTF/LTF scanner with safe error handling + pause/resume support.
+range_scanner.py — HPB–TCT v21.2 Range Finder (MEXC Self-Healing Edition)
+Robust MEXC HTF/LTF scanner with automatic symbol sanitation,
+interval validation, and adaptive retry logic.
 """
 
 import asyncio
@@ -8,17 +9,31 @@ import math
 import statistics
 import httpx
 import logging
+import os
 from datetime import datetime
 
-BYBIT_URL = "https://api.bybit.com/v5/market/kline"
+# ================================================================
+# CONFIGURATION
+# ================================================================
+MEXC_URL = "https://api.mexc.com/api/v3/klines"
+SYMBOL = os.getenv("SYMBOL", "BTCUSDT").replace("/", "").replace("-", "").upper()
 
-# Timeframes supported by Bybit v5
-LTF_INTERVALS = ["1", "3", "5", "15", "30", "60"]
-HTF_INTERVALS = ["120", "240", "360", "720", "D", "W"]  # Monthly dropped for stability
+# Valid MEXC intervals (case-sensitive)
+VALID_INTERVALS = {
+    "1s","1m","3m","5m","15m","30m","1h","2h","4h","6h","8h",
+    "12h","1d","3d","1w","1M"
+}
+
+# Preferred scanning sets
+LTF_INTERVALS = ["1m", "3m", "5m", "15m", "30m", "1h"]
+HTF_INTERVALS = ["2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w"]
 
 logger = logging.getLogger("HPB-TCT-RangeScanner")
 
 
+# ================================================================
+# RANGE CANDIDATE CONTAINER
+# ================================================================
 class RangeCandidate:
     def __init__(self, tf, high, low, candles):
         self.timeframe = tf
@@ -29,59 +44,62 @@ class RangeCandidate:
         self.score = 0.0
 
 
-class BybitRangeScanner:
-    def __init__(self, symbol="BTCUSDT", category="linear", limit=200):
+# ================================================================
+# MEXC RANGE SCANNER
+# ================================================================
+class MEXCRangeScanner:
+    def __init__(self, symbol=SYMBOL, limit=300):
         self.symbol = symbol
-        self.category = category
         self.limit = limit
         self.results = {"LTF": [], "HTF": []}
         self.paused = False
         self.current_tf = None
+        logger.info(f"[INIT] HPB–TCT v21.2 MEXC Scanner initialized ({symbol})")
 
     # ------------------------------------------------------------
-    # Safe candle fetcher with category fallbacks
+    # Safe candle fetcher with retries + self-healing
     # ------------------------------------------------------------
     async def fetch_klines(self, tf):
-        params = {"symbol": self.symbol, "interval": tf, "limit": self.limit}
-        headers = {"User-Agent": "HPB-TCT-v19.4/Enhanced"}
-        data = []
-        try:
-            async with httpx.AsyncClient(timeout=30, headers=headers) as c:
-                # Try linear first
-                params["category"] = "linear"
-                r = await c.get(BYBIT_URL, params=params)
-                data = r.json().get("result", {}).get("list", [])
-
-                # Try inverse if no result
-                if not data:
-                    params["category"] = "inverse"
-                    r2 = await c.get(BYBIT_URL, params=params)
-                    data = r2.json().get("result", {}).get("list", [])
-
-                # Try spot as final fallback
-                if not data:
-                    params["category"] = "spot"
-                    r3 = await c.get(BYBIT_URL, params=params)
-                    data = r3.json().get("result", {}).get("list", [])
-
-            if not data:
-                logger.warning(f"[BYBIT_EMPTY] No kline data for {self.symbol} {tf}")
-                return []
-
-            candles = [
-                {"t": int(x[0]), "h": float(x[2]), "l": float(x[3]), "c": float(x[4])}
-                for x in data
-            ]
-            return candles[::-1]
-        except Exception as e:
-            logger.error(f"[FETCH_ERROR] {tf}: {e}")
+        if tf not in VALID_INTERVALS:
+            logger.warning(f"[INVALID_TF] Skipping unsupported interval: {tf}")
             return []
+
+        params = {"symbol": self.symbol, "interval": tf, "limit": self.limit}
+        headers = {"User-Agent": "HPB-TCT-v21.2/MEXC"}
+
+        for attempt in range(3):  # up to 3 retries
+            try:
+                async with httpx.AsyncClient(timeout=20, headers=headers) as c:
+                    r = await c.get(MEXC_URL, params=params)
+                    if r.status_code != 200:
+                        logger.error(f"[MEXC_FAIL] {tf} — HTTP {r.status_code}")
+                        await asyncio.sleep(1.5 * (attempt + 1))
+                        continue
+
+                    data = r.json()
+                    if not isinstance(data, list) or not data:
+                        logger.warning(f"[MEXC_EMPTY] No kline data for {self.symbol} {tf}")
+                        await asyncio.sleep(1.5 * (attempt + 1))
+                        continue
+
+                    candles = [
+                        {"t": int(x[0]), "h": float(x[2]), "l": float(x[3]), "c": float(x[4])}
+                        for x in data
+                    ]
+                    return candles[::-1]
+
+            except Exception as e:
+                logger.error(f"[FETCH_ERROR] {tf}: {e}")
+                await asyncio.sleep(1.5 * (attempt + 1))
+
+        logger.error(f"[MEXC_ABORT] Failed to fetch {tf} after retries.")
+        return []
 
     # ------------------------------------------------------------
     # Range detection + scoring
     # ------------------------------------------------------------
     def detect_range(self, candles):
-        """Identify basic range high/low from recent candles"""
+        """Identify basic range high/low from recent candles."""
         if not candles:
             return None
         highs = [c["h"] for c in candles]
@@ -89,7 +107,7 @@ class BybitRangeScanner:
         return max(highs), min(lows)
 
     def score_range(self, candles, high, low):
-        """Basic smoothness + displacement scoring"""
+        """Basic smoothness + displacement scoring."""
         if not candles:
             return 0.0
         eq = (high + low) / 2
@@ -121,7 +139,7 @@ class BybitRangeScanner:
             rc.score = sc
             self.results[group_name].append(rc)
             logger.info(f"[SCAN] {group_name} {tf} | Score={sc}")
-            await asyncio.sleep(1.5)  # avoid rate-limit issues
+            await asyncio.sleep(1.0)  # mild delay to avoid rate limits
 
         self.results[group_name].sort(key=lambda x: x.score, reverse=True)
         self.results[group_name] = self.results[group_name][:3]
@@ -131,7 +149,7 @@ class BybitRangeScanner:
             self.scan_timeframes("LTF", LTF_INTERVALS),
             self.scan_timeframes("HTF", HTF_INTERVALS),
         )
-        logger.info("[SCAN_COMPLETE] Range scan completed successfully.")
+        logger.info("[SCAN_COMPLETE] ✅ Range scan completed successfully.")
         return self.results
 
     # ------------------------------------------------------------
