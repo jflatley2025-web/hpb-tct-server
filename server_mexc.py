@@ -494,9 +494,9 @@ async def fetch_mexc_candles(symbol: str, interval: str, limit: int = 500) -> Op
             if not data:
                 return None
             
+            # MEXC returns 8 columns: [timestamp, open, high, low, close, volume, close_time, quote_volume]
             df = pd.DataFrame(data, columns=[
-                "open_time", "open", "high", "low", "close", "volume",
-                "close_time", "quote_vol", "trades", "taker_base", "taker_quote", "ignore"
+                "open_time", "open", "high", "low", "close", "volume", "close_time", "quote_vol"
             ])
             
             df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
