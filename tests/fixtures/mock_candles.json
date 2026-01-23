@@ -28,5 +28,30 @@
     {"t": 1706000180000, "h": 110.0, "l": 105.0, "c": 107.0},
     {"t": 1706000240000, "h": 105.0, "l": 100.0, "c": 102.0},
     {"t": 1706000300000, "h": 100.0, "l": 95.0, "c": 97.0}
+  ],
+  "accumulation_curve_candles": [
+    {"open_time": "2026-01-01 00:00:00", "open": 40000, "high": 40200, "low": 39800, "close": 40000, "volume": 100},
+    {"open_time": "2026-01-01 01:00:00", "open": 40000, "high": 40300, "low": 39900, "close": 40100, "volume": 105},
+    {"open_time": "2026-01-01 02:00:00", "open": 40100, "high": 40350, "low": 40000, "close": 40200, "volume": 110},
+    {"open_time": "2026-01-01 03:00:00", "open": 40200, "high": 40400, "low": 40050, "close": 40250, "volume": 108},
+    {"open_time": "2026-01-01 04:00:00", "open": 40250, "high": 40450, "low": 40150, "close": 40300, "volume": 112},
+    {"open_time": "2026-01-01 05:00:00", "open": 40300, "high": 40500, "low": 40200, "close": 40350, "volume": 115}
+  ],
+  "distribution_curve_candles": [
+    {"open_time": "2026-01-01 00:00:00", "open": 41000, "high": 41200, "low": 40900, "close": 41000, "volume": 100},
+    {"open_time": "2026-01-01 01:00:00", "open": 41000, "high": 41150, "low": 40800, "close": 40950, "volume": 105},
+    {"open_time": "2026-01-01 02:00:00", "open": 40950, "high": 41100, "low": 40700, "close": 40900, "volume": 110},
+    {"open_time": "2026-01-01 03:00:00", "open": 40900, "high": 41000, "low": 40600, "close": 40800, "volume": 108},
+    {"open_time": "2026-01-01 04:00:00", "open": 40800, "high": 40950, "low": 40500, "close": 40700, "volume": 112},
+    {"open_time": "2026-01-01 05:00:00", "open": 40700, "high": 40850, "low": 40400, "close": 40600, "volume": 115}
+  ],
+  "market_structure_6_candle": [
+    {"open_time": "2026-01-01 00:00:00", "open": 100, "high": 102, "low": 98, "close": 99, "volume": 100},
+    {"open_time": "2026-01-01 01:00:00", "open": 99, "high": 101, "low": 97, "close": 98, "volume": 105},
+    {"open_time": "2026-01-01 02:00:00", "open": 98, "high": 100, "low": 96, "close": 97, "volume": 110},
+    {"open_time": "2026-01-01 03:00:00", "open": 97, "high": 99, "low": 95, "close": 98, "volume": 108},
+    {"open_time": "2026-01-01 04:00:00", "open": 98, "high": 100, "low": 96, "close": 99, "volume": 112},
+    {"open_time": "2026-01-01 05:00:00", "open": 99, "high": 101, "low": 97, "close": 100, "volume": 115},
+    {"open_time": "2026-01-01 06:00:00", "open": 100, "high": 102, "low": 98, "close": 101, "volume": 120}
   ]
 }

@@ -7,11 +7,14 @@ This directory contains the test suite for the HPB-TCT trading system.
 ```
 tests/
 ├── unit/                   # Unit tests for individual modules
-│   ├── test_range_scanner.py
-│   └── test_hpb_rig_validator.py
+│   ├── test_range_scanner.py          # Range detection & MEXC scanning (17 tests)
+│   ├── test_hpb_rig_validator.py      # RIG gate validation (15 tests)
+│   ├── test_tct_model_detector.py     # TCT model detection (30+ tests)
+│   ├── test_server_mexc.py            # Market structure & gates (30+ tests)
+│   └── test_risk_model.py             # Risk calculations (30+ tests)
 ├── integration/           # Integration tests for multi-component workflows
 ├── fixtures/              # Test data and mock responses
-│   └── mock_candles.json
+│   └── mock_candles.json # Mock market data & patterns
 ├── conftest.py           # Shared pytest fixtures
 └── README.md             # This file
 ```
@@ -82,13 +85,15 @@ def test_with_fixture(mock_context_basic):
 
 ## Coverage Goals
 
-| Module | Target Coverage | Current Coverage |
-|--------|----------------|------------------|
-| range_scanner.py | 80%+ | ✅ Comprehensive |
-| hpb_rig_validator.py | 80%+ | ✅ Comprehensive |
-| tct_model_detector.py | 80%+ | ⏳ Pending |
-| server_mexc.py | 75%+ | ⏳ Pending |
-| risk_model.py | 70%+ | ⏳ Pending |
+| Module | Target Coverage | Current Coverage | Test Count |
+|--------|----------------|------------------|------------|
+| range_scanner.py | 80%+ | ✅ Comprehensive | 17 tests |
+| hpb_rig_validator.py | 80%+ | ✅ Comprehensive | 15 tests |
+| tct_model_detector.py | 80%+ | ✅ Comprehensive | 30+ tests |
+| server_mexc.py | 75%+ | ✅ Comprehensive | 30+ tests |
+| risk_model.py | 70%+ | ✅ Comprehensive | 30+ tests |
+
+**Total: 120+ test cases covering critical trading logic**
 
 ## CI/CD
 
@@ -137,9 +142,13 @@ pytest --pdb
 
 ## Next Steps
 
-Priority modules to add tests for:
-1. `tct_model_detector.py` - Critical trading logic
-2. `server_mexc.py` - API endpoints and gate validation
-3. `risk_model.py` - Risk calculation algorithms
+Completed ✅:
+1. ✅ `tct_model_detector.py` - Critical trading logic (30+ tests)
+2. ✅ `server_mexc.py` - Market structure & gate validation (30+ tests)
+3. ✅ `risk_model.py` - Risk calculation algorithms (30+ tests)
+
+Future priorities:
 4. `telegram_bot.py` - Bot command handlers
 5. `hpb_nvs_module.py` - Sentiment analysis
+6. FastAPI endpoint integration tests
+7. End-to-end trading scenario tests
