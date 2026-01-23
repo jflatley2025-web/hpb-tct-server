@@ -57,7 +57,6 @@ pytest==7.4.3             # testing framework
 pytest-asyncio==0.21.1    # async test support
 pytest-cov==4.1.0         # coverage reporting
 pytest-mock==3.12.0       # mocking utilities
-httpx-mock==0.10.0        # httpx request mocking
 
 
 # ───────────────────────────────────────────────
