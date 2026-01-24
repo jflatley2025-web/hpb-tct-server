@@ -287,7 +287,19 @@ async def validate_current_setup():
             return JSONResponse({"error": "Failed to fetch data", "Action": "NO_TRADE"}, status_code=500)
 
         current_price = float(ltf_df.iloc[-1]["close"])
-        ltf_candles = ltf_df.to_dict('records')
+
+        # Convert to dict with timestamps as strings
+        ltf_candles = []
+        for _, row in ltf_df.iterrows():
+            ltf_candles.append({
+                'open_time': str(row['open_time']),
+                'open': float(row['open']),
+                'high': float(row['high']),
+                'low': float(row['low']),
+                'close': float(row['close']),
+                'volume': float(row['volume'])
+            })
+
         detected_range = await detect_best_range(ltf_candles)
 
         context = {
