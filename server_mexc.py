@@ -1,213 +1,316 @@
 # ================================================================
-# server_mexc.py — HPB–TCT v21.1 (MEXC Feed + Auto Auth Detection)
+# HPB–TCT v21.2 MEXC Feed + Range Detection + Gate Validation Server
 # ================================================================
 
 import os
-import json
 import asyncio
-import statistics
+import logging
 import httpx
-import hmac
-import hashlib
+import pandas as pd
+import numpy as np
 from datetime import datetime
+from typing import Dict, List, Optional
+
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from loguru import logger
 
 # ================================================================
 # CONFIGURATION
 # ================================================================
-MEXC_URL_BASE = os.getenv("MEXC_URL_BASE", "https://api.mexc.com")
-SYMBOL = os.getenv("SYMBOL", "BTCUSDT")
+
+PORT = int(os.getenv("PORT", 10000))
+SYMBOL = os.getenv("SYMBOL", "BTCUSDT").replace("/", "").replace("-", "").upper()
 MEXC_KEY = os.getenv("MEXC_KEY")
 MEXC_SECRET = os.getenv("MEXC_SECRET")
+MEXC_URL_BASE = "https://api.mexc.com"
 
-AUTH_MODE = bool(MEXC_KEY and MEXC_SECRET)
-print(f"[INIT] MEXC Auth Mode: {'🔒PRIVATE' if AUTH_MODE else '🌐PUBLIC'}")
+app = FastAPI(title="HPB–TCT v21.2 MEXC Server", version="21.2")
 
-LTF_INTERVALS = ["1m", "5m", "15m", "30m", "1h"]
-HTF_INTERVALS = ["4h", "6h", "12h", "1d", "1w"]
+latest_ranges = {"LTF": [], "HTF": []}
+scan_interval_sec = 120
 
-# ================================================================
-# FASTAPI APP
-# ================================================================
-app = FastAPI(title="HPB–TCT v21.1", version="2.1.1")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True,
-    allow_methods=["*"], allow_headers=["*"],
-)
+logging.basicConfig(level=logging.INFO)
+logger.info(f"[INIT] HPB–TCT v21.2 Ready — Symbol={SYMBOL}, Port={PORT}")
 
 # ================================================================
-# MEXC AUTH SIGNING (for private endpoints)
+# MARKET STRUCTURE
 # ================================================================
-def mexc_sign(params: dict, secret: str):
-    """Return query string + signature for MEXC private requests."""
-    query = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
-    signature = hmac.new(secret.encode(), query.encode(), hashlib.sha256).hexdigest()
-    return query + "&signature=" + signature
 
-async def get_account_info():
-    """Fetch MEXC account info if keys available."""
-    if not AUTH_MODE:
-        return {"status": "PUBLIC_MODE", "note": "No API keys configured."}
-    ts = int(datetime.utcnow().timestamp() * 1000)
-    params = {"timestamp": ts}
-    query = mexc_sign(params, MEXC_SECRET)
-    url = f"{MEXC_URL_BASE}/api/v3/account?{query}"
-    headers = {"X-MEXC-APIKEY": MEXC_KEY}
-    try:
-        async with httpx.AsyncClient(timeout=10) as c:
-            r = await c.get(url, headers=headers)
-            if r.status_code == 200:
-                return {"status": "OK", "data": r.json()}
-            return {"status": f"ERROR {r.status_code}", "detail": r.text}
-    except Exception as e:
-        return {"status": "EXCEPTION", "detail": str(e)}
+class MarketStructure:
+    """Detects market structure using 6-candle rule"""
 
-# ================================================================
-# RANGE SCANNER (Public)
-# ================================================================
-class RangeCandidate:
-    def __init__(self, tf, high, low, candles):
-        self.timeframe = tf
-        self.range_high = high
-        self.range_low = low
-        self.eq = (high + low) / 2
-        self.candles = candles
-        self.score = 0.0
+    @staticmethod
+    def detect_pivots(candles: pd.DataFrame) -> Dict:
+        if len(candles) < 6:
+            return {"highs": [], "lows": [], "trend": "neutral"}
 
+        pivots = {"highs": [], "lows": []}
 
-class MEXCRangeScanner:
-    def __init__(self, symbol=SYMBOL, limit=500):
-        self.symbol = symbol
-        self.limit = limit
-        self.results = {"LTF": [], "HTF": []}
+        for i in range(2, len(candles) - 2):
+            if (
+                candles.iloc[i - 2]["close"] < candles.iloc[i - 1]["close"]
+                and candles.iloc[i - 1]["close"] < candles.iloc[i]["close"]
+                and candles.iloc[i]["close"] > candles.iloc[i + 1]["close"]
+                and candles.iloc[i + 1]["close"] > candles.iloc[i + 2]["close"]
+            ):
+                pivots["highs"].append({"idx": i, "price": candles.iloc[i]["high"]})
 
-    async def fetch_mexc(self, tf):
-        url = f"{MEXC_URL_BASE}/api/v3/klines"
-        params = {"symbol": self.symbol, "interval": tf, "limit": self.limit}
-        try:
-            async with httpx.AsyncClient(timeout=15) as c:
-                r = await c.get(url, params=params)
-                if r.status_code != 200:
-                    print(f"[MEXC_FAIL] {tf} — HTTP {r.status_code}")
-                    return []
-                data = r.json()
-                if not data:
-                    return []
-                candles = [
-                    {"t": int(x[0]), "o": float(x[1]), "h": float(x[2]),
-                     "l": float(x[3]), "c": float(x[4]), "v": float(x[5])}
-                    for x in data
-                ]
-                return candles
-        except Exception as e:
-            print(f"[MEXC_ERROR] {tf}: {e}")
-            return []
+            if (
+                candles.iloc[i - 2]["close"] > candles.iloc[i - 1]["close"]
+                and candles.iloc[i - 1]["close"] > candles.iloc[i]["close"]
+                and candles.iloc[i]["close"] < candles.iloc[i + 1]["close"]
+                and candles.iloc[i + 1]["close"] < candles.iloc[i + 2]["close"]
+            ):
+                pivots["lows"].append({"idx": i, "price": candles.iloc[i]["low"]})
 
-    def detect_range(self, candles):
-        if not candles:
+        if len(pivots["highs"]) >= 2 and len(pivots["lows"]) >= 2:
+            h1, h2 = pivots["highs"][-2:]
+            l1, l2 = pivots["lows"][-2:]
+            if h2["price"] > h1["price"] and l2["price"] > l1["price"]:
+                pivots["trend"] = "bullish"
+            elif h2["price"] < h1["price"] and l2["price"] < l1["price"]:
+                pivots["trend"] = "bearish"
+            else:
+                pivots["trend"] = "ranging"
+        else:
+            pivots["trend"] = "neutral"
+
+        return pivots
+
+    @staticmethod
+    def detect_bos(candles: pd.DataFrame, pivots: Dict) -> Optional[Dict]:
+        if not pivots["highs"] or not pivots["lows"]:
             return None
-        highs = [c["h"] for c in candles]
-        lows = [c["l"] for c in candles]
-        return max(highs), min(lows)
 
-    def score_range(self, candles, high, low):
-        if not candles:
-            return 0.0
-        eq = (high + low) / 2
-        diffs = [abs(c["c"] - eq) for c in candles]
-        disp = statistics.pstdev(diffs) / (high - low + 1e-9)
-        smoothness = 1 - min(disp, 1)
-        t_disp = min(len(candles) / 300, 1)
-        return round(0.5 * smoothness + 0.5 * t_disp, 3)
-
-    async def scan(self, group, tfs):
-        for tf in tfs:
-            candles = await self.fetch_mexc(tf)
-            if not candles:
-                continue
-            rng = self.detect_range(candles)
-            if not rng:
-                continue
-            high, low = rng
-            sc = self.score_range(candles, high, low)
-            rc = RangeCandidate(tf, high, low, candles)
-            rc.score = sc
-            self.results[group].append(rc)
-            print(f"[SCAN] {group} {tf} | Score={sc}")
-            await asyncio.sleep(0.5)
-        self.results[group].sort(key=lambda x: x.score, reverse=True)
-        self.results[group] = self.results[group][:3]
-
-    async def run_scan(self):
-        await asyncio.gather(
-            self.scan("LTF", LTF_INTERVALS),
-            self.scan("HTF", HTF_INTERVALS),
-        )
-        print("[SCAN_COMPLETE] ✅ Range scan completed.")
-        return self.results
-
-# ================================================================
-# LIVE PRICE
-# ================================================================
-async def get_live_price(symbol=SYMBOL):
-    url = f"{MEXC_URL_BASE}/api/v3/ticker/price"
-    params = {"symbol": symbol}
-    try:
-        async with httpx.AsyncClient(timeout=5) as c:
-            r = await c.get(url, params=params)
-            if r.status_code != 200:
-                return None
-            data = r.json()
-            return float(data.get("price", 0))
-    except Exception as e:
-        print(f"[PRICE_ERROR] {e}")
+        price = candles.iloc[-1]["close"]
+        if price > pivots["highs"][-1]["price"]:
+            return {"type": "bullish", "price": price}
+        if price < pivots["lows"][-1]["price"]:
+            return {"type": "bearish", "price": price}
         return None
 
 # ================================================================
-# ROUTES
+# GATES
 # ================================================================
+
+def validate_1A(context: Dict) -> Dict:
+    try:
+        htf = context.get("htf_candles")
+        if htf is None or len(htf) < 50:
+            return {"passed": False, "bias": "neutral", "confidence": 0.0}
+
+        ms = MarketStructure()
+        pivots = ms.detect_pivots(htf)
+        bos = ms.detect_bos(htf, pivots)
+
+        conf = 0.5 + (0.3 if bos else 0.0)
+        return {
+            "passed": conf > 0.5,
+            "bias": pivots["trend"],
+            "confidence": min(conf, 1.0),
+        }
+    except Exception as e:
+        return {"passed": False, "bias": "neutral", "confidence": 0.0, "error": str(e)}
+
+def validate_1B(context: Dict) -> Dict:
+    try:
+        ltf = context.get("ltf_candles")
+        htf_bias = context.get("1A", {}).get("bias", "neutral")
+
+        if ltf is None or len(ltf) < 20:
+            return {"passed": False, "confidence": 0.0}
+
+        ms = MarketStructure()
+        pivots = ms.detect_pivots(ltf)
+        bos = ms.detect_bos(ltf, pivots)
+
+        align = pivots["trend"] in (htf_bias, "ranging")
+        conf = 0.6 if align else 0.2
+        if bos and bos["type"] == htf_bias:
+            conf += 0.3
+
+        return {"passed": conf > 0.5, "confidence": min(conf, 1.0)}
+    except Exception as e:
+        return {"passed": False, "confidence": 0.0, "error": str(e)}
+
+def validate_1C(context: Dict) -> Dict:
+    try:
+        c = context.get("1A", {}).get("confidence", 0) * 0.6
+        c += context.get("1B", {}).get("confidence", 0) * 0.4
+        return {"passed": c >= 0.65, "confidence": min(c, 1.0)}
+    except Exception as e:
+        return {"passed": False, "confidence": 0.0, "error": str(e)}
+
+def validate_RCM(context: Dict) -> Dict:
+    try:
+        r = context.get("detected_range")
+        if not r or r["duration_hours"] < 24:
+            return {"valid": False, "confidence": 0.0}
+
+        conf = min(r["duration_hours"] / 34, 1.0)
+        return {"valid": conf > 0.6, "confidence": conf}
+    except Exception as e:
+        return {"valid": False, "confidence": 0.0, "error": str(e)}
+
+def validate_MSCE(context: Dict) -> Dict:
+    utc = datetime.utcnow().hour
+    if utc < 8:
+        return {"confidence": 0.95}
+    elif utc < 16:
+        return {"confidence": 1.05}
+    return {"confidence": 1.15}
+
+def validate_RIG(context: Dict) -> Dict:
+    rcm = context.get("RCM", {})
+    if rcm.get("valid"):
+        return {"passed": True}
+    return {"passed": False}
+
+def validate_1D(context: Dict) -> Dict:
+    try:
+        if not all([
+            context["1A"]["passed"],
+            context["1B"]["passed"],
+            context["1C"]["passed"],
+            context["RCM"]["valid"],
+            context["RIG"]["passed"]
+        ]):
+            return {"passed": False, "ExecutionConfidence_Total": 0.0}
+
+        total = (
+            context["1A"]["confidence"] * 0.25 +
+            context["1B"]["confidence"] * 0.20 +
+            context["1C"]["confidence"] * 0.25 +
+            context["RCM"]["confidence"] * 0.20 +
+            context["MSCE"]["confidence"] * 0.10
+        )
+        return {"passed": total >= 0.7, "ExecutionConfidence_Total": round(total * 100, 2)}
+    except Exception:
+        return {"passed": False, "ExecutionConfidence_Total": 0.0}
+
+def validate_gates(context: Dict) -> Dict:
+    context["1A"] = validate_1A(context)
+    context["1B"] = validate_1B(context)
+    context["1C"] = validate_1C(context)
+    context["RCM"] = validate_RCM(context)
+    context["MSCE"] = validate_MSCE(context)
+    context["RIG"] = validate_RIG(context)
+    context["1D"] = validate_1D(context)
+
+    context["Action"] = "EXECUTE" if context["1D"]["passed"] else "NO_TRADE"
+    return context
+
+# ================================================================
+# DATA FETCHING
+# ================================================================
+
+async def fetch_mexc_candles(symbol: str, interval: str, limit: int = 200) -> Optional[pd.DataFrame]:
+    url = f"{MEXC_URL_BASE}/api/v3/klines"
+    params = {"symbol": symbol, "interval": interval, "limit": limit}
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(url, params=params)
+            if r.status_code != 200:
+                return None
+
+            df = pd.DataFrame(r.json(), columns=[
+                "open_time", "open", "high", "low", "close", "volume",
+                "close_time", "quote_vol"
+            ])
+            df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+            for c in ["open", "high", "low", "close", "volume"]:
+                df[c] = df[c].astype(float)
+            return df
+    except Exception as e:
+        logger.error(f"[MEXC_FETCH_ERROR] {e}")
+        return None
+
+async def detect_best_range(candles: List) -> Optional[Dict]:
+    """Simple range detection from candles"""
+    if not candles or len(candles) < 10:
+        return None
+
+    highs = [c.get('high', c.get('h', 0)) for c in candles]
+    lows = [c.get('low', c.get('l', 0)) for c in candles]
+
+    return {
+        "high": max(highs),
+        "low": min(lows),
+        "duration_hours": len(candles) * 0.25,
+        "candles": candles
+    }
+
+# ================================================================
+# ENDPOINTS
+# ================================================================
+
 @app.get("/")
 async def root():
-    price = await get_live_price()
     return {
-        "server": "HPB–TCT v21.1",
-        "exchange": "MEXC",
-        "auth_mode": "PRIVATE" if AUTH_MODE else "PUBLIC",
+        "service": "HPB–TCT v21.2 (MEXC + Gate Validation)",
+        "status": "running",
         "symbol": SYMBOL,
-        "last_price": price,
-        "timestamp": datetime.utcnow().isoformat()
+        "version": "21.2",
+        "endpoints": {
+            "/status": "Health check",
+            "/api/validate": "7-gate validation",
+            "/api/price": "Current price"
+        }
     }
 
 @app.get("/status")
-async def status():
-    return {"status": "ok", "time": datetime.utcnow().isoformat()}
+async def get_status():
+    return {"status": "OK", "symbol": SYMBOL, "timestamp": datetime.utcnow().isoformat()}
 
-@app.get("/api/ranges")
-async def get_ranges():
-    scanner = MEXCRangeScanner()
-    results = await scanner.run_scan()
-    return JSONResponse(content={
-        g: [{"timeframe": r.timeframe, "range_high": r.range_high,
-             "range_low": r.range_low, "eq": r.eq, "score": r.score}
-            for r in results[g]] for g in results
-    })
+@app.get("/api/price")
+async def live_price():
+    url = f"{MEXC_URL_BASE}/api/v3/ticker/price?symbol={SYMBOL}"
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(url)
+            if r.status_code == 200:
+                return {"symbol": SYMBOL, "price": float(r.json()["price"])}
+            return {"error": f"HTTP {r.status_code}"}
+    except Exception as e:
+        return {"error": str(e)}
 
-@app.get("/api/account")
-async def get_account():
-    return await get_account_info()
+@app.get("/api/validate")
+async def validate_current_setup():
+    """Complete 7-gate validation endpoint"""
+    try:
+        htf_df = await fetch_mexc_candles(SYMBOL, "4h", 100)
+        ltf_df = await fetch_mexc_candles(SYMBOL, "15m", 100)
 
-@app.get("/debug/env")
-async def debug_env():
-    keys = ["MEXC_URL_BASE", "SYMBOL", "MEXC_KEY", "MEXC_SECRET"]
-    return {"loaded": {k: bool(os.getenv(k)) for k in keys}}
+        if htf_df is None or ltf_df is None:
+            return JSONResponse({"error": "Failed to fetch data", "Action": "NO_TRADE"}, status_code=500)
+
+        current_price = float(ltf_df.iloc[-1]["close"])
+        ltf_candles = ltf_df.to_dict('records')
+        detected_range = await detect_best_range(ltf_candles)
+
+        context = {
+            "htf_candles": htf_df,
+            "ltf_candles": ltf_df,
+            "detected_range": detected_range,
+            "current_price": current_price,
+            "symbol": SYMBOL
+        }
+
+        result = validate_gates(context)
+        result.pop("htf_candles", None)
+        result.pop("ltf_candles", None)
+
+        return JSONResponse(result)
+    except Exception as e:
+        logger.error(f"[VALIDATE_ERROR] {e}")
+        return JSONResponse({"error": str(e), "Action": "NO_TRADE"}, status_code=500)
 
 # ================================================================
 # ENTRY POINT
 # ================================================================
+
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 8080))
-    uvicorn.run("server_mexc:app", host="0.0.0.0", port=port, reload=False)
+    uvicorn.run("server_mexc:app", host="0.0.0.0", port=PORT, reload=True)
