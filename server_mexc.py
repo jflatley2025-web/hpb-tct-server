@@ -91,6 +91,397 @@ class MarketStructure:
         return None
 
 # ================================================================
+# FAIR VALUE GAP (FVG) DETECTION
+# ================================================================
+
+class FairValueGap:
+    """Detects Fair Value Gaps (inefficiencies) - 3-candle pattern"""
+
+    @staticmethod
+    def detect_fvgs(candles: pd.DataFrame) -> Dict:
+        """
+        Detect FVGs using 3-candle pattern.
+
+        Bullish FVG: candle[i-1].high < candle[i+1].low (gap below)
+        Bearish FVG: candle[i-1].low > candle[i+1].high (gap above)
+
+        Returns: Dict with bullish_fvgs and bearish_fvgs lists
+        """
+        if len(candles) < 3:
+            return {"bullish_fvgs": [], "bearish_fvgs": []}
+
+        bullish_fvgs = []
+        bearish_fvgs = []
+
+        for i in range(1, len(candles) - 1):
+            c_prev = candles.iloc[i - 1]
+            c_curr = candles.iloc[i]
+            c_next = candles.iloc[i + 1]
+
+            # Bullish FVG: gap between prev high and next low
+            if c_prev["high"] < c_next["low"]:
+                bullish_fvgs.append({
+                    "idx": i,
+                    "top": float(c_next["low"]),
+                    "bottom": float(c_prev["high"]),
+                    "time": c_curr["open_time"] if "open_time" in c_curr.index else i,
+                    "gap_size": float(c_next["low"] - c_prev["high"])
+                })
+
+            # Bearish FVG: gap between prev low and next high
+            if c_prev["low"] > c_next["high"]:
+                bearish_fvgs.append({
+                    "idx": i,
+                    "top": float(c_prev["low"]),
+                    "bottom": float(c_next["high"]),
+                    "time": c_curr["open_time"] if "open_time" in c_curr.index else i,
+                    "gap_size": float(c_prev["low"] - c_next["high"])
+                })
+
+        return {"bullish_fvgs": bullish_fvgs, "bearish_fvgs": bearish_fvgs}
+
+# ================================================================
+# ORDER BLOCK DETECTION (OBIF - Order Block with Inefficiency)
+# ================================================================
+
+class OrderBlock:
+    """
+    Detects Order Blocks with Fair Value Gap requirement.
+
+    An Order Block is a single candle representing supply/demand area
+    that MUST have a Fair Value Gap (inefficiency).
+
+    - Bullish OBIF: Last bearish candle before bullish expansion with FVG
+    - Bearish OBIF: Last bullish candle before bearish expansion with FVG
+    """
+
+    @staticmethod
+    def detect_order_blocks(candles: pd.DataFrame, fvgs: Dict) -> Dict:
+        """
+        Detect Order Blocks using FVG requirement.
+
+        Args:
+            candles: DataFrame with OHLC data
+            fvgs: Dict from FairValueGap.detect_fvgs()
+
+        Returns: Dict with bullish_obs and bearish_obs lists
+        """
+        bullish_obs = []
+        bearish_obs = []
+
+        # Process bullish FVGs (demand zones)
+        for fvg in fvgs.get("bullish_fvgs", []):
+            idx = fvg["idx"]
+            if idx - 1 < 0 or idx + 2 >= len(candles):
+                continue
+
+            # Middle candle is the order block candidate
+            ob_candle = candles.iloc[idx]
+            expansion_candle = candles.iloc[idx + 1]
+
+            # Check if ob_candle is bearish (close < open)
+            is_bearish = ob_candle["close"] < ob_candle["open"]
+
+            # Check for bullish expansion (significant move up)
+            expansion_size = expansion_candle["high"] - expansion_candle["low"]
+            ob_size = ob_candle["high"] - ob_candle["low"]
+
+            if is_bearish and expansion_size > ob_size * 1.5:
+                bullish_obs.append({
+                    "idx": idx,
+                    "type": "bullish",
+                    "top": float(ob_candle["high"]),  # Include wick
+                    "bottom": float(ob_candle["low"]),  # Include wick
+                    "time": ob_candle["open_time"] if "open_time" in ob_candle.index else idx,
+                    "fvg": fvg,
+                    "mitigated": False
+                })
+
+        # Process bearish FVGs (supply zones)
+        for fvg in fvgs.get("bearish_fvgs", []):
+            idx = fvg["idx"]
+            if idx - 1 < 0 or idx + 2 >= len(candles):
+                continue
+
+            # Middle candle is the order block candidate
+            ob_candle = candles.iloc[idx]
+            expansion_candle = candles.iloc[idx + 1]
+
+            # Check if ob_candle is bullish (close > open)
+            is_bullish = ob_candle["close"] > ob_candle["open"]
+
+            # Check for bearish expansion (significant move down)
+            expansion_size = expansion_candle["high"] - expansion_candle["low"]
+            ob_size = ob_candle["high"] - ob_candle["low"]
+
+            if is_bullish and expansion_size > ob_size * 1.5:
+                bearish_obs.append({
+                    "idx": idx,
+                    "type": "bearish",
+                    "top": float(ob_candle["high"]),  # Include wick
+                    "bottom": float(ob_candle["low"]),  # Include wick
+                    "time": ob_candle["open_time"] if "open_time" in ob_candle.index else idx,
+                    "fvg": fvg,
+                    "mitigated": False
+                })
+
+        return {"bullish_obs": bullish_obs, "bearish_obs": bearish_obs}
+
+# ================================================================
+# STRUCTURE SUPPLY/DEMAND (SS SD)
+# ================================================================
+
+class StructureSupplyDemand:
+    """
+    Detects Structure Supply/Demand zones.
+
+    Structure S/D represents multiple candles with FVG following market structure.
+    - Demand: Entire bullish structure move before bearish expansion (with FVG)
+    - Supply: Entire bearish structure move before bullish expansion (with FVG)
+    """
+
+    @staticmethod
+    def detect_structure_zones(candles: pd.DataFrame, fvgs: Dict, pivots: Dict) -> Dict:
+        """
+        Detect Structure Supply/Demand zones using market structure and FVGs.
+
+        Args:
+            candles: DataFrame with OHLC data
+            fvgs: Dict from FairValueGap.detect_fvgs()
+            pivots: Dict from MarketStructure.detect_pivots()
+
+        Returns: Dict with demand_zones and supply_zones lists
+        """
+        demand_zones = []
+        supply_zones = []
+
+        # Process bullish structure (demand zones)
+        for fvg in fvgs.get("bullish_fvgs", []):
+            idx = fvg["idx"]
+            if idx < 5:
+                continue
+
+            # Look for structure move before this FVG
+            structure_start = max(0, idx - 10)
+            structure_candles = candles.iloc[structure_start:idx]
+
+            # Check if this forms a bullish structure (higher lows)
+            lows = structure_candles["low"].values
+            if len(lows) >= 2:
+                # Simple check: are recent lows generally higher?
+                is_bullish_structure = lows[-1] > lows[0]
+
+                if is_bullish_structure:
+                    demand_zones.append({
+                        "type": "demand",
+                        "top": float(structure_candles["high"].max()),
+                        "bottom": float(structure_candles["low"].min()),
+                        "start_idx": structure_start,
+                        "end_idx": idx,
+                        "fvg": fvg,
+                        "candle_count": len(structure_candles),
+                        "mitigated": False
+                    })
+
+        # Process bearish structure (supply zones)
+        for fvg in fvgs.get("bearish_fvgs", []):
+            idx = fvg["idx"]
+            if idx < 5:
+                continue
+
+            # Look for structure move before this FVG
+            structure_start = max(0, idx - 10)
+            structure_candles = candles.iloc[structure_start:idx]
+
+            # Check if this forms a bearish structure (lower highs)
+            highs = structure_candles["high"].values
+            if len(highs) >= 2:
+                # Simple check: are recent highs generally lower?
+                is_bearish_structure = highs[-1] < highs[0]
+
+                if is_bearish_structure:
+                    supply_zones.append({
+                        "type": "supply",
+                        "top": float(structure_candles["high"].max()),
+                        "bottom": float(structure_candles["low"].min()),
+                        "start_idx": structure_start,
+                        "end_idx": idx,
+                        "fvg": fvg,
+                        "candle_count": len(structure_candles),
+                        "mitigated": False
+                    })
+
+        return {"demand_zones": demand_zones, "supply_zones": supply_zones}
+
+# ================================================================
+# ZONE LOCATION SCORING
+# ================================================================
+
+class ZoneScoring:
+    """
+    Scores Supply/Demand zones based on 3 key locations:
+    1. Pivot points following market structure
+    2. Within ranges (demand in discount, supply in premium)
+    3. Above/below range for deviations
+    """
+
+    @staticmethod
+    def score_zones(zones: Dict, pivots: Dict, detected_range: Optional[Dict], current_price: float) -> List[Dict]:
+        """
+        Score and filter zones based on location quality.
+
+        Args:
+            zones: Combined dict with order_blocks and structure_zones
+            pivots: Market structure pivots
+            detected_range: Current detected range (if any)
+            current_price: Current market price
+
+        Returns: List of scored zones sorted by strength
+        """
+        all_zones = []
+
+        # Process Order Blocks
+        for ob in zones.get("bullish_obs", []):
+            score = ZoneScoring._calculate_location_score(
+                zone_type="demand",
+                zone_top=ob["top"],
+                zone_bottom=ob["bottom"],
+                pivots=pivots,
+                detected_range=detected_range,
+                current_price=current_price
+            )
+            all_zones.append({
+                **ob,
+                "zone_class": "order_block",
+                "location_score": score["score"],
+                "location_type": score["location"],
+                "strength": score["score"] * 100
+            })
+
+        for ob in zones.get("bearish_obs", []):
+            score = ZoneScoring._calculate_location_score(
+                zone_type="supply",
+                zone_top=ob["top"],
+                zone_bottom=ob["bottom"],
+                pivots=pivots,
+                detected_range=detected_range,
+                current_price=current_price
+            )
+            all_zones.append({
+                **ob,
+                "zone_class": "order_block",
+                "location_score": score["score"],
+                "location_type": score["location"],
+                "strength": score["score"] * 100
+            })
+
+        # Process Structure Zones
+        for zone in zones.get("demand_zones", []):
+            score = ZoneScoring._calculate_location_score(
+                zone_type="demand",
+                zone_top=zone["top"],
+                zone_bottom=zone["bottom"],
+                pivots=pivots,
+                detected_range=detected_range,
+                current_price=current_price
+            )
+            all_zones.append({
+                **zone,
+                "zone_class": "structure",
+                "location_score": score["score"],
+                "location_type": score["location"],
+                "strength": score["score"] * 85  # Slightly lower than OB
+            })
+
+        for zone in zones.get("supply_zones", []):
+            score = ZoneScoring._calculate_location_score(
+                zone_type="supply",
+                zone_top=zone["top"],
+                zone_bottom=zone["bottom"],
+                pivots=pivots,
+                detected_range=detected_range,
+                current_price=current_price
+            )
+            all_zones.append({
+                **zone,
+                "zone_class": "structure",
+                "location_score": score["score"],
+                "location_type": score["location"],
+                "strength": score["score"] * 85  # Slightly lower than OB
+            })
+
+        # Sort by strength descending
+        all_zones.sort(key=lambda z: z["strength"], reverse=True)
+        return all_zones
+
+    @staticmethod
+    def _calculate_location_score(
+        zone_type: str,
+        zone_top: float,
+        zone_bottom: float,
+        pivots: Dict,
+        detected_range: Optional[Dict],
+        current_price: float
+    ) -> Dict:
+        """Calculate location-based score for a zone."""
+        zone_mid = (zone_top + zone_bottom) / 2
+
+        # Location 1: Pivot points (highest quality)
+        if ZoneScoring._is_at_pivot(zone_mid, pivots, zone_type):
+            return {"score": 1.0, "location": "pivot"}
+
+        # Location 2: Within range (discount/premium)
+        if detected_range:
+            range_high = detected_range.get("high", 0)
+            range_low = detected_range.get("low", 0)
+            range_mid = (range_high + range_low) / 2
+
+            # Demand should be in discount (lower 50%)
+            if zone_type == "demand" and zone_mid < range_mid and zone_mid >= range_low:
+                return {"score": 0.85, "location": "range_discount"}
+
+            # Supply should be in premium (upper 50%)
+            if zone_type == "supply" and zone_mid > range_mid and zone_mid <= range_high:
+                return {"score": 0.85, "location": "range_premium"}
+
+        # Location 3: Above/below range for deviations
+        if detected_range:
+            range_high = detected_range.get("high", 0)
+            range_low = detected_range.get("low", 0)
+
+            # Demand below range low
+            if zone_type == "demand" and zone_mid < range_low:
+                return {"score": 0.75, "location": "below_range"}
+
+            # Supply above range high
+            if zone_type == "supply" and zone_mid > range_high:
+                return {"score": 0.75, "location": "above_range"}
+
+        # No specific location match
+        return {"score": 0.5, "location": "none"}
+
+    @staticmethod
+    def _is_at_pivot(zone_mid: float, pivots: Dict, zone_type: str) -> bool:
+        """Check if zone is at a pivot point."""
+        tolerance = 0.005  # 0.5% tolerance
+
+        if zone_type == "demand":
+            # Check swing lows
+            for pivot in pivots.get("lows", [])[-3:]:  # Last 3 lows
+                pivot_price = pivot.get("price", 0)
+                if abs(zone_mid - pivot_price) / pivot_price < tolerance:
+                    return True
+
+        elif zone_type == "supply":
+            # Check swing highs
+            for pivot in pivots.get("highs", [])[-3:]:  # Last 3 highs
+                pivot_price = pivot.get("price", 0)
+                if abs(zone_mid - pivot_price) / pivot_price < tolerance:
+                    return True
+
+        return False
+
+# ================================================================
 # GATES
 # ================================================================
 
@@ -256,7 +647,8 @@ async def root():
         "endpoints": {
             "/status": "Health check",
             "/api/validate": "7-gate validation",
-            "/api/price": "Current price"
+            "/api/price": "Current price",
+            "/api/zones": "Supply & Demand zones (TCT Mentorship)"
         }
     }
 
@@ -275,6 +667,108 @@ async def live_price():
             return {"error": f"HTTP {r.status_code}"}
     except Exception as e:
         return {"error": str(e)}
+
+@app.get("/api/zones")
+async def detect_zones():
+    """
+    Detect and score Supply/Demand zones using TCT Mentorship methodology.
+
+    Returns:
+        - Order Blocks (with FVG requirement)
+        - Structure Supply/Demand zones
+        - Location-based scoring (pivot, range discount/premium, deviation)
+        - Top zones sorted by strength
+    """
+    try:
+        # Fetch candles
+        htf_df = await fetch_mexc_candles(SYMBOL, "4h", 100)
+        ltf_df = await fetch_mexc_candles(SYMBOL, "15m", 200)
+
+        if htf_df is None or ltf_df is None:
+            return JSONResponse({"error": "Failed to fetch data"}, status_code=500)
+
+        current_price = float(ltf_df.iloc[-1]["close"])
+
+        # Detect FVGs
+        fvg_detector = FairValueGap()
+        htf_fvgs = fvg_detector.detect_fvgs(htf_df)
+        ltf_fvgs = fvg_detector.detect_fvgs(ltf_df)
+
+        # Detect Order Blocks
+        ob_detector = OrderBlock()
+        htf_obs = ob_detector.detect_order_blocks(htf_df, htf_fvgs)
+        ltf_obs = ob_detector.detect_order_blocks(ltf_df, ltf_fvgs)
+
+        # Detect market structure
+        ms = MarketStructure()
+        htf_pivots = ms.detect_pivots(htf_df)
+        ltf_pivots = ms.detect_pivots(ltf_df)
+
+        # Detect Structure Supply/Demand
+        ssd_detector = StructureSupplyDemand()
+        htf_structure = ssd_detector.detect_structure_zones(htf_df, htf_fvgs, htf_pivots)
+        ltf_structure = ssd_detector.detect_structure_zones(ltf_df, ltf_fvgs, ltf_pivots)
+
+        # Convert LTF to dict for range detection
+        ltf_candles = []
+        for _, row in ltf_df.iterrows():
+            ltf_candles.append({
+                'high': float(row['high']),
+                'low': float(row['low']),
+                'close': float(row['close'])
+            })
+
+        detected_range = await detect_best_range(ltf_candles)
+
+        # Combine zones
+        htf_zones = {
+            "bullish_obs": htf_obs.get("bullish_obs", []),
+            "bearish_obs": htf_obs.get("bearish_obs", []),
+            "demand_zones": htf_structure.get("demand_zones", []),
+            "supply_zones": htf_structure.get("supply_zones", [])
+        }
+
+        ltf_zones = {
+            "bullish_obs": ltf_obs.get("bullish_obs", []),
+            "bearish_obs": ltf_obs.get("bearish_obs", []),
+            "demand_zones": ltf_structure.get("demand_zones", []),
+            "supply_zones": ltf_structure.get("supply_zones", [])
+        }
+
+        # Score zones
+        scorer = ZoneScoring()
+        htf_scored = scorer.score_zones(htf_zones, htf_pivots, detected_range, current_price)
+        ltf_scored = scorer.score_zones(ltf_zones, ltf_pivots, detected_range, current_price)
+
+        # Filter for fresh (non-mitigated) zones only
+        htf_fresh = [z for z in htf_scored if not z.get("mitigated", False)]
+        ltf_fresh = [z for z in ltf_scored if not z.get("mitigated", False)]
+
+        return JSONResponse({
+            "symbol": SYMBOL,
+            "current_price": current_price,
+            "htf_zones": {
+                "timeframe": "4h",
+                "total_zones": len(htf_fresh),
+                "top_3": htf_fresh[:3]
+            },
+            "ltf_zones": {
+                "timeframe": "15m",
+                "total_zones": len(ltf_fresh),
+                "top_3": ltf_fresh[:3]
+            },
+            "detected_range": detected_range,
+            "summary": {
+                "htf_fvg_count": len(htf_fvgs.get("bullish_fvgs", [])) + len(htf_fvgs.get("bearish_fvgs", [])),
+                "ltf_fvg_count": len(ltf_fvgs.get("bullish_fvgs", [])) + len(ltf_fvgs.get("bearish_fvgs", [])),
+                "htf_order_blocks": len(htf_obs.get("bullish_obs", [])) + len(htf_obs.get("bearish_obs", [])),
+                "ltf_order_blocks": len(ltf_obs.get("bullish_obs", [])) + len(ltf_obs.get("bearish_obs", []))
+            }
+        })
+
+    except Exception as e:
+        logger.error(f"[ZONES_ERROR] {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.get("/api/validate")
 async def validate_current_setup():
