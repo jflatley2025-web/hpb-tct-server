@@ -853,6 +853,694 @@ class OverlappingZoneDetector:
         return enhanced_htf_zones
 
 # ================================================================
+# LIQUIDITY DETECTION (TCT Mentorship Lecture 4)
+# ================================================================
+
+class LiquidityDetector:
+    """
+    Detects Buy-Side Liquidity (BSL) and Sell-Side Liquidity (SSL) pools.
+
+    Methodology from Liquidity PDFs:
+    - BSL = Liquidity above highs (stop losses above resistance)
+    - SSL = Liquidity below lows (stop losses below support)
+    - Primary highs/lows = visible pivot points (major liquidity pools)
+    - Internal highs/lows = price action between primaries (less significant)
+    - Equal highs/lows = multiple touches at same level (strong liquidity targets)
+    - Non-liquidity highs/lows = highs/lows that grabbed previous liquidity
+    """
+
+    @staticmethod
+    def detect_liquidity_pools(candles: pd.DataFrame, pivots: Dict, current_price: float) -> Dict:
+        """
+        Detect BSL (above highs) and SSL (below lows) liquidity pools.
+
+        Returns: Dict with bsl_pools and ssl_pools lists
+        """
+        bsl_pools = []  # Buy-side liquidity (above price)
+        ssl_pools = []  # Sell-side liquidity (below price)
+
+        # Classify pivots as primary vs internal
+        primary_highs, internal_highs = LiquidityDetector._classify_primary_vs_internal(
+            pivots.get("highs", []), is_highs=True
+        )
+
+        primary_lows, internal_lows = LiquidityDetector._classify_primary_vs_internal(
+            pivots.get("lows", []), is_lows=True
+        )
+
+        # Detect equal highs (BSL)
+        equal_highs = LiquidityDetector._detect_equal_levels(
+            [p["price"] for p in pivots.get("highs", [])],
+            tolerance=0.001  # 0.1% tolerance
+        )
+
+        # Detect equal lows (SSL)
+        equal_lows = LiquidityDetector._detect_equal_levels(
+            [p["price"] for p in pivots.get("lows", [])],
+            tolerance=0.001
+        )
+
+        # Create BSL pools from primary highs
+        for pivot in primary_highs:
+            price = pivot["price"]
+
+            # Check if this is a non-liquidity high
+            is_non_liquidity = LiquidityDetector._is_non_liquidity_high(
+                pivot, pivots.get("highs", []), candles
+            )
+
+            if not is_non_liquidity:
+                is_equal = any(abs(price - eq) / eq < 0.001 for eq in equal_highs)
+
+                bsl_pools.append({
+                    "type": "BSL",
+                    "price": float(price),
+                    "idx": pivot["idx"],
+                    "is_primary": True,
+                    "is_equal": is_equal,
+                    "strength": 1.0 if is_equal else 0.75,
+                    "distance_from_price": float((price - current_price) / current_price * 100)
+                })
+
+        # Create SSL pools from primary lows
+        for pivot in primary_lows:
+            price = pivot["price"]
+
+            # Check if this is a non-liquidity low
+            is_non_liquidity = LiquidityDetector._is_non_liquidity_low(
+                pivot, pivots.get("lows", []), candles
+            )
+
+            if not is_non_liquidity:
+                is_equal = any(abs(price - eq) / eq < 0.001 for eq in equal_lows)
+
+                ssl_pools.append({
+                    "type": "SSL",
+                    "price": float(price),
+                    "idx": pivot["idx"],
+                    "is_primary": True,
+                    "is_equal": is_equal,
+                    "strength": 1.0 if is_equal else 0.75,
+                    "distance_from_price": float((current_price - price) / current_price * 100)
+                })
+
+        # Add internal highs/lows as weaker liquidity
+        for pivot in internal_highs:
+            price = pivot["price"]
+            bsl_pools.append({
+                "type": "BSL",
+                "price": float(price),
+                "idx": pivot["idx"],
+                "is_primary": False,
+                "is_equal": False,
+                "strength": 0.4,
+                "distance_from_price": float((price - current_price) / current_price * 100)
+            })
+
+        for pivot in internal_lows:
+            price = pivot["price"]
+            ssl_pools.append({
+                "type": "SSL",
+                "price": float(price),
+                "idx": pivot["idx"],
+                "is_primary": False,
+                "is_equal": False,
+                "strength": 0.4,
+                "distance_from_price": float((current_price - price) / current_price * 100)
+            })
+
+        # Sort by strength
+        bsl_pools.sort(key=lambda x: x["strength"], reverse=True)
+        ssl_pools.sort(key=lambda x: x["strength"], reverse=True)
+
+        return {
+            "bsl_pools": bsl_pools,
+            "ssl_pools": ssl_pools,
+            "equal_highs": equal_highs,
+            "equal_lows": equal_lows,
+            "primary_highs_count": len(primary_highs),
+            "primary_lows_count": len(primary_lows),
+            "internal_highs_count": len(internal_highs),
+            "internal_lows_count": len(internal_lows)
+        }
+
+    @staticmethod
+    def _classify_primary_vs_internal(pivots: List[Dict], is_highs: bool = False, is_lows: bool = False) -> tuple:
+        """
+        Classify pivots as primary (visible, significant) or internal (between primaries).
+
+        Primary pivots = major swing points that stand out
+        Internal pivots = smaller swings between primaries
+        """
+        if len(pivots) < 2:
+            return pivots, []
+
+        # Sort by index
+        sorted_pivots = sorted(pivots, key=lambda x: x["idx"])
+
+        # Calculate relative significance based on price range
+        prices = [p["price"] for p in sorted_pivots]
+        price_range = max(prices) - min(prices)
+
+        if price_range == 0:
+            return sorted_pivots, []
+
+        primary = []
+        internal = []
+
+        # Window-based classification
+        window_size = 5
+        for i, pivot in enumerate(sorted_pivots):
+            start = max(0, i - window_size)
+            end = min(len(sorted_pivots), i + window_size + 1)
+            window = sorted_pivots[start:end]
+            window_prices = [p["price"] for p in window]
+
+            if is_highs:
+                # For highs: primary if it's among the highest in window
+                is_primary = pivot["price"] >= sorted(window_prices)[-2] if len(window_prices) >= 2 else True
+            elif is_lows:
+                # For lows: primary if it's among the lowest in window
+                is_primary = pivot["price"] <= sorted(window_prices)[1] if len(window_prices) >= 2 else True
+            else:
+                is_primary = True
+
+            if is_primary:
+                primary.append(pivot)
+            else:
+                internal.append(pivot)
+
+        return primary, internal
+
+    @staticmethod
+    def _detect_equal_levels(prices: List[float], tolerance: float = 0.001) -> List[float]:
+        """
+        Detect equal highs/lows (multiple touches at same price level).
+
+        Returns list of price levels that have 2+ touches within tolerance.
+        """
+        if len(prices) < 2:
+            return []
+
+        equal_levels = []
+        processed = set()
+
+        for i, price1 in enumerate(prices):
+            if i in processed:
+                continue
+
+            matches = [price1]
+            for j, price2 in enumerate(prices[i+1:], start=i+1):
+                if abs(price1 - price2) / price1 < tolerance:
+                    matches.append(price2)
+                    processed.add(j)
+
+            # If 2+ matches, it's an equal level
+            if len(matches) >= 2:
+                equal_levels.append(sum(matches) / len(matches))
+                processed.add(i)
+
+        return equal_levels
+
+    @staticmethod
+    def _is_non_liquidity_high(pivot: Dict, all_highs: List[Dict], candles: pd.DataFrame) -> bool:
+        """
+        Check if high is a non-liquidity high.
+
+        Non-liquidity high = high that grabbed liquidity from previous high,
+        followed by aggressive expansion downward.
+
+        Exception: If price spent time near the swept level, it IS liquidity.
+        """
+        idx = pivot["idx"]
+        price = pivot["price"]
+
+        if idx < 5 or idx >= len(candles) - 2:
+            return False
+
+        # Find previous highs
+        previous_highs = [h for h in all_highs if h["idx"] < idx]
+        if not previous_highs:
+            return False
+
+        # Check if this high swept a previous high
+        swept_previous = any(price > h["price"] for h in previous_highs[-3:])
+
+        if not swept_previous:
+            return False
+
+        # Check for aggressive expansion downward after this high
+        next_candles = candles.iloc[idx+1:min(idx+4, len(candles))]
+        if len(next_candles) == 0:
+            return False
+
+        high_candle = candles.iloc[idx]
+        lowest_after = next_candles["low"].min()
+        expansion_size = high_candle["high"] - lowest_after
+        high_size = high_candle["high"] - high_candle["low"]
+
+        # Aggressive expansion = move down > 2x the high candle size
+        has_aggressive_expansion = expansion_size > high_size * 2.0
+
+        if not has_aggressive_expansion:
+            return False
+
+        # Exception: Check if price spent time near this level
+        time_spent_near = sum(
+            1 for c in next_candles.itertuples()
+            if abs(c.close - price) / price < 0.01
+        )
+
+        # If spent 2+ candles near level, it IS liquidity (not non-liquidity)
+        if time_spent_near >= 2:
+            return False
+
+        return True  # It's a non-liquidity high
+
+    @staticmethod
+    def _is_non_liquidity_low(pivot: Dict, all_lows: List[Dict], candles: pd.DataFrame) -> bool:
+        """
+        Check if low is a non-liquidity low.
+
+        Non-liquidity low = low that grabbed liquidity from previous low,
+        followed by aggressive expansion upward.
+        """
+        idx = pivot["idx"]
+        price = pivot["price"]
+
+        if idx < 5 or idx >= len(candles) - 2:
+            return False
+
+        # Find previous lows
+        previous_lows = [l for l in all_lows if l["idx"] < idx]
+        if not previous_lows:
+            return False
+
+        # Check if this low swept a previous low
+        swept_previous = any(price < l["price"] for l in previous_lows[-3:])
+
+        if not swept_previous:
+            return False
+
+        # Check for aggressive expansion upward after this low
+        next_candles = candles.iloc[idx+1:min(idx+4, len(candles))]
+        if len(next_candles) == 0:
+            return False
+
+        low_candle = candles.iloc[idx]
+        highest_after = next_candles["high"].max()
+        expansion_size = highest_after - low_candle["low"]
+        low_size = low_candle["high"] - low_candle["low"]
+
+        # Aggressive expansion = move up > 2x the low candle size
+        has_aggressive_expansion = expansion_size > low_size * 2.0
+
+        if not has_aggressive_expansion:
+            return False
+
+        # Exception: Check if price spent time near this level
+        time_spent_near = sum(
+            1 for c in next_candles.itertuples()
+            if abs(c.close - price) / price < 0.01
+        )
+
+        if time_spent_near >= 2:
+            return False
+
+        return True
+
+# ================================================================
+# LIQUIDITY CURVE GENERATION
+# ================================================================
+
+class LiquidityCurveGenerator:
+    """
+    Generates liquidity curves by connecting primary highs or lows.
+
+    Methodology from PDFs:
+    - Sell-side liquidity curve: Connect progressively lower primary highs
+    - Buy-side liquidity curve: Connect progressively higher primary lows
+    - Don't need all points to connect, just a few to form proper curve
+    - 3-tap pattern: 1st tap → 2nd tap → 3rd tap
+    """
+
+    @staticmethod
+    def generate_curves(liquidity_pools: Dict, candles: pd.DataFrame) -> Dict:
+        """
+        Generate liquidity curves from liquidity pools.
+
+        Returns: Dict with sell_side_curves and buy_side_curves
+        """
+        bsl_pools = liquidity_pools.get("bsl_pools", [])
+        ssl_pools = liquidity_pools.get("ssl_pools", [])
+
+        # Filter primary pools only
+        primary_bsl = [p for p in bsl_pools if p.get("is_primary", False)]
+        primary_ssl = [p for p in ssl_pools if p.get("is_primary", False)]
+
+        # Generate sell-side curves (from BSL - highs)
+        sell_side_curves = LiquidityCurveGenerator._generate_sell_side_curves(primary_bsl, candles)
+
+        # Generate buy-side curves (from SSL - lows)
+        buy_side_curves = LiquidityCurveGenerator._generate_buy_side_curves(primary_ssl, candles)
+
+        return {
+            "sell_side_curves": sell_side_curves,
+            "buy_side_curves": buy_side_curves,
+            "total_curves": len(sell_side_curves) + len(buy_side_curves)
+        }
+
+    @staticmethod
+    def _generate_sell_side_curves(primary_highs: List[Dict], candles: pd.DataFrame) -> List[Dict]:
+        """
+        Generate sell-side liquidity curves from progressively lower highs.
+        """
+        if len(primary_highs) < 3:
+            return []
+
+        # Sort by index
+        sorted_highs = sorted(primary_highs, key=lambda x: x["idx"])
+
+        curves = []
+
+        # Look for sequences of 3+ lower highs
+        for i in range(len(sorted_highs) - 2):
+            sequence = []
+            current_high = sorted_highs[i]
+            sequence.append(current_high)
+
+            for j in range(i + 1, len(sorted_highs)):
+                next_high = sorted_highs[j]
+
+                # Check if next high is lower than current
+                if next_high["price"] < sequence[-1]["price"]:
+                    sequence.append(next_high)
+
+                # Stop if we found 5+ points or price goes back up
+                if len(sequence) >= 5:
+                    break
+
+            # Valid curve needs at least 3 points
+            if len(sequence) >= 3:
+                # Check if it's a valid descending sequence
+                is_valid = all(
+                    sequence[k]["price"] > sequence[k+1]["price"]
+                    for k in range(len(sequence)-1)
+                )
+
+                if is_valid:
+                    tap_count = len(sequence)
+
+                    curves.append({
+                        "type": "sell_side",
+                        "taps": sequence,
+                        "tap_count": tap_count,
+                        "first_tap": sequence[0],
+                        "second_tap": sequence[1] if len(sequence) >= 2 else None,
+                        "third_tap": sequence[2] if len(sequence) >= 3 else None,
+                        "highest_price": float(sequence[0]["price"]),
+                        "lowest_price": float(sequence[-1]["price"]),
+                        "quality": "EXCELLENT" if tap_count >= 4 else "GOOD" if tap_count == 3 else "WEAK"
+                    })
+
+        return curves
+
+    @staticmethod
+    def _generate_buy_side_curves(primary_lows: List[Dict], candles: pd.DataFrame) -> List[Dict]:
+        """
+        Generate buy-side liquidity curves from progressively higher lows.
+        """
+        if len(primary_lows) < 3:
+            return []
+
+        # Sort by index
+        sorted_lows = sorted(primary_lows, key=lambda x: x["idx"])
+
+        curves = []
+
+        # Look for sequences of 3+ higher lows
+        for i in range(len(sorted_lows) - 2):
+            sequence = []
+            current_low = sorted_lows[i]
+            sequence.append(current_low)
+
+            for j in range(i + 1, len(sorted_lows)):
+                next_low = sorted_lows[j]
+
+                # Check if next low is higher than current
+                if next_low["price"] > sequence[-1]["price"]:
+                    sequence.append(next_low)
+
+                # Stop if we found 5+ points or price goes back down
+                if len(sequence) >= 5:
+                    break
+
+            # Valid curve needs at least 3 points
+            if len(sequence) >= 3:
+                # Check if it's a valid ascending sequence
+                is_valid = all(
+                    sequence[k]["price"] < sequence[k+1]["price"]
+                    for k in range(len(sequence)-1)
+                )
+
+                if is_valid:
+                    tap_count = len(sequence)
+
+                    curves.append({
+                        "type": "buy_side",
+                        "taps": sequence,
+                        "tap_count": tap_count,
+                        "first_tap": sequence[0],
+                        "second_tap": sequence[1] if len(sequence) >= 2 else None,
+                        "third_tap": sequence[2] if len(sequence) >= 3 else None,
+                        "lowest_price": float(sequence[0]["price"]),
+                        "highest_price": float(sequence[-1]["price"]),
+                        "quality": "EXCELLENT" if tap_count >= 4 else "GOOD" if tap_count == 3 else "WEAK"
+                    })
+
+        return curves
+
+# ================================================================
+# EXTREME LIQUIDITY TARGET IDENTIFICATION
+# ================================================================
+
+class ExtremeLiquidityTarget:
+    """
+    Identifies extreme liquidity POI (Point of Interest) after 2nd tap.
+
+    Per PDF: "After 2nd tap observation, identify extreme liquidity target:
+    - For accumulation: First higher low after 2nd tap
+    - For distribution: First lower high after 2nd tap"
+    """
+
+    @staticmethod
+    def identify_extreme_targets(curves: Dict, candles: pd.DataFrame) -> Dict:
+        """
+        Identify extreme liquidity targets for each curve.
+
+        Returns: Dict with targets for each curve type
+        """
+        sell_side_targets = []
+        buy_side_targets = []
+
+        # Process sell-side curves (distribution)
+        for curve in curves.get("sell_side_curves", []):
+            if curve.get("tap_count", 0) >= 2:
+                target = ExtremeLiquidityTarget._find_extreme_target_for_distribution(
+                    curve, candles
+                )
+                if target:
+                    sell_side_targets.append(target)
+
+        # Process buy-side curves (accumulation)
+        for curve in curves.get("buy_side_curves", []):
+            if curve.get("tap_count", 0) >= 2:
+                target = ExtremeLiquidityTarget._find_extreme_target_for_accumulation(
+                    curve, candles
+                )
+                if target:
+                    buy_side_targets.append(target)
+
+        return {
+            "sell_side_targets": sell_side_targets,
+            "buy_side_targets": buy_side_targets,
+            "total_targets": len(sell_side_targets) + len(buy_side_targets)
+        }
+
+    @staticmethod
+    def _find_extreme_target_for_distribution(curve: Dict, candles: pd.DataFrame) -> Optional[Dict]:
+        """
+        Find first lower high after 2nd tap (for distribution/sell-side).
+        """
+        second_tap = curve.get("second_tap")
+        if not second_tap:
+            return None
+
+        second_tap_idx = second_tap["idx"]
+        second_tap_price = second_tap["price"]
+
+        # Look for first lower high after 2nd tap
+        search_window = candles.iloc[second_tap_idx+1:min(second_tap_idx+20, len(candles))]
+
+        for i, candle in enumerate(search_window.itertuples(), start=second_tap_idx+1):
+            # Check if this forms a lower high
+            if candle.high < second_tap_price:
+                # Found first lower high
+                return {
+                    "type": "distribution",
+                    "curve_type": "sell_side",
+                    "target_price": float(candle.high),
+                    "target_idx": i,
+                    "second_tap_price": float(second_tap_price),
+                    "is_swept": False,  # Will be updated when checking current price
+                    "quality": "EXTREME_LIQUIDITY_POI"
+                }
+
+        return None
+
+    @staticmethod
+    def _find_extreme_target_for_accumulation(curve: Dict, candles: pd.DataFrame) -> Optional[Dict]:
+        """
+        Find first higher low after 2nd tap (for accumulation/buy-side).
+        """
+        second_tap = curve.get("second_tap")
+        if not second_tap:
+            return None
+
+        second_tap_idx = second_tap["idx"]
+        second_tap_price = second_tap["price"]
+
+        # Look for first higher low after 2nd tap
+        search_window = candles.iloc[second_tap_idx+1:min(second_tap_idx+20, len(candles))]
+
+        for i, candle in enumerate(search_window.itertuples(), start=second_tap_idx+1):
+            # Check if this forms a higher low
+            if candle.low > second_tap_price:
+                # Found first higher low
+                return {
+                    "type": "accumulation",
+                    "curve_type": "buy_side",
+                    "target_price": float(candle.low),
+                    "target_idx": i,
+                    "second_tap_price": float(second_tap_price),
+                    "is_swept": False,  # Will be updated when checking current price
+                    "quality": "EXTREME_LIQUIDITY_POI"
+                }
+
+        return None
+
+# ================================================================
+# LIQUIDITY VOID DETECTION
+# ================================================================
+
+class LiquidityVoidDetector:
+    """
+    Detects liquidity voids - areas with no S&D zones where price can move easily.
+
+    Per PDF: Areas without order blocks or structure zones are voids
+    where liquidity is sparse and price can move freely.
+    """
+
+    @staticmethod
+    def detect_voids(zones: List[Dict], candles: pd.DataFrame, current_price: float) -> Dict:
+        """
+        Detect liquidity voids between S&D zones.
+
+        Returns: Dict with void regions
+        """
+        if not zones or len(candles) < 10:
+            return {"voids": [], "total_voids": 0}
+
+        # Get price range from candles
+        price_high = float(candles["high"].max())
+        price_low = float(candles["low"].min())
+        price_range = price_high - price_low
+
+        # Divide price range into segments
+        segment_count = 20
+        segment_size = price_range / segment_count
+
+        # Create segments
+        segments = []
+        for i in range(segment_count):
+            segment_low = price_low + (i * segment_size)
+            segment_high = segment_low + segment_size
+            segments.append({
+                "low": segment_low,
+                "high": segment_high,
+                "mid": (segment_low + segment_high) / 2,
+                "has_zone": False
+            })
+
+        # Mark segments that have zones
+        for zone in zones:
+            zone_top = zone.get("top", zone.get("refined_top", 0))
+            zone_bottom = zone.get("bottom", zone.get("refined_bottom", 0))
+            zone_mid = (zone_top + zone_bottom) / 2
+
+            for segment in segments:
+                # Check if zone overlaps this segment
+                if (zone_bottom <= segment["high"] and zone_top >= segment["low"]):
+                    segment["has_zone"] = True
+
+        # Find consecutive segments without zones (voids)
+        voids = []
+        current_void = None
+
+        for segment in segments:
+            if not segment["has_zone"]:
+                if current_void is None:
+                    # Start new void
+                    current_void = {
+                        "low": segment["low"],
+                        "high": segment["high"],
+                        "segment_count": 1
+                    }
+                else:
+                    # Extend current void
+                    current_void["high"] = segment["high"]
+                    current_void["segment_count"] += 1
+            else:
+                if current_void is not None:
+                    # End current void if it's significant (2+ segments)
+                    if current_void["segment_count"] >= 2:
+                        void_range = current_void["high"] - current_void["low"]
+                        void_mid = (current_void["high"] + current_void["low"]) / 2
+
+                        voids.append({
+                            "low": float(current_void["low"]),
+                            "high": float(current_void["high"]),
+                            "mid": float(void_mid),
+                            "size": float(void_range),
+                            "size_percent": float(void_range / price_range * 100),
+                            "distance_from_price": float((void_mid - current_price) / current_price * 100),
+                            "quality": "LARGE" if current_void["segment_count"] >= 4 else "MEDIUM"
+                        })
+
+                    current_void = None
+
+        # Check final void
+        if current_void is not None and current_void["segment_count"] >= 2:
+            void_range = current_void["high"] - current_void["low"]
+            void_mid = (current_void["high"] + current_void["low"]) / 2
+
+            voids.append({
+                "low": float(current_void["low"]),
+                "high": float(current_void["high"]),
+                "mid": float(void_mid),
+                "size": float(void_range),
+                "size_percent": float(void_range / price_range * 100),
+                "distance_from_price": float((void_mid - current_price) / current_price * 100),
+                "quality": "LARGE" if current_void["segment_count"] >= 4 else "MEDIUM"
+            })
+
+        return {
+            "voids": voids,
+            "total_voids": len(voids),
+            "largest_void": max(voids, key=lambda v: v["size"]) if voids else None
+        }
+
+# ================================================================
 # GATES
 # ================================================================
 
@@ -1011,7 +1699,7 @@ async def detect_best_range(candles: List) -> Optional[Dict]:
 @app.get("/")
 async def root():
     return {
-        "service": "HPB–TCT v21.2 (MEXC + Gate Validation)",
+        "service": "HPB–TCT v21.2 (MEXC + Gate Validation + Liquidity)",
         "status": "running",
         "symbol": SYMBOL,
         "version": "21.2",
@@ -1019,7 +1707,8 @@ async def root():
             "/status": "Health check",
             "/api/validate": "7-gate validation",
             "/api/price": "Current price",
-            "/api/zones": "Supply & Demand zones (TCT Mentorship)"
+            "/api/zones": "Supply & Demand zones (TCT Mentorship Lecture 3)",
+            "/api/liquidity": "Liquidity pools, curves & targets (TCT Lecture 4)"
         }
     }
 
@@ -1214,6 +1903,210 @@ async def detect_zones():
 
     except Exception as e:
         logger.error(f"[ZONES_ERROR] {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+@app.get("/api/liquidity")
+async def detect_liquidity():
+    """
+    Detect liquidity pools, curves, and targets using TCT Lecture 4 methodology.
+
+    Returns:
+        - BSL (Buy-Side Liquidity) pools above highs
+        - SSL (Sell-Side Liquidity) pools below lows
+        - Liquidity curves (sell-side and buy-side)
+        - Extreme liquidity targets (after 2nd tap)
+        - Liquidity voids (areas with no S&D zones)
+        - Integration with existing S&D zones
+    """
+    try:
+        # Fetch candles
+        htf_df = await fetch_mexc_candles(SYMBOL, "4h", 100)
+        ltf_df = await fetch_mexc_candles(SYMBOL, "15m", 200)
+
+        if htf_df is None or ltf_df is None:
+            return JSONResponse({"error": "Failed to fetch data"}, status_code=500)
+
+        current_price = float(ltf_df.iloc[-1]["close"])
+
+        # Detect market structure (pivots)
+        ms = MarketStructure()
+        htf_pivots = ms.detect_pivots(htf_df)
+        ltf_pivots = ms.detect_pivots(ltf_df)
+
+        # Detect FVGs
+        fvg_detector = FairValueGap()
+        htf_fvgs = fvg_detector.detect_fvgs(htf_df)
+        ltf_fvgs = fvg_detector.detect_fvgs(ltf_df)
+
+        # Detect Order Blocks
+        ob_detector = OrderBlock()
+        htf_obs = ob_detector.detect_order_blocks(htf_df, htf_fvgs)
+        ltf_obs = ob_detector.detect_order_blocks(ltf_df, ltf_fvgs)
+
+        # Detect Structure Supply/Demand
+        ssd_detector = StructureSupplyDemand()
+        htf_structure = ssd_detector.detect_structure_zones(htf_df, htf_fvgs, htf_pivots)
+        ltf_structure = ssd_detector.detect_structure_zones(ltf_df, ltf_fvgs, ltf_pivots)
+
+        # === STEP 4: LIQUIDITY DETECTION ===
+
+        # 1. Detect Liquidity Pools (BSL/SSL)
+        liq_detector = LiquidityDetector()
+        htf_liquidity = liq_detector.detect_liquidity_pools(htf_df, htf_pivots, current_price)
+        ltf_liquidity = liq_detector.detect_liquidity_pools(ltf_df, ltf_pivots, current_price)
+
+        # 2. Generate Liquidity Curves
+        curve_generator = LiquidityCurveGenerator()
+        htf_curves = curve_generator.generate_curves(htf_liquidity, htf_df)
+        ltf_curves = curve_generator.generate_curves(ltf_liquidity, ltf_df)
+
+        # 3. Identify Extreme Liquidity Targets
+        target_detector = ExtremeLiquidityTarget()
+        htf_targets = target_detector.identify_extreme_targets(htf_curves, htf_df)
+        ltf_targets = target_detector.identify_extreme_targets(ltf_curves, ltf_df)
+
+        # 4. Combine all zones for void detection
+        all_htf_zones = (
+            htf_obs.get("bullish_obs", []) +
+            htf_obs.get("bearish_obs", []) +
+            htf_structure.get("demand_zones", []) +
+            htf_structure.get("supply_zones", [])
+        )
+
+        all_ltf_zones = (
+            ltf_obs.get("bullish_obs", []) +
+            ltf_obs.get("bearish_obs", []) +
+            ltf_structure.get("demand_zones", []) +
+            ltf_structure.get("supply_zones", [])
+        )
+
+        # 5. Detect Liquidity Voids
+        void_detector = LiquidityVoidDetector()
+        htf_voids = void_detector.detect_voids(all_htf_zones, htf_df, current_price)
+        ltf_voids = void_detector.detect_voids(all_ltf_zones, ltf_df, current_price)
+
+        # === INTEGRATION: Link Liquidity with S&D Zones ===
+
+        # Find S&D zones that are AT liquidity pools (high-probability zones)
+        htf_zones_at_liquidity = []
+        for zone in all_htf_zones:
+            zone_mid = (zone.get("top", 0) + zone.get("bottom", 0)) / 2
+            zone_type = zone.get("type", "unknown")
+
+            # Check if zone is at BSL pool
+            at_bsl = any(
+                abs(zone_mid - pool["price"]) / pool["price"] < 0.01
+                for pool in htf_liquidity.get("bsl_pools", [])
+                if pool.get("is_primary", False)
+            )
+
+            # Check if zone is at SSL pool
+            at_ssl = any(
+                abs(zone_mid - pool["price"]) / pool["price"] < 0.01
+                for pool in htf_liquidity.get("ssl_pools", [])
+                if pool.get("is_primary", False)
+            )
+
+            if at_bsl or at_ssl:
+                htf_zones_at_liquidity.append({
+                    **zone,
+                    "at_liquidity_pool": True,
+                    "liquidity_type": "BSL" if at_bsl else "SSL",
+                    "high_probability": True
+                })
+
+        # Find zones inside liquidity voids (low-probability zones)
+        htf_zones_in_voids = []
+        for zone in all_htf_zones:
+            zone_mid = (zone.get("top", 0) + zone.get("bottom", 0)) / 2
+
+            in_void = any(
+                void["low"] <= zone_mid <= void["high"]
+                for void in htf_voids.get("voids", [])
+            )
+
+            if in_void:
+                htf_zones_in_voids.append({
+                    **zone,
+                    "in_liquidity_void": True,
+                    "low_probability": True
+                })
+
+        # Check if liquidity sweep occurred at extreme targets
+        for target in htf_targets.get("sell_side_targets", []) + htf_targets.get("buy_side_targets", []):
+            target_price = target["target_price"]
+
+            # Check if current price swept the target
+            if target["type"] == "distribution":
+                # For sell-side, check if price went below target
+                target["is_swept"] = current_price < target_price
+            else:
+                # For buy-side, check if price went above target
+                target["is_swept"] = current_price > target_price
+
+        return JSONResponse({
+            "symbol": SYMBOL,
+            "current_price": current_price,
+            "methodology": "TCT Mentorship Lecture 4 - Liquidity",
+            "htf_liquidity": {
+                "timeframe": "4h",
+                "bsl_pools": htf_liquidity.get("bsl_pools", [])[:10],  # Top 10
+                "ssl_pools": htf_liquidity.get("ssl_pools", [])[:10],
+                "equal_highs": htf_liquidity.get("equal_highs", []),
+                "equal_lows": htf_liquidity.get("equal_lows", []),
+                "primary_highs_count": htf_liquidity.get("primary_highs_count", 0),
+                "primary_lows_count": htf_liquidity.get("primary_lows_count", 0),
+                "internal_highs_count": htf_liquidity.get("internal_highs_count", 0),
+                "internal_lows_count": htf_liquidity.get("internal_lows_count", 0)
+            },
+            "ltf_liquidity": {
+                "timeframe": "15m",
+                "bsl_pools": ltf_liquidity.get("bsl_pools", [])[:10],
+                "ssl_pools": ltf_liquidity.get("ssl_pools", [])[:10],
+                "equal_highs": ltf_liquidity.get("equal_highs", []),
+                "equal_lows": ltf_liquidity.get("equal_lows", [])
+            },
+            "htf_curves": {
+                "sell_side_curves": htf_curves.get("sell_side_curves", []),
+                "buy_side_curves": htf_curves.get("buy_side_curves", []),
+                "total_curves": htf_curves.get("total_curves", 0)
+            },
+            "ltf_curves": {
+                "sell_side_curves": ltf_curves.get("sell_side_curves", []),
+                "buy_side_curves": ltf_curves.get("buy_side_curves", []),
+                "total_curves": ltf_curves.get("total_curves", 0)
+            },
+            "extreme_targets": {
+                "htf": htf_targets,
+                "ltf": ltf_targets,
+                "total_targets": htf_targets.get("total_targets", 0) + ltf_targets.get("total_targets", 0)
+            },
+            "liquidity_voids": {
+                "htf_voids": htf_voids.get("voids", []),
+                "ltf_voids": ltf_voids.get("voids", []),
+                "htf_largest_void": htf_voids.get("largest_void"),
+                "ltf_largest_void": ltf_voids.get("largest_void")
+            },
+            "integration": {
+                "zones_at_liquidity_pools": htf_zones_at_liquidity,
+                "zones_in_voids": htf_zones_in_voids,
+                "high_probability_zone_count": len(htf_zones_at_liquidity),
+                "low_probability_zone_count": len(htf_zones_in_voids)
+            },
+            "summary": {
+                "total_bsl_pools": len(htf_liquidity.get("bsl_pools", [])),
+                "total_ssl_pools": len(htf_liquidity.get("ssl_pools", [])),
+                "total_equal_highs": len(htf_liquidity.get("equal_highs", [])),
+                "total_equal_lows": len(htf_liquidity.get("equal_lows", [])),
+                "total_curves": htf_curves.get("total_curves", 0),
+                "total_extreme_targets": htf_targets.get("total_targets", 0),
+                "total_voids": htf_voids.get("total_voids", 0),
+                "zones_enhanced_by_liquidity": len(htf_zones_at_liquidity)
+            }
+        })
+
+    except Exception as e:
+        logger.error(f"[LIQUIDITY_ERROR] {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.get("/api/validate")
