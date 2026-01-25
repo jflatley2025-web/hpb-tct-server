@@ -482,6 +482,377 @@ class ZoneScoring:
         return False
 
 # ================================================================
+# MULTI-TIMEFRAME VALIDATION (38-Page PDF Methodology)
+# ================================================================
+
+class MultiTimeframeValidator:
+    """
+    Validates HTF order blocks by drilling down through multiple timeframes
+    to find "true inefficiency" as described in 38-page PDF.
+
+    Process: HTF → Intermediate TF → LTF to find where true inefficiency exists
+    """
+
+    @staticmethod
+    def validate_htf_zone_on_ltf(htf_zone: Dict, ltf_candles: pd.DataFrame) -> Dict:
+        """
+        Validate if HTF zone has true inefficiency on LTF.
+
+        Returns validation status with LTF structure details.
+        """
+        if ltf_candles is None or len(ltf_candles) < 10:
+            return {"has_true_inefficiency": False, "ltf_structure": None}
+
+        zone_top = htf_zone.get("top", 0)
+        zone_bottom = htf_zone.get("bottom", 0)
+
+        # Find candles within HTF zone range
+        in_zone = ltf_candles[
+            (ltf_candles["low"] <= zone_top) &
+            (ltf_candles["high"] >= zone_bottom)
+        ]
+
+        if len(in_zone) == 0:
+            return {"has_true_inefficiency": False, "ltf_structure": None}
+
+        # Detect FVG on LTF within this zone
+        fvg_detector = FairValueGap()
+        ltf_fvgs = fvg_detector.detect_fvgs(in_zone)
+
+        zone_type = htf_zone.get("type", "unknown")
+        ltf_fvg_list = ltf_fvgs.get("bullish_fvgs" if zone_type == "demand" else "bearish_fvgs", [])
+
+        has_inefficiency = len(ltf_fvg_list) > 0
+
+        # Check for LTF structure (higher highs/higher lows or lower highs/lower lows)
+        ltf_structure = None
+        if has_inefficiency and len(in_zone) >= 6:
+            ltf_structure = MultiTimeframeValidator._detect_ltf_structure(in_zone, zone_type)
+
+        return {
+            "has_true_inefficiency": has_inefficiency,
+            "ltf_structure": ltf_structure,
+            "ltf_fvg_count": len(ltf_fvg_list),
+            "ltf_fvgs": ltf_fvg_list[:3] if ltf_fvg_list else []  # Top 3 for detail
+        }
+
+    @staticmethod
+    def _detect_ltf_structure(candles: pd.DataFrame, zone_type: str) -> Optional[Dict]:
+        """Detect if LTF shows proper structure (HH/HL or LH/LL)."""
+        if len(candles) < 6:
+            return None
+
+        highs = candles["high"].values
+        lows = candles["low"].values
+
+        if zone_type == "demand":
+            # Look for higher highs and higher lows (bullish structure)
+            has_hh = highs[-1] > highs[0]
+            has_hl = lows[-1] > lows[0]
+
+            if has_hh and has_hl:
+                return {
+                    "type": "bullish_structure",
+                    "higher_highs": True,
+                    "higher_lows": True,
+                    "strength": 0.9
+                }
+
+        elif zone_type == "supply":
+            # Look for lower highs and lower lows (bearish structure)
+            has_lh = highs[-1] < highs[0]
+            has_ll = lows[-1] < lows[0]
+
+            if has_lh and has_ll:
+                return {
+                    "type": "bearish_structure",
+                    "lower_highs": True,
+                    "lower_lows": True,
+                    "strength": 0.9
+                }
+
+        return None
+
+# ================================================================
+# ZONE REFINEMENT & PARTIAL MITIGATION
+# ================================================================
+
+class ZoneRefinement:
+    """
+    Refines zones based on mitigation and identifies un-mitigated portions.
+
+    Per 38-page PDF: "Market doesn't always fill entire inefficiency -
+    sometimes just taps and rejects. Resize order block to fit bottom edge
+    of inefficiency."
+    """
+
+    @staticmethod
+    def refine_zone_after_mitigation(zone: Dict, recent_candles: pd.DataFrame) -> Dict:
+        """
+        Refine zone boundaries based on partial mitigation.
+
+        Returns refined zone with updated boundaries showing un-mitigated area.
+        """
+        zone_top = zone.get("top", 0)
+        zone_bottom = zone.get("bottom", 0)
+        zone_type = zone.get("type", "unknown")
+
+        # Find candles that entered the zone
+        touched_zone = recent_candles[
+            (recent_candles["low"] <= zone_top) &
+            (recent_candles["high"] >= zone_bottom)
+        ]
+
+        if len(touched_zone) == 0:
+            # No mitigation yet
+            return {
+                **zone,
+                "mitigation_percent": 0.0,
+                "refined_top": zone_top,
+                "refined_bottom": zone_bottom,
+                "is_refined": False
+            }
+
+        # Calculate how much of zone was mitigated
+        if zone_type == "supply":
+            # For supply, check lowest low that entered zone
+            lowest_penetration = touched_zone["low"].min()
+            mitigation_percent = ((zone_top - lowest_penetration) / (zone_top - zone_bottom)) * 100
+
+            # Refine: move bottom edge to lowest penetration point
+            refined_bottom = lowest_penetration
+            refined_top = zone_top
+
+        else:  # demand
+            # For demand, check highest high that entered zone
+            highest_penetration = touched_zone["high"].max()
+            mitigation_percent = ((highest_penetration - zone_bottom) / (zone_top - zone_bottom)) * 100
+
+            # Refine: move top edge to highest penetration point
+            refined_top = highest_penetration
+            refined_bottom = zone_bottom
+
+        return {
+            **zone,
+            "mitigation_percent": min(mitigation_percent, 100.0),
+            "refined_top": float(refined_top),
+            "refined_bottom": float(refined_bottom),
+            "is_refined": True,
+            "original_top": zone_top,
+            "original_bottom": zone_bottom
+        }
+
+# ================================================================
+# PIVOT QUALITY & LIQUIDITY SWEEP DETECTION
+# ================================================================
+
+class PivotQualityScorer:
+    """
+    Scores pivots based on quality and liquidity sweep characteristics.
+
+    Per 38-page PDF: "1st pivot point after extreme liquidity sweep =
+    extremely high quality. Block itself swept liquidity from left and
+    visible in macro pivot point."
+    """
+
+    @staticmethod
+    def score_pivot_quality(zone: Dict, pivots: Dict, candles: pd.DataFrame) -> Dict:
+        """
+        Score zone quality based on pivot position and liquidity characteristics.
+
+        Returns enhanced score with pivot rank (1st, 2nd, 3rd) and liquidity sweep detection.
+        """
+        zone_mid = (zone.get("top", 0) + zone.get("bottom", 0)) / 2
+        zone_type = zone.get("type", "unknown")
+
+        # Determine if zone is at pivot and which pivot (1st, 2nd, 3rd)
+        pivot_rank = PivotQualityScorer._get_pivot_rank(zone_mid, pivots, zone_type)
+
+        # Check for liquidity sweep
+        has_liquidity_sweep = PivotQualityScorer._detect_liquidity_sweep(
+            zone, candles, pivots, zone_type
+        )
+
+        # Calculate quality score
+        base_score = 0.5
+
+        if pivot_rank == 1:
+            base_score = 1.0  # 1st pivot = highest quality
+        elif pivot_rank == 2:
+            base_score = 0.85  # 2nd pivot = high quality
+        elif pivot_rank == 3:
+            base_score = 0.70  # 3rd pivot = good quality
+
+        # Boost if has liquidity sweep
+        if has_liquidity_sweep:
+            base_score = min(base_score * 1.15, 1.0)
+
+        return {
+            "pivot_rank": pivot_rank,
+            "has_liquidity_sweep": has_liquidity_sweep,
+            "pivot_quality_score": base_score,
+            "quality_label": PivotQualityScorer._get_quality_label(base_score, pivot_rank, has_liquidity_sweep)
+        }
+
+    @staticmethod
+    def _get_pivot_rank(zone_mid: float, pivots: Dict, zone_type: str) -> int:
+        """Determine if zone is at 1st, 2nd, or 3rd pivot point."""
+        tolerance = 0.01  # 1% tolerance
+
+        pivot_list = pivots.get("lows", []) if zone_type == "demand" else pivots.get("highs", [])
+
+        # Check last 3 pivots (most recent)
+        for rank, pivot in enumerate(reversed(pivot_list[-3:]), start=1):
+            pivot_price = pivot.get("price", 0)
+            if abs(zone_mid - pivot_price) / pivot_price < tolerance:
+                return rank
+
+        return 0  # Not at any pivot
+
+    @staticmethod
+    def _detect_liquidity_sweep(zone: Dict, candles: pd.DataFrame, pivots: Dict, zone_type: str) -> bool:
+        """
+        Detect if zone formed with liquidity sweep.
+
+        Liquidity sweep = wick through previous high/low followed by reversal.
+        """
+        zone_idx = zone.get("idx", zone.get("start_idx", 0))
+
+        if zone_idx < 5 or zone_idx >= len(candles) - 1:
+            return False
+
+        lookback = candles.iloc[max(0, zone_idx - 10):zone_idx]
+        zone_candle = candles.iloc[zone_idx]
+
+        if len(lookback) < 3:
+            return False
+
+        if zone_type == "supply":
+            # Check if zone candle wicked above recent highs
+            recent_high = lookback["high"].max()
+            zone_high = zone_candle["high"]
+            zone_close = zone_candle["close"]
+
+            # Sweep = high exceeds recent high but close is below it
+            if zone_high > recent_high and zone_close < recent_high:
+                return True
+
+        else:  # demand
+            # Check if zone candle wicked below recent lows
+            recent_low = lookback["low"].min()
+            zone_low = zone_candle["low"]
+            zone_close = zone_candle["close"]
+
+            # Sweep = low breaks recent low but close is above it
+            if zone_low < recent_low and zone_close > recent_low:
+                return True
+
+        return False
+
+    @staticmethod
+    def _get_quality_label(score: float, pivot_rank: int, has_sweep: bool) -> str:
+        """Generate human-readable quality label."""
+        if pivot_rank == 1 and has_sweep:
+            return "EXTREME_HIGH_QUALITY"
+        elif pivot_rank == 1:
+            return "HIGH_QUALITY"
+        elif pivot_rank == 2 and has_sweep:
+            return "HIGH_QUALITY"
+        elif pivot_rank == 2:
+            return "GOOD_QUALITY"
+        elif pivot_rank == 3:
+            return "MEDIUM_QUALITY"
+        elif has_sweep:
+            return "MEDIUM_QUALITY"
+        else:
+            return "LOW_QUALITY"
+
+# ================================================================
+# OVERLAPPING ZONE DETECTOR
+# ================================================================
+
+class OverlappingZoneDetector:
+    """
+    Detects if LTF structure zones properly OVERLAP (not just within) HTF zones.
+
+    Per 38-page PDF: "If LTF zone is just within but not overlapping,
+    it's not representing the entire HTF block. Overlapping means boundaries
+    extend beyond both top and bottom."
+    """
+
+    @staticmethod
+    def check_overlap(htf_zone: Dict, ltf_zone: Dict) -> Dict:
+        """
+        Check if LTF zone overlaps HTF zone properly.
+
+        True overlap = LTF zone boundaries extend beyond HTF zone boundaries.
+        """
+        htf_top = htf_zone.get("top", 0)
+        htf_bottom = htf_zone.get("bottom", 0)
+        ltf_top = ltf_zone.get("top", 0)
+        ltf_bottom = ltf_zone.get("bottom", 0)
+
+        # Check if LTF is just "within" HTF (not overlapping)
+        ltf_within = (ltf_top <= htf_top and ltf_bottom >= htf_bottom)
+
+        # Check if LTF overlaps HTF (extends beyond boundaries)
+        ltf_overlaps_top = ltf_top > htf_top and ltf_bottom <= htf_top and ltf_bottom >= htf_bottom
+        ltf_overlaps_bottom = ltf_bottom < htf_bottom and ltf_top >= htf_bottom and ltf_top <= htf_top
+        ltf_fully_overlaps = ltf_top > htf_top and ltf_bottom < htf_bottom
+
+        is_overlapping = ltf_overlaps_top or ltf_overlaps_bottom or ltf_fully_overlaps
+
+        # Calculate overlap percentage
+        overlap_top = min(htf_top, ltf_top)
+        overlap_bottom = max(htf_bottom, ltf_bottom)
+        overlap_range = overlap_top - overlap_bottom
+        htf_range = htf_top - htf_bottom
+
+        overlap_percent = (overlap_range / htf_range * 100) if htf_range > 0 else 0
+
+        return {
+            "is_overlapping": is_overlapping,
+            "is_within_only": ltf_within and not is_overlapping,
+            "overlap_percent": min(overlap_percent, 100.0),
+            "represents_htf": is_overlapping,  # Only overlapping zones represent HTF
+            "overlap_quality": "EXCELLENT" if overlap_percent > 80 else "GOOD" if overlap_percent > 50 else "WEAK"
+        }
+
+    @staticmethod
+    def find_overlapping_zones(htf_zones: List[Dict], ltf_zones: List[Dict]) -> List[Dict]:
+        """
+        Find all LTF zones that properly overlap HTF zones.
+
+        Returns list of HTF zones with their overlapping LTF zones.
+        """
+        enhanced_htf_zones = []
+
+        for htf_zone in htf_zones:
+            overlapping_ltf = []
+
+            for ltf_zone in ltf_zones:
+                # Check type match
+                if htf_zone.get("type") != ltf_zone.get("type"):
+                    continue
+
+                overlap_result = OverlappingZoneDetector.check_overlap(htf_zone, ltf_zone)
+
+                if overlap_result["is_overlapping"]:
+                    overlapping_ltf.append({
+                        **ltf_zone,
+                        "overlap_details": overlap_result
+                    })
+
+            enhanced_htf_zones.append({
+                **htf_zone,
+                "has_ltf_overlap": len(overlapping_ltf) > 0,
+                "overlapping_ltf_zones": overlapping_ltf,
+                "ltf_overlap_count": len(overlapping_ltf)
+            })
+
+        return enhanced_htf_zones
+
+# ================================================================
 # GATES
 # ================================================================
 
@@ -735,22 +1106,87 @@ async def detect_zones():
             "supply_zones": ltf_structure.get("supply_zones", [])
         }
 
-        # Score zones
+        # Score zones (basic scoring)
         scorer = ZoneScoring()
         htf_scored = scorer.score_zones(htf_zones, htf_pivots, detected_range, current_price)
         ltf_scored = scorer.score_zones(ltf_zones, ltf_pivots, detected_range, current_price)
 
+        # === ENHANCED ANALYSIS (38-Page PDF Methodology) ===
+
+        # 1. Multi-Timeframe Validation - Validate HTF zones on LTF
+        mtf_validator = MultiTimeframeValidator()
+        for zone in htf_scored:
+            mtf_result = mtf_validator.validate_htf_zone_on_ltf(zone, ltf_df)
+            zone["mtf_validation"] = mtf_result
+            # Boost strength if has true LTF inefficiency
+            if mtf_result.get("has_true_inefficiency"):
+                zone["strength"] = zone.get("strength", 0) * 1.2
+
+        # 2. Zone Refinement - Detect partial mitigation and refine boundaries
+        zone_refiner = ZoneRefinement()
+        for zone in htf_scored:
+            refined = zone_refiner.refine_zone_after_mitigation(zone, ltf_df)
+            zone.update(refined)
+
+        for zone in ltf_scored:
+            refined = zone_refiner.refine_zone_after_mitigation(zone, ltf_df)
+            zone.update(refined)
+
+        # 3. Pivot Quality & Liquidity Sweep Scoring
+        pivot_scorer = PivotQualityScorer()
+        for zone in htf_scored:
+            pivot_quality = pivot_scorer.score_pivot_quality(zone, htf_pivots, htf_df)
+            zone["pivot_quality"] = pivot_quality
+            # Boost strength based on pivot quality
+            zone["strength"] = zone.get("strength", 0) * pivot_quality.get("pivot_quality_score", 1.0)
+
+        for zone in ltf_scored:
+            pivot_quality = pivot_scorer.score_pivot_quality(zone, ltf_pivots, ltf_df)
+            zone["pivot_quality"] = pivot_quality
+            zone["strength"] = zone.get("strength", 0) * pivot_quality.get("pivot_quality_score", 1.0)
+
+        # 4. Overlapping Zone Detection - Find LTF zones that overlap HTF zones
+        overlap_detector = OverlappingZoneDetector()
+
+        # Separate demand and supply for overlap detection
+        htf_demand = [z for z in htf_scored if z.get("type") == "demand"]
+        htf_supply = [z for z in htf_scored if z.get("type") == "supply"]
+        ltf_demand = [z for z in ltf_scored if z.get("type") == "demand"]
+        ltf_supply = [z for z in ltf_scored if z.get("type") == "supply"]
+
+        enhanced_htf_demand = overlap_detector.find_overlapping_zones(htf_demand, ltf_demand)
+        enhanced_htf_supply = overlap_detector.find_overlapping_zones(htf_supply, ltf_supply)
+        enhanced_htf_all = enhanced_htf_demand + enhanced_htf_supply
+
+        # Boost strength for zones with LTF overlap
+        for zone in enhanced_htf_all:
+            if zone.get("has_ltf_overlap"):
+                zone["strength"] = zone.get("strength", 0) * 1.15
+
+        # Re-sort by final strength
+        enhanced_htf_all.sort(key=lambda z: z.get("strength", 0), reverse=True)
+        ltf_scored.sort(key=lambda z: z.get("strength", 0), reverse=True)
+
         # Filter for fresh (non-mitigated) zones only
-        htf_fresh = [z for z in htf_scored if not z.get("mitigated", False)]
-        ltf_fresh = [z for z in ltf_scored if not z.get("mitigated", False)]
+        # Per PDF: Only use zones with < 50% mitigation
+        htf_fresh = [z for z in enhanced_htf_all if z.get("mitigation_percent", 0) < 50]
+        ltf_fresh = [z for z in ltf_scored if z.get("mitigation_percent", 0) < 50]
+
+        # Identify high-quality vs low-quality zones
+        htf_high_quality = [z for z in htf_fresh if z.get("pivot_quality", {}).get("quality_label", "") in ["EXTREME_HIGH_QUALITY", "HIGH_QUALITY"]]
+        htf_low_quality = [z for z in htf_fresh if z.get("pivot_quality", {}).get("quality_label", "") == "LOW_QUALITY"]
 
         return JSONResponse({
             "symbol": SYMBOL,
             "current_price": current_price,
+            "methodology": "TCT Mentorship Lecture 3 + 38-Page PDF Enhanced",
             "htf_zones": {
                 "timeframe": "4h",
                 "total_zones": len(htf_fresh),
-                "top_3": htf_fresh[:3]
+                "high_quality_count": len(htf_high_quality),
+                "low_quality_count": len(htf_low_quality),
+                "top_3_all": htf_fresh[:3],
+                "top_3_high_quality": htf_high_quality[:3]
             },
             "ltf_zones": {
                 "timeframe": "15m",
@@ -762,7 +1198,17 @@ async def detect_zones():
                 "htf_fvg_count": len(htf_fvgs.get("bullish_fvgs", [])) + len(htf_fvgs.get("bearish_fvgs", [])),
                 "ltf_fvg_count": len(ltf_fvgs.get("bullish_fvgs", [])) + len(ltf_fvgs.get("bearish_fvgs", [])),
                 "htf_order_blocks": len(htf_obs.get("bullish_obs", [])) + len(htf_obs.get("bearish_obs", [])),
-                "ltf_order_blocks": len(ltf_obs.get("bullish_obs", [])) + len(ltf_obs.get("bearish_obs", []))
+                "ltf_order_blocks": len(ltf_obs.get("bullish_obs", [])) + len(ltf_obs.get("bearish_obs", [])),
+                "htf_zones_with_ltf_validation": sum(1 for z in htf_fresh if z.get("mtf_validation", {}).get("has_true_inefficiency")),
+                "htf_zones_with_ltf_overlap": sum(1 for z in htf_fresh if z.get("has_ltf_overlap")),
+                "zones_with_liquidity_sweep": sum(1 for z in htf_fresh if z.get("pivot_quality", {}).get("has_liquidity_sweep"))
+            },
+            "enhancements_applied": {
+                "multi_timeframe_validation": True,
+                "zone_refinement": True,
+                "pivot_quality_scoring": True,
+                "overlapping_zone_detection": True,
+                "liquidity_sweep_detection": True
             }
         })
 
