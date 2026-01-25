@@ -2863,6 +2863,51 @@ async def dashboard():
     <script>
         let chart, candleSeries, lineSeries = [];
         let currentTimeframe = '4h';
+        let isLoading = false;
+
+        // Fetch with retry and timeout
+        async function fetchWithRetry(url, options = {}, retries = 3, timeout = 20000) {
+            for (let i = 0; i < retries; i++) {
+                try {
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+                    const response = await fetch(url, {
+                        ...options,
+                        signal: controller.signal
+                    });
+                    clearTimeout(timeoutId);
+
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}`);
+                    }
+                    return await response.json();
+                } catch (e) {
+                    console.warn(`Fetch attempt ${i + 1} failed for ${url}:`, e.message);
+                    if (i === retries - 1) throw e;
+                    // Exponential backoff: 1s, 2s, 4s
+                    await new Promise(r => setTimeout(r, Math.pow(2, i) * 1000));
+                }
+            }
+        }
+
+        // Show loading state for a section
+        function setLoading(sectionId, loading) {
+            const badge = document.getElementById(sectionId);
+            if (badge && loading) {
+                badge.textContent = '...';
+                badge.className = 'badge badge-neutral';
+            }
+        }
+
+        // Show error state for a section
+        function setError(sectionId, error = true) {
+            const badge = document.getElementById(sectionId);
+            if (badge && error) {
+                badge.textContent = 'ERR';
+                badge.className = 'badge badge-bearish';
+            }
+        }
 
         // Initialize chart
         function initChart() {
@@ -2910,8 +2955,10 @@ async def dashboard():
         // Fetch candle data
         async function fetchCandles(interval = '4h', limit = 100) {
             try {
-                const resp = await fetch(`https://api.mexc.com/api/v3/klines?symbol=BTCUSDT&interval=${interval}&limit=${limit}`);
-                const data = await resp.json();
+                const data = await fetchWithRetry(
+                    `https://api.mexc.com/api/v3/klines?symbol=BTCUSDT&interval=${interval}&limit=${limit}`,
+                    {}, 2, 10000
+                );
                 return data.map(k => ({
                     time: k[0] / 1000,
                     open: parseFloat(k[1]),
@@ -2947,6 +2994,16 @@ async def dashboard():
 
         // Fetch and display all TCT data
         async function refreshData() {
+            if (isLoading) return;
+            isLoading = true;
+
+            // Show loading states
+            setLoading('trendBadge', true);
+            setLoading('zoneBadge', true);
+            setLoading('zoneCount', true);
+            setLoading('liqCount', true);
+            setLoading('actionBadge', true);
+
             // Fetch candles and update chart
             const candles = await fetchCandles(currentTimeframe, 100);
             if (candles.length > 0) {
@@ -2957,33 +3014,48 @@ async def dashboard():
 
             clearPriceLines();
 
-            // Fetch ranges data
-            try {
-                const rangesResp = await fetch('/api/ranges');
-                const ranges = await rangesResp.json();
-                updateRangesUI(ranges);
-            } catch (e) { console.error('Ranges fetch error:', e); }
+            // Fetch all API data in parallel with individual error handling
+            const [rangesResult, zonesResult, liqResult, valResult] = await Promise.allSettled([
+                fetchWithRetry('/api/ranges', {}, 3, 25000),
+                fetchWithRetry('/api/zones', {}, 3, 25000),
+                fetchWithRetry('/api/liquidity', {}, 3, 25000),
+                fetchWithRetry('/api/validate', {}, 3, 25000)
+            ]);
 
-            // Fetch zones data
-            try {
-                const zonesResp = await fetch('/api/zones');
-                const zones = await zonesResp.json();
-                updateZonesUI(zones);
-            } catch (e) { console.error('Zones fetch error:', e); }
+            // Process ranges
+            if (rangesResult.status === 'fulfilled' && !rangesResult.value.error) {
+                updateRangesUI(rangesResult.value);
+            } else {
+                console.error('Ranges error:', rangesResult.reason || rangesResult.value?.error);
+                setError('trendBadge');
+                setError('zoneBadge');
+            }
 
-            // Fetch liquidity data
-            try {
-                const liqResp = await fetch('/api/liquidity');
-                const liquidity = await liqResp.json();
-                updateLiquidityUI(liquidity);
-            } catch (e) { console.error('Liquidity fetch error:', e); }
+            // Process zones
+            if (zonesResult.status === 'fulfilled' && !zonesResult.value.error) {
+                updateZonesUI(zonesResult.value);
+            } else {
+                console.error('Zones error:', zonesResult.reason || zonesResult.value?.error);
+                setError('zoneCount');
+            }
 
-            // Fetch validation data
-            try {
-                const valResp = await fetch('/api/validate');
-                const validation = await valResp.json();
-                updateValidationUI(validation);
-            } catch (e) { console.error('Validation fetch error:', e); }
+            // Process liquidity
+            if (liqResult.status === 'fulfilled' && !liqResult.value.error) {
+                updateLiquidityUI(liqResult.value);
+            } else {
+                console.error('Liquidity error:', liqResult.reason || liqResult.value?.error);
+                setError('liqCount');
+            }
+
+            // Process validation
+            if (valResult.status === 'fulfilled') {
+                updateValidationUI(valResult.value);
+            } else {
+                console.error('Validation error:', valResult.reason);
+                setError('actionBadge');
+            }
+
+            isLoading = false;
         }
 
         function updateRangesUI(data) {
