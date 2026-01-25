@@ -853,6 +853,656 @@ class OverlappingZoneDetector:
         return enhanced_htf_zones
 
 # ================================================================
+# RANGE DETECTION (TCT Mentorship Lecture 2 - Pure TCT Methodology)
+# ================================================================
+
+class TCTRangeDetector:
+    """
+    Detects and validates ranges using PURE TCT Lecture 2 methodology.
+
+    Pure TCT Methodology from "TCT-2024-mentorship-Lecture-2-Ranges-AI-Text-Only.pdf":
+    - Range = price moving sideways (consolidation phase)
+    - Purpose: Restore balance between buyers and sellers after aggressive expansion
+    - Uptrend: Pull range from TOP to BOTTOM (high → low)
+    - Downtrend: Pull range from BOTTOM to TOP (low → high)
+    - Range confirmed when price moves back to EQUILIBRIUM (0.5 fib level)
+    - Six Candle Rule: Range valid if 2 candles up, 2 down, 2 up (uptrend) or inverse
+    - Deviation Limit (DL): 30% of range size - threshold for deviation vs break
+    - Premium (above 0.5) vs Discount (below 0.5) pricing zones
+    - Ranges within ranges: Multiple timeframe nesting
+    - Good range = horizontal price action, Bad range = sharp V-shaped moves
+    """
+
+    DEVIATION_LIMIT_PERCENT = 0.30  # TCT: 30% of range size for DL
+
+    @staticmethod
+    def detect_ranges(candles: pd.DataFrame, pivots: Dict) -> Dict:
+        """
+        Detect ranges using TCT Lecture 2 methodology.
+
+        TCT: "A range is when price is simply moving sideways"
+        TCT: "After aggressive expansion, price likes to form a range"
+
+        Returns: Dict with detected ranges and their properties
+        """
+        if len(candles) < 10:
+            return {"ranges": [], "active_range": None}
+
+        ranges = []
+        trend = pivots.get("trend", "neutral")
+
+        # Get swing points for range detection
+        swing_highs = pivots.get("highs", [])
+        swing_lows = pivots.get("lows", [])
+
+        if len(swing_highs) < 2 or len(swing_lows) < 2:
+            return {"ranges": [], "active_range": None}
+
+        # TCT: Detect ranges based on trend direction
+        # "When we're trending up, we pull our range from top to bottom"
+        # "When we're trending down, we pull our range from bottom to top"
+
+        # Find potential range formations
+        for i in range(len(swing_highs) - 1):
+            for j in range(len(swing_lows) - 1):
+                high_pivot = swing_highs[i]
+                low_pivot = swing_lows[j]
+
+                # TCT: Ensure proper sequence (high comes before low for uptrend range)
+                if abs(high_pivot["idx"] - low_pivot["idx"]) > 50:
+                    continue  # Too far apart
+
+                range_high = high_pivot["price"]
+                range_low = low_pivot["price"]
+
+                if range_high <= range_low:
+                    continue  # Invalid range
+
+                equilibrium = (range_high + range_low) / 2
+
+                # TCT: Check for equilibrium touch (range confirmation)
+                # "When we have a move back to the equilibrium, that's when the range is confirmed"
+                eq_touched = TCTRangeDetector._check_equilibrium_touch(
+                    candles, high_pivot["idx"], low_pivot["idx"], equilibrium
+                )
+
+                if not eq_touched:
+                    continue
+
+                # TCT: Validate with Six Candle Rule
+                six_candle_valid = TCTRangeDetector._validate_six_candle_rule(
+                    candles, high_pivot["idx"], low_pivot["idx"], trend
+                )
+
+                # Calculate range properties
+                range_size = range_high - range_low
+                deviation_limit_high = range_high + (range_size * TCTRangeDetector.DEVIATION_LIMIT_PERCENT)
+                deviation_limit_low = range_low - (range_size * TCTRangeDetector.DEVIATION_LIMIT_PERCENT)
+
+                # Determine range quality
+                quality = TCTRangeDetector._assess_range_quality(
+                    candles, high_pivot["idx"], low_pivot["idx"], range_high, range_low
+                )
+
+                ranges.append({
+                    "range_high": float(range_high),
+                    "range_low": float(range_low),
+                    "equilibrium": float(equilibrium),
+                    "range_size": float(range_size),
+                    "deviation_limit_high": float(deviation_limit_high),
+                    "deviation_limit_low": float(deviation_limit_low),
+                    "high_idx": high_pivot["idx"],
+                    "low_idx": low_pivot["idx"],
+                    "direction": "uptrend" if high_pivot["idx"] < low_pivot["idx"] else "downtrend",
+                    "equilibrium_touched": eq_touched,
+                    "six_candle_valid": six_candle_valid,
+                    "quality": quality,
+                    "is_confirmed": eq_touched and six_candle_valid
+                })
+
+        # Sort by recency and quality
+        ranges.sort(key=lambda r: (r["is_confirmed"], r["quality"].get("score", 0)), reverse=True)
+
+        # Get most recent active range
+        active_range = ranges[0] if ranges else None
+
+        return {
+            "ranges": ranges[:5],  # Top 5 ranges
+            "active_range": active_range,
+            "total_ranges_found": len(ranges)
+        }
+
+    @staticmethod
+    def _check_equilibrium_touch(candles: pd.DataFrame, high_idx: int, low_idx: int, equilibrium: float) -> bool:
+        """
+        Check if price touched equilibrium after range formation.
+
+        TCT: "Move back up towards the equilibrium of the range - that's when the range is confirmed"
+        TCT: "Your range low is already confirmed the moment we have a move back up touching the equilibrium"
+        """
+        start_idx = min(high_idx, low_idx)
+        end_idx = max(high_idx, low_idx)
+
+        # Check candles after the range formed
+        check_start = end_idx + 1
+        check_end = min(check_start + 20, len(candles))
+
+        if check_start >= len(candles):
+            return False
+
+        for i in range(check_start, check_end):
+            candle = candles.iloc[i]
+            # TCT: Check if any candle touched the equilibrium (0.5 level)
+            if candle["low"] <= equilibrium <= candle["high"]:
+                return True
+
+        return False
+
+    @staticmethod
+    def _validate_six_candle_rule(candles: pd.DataFrame, high_idx: int, low_idx: int, trend: str) -> bool:
+        """
+        Validate range using TCT Six Candle Rule.
+
+        TCT: "A range is only valid on a certain timeframe if the six candle rule applies"
+        TCT: "You want to have two candles up, two candles down, and two candles back up again"
+        TCT: "That's when the range is valid on that specific timeframe"
+        """
+        start_idx = min(high_idx, low_idx)
+        end_idx = max(high_idx, low_idx)
+
+        if end_idx - start_idx < 6:
+            return False  # Not enough candles
+
+        # Count directional candles in the range
+        up_candles = 0
+        down_candles = 0
+        neutral_candles = 0
+
+        for i in range(start_idx, min(end_idx + 1, len(candles))):
+            candle = candles.iloc[i]
+            if candle["close"] > candle["open"]:
+                up_candles += 1
+            elif candle["close"] < candle["open"]:
+                down_candles += 1
+            else:
+                neutral_candles += 1
+
+        # TCT: Need at least 2 candles each direction for valid six candle rule
+        return up_candles >= 2 and down_candles >= 2
+
+    @staticmethod
+    def _assess_range_quality(candles: pd.DataFrame, high_idx: int, low_idx: int,
+                               range_high: float, range_low: float) -> Dict:
+        """
+        Assess range quality using TCT methodology.
+
+        TCT: "Be rational - a range is when prices are going sideways"
+        TCT: "V-shaped moves are often Market structure, not ranges"
+        TCT: "When the V gets very extended and wide - that's when you have a good range"
+        TCT: "Good range = horizontal price action, Bad range = sharp V-shaped moves"
+        """
+        start_idx = min(high_idx, low_idx)
+        end_idx = max(high_idx, low_idx)
+        range_candles = candles.iloc[start_idx:end_idx + 1]
+
+        if len(range_candles) < 3:
+            return {"score": 0.0, "quality_label": "INVALID", "is_horizontal": False}
+
+        # Calculate how "horizontal" the range is
+        equilibrium = (range_high + range_low) / 2
+        range_size = range_high - range_low
+
+        # Measure time spent in each zone
+        time_in_premium = 0
+        time_in_discount = 0
+        time_near_equilibrium = 0
+
+        for _, candle in range_candles.iterrows():
+            mid_price = (candle["high"] + candle["low"]) / 2
+            if mid_price > equilibrium + (range_size * 0.1):
+                time_in_premium += 1
+            elif mid_price < equilibrium - (range_size * 0.1):
+                time_in_discount += 1
+            else:
+                time_near_equilibrium += 1
+
+        total_candles = len(range_candles)
+
+        # TCT: Good ranges have balanced time in premium/discount
+        # V-shaped moves spend all time on one side
+        balance_ratio = min(time_in_premium, time_in_discount) / max(time_in_premium, time_in_discount, 1)
+
+        # Calculate how wide/extended the range is (horizontality)
+        candle_span = end_idx - start_idx
+        price_change_per_candle = range_size / max(candle_span, 1)
+        avg_candle_size = range_candles["high"].mean() - range_candles["low"].mean()
+
+        # TCT: Extended V (horizontal) is good, sharp V is bad
+        horizontality = 1.0 - min(price_change_per_candle / avg_candle_size, 1.0) if avg_candle_size > 0 else 0
+
+        # Calculate overall score
+        score = (balance_ratio * 0.4 + horizontality * 0.4 + (time_near_equilibrium / total_candles) * 0.2)
+
+        if score >= 0.7:
+            quality_label = "EXCELLENT"
+        elif score >= 0.5:
+            quality_label = "GOOD"
+        elif score >= 0.3:
+            quality_label = "MODERATE"
+        else:
+            quality_label = "WEAK"
+
+        return {
+            "score": round(score, 3),
+            "quality_label": quality_label,
+            "is_horizontal": horizontality > 0.5,
+            "balance_ratio": round(balance_ratio, 3),
+            "horizontality": round(horizontality, 3),
+            "time_in_premium": time_in_premium,
+            "time_in_discount": time_in_discount,
+            "time_near_equilibrium": time_near_equilibrium
+        }
+
+
+class TCTDeviationDetector:
+    """
+    Detects range deviations using TCT Lecture 2 methodology.
+
+    Pure TCT Methodology:
+    - Deviation = price exceeds range high/low but doesn't break it
+    - Wick deviation = easiest (never broke structure)
+    - Candle close deviation = bad break of structure (closes back inside quickly)
+    - Deviation Limit (DL) = 30% of range size threshold
+    - TCT: "When breaking range but not closing above DL, it's still a deviation"
+    - TCT: "Extend range to deviation high after deviation comes back inside"
+    """
+
+    @staticmethod
+    def detect_deviations(candles: pd.DataFrame, active_range: Dict) -> Dict:
+        """
+        Detect deviations from the active range.
+
+        TCT: "A deviation is when price exceeds your range high or low but it does not break it"
+        TCT: "When this happens we can expect a reversal towards the range low or close to it"
+
+        Returns: Dict with high_deviations and low_deviations
+        """
+        if not active_range:
+            return {"high_deviations": [], "low_deviations": [], "total_deviations": 0}
+
+        range_high = active_range["range_high"]
+        range_low = active_range["range_low"]
+        dl_high = active_range["deviation_limit_high"]
+        dl_low = active_range["deviation_limit_low"]
+        range_size = active_range["range_size"]
+
+        high_deviations = []
+        low_deviations = []
+
+        # Start checking after range formation
+        start_idx = max(active_range.get("high_idx", 0), active_range.get("low_idx", 0)) + 1
+
+        i = start_idx
+        while i < len(candles):
+            candle = candles.iloc[i]
+
+            # TCT: Check for high deviation
+            if candle["high"] > range_high:
+                deviation = TCTDeviationDetector._classify_deviation(
+                    candles, i, "high", range_high, dl_high, range_size
+                )
+                if deviation:
+                    high_deviations.append(deviation)
+                    # Skip ahead past the deviation
+                    i += deviation.get("duration_candles", 1)
+                    continue
+
+            # TCT: Check for low deviation
+            if candle["low"] < range_low:
+                deviation = TCTDeviationDetector._classify_deviation(
+                    candles, i, "low", range_low, dl_low, range_size
+                )
+                if deviation:
+                    low_deviations.append(deviation)
+                    # Skip ahead past the deviation
+                    i += deviation.get("duration_candles", 1)
+                    continue
+
+            i += 1
+
+        return {
+            "high_deviations": high_deviations,
+            "low_deviations": low_deviations,
+            "total_deviations": len(high_deviations) + len(low_deviations),
+            "has_deviation": len(high_deviations) + len(low_deviations) > 0
+        }
+
+    @staticmethod
+    def _classify_deviation(candles: pd.DataFrame, start_idx: int, direction: str,
+                            range_level: float, dl_level: float, range_size: float) -> Optional[Dict]:
+        """
+        Classify deviation type using TCT methodology.
+
+        TCT Deviation Types:
+        1. Wick deviation - "Easiest deviations will always be the wicks"
+        2. Candle close deviation - "Bad break of structure falls into category of deviations"
+        3. DL-based deviation - "When breaking range but not closing above DL"
+
+        TCT: "The bad break of structure was whenever you break your range low
+        but the second candle immediately comes and closes back inside"
+        """
+        if start_idx >= len(candles):
+            return None
+
+        candle = candles.iloc[start_idx]
+        exceeded_dl = False
+        is_wick = False
+        is_bad_bos = False
+        duration = 1
+        max_deviation = 0.0
+        came_back_inside = False
+
+        if direction == "high":
+            # TCT: Check if it's a wick deviation (no close above range high)
+            is_wick = candle["close"] <= range_level and candle["high"] > range_level
+
+            # Check if exceeded DL
+            exceeded_dl = candle["close"] > dl_level
+
+            # Calculate max deviation
+            max_deviation = candle["high"] - range_level
+
+            # TCT: Check for bad BOS (closes above then quickly comes back)
+            if candle["close"] > range_level:
+                # Look for quick return inside range
+                for j in range(start_idx + 1, min(start_idx + 5, len(candles))):
+                    next_candle = candles.iloc[j]
+                    duration += 1
+                    max_deviation = max(max_deviation, next_candle["high"] - range_level)
+
+                    if next_candle["close"] <= range_level:
+                        is_bad_bos = True
+                        came_back_inside = True
+                        break
+
+                    # TCT: If closes above DL, it's likely a real break
+                    if next_candle["close"] > dl_level:
+                        exceeded_dl = True
+
+        else:  # direction == "low"
+            # TCT: Check if it's a wick deviation (no close below range low)
+            is_wick = candle["close"] >= range_level and candle["low"] < range_level
+
+            # Check if exceeded DL
+            exceeded_dl = candle["close"] < dl_level
+
+            # Calculate max deviation
+            max_deviation = range_level - candle["low"]
+
+            # TCT: Check for bad BOS
+            if candle["close"] < range_level:
+                for j in range(start_idx + 1, min(start_idx + 5, len(candles))):
+                    next_candle = candles.iloc[j]
+                    duration += 1
+                    max_deviation = max(max_deviation, range_level - next_candle["low"])
+
+                    if next_candle["close"] >= range_level:
+                        is_bad_bos = True
+                        came_back_inside = True
+                        break
+
+                    if next_candle["close"] < dl_level:
+                        exceeded_dl = True
+
+        # TCT: If exceeded DL with close, it's likely a real break, not deviation
+        if exceeded_dl and not came_back_inside:
+            return None  # This is a range break, not a deviation
+
+        # Determine deviation type
+        if is_wick:
+            deviation_type = "WICK"
+            quality = "EXCELLENT"  # TCT: "Wicks are always the easiest deviations"
+        elif is_bad_bos:
+            deviation_type = "BAD_BOS"
+            quality = "GOOD"  # TCT: "Bad break of structure falls into category of deviations"
+        else:
+            deviation_type = "CANDLE_CLOSE"
+            quality = "MODERATE"
+
+        deviation_percent = (max_deviation / range_size) * 100
+
+        return {
+            "direction": direction,
+            "type": deviation_type,
+            "quality": quality,
+            "start_idx": start_idx,
+            "duration_candles": duration,
+            "max_deviation_price": float(max_deviation),
+            "max_deviation_percent": round(deviation_percent, 2),
+            "exceeded_dl": exceeded_dl,
+            "came_back_inside": came_back_inside,
+            "is_valid_deviation": not exceeded_dl or came_back_inside
+        }
+
+
+class TCTPremiumDiscountClassifier:
+    """
+    Classifies price zones as Premium or Discount using TCT methodology.
+
+    Pure TCT Methodology:
+    - Premium = Above equilibrium (0.5) to range high
+    - Discount = Below equilibrium (0.5) to range low
+    - TCT: "From equilibrium towards the range low - that's what we call Discount pricing"
+    - TCT: "Above the 0.5 to range high is what we call Premium pricing"
+    - TCT: "We can have many rotations from premium back to discount"
+    """
+
+    @staticmethod
+    def classify_current_position(current_price: float, active_range: Dict) -> Dict:
+        """
+        Classify current price position within range.
+
+        TCT: "Premium section = above 0.5 to range high"
+        TCT: "Discount section = from equilibrium towards range low"
+        """
+        if not active_range:
+            return {"zone": "UNKNOWN", "distance_to_eq": 0.0}
+
+        range_high = active_range["range_high"]
+        range_low = active_range["range_low"]
+        equilibrium = active_range["equilibrium"]
+        range_size = active_range["range_size"]
+
+        # Calculate position
+        if current_price >= range_high:
+            zone = "ABOVE_RANGE"
+            position_percent = 100 + ((current_price - range_high) / range_size * 100)
+        elif current_price <= range_low:
+            zone = "BELOW_RANGE"
+            position_percent = -((range_low - current_price) / range_size * 100)
+        elif current_price > equilibrium:
+            zone = "PREMIUM"
+            position_percent = 50 + ((current_price - equilibrium) / (range_high - equilibrium) * 50)
+        elif current_price < equilibrium:
+            zone = "DISCOUNT"
+            position_percent = ((current_price - range_low) / (equilibrium - range_low) * 50)
+        else:
+            zone = "EQUILIBRIUM"
+            position_percent = 50.0
+
+        distance_to_eq = abs(current_price - equilibrium)
+        distance_to_eq_percent = (distance_to_eq / range_size) * 100
+
+        # TCT: Trading bias based on zone
+        if zone == "DISCOUNT":
+            trading_bias = "LONG"  # TCT: Look for longs in discount
+            bias_strength = (equilibrium - current_price) / (equilibrium - range_low)
+        elif zone == "PREMIUM":
+            trading_bias = "SHORT"  # TCT: Look for shorts in premium
+            bias_strength = (current_price - equilibrium) / (range_high - equilibrium)
+        elif zone == "ABOVE_RANGE":
+            trading_bias = "SHORT"  # Above range = potential deviation short
+            bias_strength = 0.8
+        elif zone == "BELOW_RANGE":
+            trading_bias = "LONG"  # Below range = potential deviation long
+            bias_strength = 0.8
+        else:
+            trading_bias = "NEUTRAL"
+            bias_strength = 0.0
+
+        return {
+            "zone": zone,
+            "position_percent": round(position_percent, 2),
+            "distance_to_equilibrium": round(distance_to_eq, 6),
+            "distance_to_equilibrium_percent": round(distance_to_eq_percent, 2),
+            "trading_bias": trading_bias,
+            "bias_strength": round(bias_strength, 3)
+        }
+
+    @staticmethod
+    def get_zone_targets(active_range: Dict) -> Dict:
+        """
+        Get trading targets based on current range zones.
+
+        TCT: "If we deviated the high, we can expect a reversal towards the range low"
+        TCT: "If you deviate the low, we can expect a move back up towards the Range High"
+        """
+        if not active_range:
+            return {"premium_target": None, "discount_target": None}
+
+        range_high = active_range["range_high"]
+        range_low = active_range["range_low"]
+        equilibrium = active_range["equilibrium"]
+        range_size = active_range["range_size"]
+
+        # TCT: Define key target levels
+        return {
+            "range_high": float(range_high),
+            "range_low": float(range_low),
+            "equilibrium": float(equilibrium),
+            "premium_entry_zone": {
+                "top": float(range_high),
+                "bottom": float(equilibrium + range_size * 0.1)  # Upper 40% of range
+            },
+            "discount_entry_zone": {
+                "top": float(equilibrium - range_size * 0.1),  # Lower 40% of range
+                "bottom": float(range_low)
+            },
+            "deviation_limit_high": float(active_range["deviation_limit_high"]),
+            "deviation_limit_low": float(active_range["deviation_limit_low"])
+        }
+
+
+class TCTRangesWithinRanges:
+    """
+    Detects nested ranges (ranges within ranges) using TCT methodology.
+
+    Pure TCT Methodology:
+    - TCT: "Ranges within ranges are so so so common"
+    - TCT: "You literally almost all of the time have it - range within the range"
+    - TCT: "High time frame ranges are more important than low time frame ranges"
+    - TCT: "Watch your most recent expansions - that's the most important structure"
+    - TCT: "The same way HTF market structure is more important, HTF ranges are more important"
+    """
+
+    @staticmethod
+    def detect_nested_ranges(htf_ranges: List[Dict], ltf_ranges: List[Dict]) -> Dict:
+        """
+        Detect ranges nested within higher timeframe ranges.
+
+        TCT: "This black range inside, in the Black Range we have a red range,
+        and in the red range we have a blue range"
+
+        Returns: Dict with nested range relationships
+        """
+        nested_relationships = []
+
+        for htf_range in htf_ranges:
+            htf_high = htf_range["range_high"]
+            htf_low = htf_range["range_low"]
+
+            ltf_inside = []
+            for ltf_range in ltf_ranges:
+                ltf_high = ltf_range["range_high"]
+                ltf_low = ltf_range["range_low"]
+
+                # Check if LTF range is inside HTF range
+                if ltf_high <= htf_high and ltf_low >= htf_low:
+                    # Calculate position within HTF range
+                    htf_size = htf_high - htf_low
+                    ltf_mid = (ltf_high + ltf_low) / 2
+                    position_in_htf = ((ltf_mid - htf_low) / htf_size) * 100
+
+                    ltf_inside.append({
+                        **ltf_range,
+                        "position_in_htf_percent": round(position_in_htf, 2),
+                        "is_in_premium": position_in_htf > 50,
+                        "is_in_discount": position_in_htf < 50
+                    })
+
+            if ltf_inside:
+                nested_relationships.append({
+                    "htf_range": htf_range,
+                    "ltf_ranges_inside": ltf_inside,
+                    "ltf_count": len(ltf_inside)
+                })
+
+        return {
+            "nested_relationships": nested_relationships,
+            "htf_ranges_with_nesting": len(nested_relationships),
+            "total_nested_ltf_ranges": sum(rel["ltf_count"] for rel in nested_relationships)
+        }
+
+    @staticmethod
+    def identify_most_recent_rotation(candles: pd.DataFrame, active_range: Dict) -> Dict:
+        """
+        Identify the most recent rotation within a range.
+
+        TCT: "When we're ranging, the most important Market structure pool
+        to watch is just your most recent expansion"
+        TCT: "Just watch your most recent rotations within the range"
+        """
+        if not active_range or len(candles) < 10:
+            return {"rotation": None, "direction": "unknown"}
+
+        range_high = active_range["range_high"]
+        range_low = active_range["range_low"]
+        equilibrium = active_range["equilibrium"]
+
+        # Find recent price action
+        recent_candles = candles.tail(20)
+
+        # Determine rotation direction
+        first_close = recent_candles.iloc[0]["close"]
+        last_close = recent_candles.iloc[-1]["close"]
+
+        if last_close > first_close:
+            direction = "UP"
+            # TCT: "We're moving up - watch structure from low up"
+        else:
+            direction = "DOWN"
+            # TCT: "We're moving down - watch structure from high down"
+
+        # Find rotation extremes
+        rotation_high = recent_candles["high"].max()
+        rotation_low = recent_candles["low"].min()
+
+        # Calculate rotation within range context
+        crossed_equilibrium = (
+            recent_candles["low"].min() < equilibrium < recent_candles["high"].max()
+        )
+
+        return {
+            "direction": direction,
+            "rotation_high": float(rotation_high),
+            "rotation_low": float(rotation_low),
+            "crossed_equilibrium": crossed_equilibrium,
+            "started_in_zone": "PREMIUM" if first_close > equilibrium else "DISCOUNT",
+            "ended_in_zone": "PREMIUM" if last_close > equilibrium else "DISCOUNT"
+        }
+
+
+# ================================================================
 # LIQUIDITY DETECTION (TCT Mentorship Lecture 4 - Pure TCT Methodology)
 # ================================================================
 
@@ -1791,7 +2441,7 @@ async def detect_best_range(candles: List) -> Optional[Dict]:
 @app.get("/")
 async def root():
     return {
-        "service": "HPB–TCT v21.2 (MEXC + Gate Validation + Liquidity)",
+        "service": "HPB–TCT v21.2 (MEXC + Gate Validation + Full TCT)",
         "status": "running",
         "symbol": SYMBOL,
         "version": "21.2",
@@ -1799,8 +2449,15 @@ async def root():
             "/status": "Health check",
             "/api/validate": "7-gate validation",
             "/api/price": "Current price",
+            "/api/ranges": "Range detection & deviations (TCT Mentorship Lecture 2)",
             "/api/zones": "Supply & Demand zones (TCT Mentorship Lecture 3)",
             "/api/liquidity": "Liquidity pools, curves & targets (TCT Lecture 4)"
+        },
+        "tct_lectures": {
+            "lecture_1": "Market Structure (MarketStructure class)",
+            "lecture_2": "Ranges (TCTRangeDetector, TCTDeviationDetector, TCTPremiumDiscountClassifier)",
+            "lecture_3": "Supply & Demand (StructureSupplyDemand, ZoneScoring, ZoneRefinement)",
+            "lecture_4": "Liquidity (LiquidityDetector, LiquidityCurveGenerator, ExtremeLiquidityTarget)"
         }
     }
 
@@ -1995,6 +2652,170 @@ async def detect_zones():
 
     except Exception as e:
         logger.error(f"[ZONES_ERROR] {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+@app.get("/api/ranges")
+async def detect_ranges():
+    """
+    Detect and analyze ranges using PURE TCT Lecture 2 methodology.
+
+    Pure TCT Methodology from "TCT-2024-mentorship-Lecture-2-Ranges-AI-Text-Only.pdf":
+    - Range = price moving sideways (consolidation phase)
+    - Purpose: Restore balance between buyers and sellers after aggressive expansion
+    - Uptrend: Pull range from TOP to BOTTOM (high → low)
+    - Downtrend: Pull range from BOTTOM to TOP (low → high)
+    - Range confirmed when price moves back to EQUILIBRIUM (0.5 fib level)
+    - Six Candle Rule: Range valid if 2 candles up, 2 down, 2 up (uptrend) or inverse
+    - Deviation Limit (DL): 30% of range size - threshold for deviation vs break
+    - Wick deviation = easiest (never broke structure)
+    - Candle close deviation = bad break of structure
+    - Premium (above 0.5) vs Discount (below 0.5) pricing zones
+    - Ranges within ranges: Multiple timeframe nesting
+    - Good range = horizontal price action, Bad range = sharp V-shaped moves
+
+    Returns:
+        - HTF and LTF detected ranges with quality scoring
+        - Active range with premium/discount classification
+        - Deviations (wick, candle close, DL-based)
+        - Current position classification
+        - Nested ranges (ranges within ranges)
+        - Trading targets based on range zones
+    """
+    try:
+        # Fetch candles
+        htf_df = await fetch_mexc_candles(SYMBOL, "4h", 100)
+        ltf_df = await fetch_mexc_candles(SYMBOL, "15m", 200)
+
+        if htf_df is None or ltf_df is None:
+            return JSONResponse({"error": "Failed to fetch data"}, status_code=500)
+
+        current_price = float(ltf_df.iloc[-1]["close"])
+
+        # Detect market structure (pivots)
+        ms = MarketStructure()
+        htf_pivots = ms.detect_pivots(htf_df)
+        ltf_pivots = ms.detect_pivots(ltf_df)
+
+        # === STEP 2: RANGE DETECTION (TCT Lecture 2) ===
+
+        # 1. Detect Ranges on both timeframes
+        range_detector = TCTRangeDetector()
+        htf_ranges_result = range_detector.detect_ranges(htf_df, htf_pivots)
+        ltf_ranges_result = range_detector.detect_ranges(ltf_df, ltf_pivots)
+
+        htf_ranges = htf_ranges_result.get("ranges", [])
+        ltf_ranges = ltf_ranges_result.get("ranges", [])
+
+        # Get active ranges (most relevant confirmed ranges)
+        htf_active_range = htf_ranges_result.get("active_range")
+        ltf_active_range = ltf_ranges_result.get("active_range")
+
+        # 2. Detect Deviations from active ranges
+        deviation_detector = TCTDeviationDetector()
+
+        htf_deviations = deviation_detector.detect_deviations(htf_df, htf_active_range)
+        ltf_deviations = deviation_detector.detect_deviations(ltf_df, ltf_active_range)
+
+        # 3. Classify Current Position (Premium/Discount)
+        position_classifier = TCTPremiumDiscountClassifier()
+
+        # Use LTF active range for current position if available, else HTF
+        active_range_for_position = ltf_active_range or htf_active_range
+
+        current_position = position_classifier.classify_current_position(
+            current_price, active_range_for_position
+        )
+
+        # Get trading targets
+        zone_targets = position_classifier.get_zone_targets(active_range_for_position)
+
+        # 4. Detect Nested Ranges (Ranges within Ranges)
+        nesting_detector = TCTRangesWithinRanges()
+        nested_ranges = nesting_detector.detect_nested_ranges(htf_ranges, ltf_ranges)
+
+        # 5. Identify Most Recent Rotation within active range
+        htf_rotation = nesting_detector.identify_most_recent_rotation(htf_df, htf_active_range)
+        ltf_rotation = nesting_detector.identify_most_recent_rotation(ltf_df, ltf_active_range)
+
+        # === SUMMARY STATISTICS ===
+
+        # Count confirmed vs unconfirmed ranges
+        htf_confirmed = [r for r in htf_ranges if r.get("is_confirmed")]
+        ltf_confirmed = [r for r in ltf_ranges if r.get("is_confirmed")]
+
+        # Count range quality distribution
+        htf_quality_dist = {}
+        for r in htf_ranges:
+            quality = r.get("quality", {}).get("quality_label", "UNKNOWN")
+            htf_quality_dist[quality] = htf_quality_dist.get(quality, 0) + 1
+
+        ltf_quality_dist = {}
+        for r in ltf_ranges:
+            quality = r.get("quality", {}).get("quality_label", "UNKNOWN")
+            ltf_quality_dist[quality] = ltf_quality_dist.get(quality, 0) + 1
+
+        return JSONResponse({
+            "symbol": SYMBOL,
+            "current_price": current_price,
+            "methodology": "TCT Mentorship Lecture 2 - Ranges",
+            "htf_ranges": {
+                "timeframe": "4h",
+                "total_ranges": len(htf_ranges),
+                "confirmed_ranges": len(htf_confirmed),
+                "active_range": htf_active_range,
+                "all_ranges": htf_ranges[:5],  # Top 5
+                "quality_distribution": htf_quality_dist
+            },
+            "ltf_ranges": {
+                "timeframe": "15m",
+                "total_ranges": len(ltf_ranges),
+                "confirmed_ranges": len(ltf_confirmed),
+                "active_range": ltf_active_range,
+                "all_ranges": ltf_ranges[:5],  # Top 5
+                "quality_distribution": ltf_quality_dist
+            },
+            "deviations": {
+                "htf_deviations": htf_deviations,
+                "ltf_deviations": ltf_deviations,
+                "total_htf_deviations": htf_deviations.get("total_deviations", 0),
+                "total_ltf_deviations": ltf_deviations.get("total_deviations", 0)
+            },
+            "current_position": current_position,
+            "zone_targets": zone_targets,
+            "nested_ranges": nested_ranges,
+            "rotations": {
+                "htf_rotation": htf_rotation,
+                "ltf_rotation": ltf_rotation
+            },
+            "market_structure": {
+                "htf_trend": htf_pivots.get("trend", "neutral"),
+                "ltf_trend": ltf_pivots.get("trend", "neutral")
+            },
+            "summary": {
+                "htf_ranges_found": htf_ranges_result.get("total_ranges_found", 0),
+                "ltf_ranges_found": ltf_ranges_result.get("total_ranges_found", 0),
+                "htf_has_active_range": htf_active_range is not None,
+                "ltf_has_active_range": ltf_active_range is not None,
+                "current_zone": current_position.get("zone", "UNKNOWN"),
+                "trading_bias": current_position.get("trading_bias", "NEUTRAL"),
+                "htf_deviations_detected": htf_deviations.get("has_deviation", False),
+                "ltf_deviations_detected": ltf_deviations.get("has_deviation", False),
+                "nested_htf_ranges": nested_ranges.get("htf_ranges_with_nesting", 0),
+                "total_nested_ltf_ranges": nested_ranges.get("total_nested_ltf_ranges", 0)
+            },
+            "tct_concepts": {
+                "six_candle_rule": "Range valid if 2 candles up, 2 down, 2 up (or inverse)",
+                "deviation_limit": "30% of range size - threshold for deviation vs break",
+                "premium_zone": "Above equilibrium (0.5) to range high",
+                "discount_zone": "Below equilibrium (0.5) to range low",
+                "equilibrium": "0.5 fib level - range confirmation point",
+                "wick_deviation": "Easiest deviation - never broke structure",
+                "bad_bos_deviation": "Candle close deviation - closes back inside quickly"
+            }
+        })
+
+    except Exception as e:
+        logger.error(f"[RANGES_ERROR] {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.get("/api/liquidity")
