@@ -2450,6 +2450,7 @@ async def root():
             "/status": "Health check",
             "/api/validate": "7-gate validation",
             "/api/price": "Current price",
+            "/api/candles": "OHLC candle data (for charting)",
             "/api/ranges": "Range detection & deviations (TCT Mentorship Lecture 2)",
             "/api/zones": "Supply & Demand zones (TCT Mentorship Lecture 3)",
             "/api/liquidity": "Liquidity pools, curves & targets (TCT Lecture 4)"
@@ -2477,6 +2478,44 @@ async def live_price():
             return {"error": f"HTTP {r.status_code}"}
     except Exception as e:
         return {"error": str(e)}
+
+@app.get("/api/candles")
+async def get_candles(interval: str = "4h", limit: int = 100):
+    """
+    Fetch candles from MEXC - server-side to avoid CORS issues.
+
+    Args:
+        interval: Timeframe (1m, 5m, 15m, 1h, 4h, 1d)
+        limit: Number of candles (max 1000)
+
+    Returns:
+        List of candles with time, open, high, low, close
+    """
+    try:
+        df = await fetch_mexc_candles(SYMBOL, interval, min(limit, 500))
+        if df is None:
+            return JSONResponse({"error": "Failed to fetch candles from MEXC"}, status_code=500)
+
+        candles = []
+        for _, row in df.iterrows():
+            candles.append({
+                "time": int(row["open_time"].timestamp()),
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "volume": float(row["volume"])
+            })
+
+        return {
+            "symbol": SYMBOL,
+            "interval": interval,
+            "count": len(candles),
+            "candles": candles
+        }
+    except Exception as e:
+        logger.error(f"[CANDLES_ERROR] {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard():
@@ -2954,20 +2993,18 @@ async def dashboard():
             });
         }
 
-        // Fetch candle data
+        // Fetch candle data from server (avoids CORS issues)
         async function fetchCandles(interval = '4h', limit = 100) {
             try {
                 const data = await fetchWithRetry(
-                    `https://api.mexc.com/api/v3/klines?symbol=BTCUSDT&interval=${interval}&limit=${limit}`,
-                    {}, 2, 10000
+                    `/api/candles?interval=${interval}&limit=${limit}`,
+                    {}, 3, 20000
                 );
-                return data.map(k => ({
-                    time: k[0] / 1000,
-                    open: parseFloat(k[1]),
-                    high: parseFloat(k[2]),
-                    low: parseFloat(k[3]),
-                    close: parseFloat(k[4]),
-                }));
+                if (data.error) {
+                    console.error('Candles API error:', data.error);
+                    return [];
+                }
+                return data.candles || [];
             } catch (e) {
                 console.error('Failed to fetch candles:', e);
                 return [];
@@ -3665,6 +3702,40 @@ async def detect_ranges():
         # Get active ranges (most relevant confirmed ranges)
         htf_active_range = htf_ranges_result.get("active_range")
         ltf_active_range = ltf_ranges_result.get("active_range")
+
+        # FALLBACK: If no TCT range detected, create a simple range from recent price action
+        # This ensures the dashboard always has range data to display
+        if not htf_active_range and len(htf_df) >= 20:
+            recent_high = float(htf_df.tail(50)["high"].max())
+            recent_low = float(htf_df.tail(50)["low"].min())
+            eq = (recent_high + recent_low) / 2
+            range_size = recent_high - recent_low
+            htf_active_range = {
+                "range_high": recent_high,
+                "range_low": recent_low,
+                "equilibrium": eq,
+                "range_size": range_size,
+                "deviation_limit_high": recent_high + (range_size * 0.30),
+                "deviation_limit_low": recent_low - (range_size * 0.30),
+                "is_fallback": True,  # Mark as fallback (not TCT validated)
+                "is_confirmed": False
+            }
+
+        if not ltf_active_range and len(ltf_df) >= 20:
+            recent_high = float(ltf_df.tail(100)["high"].max())
+            recent_low = float(ltf_df.tail(100)["low"].min())
+            eq = (recent_high + recent_low) / 2
+            range_size = recent_high - recent_low
+            ltf_active_range = {
+                "range_high": recent_high,
+                "range_low": recent_low,
+                "equilibrium": eq,
+                "range_size": range_size,
+                "deviation_limit_high": recent_high + (range_size * 0.30),
+                "deviation_limit_low": recent_low - (range_size * 0.30),
+                "is_fallback": True,  # Mark as fallback (not TCT validated)
+                "is_confirmed": False
+            }
 
         # 2. Detect Deviations from active ranges
         deviation_detector = TCTDeviationDetector()
