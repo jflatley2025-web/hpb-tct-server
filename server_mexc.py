@@ -853,20 +853,21 @@ class OverlappingZoneDetector:
         return enhanced_htf_zones
 
 # ================================================================
-# LIQUIDITY DETECTION (TCT Mentorship Lecture 4)
+# LIQUIDITY DETECTION (TCT Mentorship Lecture 4 - Pure TCT Methodology)
 # ================================================================
 
 class LiquidityDetector:
     """
     Detects Buy-Side Liquidity (BSL) and Sell-Side Liquidity (SSL) pools.
 
-    Methodology from Liquidity PDFs:
-    - BSL = Liquidity above highs (stop losses above resistance)
-    - SSL = Liquidity below lows (stop losses below support)
-    - Primary highs/lows = visible pivot points (major liquidity pools)
-    - Internal highs/lows = price action between primaries (less significant)
-    - Equal highs/lows = multiple touches at same level (strong liquidity targets)
-    - Non-liquidity highs/lows = highs/lows that grabbed previous liquidity
+    Pure TCT Methodology from Liquidity PDFs:
+    - BSL = Buy-Side Liquidity above highs (stop losses from shorts)
+    - SSL = Sell-Side Liquidity below lows (stop losses from longs)
+    - Primary highs/lows = visible pivot points
+    - Internal highs/lows = price action between primary highs/lows
+    - Equal highs/lows = exact same price levels (amazing liquidity targets)
+    - Non-liquidity highs/lows = grabbed liquidity from left, NOT liquidity targets
+    - Exception: If price spends time near swept level, it becomes liquidity curve
     """
 
     @staticmethod
@@ -874,12 +875,17 @@ class LiquidityDetector:
         """
         Detect BSL (above highs) and SSL (below lows) liquidity pools.
 
+        TCT Methodology:
+        - Primary highs/lows = visible pivot points (major liquidity)
+        - Internal highs/lows = between primaries (less significant)
+        - Equal highs/lows = exact same price (amazing liquidity targets)
+
         Returns: Dict with bsl_pools and ssl_pools lists
         """
         bsl_pools = []  # Buy-side liquidity (above price)
         ssl_pools = []  # Sell-side liquidity (below price)
 
-        # Classify pivots as primary vs internal
+        # Classify pivots as primary vs internal (TCT: visible pivots vs between pivots)
         primary_highs, internal_highs = LiquidityDetector._classify_primary_vs_internal(
             pivots.get("highs", []), is_highs=True
         )
@@ -888,29 +894,32 @@ class LiquidityDetector:
             pivots.get("lows", []), is_lows=True
         )
 
-        # Detect equal highs (BSL)
+        # Detect equal highs (TCT: "amazing liquidity targets")
         equal_highs = LiquidityDetector._detect_equal_levels(
             [p["price"] for p in pivots.get("highs", [])],
-            tolerance=0.001  # 0.1% tolerance
+            tolerance=0.0001  # Exact same price level (e.g., 1.07833 = 1.07833)
         )
 
-        # Detect equal lows (SSL)
+        # Detect equal lows (TCT: "amazing liquidity targets")
         equal_lows = LiquidityDetector._detect_equal_levels(
             [p["price"] for p in pivots.get("lows", [])],
-            tolerance=0.001
+            tolerance=0.0001  # Exact same price level
         )
 
         # Create BSL pools from primary highs
+        # TCT: Primary highs are visible pivot points representing liquidity above
         for pivot in primary_highs:
             price = pivot["price"]
 
-            # Check if this is a non-liquidity high
+            # TCT: Check if this is a non-liquidity high (grabbed liquidity from left)
             is_non_liquidity = LiquidityDetector._is_non_liquidity_high(
                 pivot, pivots.get("highs", []), candles
             )
 
+            # TCT: Only use liquidity highs (not non-liquidity highs) for BSL pools
             if not is_non_liquidity:
-                is_equal = any(abs(price - eq) / eq < 0.001 for eq in equal_highs)
+                # TCT: Equal highs are "amazing liquidity targets"
+                is_equal = any(abs(price - eq) / eq < 0.0001 for eq in equal_highs)
 
                 bsl_pools.append({
                     "type": "BSL",
@@ -918,21 +927,24 @@ class LiquidityDetector:
                     "idx": pivot["idx"],
                     "is_primary": True,
                     "is_equal": is_equal,
-                    "strength": 1.0 if is_equal else 0.75,
+                    "strength": 1.0 if is_equal else 0.8,  # TCT: Equal = stronger
                     "distance_from_price": float((price - current_price) / current_price * 100)
                 })
 
         # Create SSL pools from primary lows
+        # TCT: Primary lows are visible pivot points representing liquidity below
         for pivot in primary_lows:
             price = pivot["price"]
 
-            # Check if this is a non-liquidity low
+            # TCT: Check if this is a non-liquidity low (grabbed liquidity from left)
             is_non_liquidity = LiquidityDetector._is_non_liquidity_low(
                 pivot, pivots.get("lows", []), candles
             )
 
+            # TCT: Only use liquidity lows (not non-liquidity lows) for SSL pools
             if not is_non_liquidity:
-                is_equal = any(abs(price - eq) / eq < 0.001 for eq in equal_lows)
+                # TCT: Equal lows are "amazing liquidity targets"
+                is_equal = any(abs(price - eq) / eq < 0.0001 for eq in equal_lows)
 
                 ssl_pools.append({
                     "type": "SSL",
@@ -940,11 +952,12 @@ class LiquidityDetector:
                     "idx": pivot["idx"],
                     "is_primary": True,
                     "is_equal": is_equal,
-                    "strength": 1.0 if is_equal else 0.75,
+                    "strength": 1.0 if is_equal else 0.8,  # TCT: Equal = stronger
                     "distance_from_price": float((current_price - price) / current_price * 100)
                 })
 
-        # Add internal highs/lows as weaker liquidity
+        # TCT: Add internal highs/lows as weaker liquidity (stacking up)
+        # "Internal highs stacking up here" creating buy-side liquidity
         for pivot in internal_highs:
             price = pivot["price"]
             bsl_pools.append({
@@ -953,10 +966,11 @@ class LiquidityDetector:
                 "idx": pivot["idx"],
                 "is_primary": False,
                 "is_equal": False,
-                "strength": 0.4,
+                "strength": 0.5,  # TCT: Internal = weaker than primary
                 "distance_from_price": float((price - current_price) / current_price * 100)
             })
 
+        # "Internal lows stacking up" creating sell-side liquidity
         for pivot in internal_lows:
             price = pivot["price"]
             ssl_pools.append({
@@ -965,7 +979,7 @@ class LiquidityDetector:
                 "idx": pivot["idx"],
                 "is_primary": False,
                 "is_equal": False,
-                "strength": 0.4,
+                "strength": 0.5,  # TCT: Internal = weaker than primary
                 "distance_from_price": float((current_price - price) / current_price * 100)
             })
 
@@ -987,10 +1001,13 @@ class LiquidityDetector:
     @staticmethod
     def _classify_primary_vs_internal(pivots: List[Dict], is_highs: bool = False, is_lows: bool = False) -> tuple:
         """
-        Classify pivots as primary (visible, significant) or internal (between primaries).
+        Classify pivots as primary vs internal using TCT methodology.
 
-        Primary pivots = major swing points that stand out
-        Internal pivots = smaller swings between primaries
+        TCT Methodology:
+        - Primary highs/lows = visible pivot points (major swings)
+        - Internal highs/lows = high/low creations between primaries
+        - "Visible pivot points are our primary highs"
+        - "Internal highs are our high creations in between our primary highs"
         """
         if len(pivots) < 2:
             return pivots, []
@@ -1008,7 +1025,7 @@ class LiquidityDetector:
         primary = []
         internal = []
 
-        # Window-based classification
+        # TCT: Window-based classification to identify visible pivots
         window_size = 5
         for i, pivot in enumerate(sorted_pivots):
             start = max(0, i - window_size)
@@ -1017,10 +1034,10 @@ class LiquidityDetector:
             window_prices = [p["price"] for p in window]
 
             if is_highs:
-                # For highs: primary if it's among the highest in window
+                # TCT: Primary highs are visible/prominent highs in the window
                 is_primary = pivot["price"] >= sorted(window_prices)[-2] if len(window_prices) >= 2 else True
             elif is_lows:
-                # For lows: primary if it's among the lowest in window
+                # TCT: Primary lows are visible/prominent lows in the window
                 is_primary = pivot["price"] <= sorted(window_prices)[1] if len(window_prices) >= 2 else True
             else:
                 is_primary = True
@@ -1033,11 +1050,15 @@ class LiquidityDetector:
         return primary, internal
 
     @staticmethod
-    def _detect_equal_levels(prices: List[float], tolerance: float = 0.001) -> List[float]:
+    def _detect_equal_levels(prices: List[float], tolerance: float = 0.0001) -> List[float]:
         """
-        Detect equal highs/lows (multiple touches at same price level).
+        Detect equal highs/lows using TCT methodology.
 
-        Returns list of price levels that have 2+ touches within tolerance.
+        TCT: "Equal lows are amazing liquidity targets"
+        Example: "Both lows length equals 1.07833" - exact same price
+        "Indicated that it purposely went there to grab it to the exact amount"
+
+        Returns list of price levels that have 2+ touches at exact same level.
         """
         if len(prices) < 2:
             return []
@@ -1051,11 +1072,12 @@ class LiquidityDetector:
 
             matches = [price1]
             for j, price2 in enumerate(prices[i+1:], start=i+1):
+                # TCT: Equal means exact same price (very tight tolerance)
                 if abs(price1 - price2) / price1 < tolerance:
                     matches.append(price2)
                     processed.add(j)
 
-            # If 2+ matches, it's an equal level
+            # TCT: If 2+ matches at exact same level, it's an equal level (amazing liquidity target)
             if len(matches) >= 2:
                 equal_levels.append(sum(matches) / len(matches))
                 processed.add(i)
@@ -1065,32 +1087,38 @@ class LiquidityDetector:
     @staticmethod
     def _is_non_liquidity_high(pivot: Dict, all_highs: List[Dict], candles: pd.DataFrame) -> bool:
         """
-        Check if high is a non-liquidity high.
+        Check if high is a non-liquidity high using TCT methodology.
 
-        Non-liquidity high = high that grabbed liquidity from previous high,
-        followed by aggressive expansion downward.
+        TCT: "If a high grabs liquidity from a previous high - that high is NOT a liquidity target"
+        "Short sellers place their stop loss just above the previous high"
+        "Often you will see a more aggressive expansion towards the downside from it"
+        "That non liquidity high should not be apart of your plan for return to zone"
 
-        Exception: If price spent time near the swept level, it IS liquidity.
+        Exception: "If liquidity gets swept than immediately starts creating price action
+        near that high... more stop losses get set above that liquidity high, more liquidity
+        gets stacked → becomes part of liquidity curve"
+
+        Returns True if this is a non-liquidity high (should NOT be used as liquidity target)
         """
         idx = pivot["idx"]
         price = pivot["price"]
 
-        if idx < 5 or idx >= len(candles) - 2:
+        if idx < 3 or idx >= len(candles) - 2:
             return False
 
-        # Find previous highs
+        # TCT: Find previous highs to check if this grabbed liquidity from left
         previous_highs = [h for h in all_highs if h["idx"] < idx]
         if not previous_highs:
             return False
 
-        # Check if this high swept a previous high
-        swept_previous = any(price > h["price"] for h in previous_highs[-3:])
+        # TCT: Check if this high grabbed liquidity from a previous high
+        grabbed_liquidity_from_left = any(price > h["price"] for h in previous_highs[-3:])
 
-        if not swept_previous:
-            return False
+        if not grabbed_liquidity_from_left:
+            return False  # Didn't grab liquidity, so it's a valid liquidity high
 
-        # Check for aggressive expansion downward after this high
-        next_candles = candles.iloc[idx+1:min(idx+4, len(candles))]
+        # TCT: Check for aggressive expansion downward after grabbing liquidity
+        next_candles = candles.iloc[idx+1:min(idx+5, len(candles))]
         if len(next_candles) == 0:
             return False
 
@@ -1099,51 +1127,56 @@ class LiquidityDetector:
         expansion_size = high_candle["high"] - lowest_after
         high_size = high_candle["high"] - high_candle["low"]
 
-        # Aggressive expansion = move down > 2x the high candle size
-        has_aggressive_expansion = expansion_size > high_size * 2.0
+        # TCT: "Often you will see a more aggressive expansion towards the downside"
+        has_aggressive_expansion = expansion_size > high_size * 1.5
 
         if not has_aggressive_expansion:
-            return False
+            return False  # No aggressive expansion, treat as liquidity high
 
-        # Exception: Check if price spent time near this level
+        # TCT EXCEPTION: "If price is spending time nearby that liquidity high"
+        # "Price action near that liquidity high is going to create more short orders
+        # and people tend to put their stop loss above that liquidity high"
         time_spent_near = sum(
             1 for c in next_candles.itertuples()
             if abs(c.close - price) / price < 0.01
         )
 
-        # If spent 2+ candles near level, it IS liquidity (not non-liquidity)
+        # TCT: If spent time near level, it becomes part of liquidity curve
         if time_spent_near >= 2:
-            return False
+            return False  # Exception: IS liquidity because price spent time nearby
 
-        return True  # It's a non-liquidity high
+        return True  # It's a non-liquidity high (grabbed liquidity + aggressive expansion)
 
     @staticmethod
     def _is_non_liquidity_low(pivot: Dict, all_lows: List[Dict], candles: pd.DataFrame) -> bool:
         """
-        Check if low is a non-liquidity low.
+        Check if low is a non-liquidity low using TCT methodology.
 
-        Non-liquidity low = low that grabbed liquidity from previous low,
-        followed by aggressive expansion upward.
+        TCT: Same concept as non-liquidity high but inverted
+        "The exact same thing happens from a liquidity low perspective"
+        "We have a low right here and this low grabbed that liquidity from here"
+
+        Returns True if this is a non-liquidity low (should NOT be used as liquidity target)
         """
         idx = pivot["idx"]
         price = pivot["price"]
 
-        if idx < 5 or idx >= len(candles) - 2:
+        if idx < 3 or idx >= len(candles) - 2:
             return False
 
-        # Find previous lows
+        # TCT: Find previous lows to check if this grabbed liquidity from left
         previous_lows = [l for l in all_lows if l["idx"] < idx]
         if not previous_lows:
             return False
 
-        # Check if this low swept a previous low
-        swept_previous = any(price < l["price"] for l in previous_lows[-3:])
+        # TCT: Check if this low grabbed liquidity from a previous low
+        grabbed_liquidity_from_left = any(price < l["price"] for l in previous_lows[-3:])
 
-        if not swept_previous:
-            return False
+        if not grabbed_liquidity_from_left:
+            return False  # Didn't grab liquidity, so it's a valid liquidity low
 
-        # Check for aggressive expansion upward after this low
-        next_candles = candles.iloc[idx+1:min(idx+4, len(candles))]
+        # TCT: Check for aggressive expansion upward after grabbing liquidity
+        next_candles = candles.iloc[idx+1:min(idx+5, len(candles))]
         if len(next_candles) == 0:
             return False
 
@@ -1152,56 +1185,66 @@ class LiquidityDetector:
         expansion_size = highest_after - low_candle["low"]
         low_size = low_candle["high"] - low_candle["low"]
 
-        # Aggressive expansion = move up > 2x the low candle size
-        has_aggressive_expansion = expansion_size > low_size * 2.0
+        # TCT: Aggressive expansion upward (inverted from non-liquidity high)
+        has_aggressive_expansion = expansion_size > low_size * 1.5
 
         if not has_aggressive_expansion:
-            return False
+            return False  # No aggressive expansion, treat as liquidity low
 
-        # Exception: Check if price spent time near this level
+        # TCT EXCEPTION: "Same goes for liquidity lows - only if we spend time above
+        # that liquidity low can we start building a liquidity curve above it"
         time_spent_near = sum(
             1 for c in next_candles.itertuples()
             if abs(c.close - price) / price < 0.01
         )
 
+        # TCT: If spent time near level, it becomes part of liquidity curve
         if time_spent_near >= 2:
-            return False
+            return False  # Exception: IS liquidity because price spent time nearby
 
-        return True
+        return True  # It's a non-liquidity low (grabbed liquidity + aggressive expansion)
 
 # ================================================================
-# LIQUIDITY CURVE GENERATION
+# LIQUIDITY CURVE GENERATION (TCT Methodology)
 # ================================================================
 
 class LiquidityCurveGenerator:
     """
     Generates liquidity curves by connecting primary highs or lows.
 
-    Methodology from PDFs:
-    - Sell-side liquidity curve: Connect progressively lower primary highs
-    - Buy-side liquidity curve: Connect progressively higher primary lows
-    - Don't need all points to connect, just a few to form proper curve
-    - 3-tap pattern: 1st tap → 2nd tap → 3rd tap
+    Pure TCT Methodology from PDFs:
+    - "Buy-side liquidity curve getting generated"
+    - "Sell-side liquidity curve" with progressively lower primary highs
+    - "Points all don't need to connect - just need a few points for proper liquidity curve"
+    - "Typically you want each primary high to be a lower one to the previous one"
+    - "Primary lows should form progressively higher lows" (for buy-side curve)
+    - "Two lower highs" "Range high touches liquidity curve"
+    - 3-tap pattern: 1st tap → 2nd tap → 3rd tap (Model 2 TCT)
     """
 
     @staticmethod
     def generate_curves(liquidity_pools: Dict, candles: pd.DataFrame) -> Dict:
         """
-        Generate liquidity curves from liquidity pools.
+        Generate liquidity curves from liquidity pools using TCT methodology.
+
+        TCT: "Buy-side liquidity curve getting generated"
+        TCT: "Sell-side liquidity curve" from primary highs
+        TCT: "Points all don't need to connect - just need a few points for proper liquidity curve"
 
         Returns: Dict with sell_side_curves and buy_side_curves
         """
         bsl_pools = liquidity_pools.get("bsl_pools", [])
         ssl_pools = liquidity_pools.get("ssl_pools", [])
 
-        # Filter primary pools only
+        # TCT: Filter primary pools only (visible pivot points)
+        # "Visible pivot points are our primary highs"
         primary_bsl = [p for p in bsl_pools if p.get("is_primary", False)]
         primary_ssl = [p for p in ssl_pools if p.get("is_primary", False)]
 
-        # Generate sell-side curves (from BSL - highs)
+        # TCT: Generate sell-side curves from progressively lower primary highs
         sell_side_curves = LiquidityCurveGenerator._generate_sell_side_curves(primary_bsl, candles)
 
-        # Generate buy-side curves (from SSL - lows)
+        # TCT: Generate buy-side curves from progressively higher primary lows
         buy_side_curves = LiquidityCurveGenerator._generate_buy_side_curves(primary_ssl, candles)
 
         return {
@@ -1213,17 +1256,23 @@ class LiquidityCurveGenerator:
     @staticmethod
     def _generate_sell_side_curves(primary_highs: List[Dict], candles: pd.DataFrame) -> List[Dict]:
         """
-        Generate sell-side liquidity curves from progressively lower highs.
+        Generate sell-side liquidity curves from progressively lower primary highs.
+
+        TCT Methodology:
+        - "Typically you want each primary high to be a lower one to the previous one"
+        - "Two lower highs" forming the curve
+        - "Points all don't need to connect - just need a few points for proper liquidity curve"
+        - 1st tap, 2nd tap, 3rd tap pattern (Model 2)
         """
         if len(primary_highs) < 3:
             return []
 
-        # Sort by index
+        # Sort by index (chronological order)
         sorted_highs = sorted(primary_highs, key=lambda x: x["idx"])
 
         curves = []
 
-        # Look for sequences of 3+ lower highs
+        # TCT: Look for sequences of 3+ progressively lower highs
         for i in range(len(sorted_highs) - 2):
             sequence = []
             current_high = sorted_highs[i]
@@ -1232,17 +1281,17 @@ class LiquidityCurveGenerator:
             for j in range(i + 1, len(sorted_highs)):
                 next_high = sorted_highs[j]
 
-                # Check if next high is lower than current
+                # TCT: "Each primary high to be a lower one to the previous one"
                 if next_high["price"] < sequence[-1]["price"]:
                     sequence.append(next_high)
 
-                # Stop if we found 5+ points or price goes back up
+                # TCT: Stop if we found enough points (don't need all points to connect)
                 if len(sequence) >= 5:
                     break
 
-            # Valid curve needs at least 3 points
+            # TCT: Valid curve needs at least 3 points (1st, 2nd, 3rd tap)
             if len(sequence) >= 3:
-                # Check if it's a valid descending sequence
+                # Verify it's a valid descending sequence (lower highs)
                 is_valid = all(
                     sequence[k]["price"] > sequence[k+1]["price"]
                     for k in range(len(sequence)-1)
@@ -1255,9 +1304,9 @@ class LiquidityCurveGenerator:
                         "type": "sell_side",
                         "taps": sequence,
                         "tap_count": tap_count,
-                        "first_tap": sequence[0],
-                        "second_tap": sequence[1] if len(sequence) >= 2 else None,
-                        "third_tap": sequence[2] if len(sequence) >= 3 else None,
+                        "first_tap": sequence[0],  # TCT: 1st tap
+                        "second_tap": sequence[1] if len(sequence) >= 2 else None,  # TCT: 2nd tap
+                        "third_tap": sequence[2] if len(sequence) >= 3 else None,  # TCT: 3rd tap
                         "highest_price": float(sequence[0]["price"]),
                         "lowest_price": float(sequence[-1]["price"]),
                         "quality": "EXCELLENT" if tap_count >= 4 else "GOOD" if tap_count == 3 else "WEAK"
@@ -1268,17 +1317,24 @@ class LiquidityCurveGenerator:
     @staticmethod
     def _generate_buy_side_curves(primary_lows: List[Dict], candles: pd.DataFrame) -> List[Dict]:
         """
-        Generate buy-side liquidity curves from progressively higher lows.
+        Generate buy-side liquidity curves from progressively higher primary lows.
+
+        TCT Methodology:
+        - "Buy-side liquidity curve getting generated"
+        - Primary lows should form progressively higher lows (accumulation model)
+        - "Primary lows stacking up creating buy-side liquidity"
+        - "Internal lows stacking up" below the curve
+        - 1st tap (initial range low), 2nd tap, 3rd tap
         """
         if len(primary_lows) < 3:
             return []
 
-        # Sort by index
+        # Sort by index (chronological order)
         sorted_lows = sorted(primary_lows, key=lambda x: x["idx"])
 
         curves = []
 
-        # Look for sequences of 3+ higher lows
+        # TCT: Look for sequences of 3+ progressively higher lows
         for i in range(len(sorted_lows) - 2):
             sequence = []
             current_low = sorted_lows[i]
@@ -1287,17 +1343,17 @@ class LiquidityCurveGenerator:
             for j in range(i + 1, len(sorted_lows)):
                 next_low = sorted_lows[j]
 
-                # Check if next low is higher than current
+                # TCT: Each primary low should be higher than the previous (higher lows)
                 if next_low["price"] > sequence[-1]["price"]:
                     sequence.append(next_low)
 
-                # Stop if we found 5+ points or price goes back down
+                # TCT: Stop if we found enough points (don't need all points to connect)
                 if len(sequence) >= 5:
                     break
 
-            # Valid curve needs at least 3 points
+            # TCT: Valid curve needs at least 3 points (1st, 2nd, 3rd tap)
             if len(sequence) >= 3:
-                # Check if it's a valid ascending sequence
+                # Verify it's a valid ascending sequence (higher lows)
                 is_valid = all(
                     sequence[k]["price"] < sequence[k+1]["price"]
                     for k in range(len(sequence)-1)
@@ -1310,9 +1366,9 @@ class LiquidityCurveGenerator:
                         "type": "buy_side",
                         "taps": sequence,
                         "tap_count": tap_count,
-                        "first_tap": sequence[0],
-                        "second_tap": sequence[1] if len(sequence) >= 2 else None,
-                        "third_tap": sequence[2] if len(sequence) >= 3 else None,
+                        "first_tap": sequence[0],  # TCT: 1st tap (initial range low)
+                        "second_tap": sequence[1] if len(sequence) >= 2 else None,  # TCT: 2nd tap
+                        "third_tap": sequence[2] if len(sequence) >= 3 else None,  # TCT: 3rd tap
                         "lowest_price": float(sequence[0]["price"]),
                         "highest_price": float(sequence[-1]["price"]),
                         "quality": "EXCELLENT" if tap_count >= 4 else "GOOD" if tap_count == 3 else "WEAK"
@@ -1321,29 +1377,41 @@ class LiquidityCurveGenerator:
         return curves
 
 # ================================================================
-# EXTREME LIQUIDITY TARGET IDENTIFICATION
+# EXTREME LIQUIDITY TARGET IDENTIFICATION (TCT 2nd Tap Observations)
 # ================================================================
 
 class ExtremeLiquidityTarget:
     """
-    Identifies extreme liquidity POI (Point of Interest) after 2nd tap.
+    Identifies extreme liquidity POI after 2nd tap using TCT methodology.
 
-    Per PDF: "After 2nd tap observation, identify extreme liquidity target:
-    - For accumulation: First higher low after 2nd tap
-    - For distribution: First lower high after 2nd tap"
+    Pure TCT Methodology from PDFs:
+    - "2nd Tap Observations for Extreme Liquidity Point of Interest"
+    - "Just understanding that your extreme liquidity is going to be that first higher low POI
+      you would use this as your extreme liquidity target" (for accumulation)
+    - For distribution: first lower high after 2nd tap
+    - "If extreme liquidity gets grabbed in 5 minutes after 2nd tap, then focus on 2nd higher low"
+    - "Equal lows are amazing liquidity targets" - use 2nd higher low if it's equal to next low
+    - "If we used that 1st lower low after 2nd tap we would have been waiting for extreme
+      liquidity target that was never revisited because the 2nd lower low was actually the
+      extreme liquidity target"
     """
 
     @staticmethod
     def identify_extreme_targets(curves: Dict, candles: pd.DataFrame) -> Dict:
         """
-        Identify extreme liquidity targets for each curve.
+        Identify extreme liquidity targets for each curve using TCT methodology.
+
+        TCT: "2nd Tap Observations for Extreme Liquidity Point of Interest"
+        - Must have at least 2 taps to identify extreme liquidity target
+        - For accumulation (buy-side): first higher low after 2nd tap
+        - For distribution (sell-side): first lower high after 2nd tap
 
         Returns: Dict with targets for each curve type
         """
         sell_side_targets = []
         buy_side_targets = []
 
-        # Process sell-side curves (distribution)
+        # TCT: Process sell-side curves (distribution model)
         for curve in curves.get("sell_side_curves", []):
             if curve.get("tap_count", 0) >= 2:
                 target = ExtremeLiquidityTarget._find_extreme_target_for_distribution(
@@ -1352,7 +1420,7 @@ class ExtremeLiquidityTarget:
                 if target:
                     sell_side_targets.append(target)
 
-        # Process buy-side curves (accumulation)
+        # TCT: Process buy-side curves (accumulation model)
         for curve in curves.get("buy_side_curves", []):
             if curve.get("tap_count", 0) >= 2:
                 target = ExtremeLiquidityTarget._find_extreme_target_for_accumulation(
@@ -1370,7 +1438,10 @@ class ExtremeLiquidityTarget:
     @staticmethod
     def _find_extreme_target_for_distribution(curve: Dict, candles: pd.DataFrame) -> Optional[Dict]:
         """
-        Find first lower high after 2nd tap (for distribution/sell-side).
+        Find first lower high after 2nd tap for distribution/sell-side using TCT methodology.
+
+        TCT: "For distribution (sell-side): first lower high after 2nd tap"
+        This is the inverted version of the accumulation model shown in the PDFs.
         """
         second_tap = curve.get("second_tap")
         if not second_tap:
@@ -1379,13 +1450,14 @@ class ExtremeLiquidityTarget:
         second_tap_idx = second_tap["idx"]
         second_tap_price = second_tap["price"]
 
-        # Look for first lower high after 2nd tap
+        # TCT: Look for first lower high after 2nd tap
+        # Search window should be sufficient to find the extreme target
         search_window = candles.iloc[second_tap_idx+1:min(second_tap_idx+20, len(candles))]
 
         for i, candle in enumerate(search_window.itertuples(), start=second_tap_idx+1):
-            # Check if this forms a lower high
+            # TCT: Check if this forms a lower high (below 2nd tap price)
             if candle.high < second_tap_price:
-                # Found first lower high
+                # TCT: Found first lower high - this is the extreme liquidity POI
                 return {
                     "type": "distribution",
                     "curve_type": "sell_side",
@@ -1401,7 +1473,16 @@ class ExtremeLiquidityTarget:
     @staticmethod
     def _find_extreme_target_for_accumulation(curve: Dict, candles: pd.DataFrame) -> Optional[Dict]:
         """
-        Find first higher low after 2nd tap (for accumulation/buy-side).
+        Find first higher low after 2nd tap for accumulation/buy-side using TCT methodology.
+
+        TCT: "Just understanding that your extreme liquidity is going to be that first higher
+        low POI you would use this as your extreme liquidity target"
+
+        TCT: "1st Low after the 2nd tap is going to be our extreme liquidity"
+
+        TCT: Important note - if this gets swept quickly (e.g., "5 minutes after 2nd tap"),
+        then should focus on 2nd higher low instead. But this function returns the first
+        higher low, and the endpoint logic will handle whether it was swept.
         """
         second_tap = curve.get("second_tap")
         if not second_tap:
@@ -1410,13 +1491,15 @@ class ExtremeLiquidityTarget:
         second_tap_idx = second_tap["idx"]
         second_tap_price = second_tap["price"]
 
-        # Look for first higher low after 2nd tap
+        # TCT: "Look for first higher low after 2nd tap"
+        # "We have a high, a low, higher high, and higher low in that first expansion after the 2nd tap"
         search_window = candles.iloc[second_tap_idx+1:min(second_tap_idx+20, len(candles))]
 
         for i, candle in enumerate(search_window.itertuples(), start=second_tap_idx+1):
-            # Check if this forms a higher low
+            # TCT: Check if this forms a higher low (above 2nd tap price)
             if candle.low > second_tap_price:
-                # Found first higher low
+                # TCT: Found first higher low - this is the extreme liquidity POI
+                # "You would use this as your extreme liquidity target"
                 return {
                     "type": "accumulation",
                     "curve_type": "buy_side",
@@ -1430,21 +1513,30 @@ class ExtremeLiquidityTarget:
         return None
 
 # ================================================================
-# LIQUIDITY VOID DETECTION
+# LIQUIDITY VOID DETECTION (TCT Methodology)
 # ================================================================
 
 class LiquidityVoidDetector:
     """
-    Detects liquidity voids - areas with no S&D zones where price can move easily.
+    Detects liquidity voids using TCT methodology.
 
-    Per PDF: Areas without order blocks or structure zones are voids
-    where liquidity is sparse and price can move freely.
+    Pure TCT from PDFs:
+    - "There is no supply because of this" - areas without supply/demand
+    - "This is so important to understand for high probablity trades because there is
+      nothing in here that can hold price down" (no order blocks/zones to block movement)
+    - Voids = areas with no S&D zones where price can move freely/aggressively
+    - "If price returns to our deviation here than the move down will be quick because
+      all the liquidity below will cause the sell orders to get triggered and price to
+      move towards the downside"
     """
 
     @staticmethod
     def detect_voids(zones: List[Dict], candles: pd.DataFrame, current_price: float) -> Dict:
         """
-        Detect liquidity voids between S&D zones.
+        Detect liquidity voids between S&D zones using TCT methodology.
+
+        TCT: "There is nothing in here that can hold price down/up"
+        Areas without order blocks or structure zones = voids where price moves freely
 
         Returns: Dict with void regions
         """
@@ -1908,15 +2000,26 @@ async def detect_zones():
 @app.get("/api/liquidity")
 async def detect_liquidity():
     """
-    Detect liquidity pools, curves, and targets using TCT Lecture 4 methodology.
+    Detect liquidity pools, curves, and targets using PURE TCT Lecture 4 methodology.
+
+    Pure TCT Methodology from PDFs:
+    - BSL (Buy-Side Liquidity) = liquidity above primary/internal highs
+    - SSL (Sell-Side Liquidity) = liquidity below primary/internal lows
+    - Primary highs/lows = visible pivot points
+    - Internal highs/lows = between primaries (stacking up liquidity)
+    - Equal highs/lows = amazing liquidity targets (exact same price)
+    - Liquidity curves = connecting progressively lower/higher primaries
+    - 2nd tap observations → extreme liquidity POI (first higher low / first lower high)
+    - Liquidity voids = areas with no S&D zones (price moves freely)
+    - Non-liquidity highs/lows = grabbed liquidity from left (NOT valid targets)
+    - Exception: price spending time near = becomes part of liquidity curve
 
     Returns:
-        - BSL (Buy-Side Liquidity) pools above highs
-        - SSL (Sell-Side Liquidity) pools below lows
-        - Liquidity curves (sell-side and buy-side)
-        - Extreme liquidity targets (after 2nd tap)
-        - Liquidity voids (areas with no S&D zones)
-        - Integration with existing S&D zones
+        - BSL/SSL pools with primary/internal classification
+        - Liquidity curves (3-tap patterns: 1st, 2nd, 3rd)
+        - Extreme liquidity targets (after 2nd tap observation)
+        - Liquidity voids
+        - Integration with S&D zones (high-probability vs low-probability)
     """
     try:
         # Fetch candles
