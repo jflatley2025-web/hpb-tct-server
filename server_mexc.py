@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from loguru import logger
 
 # ================================================================
@@ -2446,6 +2446,7 @@ async def root():
         "symbol": SYMBOL,
         "version": "21.2",
         "endpoints": {
+            "/dashboard": "Interactive TCT Dashboard with chart and all metrics",
             "/status": "Health check",
             "/api/validate": "7-gate validation",
             "/api/price": "Current price",
@@ -2476,6 +2477,732 @@ async def live_price():
             return {"error": f"HTTP {r.status_code}"}
     except Exception as e:
         return {"error": str(e)}
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard():
+    """
+    Interactive TCT Dashboard with candlestick chart and all TCT metrics.
+    Displays: Market Structure, Ranges, Supply/Demand Zones, Liquidity, Deviations.
+    """
+    html_content = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HPB-TCT Dashboard</title>
+    <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0a0a0f;
+            color: #e0e0e0;
+            min-height: 100vh;
+        }
+        .header {
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            padding: 15px 25px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid #2d2d44;
+        }
+        .header h1 {
+            font-size: 1.5rem;
+            color: #00d4ff;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .header .price-display {
+            font-size: 1.8rem;
+            font-weight: bold;
+            color: #00ff88;
+        }
+        .header .symbol { color: #888; font-size: 0.9rem; }
+        .main-container {
+            display: grid;
+            grid-template-columns: 1fr 320px;
+            gap: 15px;
+            padding: 15px;
+            height: calc(100vh - 70px);
+        }
+        .chart-section {
+            background: #12121a;
+            border-radius: 10px;
+            overflow: hidden;
+            border: 1px solid #2d2d44;
+        }
+        #chart { width: 100%; height: 100%; }
+        .metrics-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            overflow-y: auto;
+            padding-right: 5px;
+        }
+        .metric-card {
+            background: #12121a;
+            border-radius: 8px;
+            padding: 12px;
+            border: 1px solid #2d2d44;
+        }
+        .metric-card h3 {
+            font-size: 0.85rem;
+            color: #00d4ff;
+            margin-bottom: 10px;
+            padding-bottom: 6px;
+            border-bottom: 1px solid #2d2d44;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .metric-card h3 .badge {
+            font-size: 0.7rem;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-weight: normal;
+        }
+        .badge-bullish { background: rgba(0, 255, 136, 0.2); color: #00ff88; }
+        .badge-bearish { background: rgba(255, 68, 68, 0.2); color: #ff4444; }
+        .badge-neutral { background: rgba(255, 193, 7, 0.2); color: #ffc107; }
+        .badge-premium { background: rgba(255, 68, 68, 0.2); color: #ff6b6b; }
+        .badge-discount { background: rgba(0, 255, 136, 0.2); color: #00ff88; }
+        .metric-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 4px 0;
+            font-size: 0.8rem;
+        }
+        .metric-row .label { color: #888; }
+        .metric-row .value { color: #e0e0e0; font-weight: 500; }
+        .metric-row .value.bullish { color: #00ff88; }
+        .metric-row .value.bearish { color: #ff4444; }
+        .metric-row .value.warning { color: #ffc107; }
+        .zone-list { margin-top: 8px; }
+        .zone-item {
+            background: #1a1a2e;
+            border-radius: 4px;
+            padding: 6px 8px;
+            margin-bottom: 4px;
+            font-size: 0.75rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .zone-item.demand { border-left: 3px solid #00ff88; }
+        .zone-item.supply { border-left: 3px solid #ff4444; }
+        .zone-item.bsl { border-left: 3px solid #ff6b6b; }
+        .zone-item.ssl { border-left: 3px solid #4ecdc4; }
+        .range-viz {
+            background: #1a1a2e;
+            border-radius: 6px;
+            padding: 10px;
+            margin-top: 8px;
+        }
+        .range-bar {
+            height: 30px;
+            background: linear-gradient(to bottom, rgba(255,68,68,0.3) 0%, rgba(255,68,68,0.3) 50%, rgba(0,255,136,0.3) 50%, rgba(0,255,136,0.3) 100%);
+            border-radius: 4px;
+            position: relative;
+            margin: 10px 0;
+        }
+        .range-bar .eq-line {
+            position: absolute;
+            top: 50%;
+            left: 0;
+            right: 0;
+            height: 2px;
+            background: #ffc107;
+        }
+        .range-bar .price-marker {
+            position: absolute;
+            width: 8px;
+            height: 8px;
+            background: #00d4ff;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            box-shadow: 0 0 10px #00d4ff;
+        }
+        .range-labels {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.7rem;
+            color: #888;
+        }
+        .validation-gates {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 4px;
+            margin-top: 8px;
+        }
+        .gate {
+            text-align: center;
+            padding: 6px 4px;
+            border-radius: 4px;
+            font-size: 0.65rem;
+        }
+        .gate.pass { background: rgba(0, 255, 136, 0.2); color: #00ff88; }
+        .gate.fail { background: rgba(255, 68, 68, 0.2); color: #ff4444; }
+        .gate.pending { background: rgba(136, 136, 136, 0.2); color: #888; }
+        .loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: #888;
+        }
+        .loading::after {
+            content: '';
+            width: 20px;
+            height: 20px;
+            border: 2px solid #2d2d44;
+            border-top-color: #00d4ff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-left: 10px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .deviation-indicator {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 4px;
+        }
+        .deviation-indicator.wick { background: #ffc107; }
+        .deviation-indicator.candle { background: #ff6b6b; }
+        .deviation-indicator.dl { background: #9b59b6; }
+        .tct-lecture {
+            font-size: 0.65rem;
+            color: #666;
+            font-style: italic;
+        }
+        .refresh-btn {
+            background: #00d4ff;
+            color: #0a0a0f;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+        .refresh-btn:hover { background: #00b8e6; }
+        .timeframe-selector {
+            display: flex;
+            gap: 5px;
+        }
+        .tf-btn {
+            background: #1a1a2e;
+            color: #888;
+            border: 1px solid #2d2d44;
+            padding: 4px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.75rem;
+        }
+        .tf-btn.active { background: #00d4ff; color: #0a0a0f; border-color: #00d4ff; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>HPB-TCT Dashboard <span class="symbol">BTCUSDT</span></h1>
+        <div style="display: flex; align-items: center; gap: 15px;">
+            <div class="timeframe-selector">
+                <button class="tf-btn" data-tf="15m">15m</button>
+                <button class="tf-btn active" data-tf="4h">4H</button>
+            </div>
+            <div class="price-display" id="currentPrice">--</div>
+            <button class="refresh-btn" onclick="refreshData()">Refresh</button>
+        </div>
+    </div>
+
+    <div class="main-container">
+        <div class="chart-section">
+            <div id="chart"></div>
+        </div>
+
+        <div class="metrics-panel">
+            <!-- Market Structure -->
+            <div class="metric-card">
+                <h3>Market Structure <span class="badge badge-neutral" id="trendBadge">--</span></h3>
+                <div class="tct-lecture">TCT Lecture 1</div>
+                <div class="metric-row">
+                    <span class="label">HTF Trend (4H)</span>
+                    <span class="value" id="htfTrend">--</span>
+                </div>
+                <div class="metric-row">
+                    <span class="label">LTF Trend (15m)</span>
+                    <span class="value" id="ltfTrend">--</span>
+                </div>
+                <div class="metric-row">
+                    <span class="label">HTF Pivots</span>
+                    <span class="value" id="htfPivots">--</span>
+                </div>
+            </div>
+
+            <!-- Active Range -->
+            <div class="metric-card">
+                <h3>Active Range <span class="badge" id="zoneBadge">--</span></h3>
+                <div class="tct-lecture">TCT Lecture 2 - Ranges</div>
+                <div class="metric-row">
+                    <span class="label">Range High</span>
+                    <span class="value" id="rangeHigh">--</span>
+                </div>
+                <div class="metric-row">
+                    <span class="label">Equilibrium (0.5)</span>
+                    <span class="value warning" id="rangeEq">--</span>
+                </div>
+                <div class="metric-row">
+                    <span class="label">Range Low</span>
+                    <span class="value" id="rangeLow">--</span>
+                </div>
+                <div class="range-viz" id="rangeViz" style="display:none;">
+                    <div class="range-labels">
+                        <span>Premium</span>
+                        <span>Discount</span>
+                    </div>
+                    <div class="range-bar">
+                        <div class="eq-line"></div>
+                        <div class="price-marker" id="priceMarker"></div>
+                    </div>
+                    <div class="range-labels">
+                        <span id="rangeHighLabel">--</span>
+                        <span id="rangeLowLabel">--</span>
+                    </div>
+                </div>
+                <div class="metric-row">
+                    <span class="label">Trading Bias</span>
+                    <span class="value" id="tradingBias">--</span>
+                </div>
+                <div class="metric-row">
+                    <span class="label">Bias Strength</span>
+                    <span class="value" id="biasStrength">--</span>
+                </div>
+            </div>
+
+            <!-- Deviations -->
+            <div class="metric-card">
+                <h3>Deviations <span class="badge badge-neutral" id="devBadge">0</span></h3>
+                <div class="tct-lecture">TCT Lecture 2 - DL: 30%</div>
+                <div class="metric-row">
+                    <span class="label"><span class="deviation-indicator wick"></span>Wick Devs</span>
+                    <span class="value" id="wickDevs">0</span>
+                </div>
+                <div class="metric-row">
+                    <span class="label"><span class="deviation-indicator candle"></span>Bad BOS</span>
+                    <span class="value" id="candleDevs">0</span>
+                </div>
+                <div class="metric-row">
+                    <span class="label"><span class="deviation-indicator dl"></span>DL Devs</span>
+                    <span class="value" id="dlDevs">0</span>
+                </div>
+            </div>
+
+            <!-- Supply & Demand Zones -->
+            <div class="metric-card">
+                <h3>S&D Zones <span class="badge badge-neutral" id="zoneCount">0</span></h3>
+                <div class="tct-lecture">TCT Lecture 3</div>
+                <div class="metric-row">
+                    <span class="label">HTF Zones</span>
+                    <span class="value" id="htfZones">--</span>
+                </div>
+                <div class="metric-row">
+                    <span class="label">High Quality</span>
+                    <span class="value bullish" id="hqZones">--</span>
+                </div>
+                <div class="zone-list" id="topZones"></div>
+            </div>
+
+            <!-- Liquidity -->
+            <div class="metric-card">
+                <h3>Liquidity Pools <span class="badge badge-neutral" id="liqCount">0</span></h3>
+                <div class="tct-lecture">TCT Lecture 4</div>
+                <div class="metric-row">
+                    <span class="label">BSL Pools (Above)</span>
+                    <span class="value bearish" id="bslCount">--</span>
+                </div>
+                <div class="metric-row">
+                    <span class="label">SSL Pools (Below)</span>
+                    <span class="value bullish" id="sslCount">--</span>
+                </div>
+                <div class="metric-row">
+                    <span class="label">Equal Highs</span>
+                    <span class="value" id="eqHighs">--</span>
+                </div>
+                <div class="metric-row">
+                    <span class="label">Equal Lows</span>
+                    <span class="value" id="eqLows">--</span>
+                </div>
+                <div class="zone-list" id="liqPools"></div>
+            </div>
+
+            <!-- 7-Gate Validation -->
+            <div class="metric-card">
+                <h3>7-Gate Validation <span class="badge" id="actionBadge">--</span></h3>
+                <div class="validation-gates" id="gates">
+                    <div class="gate pending">G1</div>
+                    <div class="gate pending">G2</div>
+                    <div class="gate pending">G3</div>
+                    <div class="gate pending">G4</div>
+                    <div class="gate pending">G5</div>
+                    <div class="gate pending">G6</div>
+                    <div class="gate pending">G7</div>
+                    <div class="gate pending">--</div>
+                </div>
+                <div class="metric-row" style="margin-top: 8px;">
+                    <span class="label">Recommendation</span>
+                    <span class="value" id="recommendation">--</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let chart, candleSeries, lineSeries = [];
+        let currentTimeframe = '4h';
+
+        // Initialize chart
+        function initChart() {
+            const container = document.getElementById('chart');
+            chart = LightweightCharts.createChart(container, {
+                width: container.clientWidth,
+                height: container.clientHeight,
+                layout: {
+                    background: { color: '#12121a' },
+                    textColor: '#888',
+                },
+                grid: {
+                    vertLines: { color: '#1e1e2d' },
+                    horzLines: { color: '#1e1e2d' },
+                },
+                crosshair: {
+                    mode: LightweightCharts.CrosshairMode.Normal,
+                },
+                rightPriceScale: {
+                    borderColor: '#2d2d44',
+                },
+                timeScale: {
+                    borderColor: '#2d2d44',
+                    timeVisible: true,
+                },
+            });
+
+            candleSeries = chart.addCandlestickSeries({
+                upColor: '#00ff88',
+                downColor: '#ff4444',
+                borderUpColor: '#00ff88',
+                borderDownColor: '#ff4444',
+                wickUpColor: '#00ff88',
+                wickDownColor: '#ff4444',
+            });
+
+            window.addEventListener('resize', () => {
+                chart.applyOptions({
+                    width: container.clientWidth,
+                    height: container.clientHeight,
+                });
+            });
+        }
+
+        // Fetch candle data
+        async function fetchCandles(interval = '4h', limit = 100) {
+            try {
+                const resp = await fetch(`https://api.mexc.com/api/v3/klines?symbol=BTCUSDT&interval=${interval}&limit=${limit}`);
+                const data = await resp.json();
+                return data.map(k => ({
+                    time: k[0] / 1000,
+                    open: parseFloat(k[1]),
+                    high: parseFloat(k[2]),
+                    low: parseFloat(k[3]),
+                    close: parseFloat(k[4]),
+                }));
+            } catch (e) {
+                console.error('Failed to fetch candles:', e);
+                return [];
+            }
+        }
+
+        // Add horizontal line to chart
+        function addPriceLine(price, color, title, lineStyle = 0) {
+            return candleSeries.createPriceLine({
+                price: price,
+                color: color,
+                lineWidth: 1,
+                lineStyle: lineStyle,
+                axisLabelVisible: true,
+                title: title,
+            });
+        }
+
+        // Clear all price lines
+        function clearPriceLines() {
+            lineSeries.forEach(line => {
+                try { candleSeries.removePriceLine(line); } catch(e) {}
+            });
+            lineSeries = [];
+        }
+
+        // Fetch and display all TCT data
+        async function refreshData() {
+            // Fetch candles and update chart
+            const candles = await fetchCandles(currentTimeframe, 100);
+            if (candles.length > 0) {
+                candleSeries.setData(candles);
+                const lastPrice = candles[candles.length - 1].close;
+                document.getElementById('currentPrice').textContent = '$' + lastPrice.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+            }
+
+            clearPriceLines();
+
+            // Fetch ranges data
+            try {
+                const rangesResp = await fetch('/api/ranges');
+                const ranges = await rangesResp.json();
+                updateRangesUI(ranges);
+            } catch (e) { console.error('Ranges fetch error:', e); }
+
+            // Fetch zones data
+            try {
+                const zonesResp = await fetch('/api/zones');
+                const zones = await zonesResp.json();
+                updateZonesUI(zones);
+            } catch (e) { console.error('Zones fetch error:', e); }
+
+            // Fetch liquidity data
+            try {
+                const liqResp = await fetch('/api/liquidity');
+                const liquidity = await liqResp.json();
+                updateLiquidityUI(liquidity);
+            } catch (e) { console.error('Liquidity fetch error:', e); }
+
+            // Fetch validation data
+            try {
+                const valResp = await fetch('/api/validate');
+                const validation = await valResp.json();
+                updateValidationUI(validation);
+            } catch (e) { console.error('Validation fetch error:', e); }
+        }
+
+        function updateRangesUI(data) {
+            if (data.error) return;
+
+            // Market structure
+            const htfTrend = data.market_structure?.htf_trend || 'neutral';
+            const ltfTrend = data.market_structure?.ltf_trend || 'neutral';
+            document.getElementById('htfTrend').textContent = htfTrend.toUpperCase();
+            document.getElementById('htfTrend').className = 'value ' + (htfTrend === 'bullish' ? 'bullish' : htfTrend === 'bearish' ? 'bearish' : '');
+            document.getElementById('ltfTrend').textContent = ltfTrend.toUpperCase();
+            document.getElementById('ltfTrend').className = 'value ' + (ltfTrend === 'bullish' ? 'bullish' : ltfTrend === 'bearish' ? 'bearish' : '');
+
+            const trendBadge = document.getElementById('trendBadge');
+            trendBadge.textContent = htfTrend.toUpperCase();
+            trendBadge.className = 'badge badge-' + (htfTrend === 'bullish' ? 'bullish' : htfTrend === 'bearish' ? 'bearish' : 'neutral');
+
+            // Active range
+            const activeRange = data.htf_ranges?.active_range || data.ltf_ranges?.active_range;
+            if (activeRange) {
+                const high = activeRange.range_high || activeRange.high;
+                const low = activeRange.range_low || activeRange.low;
+                const eq = activeRange.equilibrium || ((high + low) / 2);
+
+                document.getElementById('rangeHigh').textContent = '$' + high?.toLocaleString(undefined, {maximumFractionDigits: 2});
+                document.getElementById('rangeEq').textContent = '$' + eq?.toLocaleString(undefined, {maximumFractionDigits: 2});
+                document.getElementById('rangeLow').textContent = '$' + low?.toLocaleString(undefined, {maximumFractionDigits: 2});
+
+                // Add range lines to chart
+                if (high) lineSeries.push(addPriceLine(high, '#ff4444', 'Range High', 2));
+                if (eq) lineSeries.push(addPriceLine(eq, '#ffc107', 'EQ (0.5)', 1));
+                if (low) lineSeries.push(addPriceLine(low, '#00ff88', 'Range Low', 2));
+
+                // Range visualization
+                document.getElementById('rangeViz').style.display = 'block';
+                document.getElementById('rangeHighLabel').textContent = '$' + high?.toLocaleString(undefined, {maximumFractionDigits: 0});
+                document.getElementById('rangeLowLabel').textContent = '$' + low?.toLocaleString(undefined, {maximumFractionDigits: 0});
+
+                // Position price marker
+                const currentPrice = data.current_price;
+                if (currentPrice && high && low) {
+                    const pct = ((high - currentPrice) / (high - low)) * 100;
+                    const marker = document.getElementById('priceMarker');
+                    marker.style.top = Math.min(100, Math.max(0, pct)) + '%';
+                    marker.style.left = '50%';
+                }
+            }
+
+            // Current position
+            const position = data.current_position || {};
+            const zone = position.zone || 'UNKNOWN';
+            const zoneBadge = document.getElementById('zoneBadge');
+            zoneBadge.textContent = zone;
+            zoneBadge.className = 'badge badge-' + (zone === 'PREMIUM' ? 'premium' : zone === 'DISCOUNT' ? 'discount' : 'neutral');
+
+            document.getElementById('tradingBias').textContent = position.trading_bias || '--';
+            document.getElementById('tradingBias').className = 'value ' + (position.trading_bias === 'SELL' ? 'bearish' : position.trading_bias === 'BUY' ? 'bullish' : '');
+            document.getElementById('biasStrength').textContent = position.bias_strength ? (position.bias_strength * 100).toFixed(0) + '%' : '--';
+
+            // Deviations
+            const htfDevs = data.deviations?.htf_deviations || {};
+            const ltfDevs = data.deviations?.ltf_deviations || {};
+            const totalDevs = (htfDevs.total_deviations || 0) + (ltfDevs.total_deviations || 0);
+
+            document.getElementById('devBadge').textContent = totalDevs;
+            document.getElementById('wickDevs').textContent = (htfDevs.wick_deviations?.length || 0) + (ltfDevs.wick_deviations?.length || 0);
+            document.getElementById('candleDevs').textContent = (htfDevs.candle_close_deviations?.length || 0) + (ltfDevs.candle_close_deviations?.length || 0);
+            document.getElementById('dlDevs').textContent = (htfDevs.dl_deviations?.length || 0) + (ltfDevs.dl_deviations?.length || 0);
+
+            document.getElementById('htfPivots').textContent =
+                (data.htf_ranges?.total_ranges || 0) + ' ranges, ' +
+                (data.htf_ranges?.confirmed_ranges || 0) + ' confirmed';
+        }
+
+        function updateZonesUI(data) {
+            if (data.error) return;
+
+            const htfTotal = data.htf_zones?.total_zones || 0;
+            const hqCount = data.htf_zones?.high_quality_count || 0;
+
+            document.getElementById('htfZones').textContent = htfTotal;
+            document.getElementById('hqZones').textContent = hqCount;
+            document.getElementById('zoneCount').textContent = htfTotal;
+
+            // Display top zones
+            const topZonesEl = document.getElementById('topZones');
+            topZonesEl.innerHTML = '';
+
+            const topZones = data.htf_zones?.top_3_high_quality || data.htf_zones?.top_3_all || [];
+            topZones.slice(0, 3).forEach(zone => {
+                const zoneType = zone.type || (zone.top > data.current_price ? 'supply' : 'demand');
+                const div = document.createElement('div');
+                div.className = 'zone-item ' + zoneType;
+                div.innerHTML = `
+                    <span>${zoneType.toUpperCase()}</span>
+                    <span>$${zone.top?.toLocaleString(undefined, {maximumFractionDigits: 0})} - $${zone.bottom?.toLocaleString(undefined, {maximumFractionDigits: 0})}</span>
+                `;
+                topZonesEl.appendChild(div);
+
+                // Add zone to chart
+                if (zone.top && zone.bottom) {
+                    const color = zoneType === 'demand' ? 'rgba(0, 255, 136, 0.3)' : 'rgba(255, 68, 68, 0.3)';
+                    // Note: Lightweight Charts doesn't support rectangles natively, using price lines
+                    lineSeries.push(addPriceLine(zone.top, zoneType === 'demand' ? '#00ff88' : '#ff4444', zoneType.charAt(0).toUpperCase(), 2));
+                }
+            });
+        }
+
+        function updateLiquidityUI(data) {
+            if (data.error) return;
+
+            const bslPools = data.htf_liquidity?.bsl_pools || [];
+            const sslPools = data.htf_liquidity?.ssl_pools || [];
+
+            document.getElementById('bslCount').textContent = bslPools.length;
+            document.getElementById('sslCount').textContent = sslPools.length;
+            document.getElementById('eqHighs').textContent = data.htf_liquidity?.equal_highs?.length || 0;
+            document.getElementById('eqLows').textContent = data.htf_liquidity?.equal_lows?.length || 0;
+            document.getElementById('liqCount').textContent = bslPools.length + sslPools.length;
+
+            // Display top liquidity pools
+            const liqPoolsEl = document.getElementById('liqPools');
+            liqPoolsEl.innerHTML = '';
+
+            // Top 2 BSL pools
+            bslPools.slice(0, 2).forEach(pool => {
+                const div = document.createElement('div');
+                div.className = 'zone-item bsl';
+                div.innerHTML = `
+                    <span>BSL ${pool.is_equal ? '(EQ)' : ''}</span>
+                    <span>$${pool.price?.toLocaleString(undefined, {maximumFractionDigits: 0})}</span>
+                `;
+                liqPoolsEl.appendChild(div);
+
+                // Add to chart
+                if (pool.price) {
+                    lineSeries.push(addPriceLine(pool.price, '#ff6b6b', 'BSL', 1));
+                }
+            });
+
+            // Top 2 SSL pools
+            sslPools.slice(0, 2).forEach(pool => {
+                const div = document.createElement('div');
+                div.className = 'zone-item ssl';
+                div.innerHTML = `
+                    <span>SSL ${pool.is_equal ? '(EQ)' : ''}</span>
+                    <span>$${pool.price?.toLocaleString(undefined, {maximumFractionDigits: 0})}</span>
+                `;
+                liqPoolsEl.appendChild(div);
+
+                // Add to chart
+                if (pool.price) {
+                    lineSeries.push(addPriceLine(pool.price, '#4ecdc4', 'SSL', 1));
+                }
+            });
+        }
+
+        function updateValidationUI(data) {
+            if (data.error) {
+                document.getElementById('recommendation').textContent = data.Action || 'ERROR';
+                return;
+            }
+
+            const gates = data.gates || {};
+            const gatesEl = document.getElementById('gates');
+            const gateNames = ['G1', 'G2', 'G3', 'G4', 'G5', 'G6', 'G7'];
+            const gateKeys = ['htf_trend', 'ltf_alignment', 'sd_zone', 'liquidity', 'fvg', 'entry_model', 'rr_ratio'];
+
+            let passCount = 0;
+            gatesEl.innerHTML = '';
+
+            gateKeys.forEach((key, i) => {
+                const gate = gates[key];
+                const passed = gate?.passed || gate?.valid || false;
+                if (passed) passCount++;
+
+                const div = document.createElement('div');
+                div.className = 'gate ' + (passed ? 'pass' : 'fail');
+                div.textContent = gateNames[i];
+                div.title = gate?.reason || key;
+                gatesEl.appendChild(div);
+            });
+
+            // Summary gate
+            const summaryDiv = document.createElement('div');
+            summaryDiv.className = 'gate ' + (passCount >= 5 ? 'pass' : 'fail');
+            summaryDiv.textContent = passCount + '/7';
+            gatesEl.appendChild(summaryDiv);
+
+            const action = data.Action || (passCount >= 5 ? 'VALID_SETUP' : 'NO_TRADE');
+            const actionBadge = document.getElementById('actionBadge');
+            actionBadge.textContent = action;
+            actionBadge.className = 'badge badge-' + (action.includes('LONG') || action.includes('VALID') ? 'bullish' : action.includes('SHORT') ? 'bearish' : 'neutral');
+
+            document.getElementById('recommendation').textContent = action;
+            document.getElementById('recommendation').className = 'value ' + (action.includes('LONG') || action.includes('VALID') ? 'bullish' : action.includes('SHORT') ? 'bearish' : 'warning');
+        }
+
+        // Timeframe selector
+        document.querySelectorAll('.tf-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                document.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                currentTimeframe = btn.dataset.tf;
+                await refreshData();
+            });
+        });
+
+        // Initialize
+        initChart();
+        refreshData();
+
+        // Auto-refresh every 30 seconds
+        setInterval(refreshData, 30000);
+    </script>
+</body>
+</html>
+    """
+    return HTMLResponse(content=html_content)
 
 @app.get("/api/zones")
 async def detect_zones():
