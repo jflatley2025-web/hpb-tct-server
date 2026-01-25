@@ -951,13 +951,13 @@ class TCTRangeDetector:
                     "range_size": float(range_size),
                     "deviation_limit_high": float(deviation_limit_high),
                     "deviation_limit_low": float(deviation_limit_low),
-                    "high_idx": high_pivot["idx"],
-                    "low_idx": low_pivot["idx"],
+                    "high_idx": int(high_pivot["idx"]),
+                    "low_idx": int(low_pivot["idx"]),
                     "direction": "uptrend" if high_pivot["idx"] < low_pivot["idx"] else "downtrend",
-                    "equilibrium_touched": eq_touched,
-                    "six_candle_valid": six_candle_valid,
+                    "equilibrium_touched": bool(eq_touched),
+                    "six_candle_valid": bool(six_candle_valid),
                     "quality": quality,
-                    "is_confirmed": eq_touched and six_candle_valid
+                    "is_confirmed": bool(eq_touched and six_candle_valid)
                 })
 
         # Sort by recency and quality
@@ -1093,14 +1093,14 @@ class TCTRangeDetector:
             quality_label = "WEAK"
 
         return {
-            "score": round(score, 3),
+            "score": float(round(score, 3)),
             "quality_label": quality_label,
-            "is_horizontal": horizontality > 0.5,
-            "balance_ratio": round(balance_ratio, 3),
-            "horizontality": round(horizontality, 3),
-            "time_in_premium": time_in_premium,
-            "time_in_discount": time_in_discount,
-            "time_near_equilibrium": time_near_equilibrium
+            "is_horizontal": bool(horizontality > 0.5),
+            "balance_ratio": float(round(balance_ratio, 3)),
+            "horizontality": float(round(horizontality, 3)),
+            "time_in_premium": int(time_in_premium),
+            "time_in_discount": int(time_in_discount),
+            "time_near_equilibrium": int(time_near_equilibrium)
         }
 
 
@@ -1275,13 +1275,13 @@ class TCTDeviationDetector:
             "direction": direction,
             "type": deviation_type,
             "quality": quality,
-            "start_idx": start_idx,
-            "duration_candles": duration,
+            "start_idx": int(start_idx),
+            "duration_candles": int(duration),
             "max_deviation_price": float(max_deviation),
-            "max_deviation_percent": round(deviation_percent, 2),
-            "exceeded_dl": exceeded_dl,
-            "came_back_inside": came_back_inside,
-            "is_valid_deviation": not exceeded_dl or came_back_inside
+            "max_deviation_percent": float(round(deviation_percent, 2)),
+            "exceeded_dl": bool(exceeded_dl),
+            "came_back_inside": bool(came_back_inside),
+            "is_valid_deviation": bool(not exceeded_dl or came_back_inside)
         }
 
 
