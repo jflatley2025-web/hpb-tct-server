@@ -2862,8 +2862,10 @@ async def dashboard():
 
     <script>
         let chart, candleSeries, lineSeries = [];
+        let additionalSeries = []; // For liquidity curves
         let currentTimeframe = '4h';
         let isLoading = false;
+        let lastCandles = []; // Store candles for index-to-time mapping
 
         // Fetch with retry and timeout
         async function fetchWithRetry(url, options = {}, retries = 3, timeout = 20000) {
@@ -2973,23 +2975,109 @@ async def dashboard():
         }
 
         // Add horizontal line to chart
-        function addPriceLine(price, color, title, lineStyle = 0) {
+        function addPriceLine(price, color, title, lineStyle = 0, lineWidth = 1) {
             return candleSeries.createPriceLine({
                 price: price,
                 color: color,
-                lineWidth: 1,
+                lineWidth: lineWidth,
                 lineStyle: lineStyle,
                 axisLabelVisible: true,
                 title: title,
             });
         }
 
-        // Clear all price lines
+        // Add a range band (shaded area between two prices)
+        function addRangeBand(high, low, candles) {
+            if (!candles || candles.length === 0) return;
+
+            const startTime = candles[0].time;
+            const endTime = candles[candles.length - 1].time;
+            const eq = (high + low) / 2;
+
+            // Premium zone (above EQ) - red tint
+            const premiumSeries = chart.addAreaSeries({
+                topColor: 'rgba(255, 68, 68, 0.15)',
+                bottomColor: 'rgba(255, 68, 68, 0.05)',
+                lineColor: 'rgba(255, 68, 68, 0.0)',
+                lineWidth: 0,
+                priceScaleId: 'right',
+            });
+            premiumSeries.setData([
+                { time: startTime, value: high },
+                { time: endTime, value: high }
+            ]);
+            additionalSeries.push(premiumSeries);
+
+            // Discount zone (below EQ) - green tint
+            const discountSeries = chart.addAreaSeries({
+                topColor: 'rgba(0, 255, 136, 0.05)',
+                bottomColor: 'rgba(0, 255, 136, 0.15)',
+                lineColor: 'rgba(0, 255, 136, 0.0)',
+                lineWidth: 0,
+                priceScaleId: 'right',
+            });
+            discountSeries.setData([
+                { time: startTime, value: low },
+                { time: endTime, value: low }
+            ]);
+            additionalSeries.push(discountSeries);
+        }
+
+        // Add liquidity curve to chart
+        function addLiquidityCurve(curve, candles, isSellSide = true) {
+            if (!curve.taps || curve.taps.length < 2 || !candles || candles.length === 0) return;
+
+            const color = isSellSide ? '#ff6b6b' : '#4ecdc4';
+            const curveData = [];
+
+            curve.taps.forEach(tap => {
+                const idx = tap.idx;
+                if (idx >= 0 && idx < candles.length) {
+                    curveData.push({
+                        time: candles[idx].time,
+                        value: tap.price
+                    });
+                }
+            });
+
+            if (curveData.length >= 2) {
+                // Sort by time
+                curveData.sort((a, b) => a.time - b.time);
+
+                const curveSeries = chart.addLineSeries({
+                    color: color,
+                    lineWidth: 2,
+                    lineStyle: LightweightCharts.LineStyle.Dashed,
+                    crosshairMarkerVisible: true,
+                    priceScaleId: 'right',
+                });
+                curveSeries.setData(curveData);
+                additionalSeries.push(curveSeries);
+
+                // Add markers at tap points
+                const markers = curveData.map((point, i) => ({
+                    time: point.time,
+                    position: isSellSide ? 'aboveBar' : 'belowBar',
+                    color: color,
+                    shape: 'circle',
+                    text: `T${i + 1}`
+                }));
+                curveSeries.setMarkers(markers);
+            }
+        }
+
+        // Clear all price lines and additional series
         function clearPriceLines() {
             lineSeries.forEach(line => {
                 try { candleSeries.removePriceLine(line); } catch(e) {}
             });
             lineSeries = [];
+
+            // Remove additional series (liquidity curves, range bands)
+            additionalSeries.forEach(series => {
+                try { chart.removeSeries(series); } catch(e) {}
+            });
+            additionalSeries = [];
         }
 
         // Fetch and display all TCT data
@@ -3005,10 +3093,10 @@ async def dashboard():
             setLoading('actionBadge', true);
 
             // Fetch candles and update chart
-            const candles = await fetchCandles(currentTimeframe, 100);
-            if (candles.length > 0) {
-                candleSeries.setData(candles);
-                const lastPrice = candles[candles.length - 1].close;
+            lastCandles = await fetchCandles(currentTimeframe, 100);
+            if (lastCandles.length > 0) {
+                candleSeries.setData(lastCandles);
+                const lastPrice = lastCandles[lastCandles.length - 1].close;
                 document.getElementById('currentPrice').textContent = '$' + lastPrice.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
             }
 
@@ -3022,9 +3110,9 @@ async def dashboard():
                 fetchWithRetry('/api/validate', {}, 3, 25000)
             ]);
 
-            // Process ranges
+            // Process ranges (pass candles for range band)
             if (rangesResult.status === 'fulfilled' && !rangesResult.value.error) {
-                updateRangesUI(rangesResult.value);
+                updateRangesUI(rangesResult.value, lastCandles);
             } else {
                 console.error('Ranges error:', rangesResult.reason || rangesResult.value?.error);
                 setError('trendBadge');
@@ -3039,9 +3127,9 @@ async def dashboard():
                 setError('zoneCount');
             }
 
-            // Process liquidity
+            // Process liquidity (pass candles for curve drawing)
             if (liqResult.status === 'fulfilled' && !liqResult.value.error) {
-                updateLiquidityUI(liqResult.value);
+                updateLiquidityUI(liqResult.value, lastCandles);
             } else {
                 console.error('Liquidity error:', liqResult.reason || liqResult.value?.error);
                 setError('liqCount');
@@ -3058,7 +3146,7 @@ async def dashboard():
             isLoading = false;
         }
 
-        function updateRangesUI(data) {
+        function updateRangesUI(data, candles = []) {
             if (data.error) return;
 
             // Market structure
@@ -3084,12 +3172,51 @@ async def dashboard():
                 document.getElementById('rangeEq').textContent = '$' + eq?.toLocaleString(undefined, {maximumFractionDigits: 2});
                 document.getElementById('rangeLow').textContent = '$' + low?.toLocaleString(undefined, {maximumFractionDigits: 2});
 
-                // Add range lines to chart
-                if (high) lineSeries.push(addPriceLine(high, '#ff4444', 'Range High', 2));
-                if (eq) lineSeries.push(addPriceLine(eq, '#ffc107', 'EQ (0.5)', 1));
-                if (low) lineSeries.push(addPriceLine(low, '#00ff88', 'Range Low', 2));
+                // Add PROMINENT range lines to chart (thicker lines)
+                if (high) lineSeries.push(addPriceLine(high, '#ff4444', 'RANGE HIGH', 0, 2));
+                if (eq) lineSeries.push(addPriceLine(eq, '#ffc107', 'EQ (0.5)', 1, 2));
+                if (low) lineSeries.push(addPriceLine(low, '#00ff88', 'RANGE LOW', 0, 2));
 
-                // Range visualization
+                // Add Premium/Discount shaded zones
+                if (high && low && candles.length > 0) {
+                    // Premium zone (high to eq) - subtle red
+                    const premiumData = candles.map(c => ({ time: c.time, value: high }));
+                    const premiumSeries = chart.addLineSeries({
+                        color: 'rgba(255, 68, 68, 0.4)',
+                        lineWidth: 1,
+                        lineStyle: LightweightCharts.LineStyle.Dotted,
+                        priceLineVisible: false,
+                        lastValueVisible: false,
+                    });
+                    premiumSeries.setData(premiumData);
+                    additionalSeries.push(premiumSeries);
+
+                    // Discount zone (eq to low) - subtle green
+                    const discountData = candles.map(c => ({ time: c.time, value: low }));
+                    const discountSeries = chart.addLineSeries({
+                        color: 'rgba(0, 255, 136, 0.4)',
+                        lineWidth: 1,
+                        lineStyle: LightweightCharts.LineStyle.Dotted,
+                        priceLineVisible: false,
+                        lastValueVisible: false,
+                    });
+                    discountSeries.setData(discountData);
+                    additionalSeries.push(discountSeries);
+
+                    // Equilibrium line (prominent yellow dashed)
+                    const eqData = candles.map(c => ({ time: c.time, value: eq }));
+                    const eqSeries = chart.addLineSeries({
+                        color: '#ffc107',
+                        lineWidth: 2,
+                        lineStyle: LightweightCharts.LineStyle.Dashed,
+                        priceLineVisible: false,
+                        lastValueVisible: false,
+                    });
+                    eqSeries.setData(eqData);
+                    additionalSeries.push(eqSeries);
+                }
+
+                // Range visualization in sidebar
                 document.getElementById('rangeViz').style.display = 'block';
                 document.getElementById('rangeHighLabel').textContent = '$' + high?.toLocaleString(undefined, {maximumFractionDigits: 0});
                 document.getElementById('rangeLowLabel').textContent = '$' + low?.toLocaleString(undefined, {maximumFractionDigits: 0});
@@ -3164,7 +3291,7 @@ async def dashboard():
             });
         }
 
-        function updateLiquidityUI(data) {
+        function updateLiquidityUI(data, candles = []) {
             if (data.error) return;
 
             const bslPools = data.htf_liquidity?.bsl_pools || [];
@@ -3190,9 +3317,9 @@ async def dashboard():
                 `;
                 liqPoolsEl.appendChild(div);
 
-                // Add to chart
+                // Add to chart with thicker line
                 if (pool.price) {
-                    lineSeries.push(addPriceLine(pool.price, '#ff6b6b', 'BSL', 1));
+                    lineSeries.push(addPriceLine(pool.price, '#ff6b6b', 'BSL', 1, 1));
                 }
             });
 
@@ -3206,11 +3333,41 @@ async def dashboard():
                 `;
                 liqPoolsEl.appendChild(div);
 
-                // Add to chart
+                // Add to chart with thicker line
                 if (pool.price) {
-                    lineSeries.push(addPriceLine(pool.price, '#4ecdc4', 'SSL', 1));
+                    lineSeries.push(addPriceLine(pool.price, '#4ecdc4', 'SSL', 1, 1));
                 }
             });
+
+            // === DRAW LIQUIDITY CURVES ON CHART ===
+            const sellSideCurves = data.htf_curves?.sell_side_curves || [];
+            const buySideCurves = data.htf_curves?.buy_side_curves || [];
+
+            // Draw best quality sell-side curve (descending highs - bearish liquidity)
+            if (sellSideCurves.length > 0 && candles.length > 0) {
+                // Sort by quality/tap count to get best curve
+                const bestSellCurve = sellSideCurves.sort((a, b) =>
+                    (b.quality || b.tap_count || 0) - (a.quality || a.tap_count || 0)
+                )[0];
+
+                if (bestSellCurve && bestSellCurve.taps && bestSellCurve.taps.length >= 2) {
+                    addLiquidityCurve(bestSellCurve, candles, true);
+                    console.log('Drew sell-side liquidity curve with', bestSellCurve.taps.length, 'taps');
+                }
+            }
+
+            // Draw best quality buy-side curve (ascending lows - bullish liquidity)
+            if (buySideCurves.length > 0 && candles.length > 0) {
+                // Sort by quality/tap count to get best curve
+                const bestBuyCurve = buySideCurves.sort((a, b) =>
+                    (b.quality || b.tap_count || 0) - (a.quality || a.tap_count || 0)
+                )[0];
+
+                if (bestBuyCurve && bestBuyCurve.taps && bestBuyCurve.taps.length >= 2) {
+                    addLiquidityCurve(bestBuyCurve, candles, false);
+                    console.log('Drew buy-side liquidity curve with', bestBuyCurve.taps.length, 'taps');
+                }
+            }
         }
 
         function updateValidationUI(data) {
