@@ -124,7 +124,7 @@ class FairValueGap:
                     "idx": i,
                     "top": float(c_next["low"]),
                     "bottom": float(c_prev["high"]),
-                    "time": c_curr["open_time"] if "open_time" in c_curr.index else i,
+                    "time": str(c_curr["open_time"]) if "open_time" in c_curr.index else i,
                     "gap_size": float(c_next["low"] - c_prev["high"])
                 })
 
@@ -134,7 +134,7 @@ class FairValueGap:
                     "idx": i,
                     "top": float(c_prev["low"]),
                     "bottom": float(c_next["high"]),
-                    "time": c_curr["open_time"] if "open_time" in c_curr.index else i,
+                    "time": str(c_curr["open_time"]) if "open_time" in c_curr.index else i,
                     "gap_size": float(c_prev["low"] - c_next["high"])
                 })
 
@@ -192,7 +192,7 @@ class OrderBlock:
                     "type": "bullish",
                     "top": float(ob_candle["high"]),  # Include wick
                     "bottom": float(ob_candle["low"]),  # Include wick
-                    "time": ob_candle["open_time"] if "open_time" in ob_candle.index else idx,
+                    "time": str(ob_candle["open_time"]) if "open_time" in ob_candle.index else idx,
                     "fvg": fvg,
                     "mitigated": False
                 })
@@ -220,7 +220,7 @@ class OrderBlock:
                     "type": "bearish",
                     "top": float(ob_candle["high"]),  # Include wick
                     "bottom": float(ob_candle["low"]),  # Include wick
-                    "time": ob_candle["open_time"] if "open_time" in ob_candle.index else idx,
+                    "time": str(ob_candle["open_time"]) if "open_time" in ob_candle.index else idx,
                     "fvg": fvg,
                     "mitigated": False
                 })
