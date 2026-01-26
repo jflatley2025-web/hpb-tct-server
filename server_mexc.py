@@ -15,6 +15,8 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse, HTMLResponse
 from loguru import logger
 
+from tct_schematics import detect_tct_schematics
+
 # ================================================================
 # CONFIGURATION
 # ================================================================
@@ -4102,6 +4104,135 @@ async def validate_current_setup():
     except Exception as e:
         logger.error(f"[VALIDATE_ERROR] {e}")
         return JSONResponse({"error": str(e), "Action": "NO_TRADE"}, status_code=500)
+
+@app.get("/api/schematics")
+async def get_tct_schematics():
+    """
+    TCT Schematics endpoint - Lecture 5A methodology
+
+    Detects TCT Accumulation and Distribution schematics:
+    - Model 1: Two successive deviations (Tab1 → Tab2 → Tab3 deeper)
+    - Model 2: One deviation then higher low/lower high at extreme liquidity or demand/supply
+
+    Returns schematics with entry, stop loss, and target levels.
+    """
+    try:
+        # Fetch HTF (4h) and LTF (15m) candles
+        htf_df = await fetch_mexc_candles(SYMBOL, "4h", 200)
+        ltf_df = await fetch_mexc_candles(SYMBOL, "15m", 200)
+
+        if htf_df is None or ltf_df is None:
+            return JSONResponse({"error": "Failed to fetch candle data"}, status_code=500)
+
+        current_price = float(ltf_df.iloc[-1]["close"])
+
+        # Convert DataFrames to list of dicts for processing
+        def df_to_candles(df):
+            candles = []
+            for _, row in df.iterrows():
+                candles.append({
+                    'open_time': str(row['open_time']),
+                    'open': float(row['open']),
+                    'high': float(row['high']),
+                    'low': float(row['low']),
+                    'close': float(row['close']),
+                    'volume': float(row['volume'])
+                })
+            return candles
+
+        htf_candles = df_to_candles(htf_df)
+        ltf_candles = df_to_candles(ltf_df)
+
+        # Detect ranges for both timeframes
+        htf_ranges = await detect_best_range(htf_candles)
+        ltf_ranges = await detect_best_range(ltf_candles)
+
+        # Convert single range to list if needed
+        htf_range_list = [htf_ranges] if htf_ranges and not isinstance(htf_ranges, list) else (htf_ranges or [])
+        ltf_range_list = [ltf_ranges] if ltf_ranges and not isinstance(ltf_ranges, list) else (ltf_ranges or [])
+
+        # Detect TCT schematics on both timeframes
+        htf_schematics = detect_tct_schematics(htf_candles, htf_range_list)
+        ltf_schematics = detect_tct_schematics(ltf_candles, ltf_range_list)
+
+        # Filter and sort schematics by quality
+        def filter_active_schematics(schematics, current_price):
+            """Filter to schematics that are still valid for trading"""
+            active = []
+            for s in schematics:
+                # Check if schematic is still valid (price hasn't hit target or stop)
+                if s.get('trade_management'):
+                    tm = s['trade_management']
+                    entry = tm.get('entry_price')
+                    target = tm.get('target_price')
+                    stop = tm.get('stop_loss')
+
+                    if entry and target and stop:
+                        # For long (accumulation)
+                        if s['schematic_type'] in ['model_1_accumulation', 'model_2_accumulation']:
+                            if current_price < target and current_price > stop:
+                                active.append(s)
+                        # For short (distribution)
+                        elif s['schematic_type'] in ['model_1_distribution', 'model_2_distribution']:
+                            if current_price > target and current_price < stop:
+                                active.append(s)
+                    else:
+                        # No trade management yet, still forming
+                        active.append(s)
+                else:
+                    active.append(s)
+            return sorted(active, key=lambda x: x.get('quality_score', 0), reverse=True)
+
+        htf_active = filter_active_schematics(htf_schematics, current_price)
+        ltf_active = filter_active_schematics(ltf_schematics, current_price)
+
+        # Summarize schematics
+        def summarize_schematics(schematics):
+            return {
+                'total': len(schematics),
+                'model_1_accumulation': sum(1 for s in schematics if s.get('schematic_type') == 'model_1_accumulation'),
+                'model_2_accumulation': sum(1 for s in schematics if s.get('schematic_type') == 'model_2_accumulation'),
+                'model_1_distribution': sum(1 for s in schematics if s.get('schematic_type') == 'model_1_distribution'),
+                'model_2_distribution': sum(1 for s in schematics if s.get('schematic_type') == 'model_2_distribution'),
+                'confirmed': sum(1 for s in schematics if s.get('status') == 'confirmed'),
+                'forming': sum(1 for s in schematics if s.get('status') == 'forming'),
+            }
+
+        return JSONResponse({
+            "symbol": SYMBOL,
+            "current_price": current_price,
+            "methodology": "TCT Mentorship Lecture 5A - TCT Schematics",
+            "htf_schematics": {
+                "timeframe": "4h",
+                "schematics": htf_active[:5],  # Top 5 by quality
+                "summary": summarize_schematics(htf_active)
+            },
+            "ltf_schematics": {
+                "timeframe": "15m",
+                "schematics": ltf_active[:5],  # Top 5 by quality
+                "summary": summarize_schematics(ltf_active)
+            },
+            "trading_rules": {
+                "model_1": "Two successive deviations - Tab2 below Tab1, Tab3 below Tab2 (accumulation) or above (distribution)",
+                "model_2": "One deviation then higher low/lower high - must grab extreme liquidity OR mitigate extreme demand/supply",
+                "entry": "Wait for BOS confirmation from lowest/highest point between Tab2 and Tab3",
+                "stop_loss": "Below Tab3 for longs, above Tab3 for shorts",
+                "target": "Opposite range extreme (Wyckoff high for longs, Wyckoff low for shorts)",
+                "six_candle_rule": "Each tab pivot must pass 6-candle rule for valid schematic on that timeframe"
+            },
+            "summary": {
+                "total_htf_schematics": len(htf_active),
+                "total_ltf_schematics": len(ltf_active),
+                "best_htf_quality": htf_active[0].get('quality_score', 0) if htf_active else 0,
+                "best_ltf_quality": ltf_active[0].get('quality_score', 0) if ltf_active else 0,
+            }
+        })
+
+    except Exception as e:
+        logger.error(f"[SCHEMATICS_ERROR] {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 # ================================================================
 # ENTRY POINT
