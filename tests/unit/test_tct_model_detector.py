@@ -16,7 +16,7 @@ from tct_model_detector import (
 @pytest.fixture
 def accumulation_df():
     """DataFrame with accumulation pattern (higher lows)"""
-    dates = pd.date_range('2026-01-01', periods=100, freq='1H')
+    dates = pd.date_range('2026-01-01', periods=100, freq='1h')
     base = 40000
     prices = []
 
@@ -42,7 +42,7 @@ def accumulation_df():
 @pytest.fixture
 def distribution_df():
     """DataFrame with distribution pattern (lower highs)"""
-    dates = pd.date_range('2026-01-01', periods=100, freq='1H')
+    dates = pd.date_range('2026-01-01', periods=100, freq='1h')
     base = 42000
     prices = []
 
@@ -68,7 +68,7 @@ def distribution_df():
 @pytest.fixture
 def insufficient_data_df():
     """DataFrame with insufficient data"""
-    dates = pd.date_range('2026-01-01', periods=30, freq='1H')
+    dates = pd.date_range('2026-01-01', periods=30, freq='1h')
     prices = [40000 + np.random.uniform(-200, 200) for _ in range(30)]
 
     return pd.DataFrame({
@@ -102,7 +102,7 @@ class TestLiquidityCurveDetector:
     def test_detect_accumulation_curve_invalid_indices(self):
         """Test accumulation curve with invalid indices"""
         df = pd.DataFrame({
-            'open_time': pd.date_range('2026-01-01', periods=5, freq='1H'),
+            'open_time': pd.date_range('2026-01-01', periods=5, freq='1h'),
             'low': [100, 101, 102, 103, 104],
             'high': [105, 106, 107, 108, 109],
             'close': [102, 103, 104, 105, 106]
@@ -120,7 +120,7 @@ class TestLiquidityCurveDetector:
     def test_detect_accumulation_curve_insufficient_candles(self):
         """Test accumulation curve with too few candles"""
         df = pd.DataFrame({
-            'open_time': pd.date_range('2026-01-01', periods=2, freq='1H'),
+            'open_time': pd.date_range('2026-01-01', periods=2, freq='1h'),
             'low': [100, 101],
             'high': [105, 106],
             'close': [102, 103]
@@ -147,7 +147,7 @@ class TestLiquidityCurveDetector:
     def test_detect_distribution_curve_invalid_indices(self):
         """Test distribution curve with invalid indices"""
         df = pd.DataFrame({
-            'open_time': pd.date_range('2026-01-01', periods=5, freq='1H'),
+            'open_time': pd.date_range('2026-01-01', periods=5, freq='1h'),
             'high': [109, 108, 107, 106, 105],
             'low': [104, 103, 102, 101, 100],
             'close': [106, 105, 104, 103, 102]
@@ -160,7 +160,7 @@ class TestLiquidityCurveDetector:
         """Test curve quality must exceed 0.6 threshold"""
         # Create very choppy data (low quality)
         df = pd.DataFrame({
-            'open_time': pd.date_range('2026-01-01', periods=10, freq='1H'),
+            'open_time': pd.date_range('2026-01-01', periods=10, freq='1h'),
             'high': [100 + np.random.uniform(0, 50) for _ in range(10)],
             'low': [100 - np.random.uniform(0, 50) for _ in range(10)],
             'close': [100 + np.random.uniform(-30, 30) for _ in range(10)]
@@ -423,7 +423,7 @@ class TestTCTDetectorIntegration:
     def test_full_detection_pipeline(self):
         """Test complete detection pipeline with realistic data"""
         # Create realistic accumulation pattern
-        dates = pd.date_range('2026-01-01', periods=150, freq='1H')
+        dates = pd.date_range('2026-01-01', periods=150, freq='1h')
         base = 40000
         prices = []
 
@@ -456,7 +456,7 @@ class TestTCTDetectorIntegration:
 
     def test_both_model_types_detected(self):
         """Test detection of both accumulation and distribution"""
-        dates = pd.date_range('2026-01-01', periods=200, freq='1H')
+        dates = pd.date_range('2026-01-01', periods=200, freq='1h')
         prices = []
         base = 40000
 
