@@ -54,7 +54,7 @@ class MarketStructure:
                 and candles.iloc[i]["close"] > candles.iloc[i + 1]["close"]
                 and candles.iloc[i + 1]["close"] > candles.iloc[i + 2]["close"]
             ):
-                pivots["highs"].append({"idx": i, "price": candles.iloc[i]["high"]})
+                pivots["highs"].append({"idx": int(i), "price": float(candles.iloc[i]["high"])})
 
             if (
                 candles.iloc[i - 2]["close"] > candles.iloc[i - 1]["close"]
@@ -62,7 +62,7 @@ class MarketStructure:
                 and candles.iloc[i]["close"] < candles.iloc[i + 1]["close"]
                 and candles.iloc[i + 1]["close"] < candles.iloc[i + 2]["close"]
             ):
-                pivots["lows"].append({"idx": i, "price": candles.iloc[i]["low"]})
+                pivots["lows"].append({"idx": int(i), "price": float(candles.iloc[i]["low"])})
 
         if len(pivots["highs"]) >= 2 and len(pivots["lows"]) >= 2:
             h1, h2 = pivots["highs"][-2:]
@@ -811,10 +811,10 @@ class OverlappingZoneDetector:
         overlap_percent = (overlap_range / htf_range * 100) if htf_range > 0 else 0
 
         return {
-            "is_overlapping": is_overlapping,
-            "is_within_only": ltf_within and not is_overlapping,
-            "overlap_percent": min(overlap_percent, 100.0),
-            "represents_htf": is_overlapping,  # Only overlapping zones represent HTF
+            "is_overlapping": bool(is_overlapping),
+            "is_within_only": bool(ltf_within and not is_overlapping),
+            "overlap_percent": float(min(overlap_percent, 100.0)),
+            "represents_htf": bool(is_overlapping),  # Only overlapping zones represent HTF
             "overlap_quality": "EXCELLENT" if overlap_percent > 80 else "GOOD" if overlap_percent > 50 else "WEAK"
         }
 
@@ -845,7 +845,7 @@ class OverlappingZoneDetector:
 
             enhanced_htf_zones.append({
                 **htf_zone,
-                "has_ltf_overlap": len(overlapping_ltf) > 0,
+                "has_ltf_overlap": bool(len(overlapping_ltf) > 0),
                 "overlapping_ltf_zones": overlapping_ltf,
                 "ltf_overlap_count": len(overlapping_ltf)
             })
@@ -1435,9 +1435,9 @@ class TCTRangesWithinRanges:
 
                     ltf_inside.append({
                         **ltf_range,
-                        "position_in_htf_percent": round(position_in_htf, 2),
-                        "is_in_premium": position_in_htf > 50,
-                        "is_in_discount": position_in_htf < 50
+                        "position_in_htf_percent": float(round(position_in_htf, 2)),
+                        "is_in_premium": bool(position_in_htf > 50),
+                        "is_in_discount": bool(position_in_htf < 50)
                     })
 
             if ltf_inside:
@@ -1574,9 +1574,9 @@ class LiquidityDetector:
                 bsl_pools.append({
                     "type": "BSL",
                     "price": float(price),
-                    "idx": pivot["idx"],
+                    "idx": int(pivot["idx"]),
                     "is_primary": True,
-                    "is_equal": is_equal,
+                    "is_equal": bool(is_equal),
                     "strength": 1.0 if is_equal else 0.8,  # TCT: Equal = stronger
                     "distance_from_price": float((price - current_price) / current_price * 100)
                 })
@@ -1599,9 +1599,9 @@ class LiquidityDetector:
                 ssl_pools.append({
                     "type": "SSL",
                     "price": float(price),
-                    "idx": pivot["idx"],
+                    "idx": int(pivot["idx"]),
                     "is_primary": True,
-                    "is_equal": is_equal,
+                    "is_equal": bool(is_equal),
                     "strength": 1.0 if is_equal else 0.8,  # TCT: Equal = stronger
                     "distance_from_price": float((current_price - price) / current_price * 100)
                 })
@@ -1613,7 +1613,7 @@ class LiquidityDetector:
             bsl_pools.append({
                 "type": "BSL",
                 "price": float(price),
-                "idx": pivot["idx"],
+                "idx": int(pivot["idx"]),
                 "is_primary": False,
                 "is_equal": False,
                 "strength": 0.5,  # TCT: Internal = weaker than primary
@@ -1626,7 +1626,7 @@ class LiquidityDetector:
             ssl_pools.append({
                 "type": "SSL",
                 "price": float(price),
-                "idx": pivot["idx"],
+                "idx": int(pivot["idx"]),
                 "is_primary": False,
                 "is_equal": False,
                 "strength": 0.5,  # TCT: Internal = weaker than primary
