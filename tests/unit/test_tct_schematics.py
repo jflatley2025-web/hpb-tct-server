@@ -1,10 +1,10 @@
 """
 Unit tests for tct_schematics.py
 Tests TCT Schematic detection (Lecture 5A methodology) including:
-- Model 1 Accumulation: Tab1 → Tab2 (deviation) → Tab3 (lower deviation)
-- Model 2 Accumulation: Tab1 → Tab2 (deviation) → Tab3 (higher low at extreme liq/demand)
-- Model 1 Distribution: Tab1 → Tab2 (deviation) → Tab3 (higher deviation)
-- Model 2 Distribution: Tab1 → Tab2 (deviation) → Tab3 (lower high at extreme liq/supply)
+- Model 1 Accumulation: Tap1 → Tap2 (deviation) → Tap3 (lower deviation)
+- Model 2 Accumulation: Tap1 → Tap2 (deviation) → Tap3 (higher low at extreme liq/demand)
+- Model 1 Distribution: Tap1 → Tap2 (deviation) → Tap3 (higher deviation)
+- Model 2 Distribution: Tap1 → Tap2 (deviation) → Tap3 (lower high at extreme liq/supply)
 """
 import pytest
 import pandas as pd
@@ -27,17 +27,17 @@ def accumulation_pattern_df():
     for i in range(30):
         prices.append(base - i * 100 + np.random.uniform(-50, 50))
 
-    # Stage 2: Range formation at low (candles 30-60) - Tab1 zone
+    # Stage 2: Range formation at low (candles 30-60) - Tap1 zone
     range_low = base - 3000
     for i in range(30):
         prices.append(range_low + np.random.uniform(-200, 400))
 
-    # Stage 3: First deviation below range (candles 60-80) - Tab2 zone
+    # Stage 3: First deviation below range (candles 60-80) - Tap2 zone
     for i in range(20):
         deviation_depth = 500 + i * 20
         prices.append(range_low - deviation_depth + np.random.uniform(-100, 100))
 
-    # Stage 4: Second lower deviation (candles 80-100) - Tab3 Model 1 zone
+    # Stage 4: Second lower deviation (candles 80-100) - Tap3 Model 1 zone
     for i in range(20):
         prices.append(range_low - 1000 - i * 15 + np.random.uniform(-80, 80))
 
@@ -66,17 +66,17 @@ def distribution_pattern_df():
     for i in range(30):
         prices.append(base + i * 100 + np.random.uniform(-50, 50))
 
-    # Stage 2: Range formation at high (candles 30-60) - Tab1 zone
+    # Stage 2: Range formation at high (candles 30-60) - Tap1 zone
     range_high = base + 3000
     for i in range(30):
         prices.append(range_high + np.random.uniform(-400, 200))
 
-    # Stage 3: First deviation above range (candles 60-80) - Tab2 zone
+    # Stage 3: First deviation above range (candles 60-80) - Tap2 zone
     for i in range(20):
         deviation_height = 500 + i * 20
         prices.append(range_high + deviation_height + np.random.uniform(-100, 100))
 
-    # Stage 4: Second higher deviation (candles 80-100) - Tab3 Model 1 zone
+    # Stage 4: Second higher deviation (candles 80-100) - Tap3 Model 1 zone
     for i in range(20):
         prices.append(range_high + 1000 + i * 15 + np.random.uniform(-80, 80))
 
@@ -105,18 +105,18 @@ def model_2_accumulation_df():
     for i in range(30):
         prices.append(base - i * 80 + np.random.uniform(-40, 40))
 
-    # Stage 2: Range formation (Tab1)
+    # Stage 2: Range formation (Tap1)
     range_low = base - 2500
     range_high = range_low + 1500
     for i in range(30):
         prices.append(range_low + np.random.uniform(0, 600))
 
-    # Stage 3: First deviation (Tab2)
+    # Stage 3: First deviation (Tap2)
     for i in range(20):
         prices.append(range_low - 400 - i * 10 + np.random.uniform(-50, 50))
 
-    # Stage 4: Higher low (Tab3 Model 2) - NOT lower than Tab2
-    hl_price = range_low - 300  # Higher than Tab2's lowest
+    # Stage 4: Higher low (Tap3 Model 2) - NOT lower than Tap2
+    hl_price = range_low - 300  # Higher than Tap2's lowest
     for i in range(20):
         prices.append(hl_price + np.random.uniform(-80, 80))
 
@@ -303,9 +303,9 @@ class TestAccumulationSchematicDetection:
 
         for s in schematics:
             assert s.get("direction") == "bullish"
-            assert "tab1" in s
-            assert "tab2" in s
-            assert "tab3" in s
+            assert "tap1" in s
+            assert "tap2" in s
+            assert "tap3" in s
             assert "schematic_type" in s
             assert "Accumulation" in s["schematic_type"]
 
@@ -322,9 +322,9 @@ class TestAccumulationSchematicDetection:
             assert "schematic_type" in schematic
             assert "direction" in schematic
             assert "model" in schematic
-            assert "tab1" in schematic
-            assert "tab2" in schematic
-            assert "tab3" in schematic
+            assert "tap1" in schematic
+            assert "tap2" in schematic
+            assert "tap3" in schematic
 
             # Range info
             assert "range" in schematic
@@ -347,10 +347,10 @@ class TestAccumulationSchematicDetection:
         model_1_schematics = [s for s in schematics if "Model_1" in s.get("schematic_type", "")]
 
         for s in model_1_schematics:
-            # Tab3 should be lower than Tab2 for Model 1
-            if s["tab3"]["price"] and s["tab2"]["price"]:
-                assert s["tab3"]["price"] <= s["tab2"]["price"], \
-                    "Model 1 Tab3 should be lower than or equal to Tab2"
+            # Tap3 should be lower than Tap2 for Model 1
+            if s["tap3"]["price"] and s["tap2"]["price"]:
+                assert s["tap3"]["price"] <= s["tap2"]["price"], \
+                    "Model 1 Tap3 should be lower than or equal to Tap2"
 
 
 @pytest.mark.unit
@@ -394,10 +394,10 @@ class TestModel2Requirements:
         model_2_schematics = [s for s in schematics if "Model_2" in s.get("schematic_type", "")]
 
         for s in model_2_schematics:
-            # Tab3 should be higher than Tab2 for Model 2 accumulation
-            if s["tab3"]["price"] and s["tab2"]["price"]:
-                assert s["tab3"]["price"] >= s["tab2"]["price"], \
-                    "Model 2 Tab3 should be higher than or equal to Tab2"
+            # Tap3 should be higher than Tap2 for Model 2 accumulation
+            if s["tap3"]["price"] and s["tap2"]["price"]:
+                assert s["tap3"]["price"] >= s["tap2"]["price"], \
+                    "Model 2 Tap3 should be higher than or equal to Tap2"
 
     def test_model_2_extreme_requirements(self, model_2_accumulation_df):
         """Test Model 2 requires extreme liquidity OR extreme demand/supply"""
@@ -408,12 +408,12 @@ class TestModel2Requirements:
         model_2_schematics = [s for s in schematics if "Model_2" in s.get("schematic_type", "")]
 
         for s in model_2_schematics:
-            tab3 = s.get("tab3", {})
+            tap3 = s.get("tap3", {})
             # Model 2 should have extreme liquidity OR extreme demand info
             has_extreme_req = (
-                tab3.get("grabs_extreme_liquidity") or
-                tab3.get("mitigates_extreme_demand") or
-                tab3.get("mitigates_extreme_supply")
+                tap3.get("grabs_extreme_liquidity") or
+                tap3.get("mitigates_extreme_demand") or
+                tap3.get("mitigates_extreme_supply")
             )
             # Note: The detection may not always find extremes depending on data
 
@@ -458,16 +458,16 @@ class TestQualityScoring:
 class TestTradeManagement:
     """Tests for entry, stop loss, and target calculations"""
 
-    def test_accumulation_stop_loss_below_tab3(self, accumulation_pattern_df):
-        """Test accumulation stop loss is at Tab3 price (TCT rule)"""
+    def test_accumulation_stop_loss_below_tap3(self, accumulation_pattern_df):
+        """Test accumulation stop loss is at Tap3 price (TCT rule)"""
         detector = TCTSchematicDetector(accumulation_pattern_df)
 
         schematics = detector._detect_accumulation_schematics(None)
 
         for s in schematics:
-            if s.get("stop_loss", {}).get("price") and s.get("tab3", {}).get("price"):
-                assert s["stop_loss"]["price"] == s["tab3"]["price"], \
-                    "Stop loss should be at Tab3 price"
+            if s.get("stop_loss", {}).get("price") and s.get("tap3", {}).get("price"):
+                assert s["stop_loss"]["price"] == s["tap3"]["price"], \
+                    "Stop loss should be at Tap3 price"
 
     def test_accumulation_target_at_range_high(self, accumulation_pattern_df, simple_range_data):
         """Test accumulation target is at range high (Wyckoff high)"""
@@ -481,15 +481,15 @@ class TestTradeManagement:
                 if s.get("target", {}).get("price"):
                     assert s["target"]["price"] == s["range"]["high"]
 
-    def test_distribution_stop_loss_above_tab3(self, distribution_pattern_df):
-        """Test distribution stop loss is at Tab3 price"""
+    def test_distribution_stop_loss_above_tap3(self, distribution_pattern_df):
+        """Test distribution stop loss is at Tap3 price"""
         detector = TCTSchematicDetector(distribution_pattern_df)
 
         schematics = detector._detect_distribution_schematics(None)
 
         for s in schematics:
-            if s.get("stop_loss", {}).get("price") and s.get("tab3", {}).get("price"):
-                assert s["stop_loss"]["price"] == s["tab3"]["price"]
+            if s.get("stop_loss", {}).get("price") and s.get("tap3", {}).get("price"):
+                assert s["stop_loss"]["price"] == s["tap3"]["price"]
 
     def test_risk_reward_calculation(self, accumulation_pattern_df):
         """Test risk/reward ratio is calculated correctly"""

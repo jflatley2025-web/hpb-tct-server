@@ -4111,7 +4111,7 @@ async def get_tct_schematics():
     TCT Schematics endpoint - Lecture 5A methodology
 
     Detects TCT Accumulation and Distribution schematics:
-    - Model 1: Two successive deviations (Tab1 → Tab2 → Tab3 deeper)
+    - Model 1: Two successive deviations (Tap1 → Tap2 → Tap3 deeper)
     - Model 2: One deviation then higher low/lower high at extreme liquidity or demand/supply
 
     Returns schematics with entry, stop loss, and target levels.
@@ -4213,12 +4213,12 @@ async def get_tct_schematics():
                 "summary": summarize_schematics(ltf_active)
             },
             "trading_rules": {
-                "model_1": "Two successive deviations - Tab2 below Tab1, Tab3 below Tab2 (accumulation) or above (distribution)",
+                "model_1": "Two successive deviations - Tap2 below Tap1, Tap3 below Tap2 (accumulation) or above (distribution)",
                 "model_2": "One deviation then higher low/lower high - must grab extreme liquidity OR mitigate extreme demand/supply",
-                "entry": "Wait for BOS confirmation from lowest/highest point between Tab2 and Tab3",
-                "stop_loss": "Below Tab3 for longs, above Tab3 for shorts",
+                "entry": "Wait for BOS confirmation from lowest/highest point between Tap2 and Tap3",
+                "stop_loss": "Below Tap3 for longs, above Tap3 for shorts",
                 "target": "Opposite range extreme (Wyckoff high for longs, Wyckoff low for shorts)",
-                "six_candle_rule": "Each tab pivot must pass 6-candle rule for valid schematic on that timeframe"
+                "six_candle_rule": "Each tap pivot must pass 6-candle rule for valid schematic on that timeframe"
             },
             "summary": {
                 "total_htf_schematics": len(htf_active),
