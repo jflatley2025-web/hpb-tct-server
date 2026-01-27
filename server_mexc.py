@@ -2719,6 +2719,62 @@ async def dashboard():
             font-size: 0.65rem;
             color: #666;
             font-style: italic;
+            margin-bottom: 8px;
+        }
+        .schematic-item {
+            background: #1a1a2e;
+            border-radius: 6px;
+            padding: 10px;
+            margin-bottom: 8px;
+            border-left: 3px solid #00d4ff;
+        }
+        .schematic-item.accumulation { border-left-color: #00ff88; }
+        .schematic-item.distribution { border-left-color: #ff4444; }
+        .schematic-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 6px;
+        }
+        .schematic-type {
+            font-size: 0.75rem;
+            font-weight: bold;
+            color: #e0e0e0;
+        }
+        .schematic-quality {
+            font-size: 0.65rem;
+            padding: 2px 6px;
+            border-radius: 3px;
+            background: rgba(0, 212, 255, 0.2);
+            color: #00d4ff;
+        }
+        .schematic-levels {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 6px;
+            margin-top: 6px;
+        }
+        .level-box {
+            text-align: center;
+            padding: 4px;
+            border-radius: 4px;
+            font-size: 0.7rem;
+        }
+        .level-box.entry { background: rgba(0, 212, 255, 0.15); color: #00d4ff; }
+        .level-box.stop { background: rgba(255, 68, 68, 0.15); color: #ff4444; }
+        .level-box.target { background: rgba(0, 255, 136, 0.15); color: #00ff88; }
+        .level-label { font-size: 0.6rem; color: #888; display: block; }
+        .level-price { font-weight: bold; }
+        .schematic-meta {
+            display: flex;
+            gap: 8px;
+            margin-top: 6px;
+            font-size: 0.65rem;
+            color: #888;
+        }
+        .schematic-meta .rr { color: #ffc107; }
+        .schematic-meta .safe { color: #00ff88; }
+        .schematic-meta .unsafe { color: #ff4444;
         }
         .refresh-btn {
             background: #00d4ff;
@@ -2896,6 +2952,17 @@ async def dashboard():
                 <div class="metric-row" style="margin-top: 8px;">
                     <span class="label">Recommendation</span>
                     <span class="value" id="recommendation">--</span>
+                </div>
+            </div>
+
+            <!-- TCT Schematics (Lecture 5A + 5B) -->
+            <div class="metric-card">
+                <h3>TCT Schematics <span class="badge badge-neutral" id="schematicsBadge">--</span></h3>
+                <div class="tct-lecture">Lecture 5A + 5B Methodology</div>
+                <div id="schematicsContent">
+                    <div class="metric-row">
+                        <span class="label">Loading...</span>
+                    </div>
                 </div>
             </div>
         </div>
@@ -3130,6 +3197,7 @@ async def dashboard():
             setLoading('zoneCount', true);
             setLoading('liqCount', true);
             setLoading('actionBadge', true);
+            setLoading('schematicsBadge', true);
 
             // Fetch candles and update chart
             lastCandles = await fetchCandles(currentTimeframe, 100);
@@ -3142,11 +3210,12 @@ async def dashboard():
             clearPriceLines();
 
             // Fetch all API data in parallel with individual error handling
-            const [rangesResult, zonesResult, liqResult, valResult] = await Promise.allSettled([
+            const [rangesResult, zonesResult, liqResult, valResult, schematicsResult] = await Promise.allSettled([
                 fetchWithRetry('/api/ranges', {}, 3, 25000),
                 fetchWithRetry('/api/zones', {}, 3, 25000),
                 fetchWithRetry('/api/liquidity', {}, 3, 25000),
-                fetchWithRetry('/api/validate', {}, 3, 25000)
+                fetchWithRetry('/api/validate', {}, 3, 25000),
+                fetchWithRetry('/api/schematics', {}, 3, 30000)
             ]);
 
             // Process ranges (pass candles for range band)
@@ -3180,6 +3249,14 @@ async def dashboard():
             } else {
                 console.error('Validation error:', valResult.reason);
                 setError('actionBadge');
+            }
+
+            // Process schematics
+            if (schematicsResult.status === 'fulfilled' && !schematicsResult.value.error) {
+                updateSchematicsUI(schematicsResult.value);
+            } else {
+                console.error('Schematics error:', schematicsResult.reason || schematicsResult.value?.error);
+                setError('schematicsBadge');
             }
 
             isLoading = false;
@@ -3448,6 +3525,83 @@ async def dashboard():
 
             document.getElementById('recommendation').textContent = action;
             document.getElementById('recommendation').className = 'value ' + (action.includes('LONG') || action.includes('VALID') ? 'bullish' : action.includes('SHORT') ? 'bearish' : 'warning');
+        }
+
+        function updateSchematicsUI(data) {
+            const contentEl = document.getElementById('schematicsContent');
+            const badgeEl = document.getElementById('schematicsBadge');
+
+            if (data.error) {
+                contentEl.innerHTML = '<div class="metric-row"><span class="label">Error loading schematics</span></div>';
+                badgeEl.textContent = 'ERR';
+                badgeEl.className = 'badge badge-bearish';
+                return;
+            }
+
+            // Combine HTF and LTF schematics
+            const htfSchematics = data.htf_schematics?.schematics || [];
+            const ltfSchematics = data.ltf_schematics?.schematics || [];
+            const allSchematics = [...htfSchematics.slice(0, 2), ...ltfSchematics.slice(0, 2)];
+
+            if (allSchematics.length === 0) {
+                contentEl.innerHTML = '<div class="metric-row"><span class="label">No active schematics detected</span></div>';
+                badgeEl.textContent = '0';
+                badgeEl.className = 'badge badge-neutral';
+                return;
+            }
+
+            // Update badge
+            const totalCount = (data.htf_schematics?.summary?.total || 0) + (data.ltf_schematics?.summary?.total || 0);
+            const hasAccum = allSchematics.some(s => s.direction === 'bullish');
+            const hasDist = allSchematics.some(s => s.direction === 'bearish');
+            badgeEl.textContent = totalCount;
+            badgeEl.className = 'badge badge-' + (hasAccum && !hasDist ? 'bullish' : hasDist && !hasAccum ? 'bearish' : 'neutral');
+
+            // Build schematic cards
+            let html = '';
+            allSchematics.forEach((s, i) => {
+                const isAccum = s.direction === 'bullish';
+                const typeClass = isAccum ? 'accumulation' : 'distribution';
+                const typeLabel = s.schematic_type?.replace(/_/g, ' ').toUpperCase() || (isAccum ? 'ACCUMULATION' : 'DISTRIBUTION');
+                const quality = Math.round((s.quality_score || 0) * 100);
+                const entry = s.entry?.price;
+                const stop = s.stop_loss?.price;
+                const target = s.target?.price;
+                const rr = s.risk_reward;
+                const isSafe = s.entry?.is_safe !== false;
+                const isConfirmed = s.is_confirmed;
+
+                // Lecture 5B enhancements
+                const enhancements = s.lecture_5b_enhancements || {};
+                const meetsRR = enhancements.meets_minimum_rr;
+                const has6CR = enhancements.htf_validation?.all_taps_valid_6cr;
+                const hasTrendline = enhancements.has_trendline_confluence;
+
+                html += '<div class="schematic-item ' + typeClass + '">';
+                html += '<div class="schematic-header">';
+                html += '<span class="schematic-type">' + typeLabel + '</span>';
+                html += '<span class="schematic-quality">' + quality + '%</span>';
+                html += '</div>';
+
+                if (entry && stop && target) {
+                    html += '<div class="schematic-levels">';
+                    html += '<div class="level-box entry"><span class="level-label">ENTRY</span><span class="level-price">$' + entry.toLocaleString(undefined, {maximumFractionDigits: 0}) + '</span></div>';
+                    html += '<div class="level-box stop"><span class="level-label">STOP</span><span class="level-price">$' + stop.toLocaleString(undefined, {maximumFractionDigits: 0}) + '</span></div>';
+                    html += '<div class="level-box target"><span class="level-label">TARGET</span><span class="level-price">$' + target.toLocaleString(undefined, {maximumFractionDigits: 0}) + '</span></div>';
+                    html += '</div>';
+                }
+
+                html += '<div class="schematic-meta">';
+                if (rr) html += '<span class="rr">R:R ' + rr.toFixed(1) + '</span>';
+                html += '<span class="' + (isSafe ? 'safe' : 'unsafe') + '">' + (isSafe ? 'Safe Entry' : 'Caution: S/D Zone') + '</span>';
+                if (isConfirmed) html += '<span class="safe">Confirmed</span>';
+                if (has6CR) html += '<span class="safe">6CR Valid</span>';
+                if (hasTrendline) html += '<span class="safe">TL Confluence</span>';
+                html += '</div>';
+                html += '</div>';
+            });
+
+            contentEl.innerHTML = html;
         }
 
         // Timeframe selector
