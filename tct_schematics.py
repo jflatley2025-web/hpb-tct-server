@@ -1,19 +1,30 @@
 """
-tct_schematics.py — TCT Schematics Detection (Lecture 5A Pure TCT Methodology)
+tct_schematics.py — TCT Schematics Detection (Lecture 5A + 5B Advanced Methodology)
 Author: HPB-TCT Dev Team
 Date: 2026-01-26
 
 Detects TCT Schematics (Accumulation & Distribution Models 1 and 2) based on:
-- TCT 2024 mentorship - Lecture 5A | TCT schematics
+- TCT 2024 mentorship - Lecture 5A | TCT schematics (core methodology)
+- TCT 2024 mentorship - Lecture 5B | TCT schematics (advanced enhancements)
 - Wyckoff methodology simplified with TCT rules
 
-TCT Schematic Key Concepts:
+TCT Schematic Key Concepts (Lecture 5A):
 - Model 1: Range → Deviation 1 → Deviation 2 (each lower/higher than previous)
 - Model 2: Range → Deviation 1 → Higher Low/Lower High (grabs extreme liquidity OR extreme S/D)
 - Three-tap model: Tap1 (range), Tap2 (first deviation), Tap3 (second deviation or HL/LH)
 - Entry: Break of structure from highest/lowest point between Tap2 and Tap3
 - Target: Opposite range extreme (Wyckoff High/Low)
 - Stop Loss: Below/Above Tap3
+
+Advanced Concepts (Lecture 5B):
+- Highest timeframe validation: Schematic valid only on TF where 6-candle rule applies to all taps
+- Overlapping structure (domino effect): Blue → Red → Black timeframe nesting for R:R optimization
+- Supply/demand zone awareness: Never enter inside opposing S/D zones
+- R:R calculation and optimization: Minimum 1:2 R:R requirement
+- Trendline liquidity detection: Identify trendline sweeps before entry
+- Tap spacing validation: Equal distribution between taps indicates healthy range
+- Model 2 failure → Model 1 transition: Detect when M2 fails and converts to M1
+- Range quality/rationality: Horizontal price action with logical tap distances
 
 Terminology:
 - Accumulation: Trending down → range forms → breaks upside (reversal)
@@ -33,22 +44,35 @@ logger = logging.getLogger("TCT-Schematics")
 
 class TCTSchematicDetector:
     """
-    Main TCT Schematic Detection Engine implementing Lecture 5A methodology.
+    Main TCT Schematic Detection Engine implementing Lecture 5A + 5B methodology.
 
-    Pure TCT Methodology:
+    Pure TCT Methodology (Lecture 5A):
     - Model 1 Accumulation: Tap1 (range low) → Tap2 (deviation lower) → Tap3 (deviation even lower)
     - Model 2 Accumulation: Tap1 (range low) → Tap2 (deviation) → Tap3 (higher low at extreme liq/demand)
     - Model 1 Distribution: Tap1 (range high) → Tap2 (deviation higher) → Tap3 (deviation even higher)
     - Model 2 Distribution: Tap1 (range high) → Tap2 (deviation) → Tap3 (lower high at extreme liq/supply)
 
+    Advanced Features (Lecture 5B):
+    - Highest timeframe validation: Validate schematic on correct TF using 6-candle rule
+    - Overlapping structure: Detect blue/red/black domino effect for better R:R entries
+    - Supply/demand zone awareness: Avoid entries inside opposing zones
+    - Trendline liquidity detection: Identify trendline sweeps for additional confluence
+    - Tap spacing validation: Ensure equal distribution for healthy ranges
+    - Model 2 → Model 1 failure transition detection
+    - Range quality scoring based on horizontal price action
+
     Entry Confirmation:
     - Watch structure from highest/lowest point between Tap2 and Tap3
     - When structure breaks back to bullish/bearish = entry confirmation
     - Preferably BOS inside original range values (safer entry)
+    - Never enter inside opposing supply/demand zones
     """
 
     DEVIATION_LIMIT_PERCENT = 0.30  # TCT: 30% of range size for DL
     SIX_CANDLE_LOOKBACK = 6  # Minimum candles for pivot validation
+    MIN_RR_RATIO = 2.0  # Lecture 5B: Minimum 1:2 R:R requirement
+    TAP_SPACING_TOLERANCE = 0.25  # 25% tolerance for equal tap spacing
+    RANGE_QUALITY_MIN = 0.6  # Minimum range quality score for valid schematic
 
     def __init__(self, candles: pd.DataFrame):
         """Initialize with candle data."""
@@ -141,6 +165,26 @@ class TCTSchematicDetector:
                     )
                     if schematic:
                         schematics.append(schematic)
+
+                    # TCT 5B: Check for Model 2 → Model 1 failure transition
+                    # "A model two when you have a higher low, and when that fails
+                    # to hold, it turns into a model one"
+                    tap3_m2_failure = self._detect_model2_to_model1_failure(
+                        range_data, tap1, tap2, tap3_m2
+                    )
+                    if tap3_m2_failure:
+                        schematic_m2_to_m1 = self._build_accumulation_schematic(
+                            range_data, tap1, tap2, tap3_m2_failure,
+                            model_type="Model_1_from_M2_failure"
+                        )
+                        if schematic_m2_to_m1:
+                            # Add metadata about the transition
+                            schematic_m2_to_m1["lecture_5b_enhancements"]["m2_to_m1_transition"] = {
+                                "original_m2_tap3": tap3_m2,
+                                "failure_price": tap3_m2_failure.get("model2_failure_price"),
+                                "transition_detected": True
+                            }
+                            schematics.append(schematic_m2_to_m1)
 
             except Exception as e:
                 logger.debug(f"Error detecting accumulation schematic: {e}")
@@ -427,6 +471,26 @@ class TCTSchematicDetector:
                     )
                     if schematic:
                         schematics.append(schematic)
+
+                    # TCT 5B: Check for Model 2 → Model 1 failure transition
+                    # "A model two when you have a lower high, and when that fails
+                    # to hold, it turns into a model one"
+                    tap3_m2_failure = self._detect_model2_to_model1_failure(
+                        range_data, tap1, tap2, tap3_m2, schematic_type="distribution"
+                    )
+                    if tap3_m2_failure:
+                        schematic_m2_to_m1 = self._build_distribution_schematic(
+                            range_data, tap1, tap2, tap3_m2_failure,
+                            model_type="Model_1_from_M2_failure"
+                        )
+                        if schematic_m2_to_m1:
+                            # Add metadata about the transition
+                            schematic_m2_to_m1["lecture_5b_enhancements"]["m2_to_m1_transition"] = {
+                                "original_m2_tap3": tap3_m2,
+                                "failure_price": tap3_m2_failure.get("model2_failure_price"),
+                                "transition_detected": True
+                            }
+                            schematics.append(schematic_m2_to_m1)
 
             except Exception as e:
                 logger.debug(f"Error detecting distribution schematic: {e}")
@@ -919,8 +983,11 @@ class TCTSchematicDetector:
         """
         Build complete accumulation schematic with entry, stop loss, and target.
 
-        TCT: "You enter on the break you put your stop loss below your third tap low
+        TCT 5A: "You enter on the break you put your stop loss below your third tap low
         and you target the Range High"
+
+        TCT 5B: Enhanced with overlapping structure, S/D awareness, R:R optimization,
+        trendline liquidity, tap spacing, and range quality validation.
         """
         schematic_type = f"{model_type}_Accumulation"
 
@@ -932,21 +999,66 @@ class TCTSchematicDetector:
         stop_loss = tap3["price"]  # TCT: "Stop loss below your third tap low"
         target = range_data["range_high"]  # TCT: "Target the Range High"
 
-        # Calculate risk/reward
-        risk_reward = None
-        if entry_price and stop_loss and target:
-            risk = entry_price - stop_loss
-            reward = target - entry_price
-            if risk > 0:
-                risk_reward = round(reward / risk, 2)
+        # ============================================================
+        # LECTURE 5B ENHANCEMENTS
+        # ============================================================
 
-        # Calculate quality score
-        quality_score = self._calculate_schematic_quality(
-            range_data, tap1, tap2, tap3, bos, model_type
+        # 1. Highest timeframe validation
+        htf_validation = self._validate_highest_timeframe(tap1, tap2, tap3)
+
+        # 2. Overlapping structure (domino effect) for R:R optimization
+        overlapping_structure = self._detect_overlapping_structure(
+            range_data, tap3, schematic_type
+        )
+
+        # 3. Supply/demand zone awareness
+        sd_zone_check = None
+        if entry_price:
+            sd_zone_check = self._check_supply_demand_zone_conflict(
+                entry_price, schematic_type, range_data, tap3["idx"]
+            )
+
+        # 4. R:R calculation and optimization
+        rr_analysis = None
+        if entry_price and stop_loss and target:
+            rr_analysis = self._calculate_optimized_rr(
+                entry_price, stop_loss, target, schematic_type
+            )
+
+        # 5. Trendline liquidity detection
+        trendline_liq = self._detect_trendline_liquidity(tap3, range_data, schematic_type)
+
+        # 6. Tap spacing validation
+        tap_spacing = self._validate_tap_spacing(tap1, tap2, tap3, range_data)
+
+        # 7. Range quality calculation
+        range_quality = self._calculate_range_quality(range_data, tap1, tap2, tap3)
+
+        # Calculate risk/reward (standard)
+        risk_reward = rr_analysis["risk_reward_ratio"] if rr_analysis else None
+
+        # Use optimized entry if available from overlapping structure
+        optimized_entry = None
+        if overlapping_structure["has_overlapping_structure"]:
+            optimized_entry = {
+                "entry": overlapping_structure["optimized_entry"],
+                "stop_loss": overlapping_structure["optimized_stop_loss"],
+                "target": overlapping_structure["optimized_target"],
+                "risk_reward": overlapping_structure["optimized_rr"],
+                "domino_levels": overlapping_structure["domino_levels"]
+            }
+
+        # Calculate overall quality score (enhanced with 5B factors)
+        quality_score = self._calculate_schematic_quality_enhanced(
+            range_data, tap1, tap2, tap3, bos, model_type,
+            htf_validation, sd_zone_check, rr_analysis, tap_spacing, range_quality
         )
 
         # Validate six candle rule
-        six_candle_valid = self._validate_six_candle_rule_on_tabs(tap1, tap2, tap3)
+        six_candle_valid = htf_validation["all_taps_valid_6cr"]
+
+        # Determine if entry is safe (no S/D conflicts)
+        entry_is_safe = not (sd_zone_check and sd_zone_check.get("has_conflict", False))
 
         return {
             "schematic_type": schematic_type,
@@ -969,7 +1081,8 @@ class TCTSchematicDetector:
             "entry": {
                 "type": "BOS_confirmation",
                 "price": entry_price,
-                "description": "Enter on break of structure back to bullish"
+                "description": "Enter on break of structure back to bullish",
+                "is_safe": entry_is_safe
             },
             "stop_loss": {
                 "price": stop_loss,
@@ -983,6 +1096,19 @@ class TCTSchematicDetector:
             "quality_score": quality_score,
             "six_candle_valid": six_candle_valid,
             "is_confirmed": bos is not None and bos.get("confirmed", False),
+            # Lecture 5B enhanced fields
+            "lecture_5b_enhancements": {
+                "htf_validation": htf_validation,
+                "overlapping_structure": overlapping_structure,
+                "optimized_entry": optimized_entry,
+                "supply_demand_check": sd_zone_check,
+                "rr_analysis": rr_analysis,
+                "trendline_liquidity": trendline_liq,
+                "tap_spacing": tap_spacing,
+                "range_quality": range_quality,
+                "meets_minimum_rr": rr_analysis["meets_minimum_rr"] if rr_analysis else False,
+                "has_trendline_confluence": trendline_liq.get("provides_confluence", False)
+            },
             "timestamp": datetime.utcnow().isoformat()
         }
 
@@ -991,8 +1117,11 @@ class TCTSchematicDetector:
         """
         Build complete distribution schematic with entry, stop loss, and target.
 
-        TCT: "Once we do break that we put our stop loss above our Tap high
+        TCT 5A: "Once we do break that we put our stop loss above our Tap high
         and we target the range low"
+
+        TCT 5B: Enhanced with overlapping structure, S/D awareness, R:R optimization,
+        trendline liquidity, tap spacing, and range quality validation.
         """
         schematic_type = f"{model_type}_Distribution"
 
@@ -1004,21 +1133,66 @@ class TCTSchematicDetector:
         stop_loss = tap3["price"]  # TCT: "Stop loss above your third tap high"
         target = range_data["range_low"]  # TCT: "Target the Range Low"
 
-        # Calculate risk/reward
-        risk_reward = None
-        if entry_price and stop_loss and target:
-            risk = stop_loss - entry_price
-            reward = entry_price - target
-            if risk > 0:
-                risk_reward = round(reward / risk, 2)
+        # ============================================================
+        # LECTURE 5B ENHANCEMENTS
+        # ============================================================
 
-        # Calculate quality score
-        quality_score = self._calculate_schematic_quality(
-            range_data, tap1, tap2, tap3, bos, model_type
+        # 1. Highest timeframe validation
+        htf_validation = self._validate_highest_timeframe(tap1, tap2, tap3)
+
+        # 2. Overlapping structure (domino effect) for R:R optimization
+        overlapping_structure = self._detect_overlapping_structure(
+            range_data, tap3, schematic_type
+        )
+
+        # 3. Supply/demand zone awareness
+        sd_zone_check = None
+        if entry_price:
+            sd_zone_check = self._check_supply_demand_zone_conflict(
+                entry_price, schematic_type, range_data, tap3["idx"]
+            )
+
+        # 4. R:R calculation and optimization
+        rr_analysis = None
+        if entry_price and stop_loss and target:
+            rr_analysis = self._calculate_optimized_rr(
+                entry_price, stop_loss, target, schematic_type
+            )
+
+        # 5. Trendline liquidity detection
+        trendline_liq = self._detect_trendline_liquidity(tap3, range_data, schematic_type)
+
+        # 6. Tap spacing validation
+        tap_spacing = self._validate_tap_spacing(tap1, tap2, tap3, range_data)
+
+        # 7. Range quality calculation
+        range_quality = self._calculate_range_quality(range_data, tap1, tap2, tap3)
+
+        # Calculate risk/reward (standard)
+        risk_reward = rr_analysis["risk_reward_ratio"] if rr_analysis else None
+
+        # Use optimized entry if available from overlapping structure
+        optimized_entry = None
+        if overlapping_structure["has_overlapping_structure"]:
+            optimized_entry = {
+                "entry": overlapping_structure["optimized_entry"],
+                "stop_loss": overlapping_structure["optimized_stop_loss"],
+                "target": overlapping_structure["optimized_target"],
+                "risk_reward": overlapping_structure["optimized_rr"],
+                "domino_levels": overlapping_structure["domino_levels"]
+            }
+
+        # Calculate overall quality score (enhanced with 5B factors)
+        quality_score = self._calculate_schematic_quality_enhanced(
+            range_data, tap1, tap2, tap3, bos, model_type,
+            htf_validation, sd_zone_check, rr_analysis, tap_spacing, range_quality
         )
 
         # Validate six candle rule
-        six_candle_valid = self._validate_six_candle_rule_on_tabs(tap1, tap2, tap3)
+        six_candle_valid = htf_validation["all_taps_valid_6cr"]
+
+        # Determine if entry is safe (no S/D conflicts)
+        entry_is_safe = not (sd_zone_check and sd_zone_check.get("has_conflict", False))
 
         return {
             "schematic_type": schematic_type,
@@ -1041,7 +1215,8 @@ class TCTSchematicDetector:
             "entry": {
                 "type": "BOS_confirmation",
                 "price": entry_price,
-                "description": "Enter on break of structure back to bearish"
+                "description": "Enter on break of structure back to bearish",
+                "is_safe": entry_is_safe
             },
             "stop_loss": {
                 "price": stop_loss,
@@ -1055,8 +1230,785 @@ class TCTSchematicDetector:
             "quality_score": quality_score,
             "six_candle_valid": six_candle_valid,
             "is_confirmed": bos is not None and bos.get("confirmed", False),
+            # Lecture 5B enhanced fields
+            "lecture_5b_enhancements": {
+                "htf_validation": htf_validation,
+                "overlapping_structure": overlapping_structure,
+                "optimized_entry": optimized_entry,
+                "supply_demand_check": sd_zone_check,
+                "rr_analysis": rr_analysis,
+                "trendline_liquidity": trendline_liq,
+                "tap_spacing": tap_spacing,
+                "range_quality": range_quality,
+                "meets_minimum_rr": rr_analysis["meets_minimum_rr"] if rr_analysis else False,
+                "has_trendline_confluence": trendline_liq.get("provides_confluence", False)
+            },
             "timestamp": datetime.utcnow().isoformat()
         }
+
+    # ================================================================
+    # LECTURE 5B: ADVANCED ENHANCEMENTS
+    # ================================================================
+
+    def _validate_highest_timeframe(self, tap1: Dict, tap2: Dict, tap3: Dict,
+                                     timeframe: str = None) -> Dict:
+        """
+        Lecture 5B: Validate which timeframe the schematic is valid on.
+
+        TCT 5B: "Your TCT schematic is only valid on a certain time frame if you can
+        draw your mark structure on each tap applying the six candle rule"
+
+        TCT 5B: "When your schematic is playing out on one time frame if that schematic
+        does not have all taps applying the 6 candle rule on your highest time frame,
+        we need to zoom out to find the time frame where all three taps do apply"
+
+        Returns:
+            Dict with validity info and recommended timeframe
+        """
+        result = {
+            "all_taps_valid_6cr": False,
+            "tap1_valid_6cr": False,
+            "tap2_valid_6cr": False,
+            "tap3_valid_6cr": False,
+            "recommended_tf": None,
+            "current_tf": timeframe,
+            "validity_explanation": ""
+        }
+
+        try:
+            # Check each tap applies 6-candle rule
+            tap1_valid = self._is_swing_low(tap1["idx"]) or self._is_swing_high(tap1["idx"])
+            tap2_valid = self._is_swing_low(tap2["idx"]) or self._is_swing_high(tap2["idx"])
+            tap3_valid = self._is_swing_low(tap3["idx"]) or self._is_swing_high(tap3["idx"])
+
+            result["tap1_valid_6cr"] = tap1_valid
+            result["tap2_valid_6cr"] = tap2_valid
+            result["tap3_valid_6cr"] = tap3_valid
+            result["all_taps_valid_6cr"] = tap1_valid and tap2_valid and tap3_valid
+
+            if result["all_taps_valid_6cr"]:
+                result["validity_explanation"] = "All taps apply 6-candle rule on current TF"
+                result["recommended_tf"] = timeframe
+            else:
+                invalid_taps = []
+                if not tap1_valid:
+                    invalid_taps.append("Tap1")
+                if not tap2_valid:
+                    invalid_taps.append("Tap2")
+                if not tap3_valid:
+                    invalid_taps.append("Tap3")
+                result["validity_explanation"] = f"{', '.join(invalid_taps)} fail 6CR - zoom out to higher TF"
+                # Suggest next higher TF
+                tf_hierarchy = ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"]
+                if timeframe and timeframe in tf_hierarchy:
+                    current_idx = tf_hierarchy.index(timeframe)
+                    if current_idx < len(tf_hierarchy) - 1:
+                        result["recommended_tf"] = tf_hierarchy[current_idx + 1]
+
+        except Exception as e:
+            result["validity_explanation"] = f"Validation error: {e}"
+
+        return result
+
+    def _detect_overlapping_structure(self, range_data: Dict, tap3: Dict,
+                                       schematic_type: str) -> Dict:
+        """
+        Lecture 5B: Detect overlapping structure (domino effect) for R:R optimization.
+
+        TCT 5B: "What is overlapping structure? Basically this is a schematic inside
+        of a schematic... the blue inside of the red inside of the black"
+
+        TCT 5B: "The black range plays out and we zoom into the red and then inside
+        the red we have the blue"
+
+        This creates optimized entries where:
+        - Entry happens at blue schematic BOS
+        - Stop loss is below blue Tap3
+        - Target is the black range high/low (much larger move)
+
+        Returns:
+            Dict with overlapping structure info and optimized R:R
+        """
+        result = {
+            "has_overlapping_structure": False,
+            "nested_schematics": [],
+            "optimized_entry": None,
+            "optimized_stop_loss": None,
+            "optimized_target": None,
+            "optimized_rr": None,
+            "domino_levels": 1  # 1 = current only, 2 = has nested, 3 = double nested
+        }
+
+        try:
+            tap3_idx = tap3["idx"]
+            range_low = range_data["range_low"]
+            range_high = range_data["range_high"]
+
+            # Look for nested schematic structure after Tap3
+            # This is a smaller range that forms within the deviation zone
+            nested_range = self._find_nested_schematic_range(tap3_idx, range_data, schematic_type)
+
+            if nested_range:
+                result["has_overlapping_structure"] = True
+                result["domino_levels"] = 2
+                result["nested_schematics"].append({
+                    "level": "inner",
+                    "range_high": nested_range["range_high"],
+                    "range_low": nested_range["range_low"],
+                    "is_accumulation": "accumulation" in schematic_type.lower()
+                })
+
+                # Calculate optimized R:R using nested schematic entry with outer target
+                if "accumulation" in schematic_type.lower():
+                    # Entry at nested BOS, stop below nested Tap3, target outer range high
+                    optimized_entry = nested_range.get("entry_price", nested_range["range_low"])
+                    optimized_stop = nested_range.get("tap3_price", nested_range["range_low"] * 0.995)
+                    optimized_target = range_high  # Outer range target
+
+                    risk = optimized_entry - optimized_stop
+                    reward = optimized_target - optimized_entry
+                    if risk > 0:
+                        result["optimized_rr"] = round(reward / risk, 2)
+                        result["optimized_entry"] = optimized_entry
+                        result["optimized_stop_loss"] = optimized_stop
+                        result["optimized_target"] = optimized_target
+
+                else:  # Distribution
+                    optimized_entry = nested_range.get("entry_price", nested_range["range_high"])
+                    optimized_stop = nested_range.get("tap3_price", nested_range["range_high"] * 1.005)
+                    optimized_target = range_low  # Outer range target
+
+                    risk = optimized_stop - optimized_entry
+                    reward = optimized_entry - optimized_target
+                    if risk > 0:
+                        result["optimized_rr"] = round(reward / risk, 2)
+                        result["optimized_entry"] = optimized_entry
+                        result["optimized_stop_loss"] = optimized_stop
+                        result["optimized_target"] = optimized_target
+
+        except Exception as e:
+            logger.debug(f"Error detecting overlapping structure: {e}")
+
+        return result
+
+    def _find_nested_schematic_range(self, start_idx: int, outer_range: Dict,
+                                      schematic_type: str) -> Optional[Dict]:
+        """
+        Find a nested schematic range (smaller range forming within outer deviation).
+
+        Lecture 5B: Looking for a range that forms within the deviation zone
+        that can provide a more optimized entry point.
+        """
+        if start_idx >= len(self.candles) - 20:
+            return None
+
+        # Define search area based on schematic type
+        if "accumulation" in schematic_type.lower():
+            # Look for small range forming below outer range low
+            search_start = start_idx
+            search_end = min(start_idx + 30, len(self.candles) - 5)
+
+            for i in range(search_start, search_end - 10):
+                if self._is_swing_low(i):
+                    potential_range_low = float(self.candles.iloc[i]["low"])
+
+                    # Look for range high
+                    for j in range(i + 3, min(i + 15, search_end)):
+                        if self._is_swing_high(j):
+                            potential_range_high = float(self.candles.iloc[j]["high"])
+
+                            # Validate it's a smaller nested range
+                            nested_size = potential_range_high - potential_range_low
+                            outer_size = outer_range["range_size"]
+
+                            # Nested range should be smaller (20-60% of outer)
+                            if 0.2 * outer_size <= nested_size <= 0.6 * outer_size:
+                                return {
+                                    "range_high": potential_range_high,
+                                    "range_low": potential_range_low,
+                                    "range_size": nested_size,
+                                    "range_high_idx": j,
+                                    "range_low_idx": i,
+                                    "is_nested": True
+                                }
+
+        else:  # Distribution
+            search_start = start_idx
+            search_end = min(start_idx + 30, len(self.candles) - 5)
+
+            for i in range(search_start, search_end - 10):
+                if self._is_swing_high(i):
+                    potential_range_high = float(self.candles.iloc[i]["high"])
+
+                    for j in range(i + 3, min(i + 15, search_end)):
+                        if self._is_swing_low(j):
+                            potential_range_low = float(self.candles.iloc[j]["low"])
+
+                            nested_size = potential_range_high - potential_range_low
+                            outer_size = outer_range["range_size"]
+
+                            if 0.2 * outer_size <= nested_size <= 0.6 * outer_size:
+                                return {
+                                    "range_high": potential_range_high,
+                                    "range_low": potential_range_low,
+                                    "range_size": nested_size,
+                                    "range_high_idx": i,
+                                    "range_low_idx": j,
+                                    "is_nested": True
+                                }
+
+        return None
+
+    def _check_supply_demand_zone_conflict(self, entry_price: float, schematic_type: str,
+                                            range_data: Dict, tap3_idx: int) -> Dict:
+        """
+        Lecture 5B: Check for supply/demand zone conflicts before entry.
+
+        TCT 5B: "What we don't want to see on entry is inside the structure demand
+        that is in the way of our Target and that we are inside the zone it's a
+        no-go basically"
+
+        TCT 5B: "If there's structure demand in the way of our Target we shouldn't
+        take the trade"
+
+        Returns:
+            Dict with zone conflict info
+        """
+        result = {
+            "has_conflict": False,
+            "entry_inside_opposing_zone": False,
+            "opposing_zone_blocks_target": False,
+            "conflicting_zones": [],
+            "recommendation": "clear_entry"
+        }
+
+        try:
+            if "accumulation" in schematic_type.lower():
+                # For long entries, check for supply zones above entry blocking target
+                supply_zones = self._find_supply_zones_above(entry_price, range_data)
+
+                for zone in supply_zones:
+                    # Check if entry is inside a supply zone (bad)
+                    if zone["bottom"] <= entry_price <= zone["top"]:
+                        result["has_conflict"] = True
+                        result["entry_inside_opposing_zone"] = True
+                        result["conflicting_zones"].append(zone)
+                        result["recommendation"] = "no_entry_inside_supply"
+
+                    # Check if supply zone blocks path to target
+                    if zone["bottom"] < range_data["range_high"]:
+                        # Zone is between entry and target
+                        result["opposing_zone_blocks_target"] = True
+                        result["conflicting_zones"].append(zone)
+                        result["recommendation"] = "caution_supply_in_way"
+
+            else:  # Distribution
+                # For short entries, check for demand zones below entry blocking target
+                demand_zones = self._find_demand_zones_below(entry_price, range_data)
+
+                for zone in demand_zones:
+                    # Check if entry is inside a demand zone (bad)
+                    if zone["bottom"] <= entry_price <= zone["top"]:
+                        result["has_conflict"] = True
+                        result["entry_inside_opposing_zone"] = True
+                        result["conflicting_zones"].append(zone)
+                        result["recommendation"] = "no_entry_inside_demand"
+
+                    # Check if demand zone blocks path to target
+                    if zone["top"] > range_data["range_low"]:
+                        result["opposing_zone_blocks_target"] = True
+                        result["conflicting_zones"].append(zone)
+                        result["recommendation"] = "caution_demand_in_way"
+
+        except Exception as e:
+            logger.debug(f"Error checking S/D zone conflict: {e}")
+
+        return result
+
+    def _find_supply_zones_above(self, price: float, range_data: Dict) -> List[Dict]:
+        """Find supply zones above a given price that could block target."""
+        supply_zones = []
+        range_high = range_data["range_high"]
+
+        # Look for bearish order blocks above entry price
+        for i in range(max(0, range_data.get("range_low_idx", 0) - 30),
+                       range_data.get("range_high_idx", len(self.candles)) + 30):
+            if i >= len(self.candles) - 1:
+                break
+
+            candle = self.candles.iloc[i]
+
+            # Bullish candle followed by bearish move = potential supply
+            if candle["close"] > candle["open"]:
+                next_candle = self.candles.iloc[i + 1] if i + 1 < len(self.candles) else None
+                if next_candle is not None and next_candle["close"] < next_candle["open"]:
+                    zone_top = float(candle["high"])
+                    zone_bottom = float(candle["low"])
+
+                    # Only include zones above entry price
+                    if zone_bottom > price and zone_bottom < range_high:
+                        supply_zones.append({
+                            "top": zone_top,
+                            "bottom": zone_bottom,
+                            "idx": i,
+                            "type": "supply"
+                        })
+
+        return supply_zones[:3]  # Return top 3 most relevant
+
+    def _find_demand_zones_below(self, price: float, range_data: Dict) -> List[Dict]:
+        """Find demand zones below a given price that could block target."""
+        demand_zones = []
+        range_low = range_data["range_low"]
+
+        # Look for bullish order blocks below entry price
+        for i in range(max(0, range_data.get("range_low_idx", 0) - 30),
+                       range_data.get("range_high_idx", len(self.candles)) + 30):
+            if i >= len(self.candles) - 1:
+                break
+
+            candle = self.candles.iloc[i]
+
+            # Bearish candle followed by bullish move = potential demand
+            if candle["close"] < candle["open"]:
+                next_candle = self.candles.iloc[i + 1] if i + 1 < len(self.candles) else None
+                if next_candle is not None and next_candle["close"] > next_candle["open"]:
+                    zone_top = float(candle["high"])
+                    zone_bottom = float(candle["low"])
+
+                    # Only include zones below entry price
+                    if zone_top < price and zone_top > range_low:
+                        demand_zones.append({
+                            "top": zone_top,
+                            "bottom": zone_bottom,
+                            "idx": i,
+                            "type": "demand"
+                        })
+
+        return demand_zones[:3]
+
+    def _calculate_optimized_rr(self, entry_price: float, stop_loss: float,
+                                 target: float, schematic_type: str) -> Dict:
+        """
+        Lecture 5B: Calculate R:R and determine if trade meets minimum requirements.
+
+        TCT 5B: "We calculate our R to R ratio before we enter the trade to make
+        sure we are getting enough R out of it"
+
+        TCT 5B: Minimum 1:2 R:R is generally required.
+
+        Returns:
+            Dict with R:R calculation and optimization suggestions
+        """
+        result = {
+            "risk_reward_ratio": None,
+            "meets_minimum_rr": False,
+            "risk_amount": None,
+            "reward_amount": None,
+            "optimization_suggestions": []
+        }
+
+        try:
+            if "accumulation" in schematic_type.lower():
+                risk = entry_price - stop_loss
+                reward = target - entry_price
+            else:
+                risk = stop_loss - entry_price
+                reward = entry_price - target
+
+            if risk > 0:
+                rr = reward / risk
+                result["risk_reward_ratio"] = round(rr, 2)
+                result["risk_amount"] = round(risk, 8)
+                result["reward_amount"] = round(reward, 8)
+                result["meets_minimum_rr"] = rr >= self.MIN_RR_RATIO
+
+                if not result["meets_minimum_rr"]:
+                    result["optimization_suggestions"].append(
+                        f"R:R of {rr:.2f} below minimum {self.MIN_RR_RATIO}:1"
+                    )
+                    result["optimization_suggestions"].append(
+                        "Look for overlapping structure for better entry"
+                    )
+                    result["optimization_suggestions"].append(
+                        "Wait for nested schematic to improve R:R"
+                    )
+
+        except Exception as e:
+            logger.debug(f"Error calculating R:R: {e}")
+
+        return result
+
+    def _detect_trendline_liquidity(self, tap3: Dict, range_data: Dict,
+                                     schematic_type: str) -> Dict:
+        """
+        Lecture 5B: Detect trendline liquidity sweeps.
+
+        TCT 5B: "When we have your range drawn what other concepts are happening
+        in the background so for example your trendlines"
+
+        TCT 5B: "We're likely going to take out trendline liquidity at a minimum"
+
+        Returns:
+            Dict with trendline liquidity info
+        """
+        result = {
+            "has_trendline": False,
+            "trendline_swept": False,
+            "trendline_price": None,
+            "provides_confluence": False
+        }
+
+        try:
+            tap3_idx = tap3["idx"]
+            tap3_price = tap3["price"]
+
+            if "accumulation" in schematic_type.lower():
+                # Look for descending trendline that gets swept at Tap3
+                trendline = self._find_descending_trendline(tap3_idx, range_data)
+                if trendline:
+                    result["has_trendline"] = True
+                    result["trendline_price"] = trendline["price_at_tap3"]
+
+                    # Check if Tap3 swept the trendline
+                    if tap3_price <= trendline["price_at_tap3"]:
+                        result["trendline_swept"] = True
+                        result["provides_confluence"] = True
+
+            else:  # Distribution
+                # Look for ascending trendline that gets swept at Tap3
+                trendline = self._find_ascending_trendline(tap3_idx, range_data)
+                if trendline:
+                    result["has_trendline"] = True
+                    result["trendline_price"] = trendline["price_at_tap3"]
+
+                    # Check if Tap3 swept the trendline
+                    if tap3_price >= trendline["price_at_tap3"]:
+                        result["trendline_swept"] = True
+                        result["provides_confluence"] = True
+
+        except Exception as e:
+            logger.debug(f"Error detecting trendline liquidity: {e}")
+
+        return result
+
+    def _find_descending_trendline(self, tap3_idx: int, range_data: Dict) -> Optional[Dict]:
+        """Find descending trendline from swing highs before the range."""
+        swing_highs = []
+
+        # Find swing highs before range formation
+        start_idx = max(0, range_data.get("range_low_idx", 0) - 50)
+        end_idx = range_data.get("range_low_idx", tap3_idx)
+
+        for i in range(start_idx, end_idx):
+            if self._is_swing_high(i, lookback=3):
+                swing_highs.append({
+                    "idx": i,
+                    "price": float(self.candles.iloc[i]["high"])
+                })
+
+        if len(swing_highs) >= 2:
+            # Use last two swing highs to draw trendline
+            sh1, sh2 = swing_highs[-2], swing_highs[-1]
+
+            # Calculate slope
+            if sh2["idx"] != sh1["idx"]:
+                slope = (sh2["price"] - sh1["price"]) / (sh2["idx"] - sh1["idx"])
+
+                # Project trendline to Tap3 index
+                price_at_tap3 = sh2["price"] + slope * (tap3_idx - sh2["idx"])
+
+                return {
+                    "start_idx": sh1["idx"],
+                    "end_idx": sh2["idx"],
+                    "slope": slope,
+                    "price_at_tap3": price_at_tap3,
+                    "is_descending": slope < 0
+                }
+
+        return None
+
+    def _find_ascending_trendline(self, tap3_idx: int, range_data: Dict) -> Optional[Dict]:
+        """Find ascending trendline from swing lows before the range."""
+        swing_lows = []
+
+        # Find swing lows before range formation
+        start_idx = max(0, range_data.get("range_high_idx", 0) - 50)
+        end_idx = range_data.get("range_high_idx", tap3_idx)
+
+        for i in range(start_idx, end_idx):
+            if self._is_swing_low(i, lookback=3):
+                swing_lows.append({
+                    "idx": i,
+                    "price": float(self.candles.iloc[i]["low"])
+                })
+
+        if len(swing_lows) >= 2:
+            # Use last two swing lows to draw trendline
+            sl1, sl2 = swing_lows[-2], swing_lows[-1]
+
+            if sl2["idx"] != sl1["idx"]:
+                slope = (sl2["price"] - sl1["price"]) / (sl2["idx"] - sl1["idx"])
+
+                price_at_tap3 = sl2["price"] + slope * (tap3_idx - sl2["idx"])
+
+                return {
+                    "start_idx": sl1["idx"],
+                    "end_idx": sl2["idx"],
+                    "slope": slope,
+                    "price_at_tap3": price_at_tap3,
+                    "is_ascending": slope > 0
+                }
+
+        return None
+
+    def _validate_tap_spacing(self, tap1: Dict, tap2: Dict, tap3: Dict,
+                               range_data: Dict) -> Dict:
+        """
+        Lecture 5B: Validate equal spacing between taps.
+
+        TCT 5B: "This is also one thing you want to watch as well is that
+        there's some equal distribution between your taps"
+
+        TCT 5B: "Range quality, rational and horizontal range with logical
+        tap distances"
+
+        Returns:
+            Dict with tap spacing validation info
+        """
+        result = {
+            "spacing_valid": False,
+            "tap1_to_tap2_candles": None,
+            "tap2_to_tap3_candles": None,
+            "spacing_ratio": None,
+            "is_horizontal": False,
+            "spacing_quality": 0.0
+        }
+
+        try:
+            tap1_idx = tap1["idx"]
+            tap2_idx = tap2["idx"]
+            tap3_idx = tap3["idx"]
+
+            # Calculate candle distances
+            tap1_to_tap2 = tap2_idx - tap1_idx
+            tap2_to_tap3 = tap3_idx - tap2_idx
+
+            result["tap1_to_tap2_candles"] = tap1_to_tap2
+            result["tap2_to_tap3_candles"] = tap2_to_tap3
+
+            if tap1_to_tap2 > 0 and tap2_to_tap3 > 0:
+                # Calculate spacing ratio (ideal is 1.0 = equal spacing)
+                ratio = min(tap1_to_tap2, tap2_to_tap3) / max(tap1_to_tap2, tap2_to_tap3)
+                result["spacing_ratio"] = round(ratio, 2)
+
+                # Check if within tolerance for equal spacing
+                result["spacing_valid"] = ratio >= (1.0 - self.TAP_SPACING_TOLERANCE)
+
+                # Calculate quality score
+                result["spacing_quality"] = round(ratio, 2)
+
+            # Check horizontal range quality
+            range_size = range_data["range_size"]
+            tap_price_range = max(tap1["price"], tap2["price"], tap3["price"]) - \
+                             min(tap1["price"], tap2["price"], tap3["price"])
+
+            # Horizontal range means taps are within reasonable price distance
+            # relative to range size
+            if tap_price_range <= range_size * 0.6:
+                result["is_horizontal"] = True
+
+        except Exception as e:
+            logger.debug(f"Error validating tap spacing: {e}")
+
+        return result
+
+    def _detect_model2_to_model1_failure(self, range_data: Dict, tap1: Dict, tap2: Dict,
+                                          existing_tap3_m2: Optional[Dict],
+                                          schematic_type: str = "accumulation") -> Optional[Dict]:
+        """
+        Lecture 5B: Detect when Model 2 fails and transitions to Model 1.
+
+        TCT 5B: "A model two when you have a higher low, and you would expect
+        that third tap to hold being a higher low there when that fails to hold,
+        it goes through, it turns into a model one"
+
+        TCT 5B: "This happens all the time, the model two fails and converts
+        into a model one at which point you'd take out your stops"
+
+        Returns:
+            New Tap3 for Model 1 if Model 2 failed, None otherwise
+        """
+        if not existing_tap3_m2:
+            return None
+
+        try:
+            tap3_m2_idx = existing_tap3_m2["idx"]
+            tap3_m2_price = existing_tap3_m2["price"]
+            tap2_price = tap2["price"]
+
+            if "accumulation" in schematic_type.lower():
+                # For accumulation: Look for price breaking below the Model 2 Tap3 (higher low fails)
+                for i in range(tap3_m2_idx + 1, min(tap3_m2_idx + 20, len(self.candles) - 2)):
+                    candle = self.candles.iloc[i]
+
+                    # Price broke below Model 2 Tap3 - it failed
+                    if candle["low"] < tap3_m2_price:
+                        # Now find the new Model 1 Tap3 (needs to be lower than Tap2)
+                        if candle["low"] < tap2_price:
+                            # This is now a Model 1 with successive lower lows
+                            deviation_low = candle["low"]
+                            deviation_idx = i
+
+                            # Find actual lowest point
+                            for j in range(i, min(i + 10, len(self.candles))):
+                                if self.candles.iloc[j]["low"] < deviation_low:
+                                    deviation_low = self.candles.iloc[j]["low"]
+                                    deviation_idx = j
+
+                            # Validate it came back inside
+                            came_back = self._validate_deviation_came_back_inside_from_idx(
+                                deviation_idx, tap2_price, "low"
+                            )
+
+                            if came_back:
+                                return {
+                                    "idx": deviation_idx,
+                                    "price": float(deviation_low),
+                                    "time": str(self.candles.iloc[deviation_idx]["open_time"]) if "open_time" in self.candles.columns else str(deviation_idx),
+                                    "type": "tap3_model1_from_m2_failure",
+                                    "is_deviation": True,
+                                    "is_lower_than_tap2": True,
+                                    "model2_failure_price": tap3_m2_price,
+                                    "original_m2_idx": tap3_m2_idx
+                                }
+
+            else:  # Distribution
+                # For distribution: Look for price breaking above the Model 2 Tap3 (lower high fails)
+                for i in range(tap3_m2_idx + 1, min(tap3_m2_idx + 20, len(self.candles) - 2)):
+                    candle = self.candles.iloc[i]
+
+                    # Price broke above Model 2 Tap3 - it failed
+                    if candle["high"] > tap3_m2_price:
+                        # Now find the new Model 1 Tap3 (needs to be higher than Tap2)
+                        if candle["high"] > tap2_price:
+                            # This is now a Model 1 with successive higher highs
+                            deviation_high = candle["high"]
+                            deviation_idx = i
+
+                            # Find actual highest point
+                            for j in range(i, min(i + 10, len(self.candles))):
+                                if self.candles.iloc[j]["high"] > deviation_high:
+                                    deviation_high = self.candles.iloc[j]["high"]
+                                    deviation_idx = j
+
+                            # Validate it came back inside
+                            came_back = self._validate_deviation_came_back_inside_from_idx(
+                                deviation_idx, tap2_price, "high"
+                            )
+
+                            if came_back:
+                                return {
+                                    "idx": deviation_idx,
+                                    "price": float(deviation_high),
+                                    "time": str(self.candles.iloc[deviation_idx]["open_time"]) if "open_time" in self.candles.columns else str(deviation_idx),
+                                    "type": "tap3_model1_from_m2_failure",
+                                    "is_deviation": True,
+                                    "is_higher_than_tap2": True,
+                                    "model2_failure_price": tap3_m2_price,
+                                    "original_m2_idx": tap3_m2_idx
+                                }
+
+        except Exception as e:
+            logger.debug(f"Error detecting M2 to M1 failure: {e}")
+
+        return None
+
+    def _calculate_range_quality(self, range_data: Dict, tap1: Dict, tap2: Dict,
+                                  tap3: Dict) -> Dict:
+        """
+        Lecture 5B: Calculate range quality/rationality score.
+
+        TCT 5B: "Range quality, rational and horizontal range with logical
+        tap distances"
+
+        Factors:
+        - Horizontal price action (not too much slope)
+        - Equal tap spacing
+        - Clean pivot structure at each tap
+        - Range size relative to overall price
+
+        Returns:
+            Dict with range quality metrics
+        """
+        result = {
+            "quality_score": 0.0,
+            "is_horizontal": False,
+            "has_clean_pivots": False,
+            "has_equal_spacing": False,
+            "quality_factors": []
+        }
+
+        try:
+            score = 0.0
+
+            # Check horizontal range (25% weight)
+            range_size = range_data["range_size"]
+            range_midpoint = (range_data["range_high"] + range_data["range_low"]) / 2
+            horizontal_tolerance = range_size * 0.3
+
+            # Check if taps are roughly horizontal (within tolerance of each other)
+            tap_prices = [tap1["price"], tap2["price"], tap3["price"]]
+            tap_variance = max(tap_prices) - min(tap_prices)
+
+            if tap_variance <= range_size * 0.5:
+                score += 0.25
+                result["is_horizontal"] = True
+                result["quality_factors"].append("Horizontal range structure")
+
+            # Check clean pivots (25% weight)
+            tap1_clean = self._is_swing_low(tap1["idx"]) or self._is_swing_high(tap1["idx"])
+            tap2_clean = self._is_swing_low(tap2["idx"]) or self._is_swing_high(tap2["idx"])
+            tap3_clean = self._is_swing_low(tap3["idx"]) or self._is_swing_high(tap3["idx"])
+
+            clean_count = sum([tap1_clean, tap2_clean, tap3_clean])
+            score += (clean_count / 3) * 0.25
+
+            if clean_count == 3:
+                result["has_clean_pivots"] = True
+                result["quality_factors"].append("All taps have clean pivot structure")
+
+            # Check tap spacing (25% weight)
+            spacing = self._validate_tap_spacing(tap1, tap2, tap3, range_data)
+            if spacing["spacing_valid"]:
+                score += 0.25
+                result["has_equal_spacing"] = True
+                result["quality_factors"].append("Equal tap spacing")
+            else:
+                score += spacing["spacing_quality"] * 0.25
+
+            # Check range size rationality (25% weight)
+            # Range should not be too small or too large relative to price
+            equilibrium = range_data["equilibrium"]
+            range_percent = (range_size / equilibrium) * 100
+
+            # Good range is typically 1-5% of price
+            if 0.5 <= range_percent <= 8:
+                score += 0.25
+                result["quality_factors"].append(f"Range size {range_percent:.2f}% is rational")
+            elif range_percent < 0.5:
+                score += 0.1
+                result["quality_factors"].append("Range may be too small")
+            else:
+                score += 0.1
+                result["quality_factors"].append("Range may be too large")
+
+            result["quality_score"] = round(min(score, 1.0), 3)
+
+        except Exception as e:
+            logger.debug(f"Error calculating range quality: {e}")
+
+        return result
 
     # ================================================================
     # UTILITY METHODS
@@ -1210,7 +2162,7 @@ class TCTSchematicDetector:
     def _calculate_schematic_quality(self, range_data: Dict, tap1: Dict, tap2: Dict,
                                       tap3: Dict, bos: Optional[Dict], model_type: str) -> float:
         """
-        Calculate schematic quality score.
+        Calculate schematic quality score (Lecture 5A basic scoring).
 
         Factors:
         - BOS confirmation (especially inside range)
@@ -1247,6 +2199,54 @@ class TCTSchematicDetector:
             score += 0.3
 
         return round(min(score, 1.0), 3)
+
+    def _calculate_schematic_quality_enhanced(self, range_data: Dict, tap1: Dict, tap2: Dict,
+                                               tap3: Dict, bos: Optional[Dict], model_type: str,
+                                               htf_validation: Dict, sd_zone_check: Optional[Dict],
+                                               rr_analysis: Optional[Dict], tap_spacing: Dict,
+                                               range_quality: Dict) -> float:
+        """
+        Lecture 5B: Enhanced schematic quality scoring.
+
+        Additional factors from Lecture 5B:
+        - Highest timeframe validation (all taps apply 6CR)
+        - No S/D zone conflicts
+        - Meets minimum R:R requirement
+        - Equal tap spacing
+        - Range quality/rationality
+        - Trendline confluence (bonus)
+        """
+        # Start with base score from 5A methodology
+        base_score = self._calculate_schematic_quality(range_data, tap1, tap2, tap3, bos, model_type)
+
+        # Lecture 5B enhancements can add up to 0.3 more (capped at 1.0)
+        enhanced_score = 0.0
+
+        # HTF validation (10% bonus)
+        if htf_validation and htf_validation.get("all_taps_valid_6cr"):
+            enhanced_score += 0.10
+
+        # No S/D conflicts (10% bonus)
+        if sd_zone_check is None or not sd_zone_check.get("has_conflict"):
+            enhanced_score += 0.05
+            if sd_zone_check and not sd_zone_check.get("opposing_zone_blocks_target"):
+                enhanced_score += 0.05  # Clear path to target
+
+        # Meets minimum R:R (5% bonus)
+        if rr_analysis and rr_analysis.get("meets_minimum_rr"):
+            enhanced_score += 0.05
+
+        # Equal tap spacing (5% bonus)
+        if tap_spacing and tap_spacing.get("spacing_valid"):
+            enhanced_score += 0.05
+
+        # Range quality (5% bonus)
+        if range_quality and range_quality.get("quality_score", 0) >= self.RANGE_QUALITY_MIN:
+            enhanced_score += 0.05
+
+        # Combine scores (cap at 1.0)
+        total_score = base_score + enhanced_score
+        return round(min(total_score, 1.0), 3)
 
 
 def detect_tct_schematics(candles: pd.DataFrame, detected_ranges: List[Dict] = None) -> Dict:
@@ -1286,12 +2286,12 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
     print("=" * 60)
-    print("TCT SCHEMATIC DETECTOR TEST (Lecture 5A Methodology)")
+    print("TCT SCHEMATIC DETECTOR TEST (Lecture 5A + 5B Methodology)")
     print("=" * 60)
 
     # Generate test data simulating accumulation pattern
     np.random.seed(42)
-    dates = pd.date_range('2026-01-01', periods=200, freq='1H')
+    dates = pd.date_range('2026-01-01', periods=200, freq='1h')
 
     # Create accumulation pattern: downtrend → range → deviation → higher low → breakout
     prices = []
@@ -1347,11 +2347,35 @@ if __name__ == "__main__":
             print(f"    Stop: ${schematic['stop_loss']['price']:.2f}")
             print(f"    Target: ${schematic['target']['price']:.2f}")
 
+        # Lecture 5B enhancements output
+        if 'lecture_5b_enhancements' in schematic:
+            enhancements = schematic['lecture_5b_enhancements']
+            print(f"    --- Lecture 5B Enhancements ---")
+            if enhancements.get('htf_validation'):
+                print(f"    6CR Valid: {enhancements['htf_validation'].get('all_taps_valid_6cr')}")
+            if enhancements.get('rr_analysis'):
+                print(f"    Meets Min R:R: {enhancements['rr_analysis'].get('meets_minimum_rr')}")
+            if enhancements.get('tap_spacing'):
+                print(f"    Tap Spacing Valid: {enhancements['tap_spacing'].get('spacing_valid')}")
+            if enhancements.get('overlapping_structure', {}).get('has_overlapping_structure'):
+                print(f"    Has Overlapping Structure (Domino Effect)")
+                print(f"    Optimized R:R: {enhancements['overlapping_structure'].get('optimized_rr')}")
+            if enhancements.get('trendline_liquidity', {}).get('provides_confluence'):
+                print(f"    Trendline Confluence: YES")
+
     for i, schematic in enumerate(result['distribution_schematics'][:3], 1):
         print(f"\n  Distribution #{i}: {schematic['schematic_type']}")
         print(f"    Quality Score: {schematic['quality_score']}")
         print(f"    Confirmed: {schematic['is_confirmed']}")
         print(f"    R:R = {schematic['risk_reward']}")
+        # Lecture 5B enhancements output
+        if 'lecture_5b_enhancements' in schematic:
+            enhancements = schematic['lecture_5b_enhancements']
+            print(f"    --- Lecture 5B Enhancements ---")
+            if enhancements.get('htf_validation'):
+                print(f"    6CR Valid: {enhancements['htf_validation'].get('all_taps_valid_6cr')}")
+            if enhancements.get('rr_analysis'):
+                print(f"    Meets Min R:R: {enhancements['rr_analysis'].get('meets_minimum_rr')}")
 
     print(f"\n{'=' * 60}")
     print("TEST COMPLETE")
