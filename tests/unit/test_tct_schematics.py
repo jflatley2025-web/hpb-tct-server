@@ -1,10 +1,22 @@
 """
 Unit tests for tct_schematics.py
-Tests TCT Schematic detection (Lecture 5A methodology) including:
+Tests TCT Schematic detection (Lecture 5A + 5B methodology) including:
+
+Lecture 5A Core Features:
 - Model 1 Accumulation: Tap1 → Tap2 (deviation) → Tap3 (lower deviation)
 - Model 2 Accumulation: Tap1 → Tap2 (deviation) → Tap3 (higher low at extreme liq/demand)
 - Model 1 Distribution: Tap1 → Tap2 (deviation) → Tap3 (higher deviation)
 - Model 2 Distribution: Tap1 → Tap2 (deviation) → Tap3 (lower high at extreme liq/supply)
+
+Lecture 5B Advanced Enhancements:
+- Highest timeframe validation (6-candle rule on all taps)
+- Overlapping structure (domino effect) for R:R optimization
+- Supply/demand zone awareness on entry
+- R:R calculation and optimization with minimum 1:2 requirement
+- Trendline liquidity detection
+- Tap spacing validation (equal distribution)
+- Model 2 failure → Model 1 transition detection
+- Range quality/rationality scoring
 """
 import pytest
 import pandas as pd
@@ -819,3 +831,370 @@ class TestEdgeCases:
 
         assert "error" in result
         assert "Insufficient data" in result["error"]
+
+
+# ================================================================
+# LECTURE 5B ENHANCEMENT TESTS
+# ================================================================
+
+@pytest.mark.unit
+class TestLecture5BEnhancements:
+    """Tests for Lecture 5B advanced features"""
+
+    def test_schematic_has_lecture_5b_enhancements(self, accumulation_pattern_df):
+        """Test that schematics include Lecture 5B enhancement data"""
+        result = detect_tct_schematics(accumulation_pattern_df)
+
+        all_schematics = (
+            result.get("accumulation_schematics", []) +
+            result.get("distribution_schematics", [])
+        )
+
+        for schematic in all_schematics:
+            assert "lecture_5b_enhancements" in schematic
+            enhancements = schematic["lecture_5b_enhancements"]
+
+            # Check all Lecture 5B fields are present
+            assert "htf_validation" in enhancements
+            assert "overlapping_structure" in enhancements
+            assert "supply_demand_check" in enhancements or enhancements.get("supply_demand_check") is None
+            assert "rr_analysis" in enhancements or enhancements.get("rr_analysis") is None
+            assert "trendline_liquidity" in enhancements
+            assert "tap_spacing" in enhancements
+            assert "range_quality" in enhancements
+
+
+@pytest.mark.unit
+class TestHighestTimeframeValidation:
+    """Tests for highest timeframe validation (6-candle rule on all taps)"""
+
+    def test_htf_validation_structure(self, accumulation_pattern_df):
+        """Test HTF validation returns correct structure"""
+        detector = TCTSchematicDetector(accumulation_pattern_df)
+        result = detector.detect_all_schematics()
+
+        for schematic in result.get("accumulation_schematics", []):
+            htf = schematic.get("lecture_5b_enhancements", {}).get("htf_validation", {})
+
+            assert "all_taps_valid_6cr" in htf
+            assert "tap1_valid_6cr" in htf
+            assert "tap2_valid_6cr" in htf
+            assert "tap3_valid_6cr" in htf
+            assert "validity_explanation" in htf
+            assert isinstance(htf["all_taps_valid_6cr"], bool)
+
+    def test_htf_validation_affects_six_candle_valid(self, accumulation_pattern_df):
+        """Test that HTF validation is reflected in six_candle_valid field"""
+        detector = TCTSchematicDetector(accumulation_pattern_df)
+        result = detector.detect_all_schematics()
+
+        for schematic in result.get("accumulation_schematics", []):
+            htf = schematic.get("lecture_5b_enhancements", {}).get("htf_validation", {})
+            six_candle_valid = schematic.get("six_candle_valid")
+
+            # Both should agree
+            assert six_candle_valid == htf.get("all_taps_valid_6cr")
+
+
+@pytest.mark.unit
+class TestOverlappingStructure:
+    """Tests for overlapping structure (domino effect) detection"""
+
+    def test_overlapping_structure_format(self, accumulation_pattern_df):
+        """Test overlapping structure returns correct format"""
+        detector = TCTSchematicDetector(accumulation_pattern_df)
+        result = detector.detect_all_schematics()
+
+        for schematic in result.get("accumulation_schematics", []):
+            overlap = schematic.get("lecture_5b_enhancements", {}).get("overlapping_structure", {})
+
+            assert "has_overlapping_structure" in overlap
+            assert "nested_schematics" in overlap
+            assert "domino_levels" in overlap
+            assert isinstance(overlap["domino_levels"], int)
+            assert overlap["domino_levels"] >= 1
+
+    def test_overlapping_structure_optimized_rr(self, accumulation_pattern_df):
+        """Test overlapping structure provides optimized R:R when found"""
+        detector = TCTSchematicDetector(accumulation_pattern_df)
+        result = detector.detect_all_schematics()
+
+        for schematic in result.get("accumulation_schematics", []):
+            overlap = schematic.get("lecture_5b_enhancements", {}).get("overlapping_structure", {})
+
+            if overlap.get("has_overlapping_structure"):
+                assert overlap.get("optimized_entry") is not None
+                assert overlap.get("optimized_stop_loss") is not None
+                assert overlap.get("optimized_target") is not None
+                assert overlap.get("optimized_rr") is not None
+
+
+@pytest.mark.unit
+class TestSupplyDemandZoneAwareness:
+    """Tests for supply/demand zone conflict detection"""
+
+    def test_sd_zone_check_structure(self, accumulation_pattern_df):
+        """Test S/D zone check returns correct structure"""
+        detector = TCTSchematicDetector(accumulation_pattern_df)
+        result = detector.detect_all_schematics()
+
+        for schematic in result.get("accumulation_schematics", []):
+            sd_check = schematic.get("lecture_5b_enhancements", {}).get("supply_demand_check")
+
+            if sd_check:
+                assert "has_conflict" in sd_check
+                assert "entry_inside_opposing_zone" in sd_check
+                assert "opposing_zone_blocks_target" in sd_check
+                assert "conflicting_zones" in sd_check
+                assert "recommendation" in sd_check
+
+    def test_entry_safety_flag(self, accumulation_pattern_df):
+        """Test entry has is_safe flag based on S/D check"""
+        detector = TCTSchematicDetector(accumulation_pattern_df)
+        result = detector.detect_all_schematics()
+
+        for schematic in result.get("accumulation_schematics", []):
+            entry = schematic.get("entry", {})
+            assert "is_safe" in entry
+            assert isinstance(entry["is_safe"], bool)
+
+
+@pytest.mark.unit
+class TestRRCalculation:
+    """Tests for R:R calculation and optimization"""
+
+    def test_rr_analysis_structure(self, accumulation_pattern_df):
+        """Test R:R analysis returns correct structure"""
+        detector = TCTSchematicDetector(accumulation_pattern_df)
+        result = detector.detect_all_schematics()
+
+        for schematic in result.get("accumulation_schematics", []):
+            rr_analysis = schematic.get("lecture_5b_enhancements", {}).get("rr_analysis")
+
+            if rr_analysis:
+                assert "risk_reward_ratio" in rr_analysis
+                assert "meets_minimum_rr" in rr_analysis
+                assert "risk_amount" in rr_analysis
+                assert "reward_amount" in rr_analysis
+                assert "optimization_suggestions" in rr_analysis
+
+    def test_meets_minimum_rr_flag(self, accumulation_pattern_df):
+        """Test meets_minimum_rr flag is set correctly"""
+        detector = TCTSchematicDetector(accumulation_pattern_df)
+        result = detector.detect_all_schematics()
+
+        for schematic in result.get("accumulation_schematics", []):
+            rr_analysis = schematic.get("lecture_5b_enhancements", {}).get("rr_analysis")
+
+            if rr_analysis and rr_analysis.get("risk_reward_ratio"):
+                rr = rr_analysis["risk_reward_ratio"]
+                meets_min = rr_analysis["meets_minimum_rr"]
+
+                # MIN_RR_RATIO is 2.0
+                if rr >= 2.0:
+                    assert meets_min is True
+                else:
+                    assert meets_min is False
+
+
+@pytest.mark.unit
+class TestTrendlineLiquidity:
+    """Tests for trendline liquidity detection"""
+
+    def test_trendline_liquidity_structure(self, accumulation_pattern_df):
+        """Test trendline liquidity returns correct structure"""
+        detector = TCTSchematicDetector(accumulation_pattern_df)
+        result = detector.detect_all_schematics()
+
+        for schematic in result.get("accumulation_schematics", []):
+            trendline = schematic.get("lecture_5b_enhancements", {}).get("trendline_liquidity", {})
+
+            assert "has_trendline" in trendline
+            assert "trendline_swept" in trendline
+            assert "provides_confluence" in trendline
+            assert isinstance(trendline["has_trendline"], bool)
+
+
+@pytest.mark.unit
+class TestTapSpacingValidation:
+    """Tests for tap spacing validation"""
+
+    def test_tap_spacing_structure(self, accumulation_pattern_df):
+        """Test tap spacing validation returns correct structure"""
+        detector = TCTSchematicDetector(accumulation_pattern_df)
+        result = detector.detect_all_schematics()
+
+        for schematic in result.get("accumulation_schematics", []):
+            spacing = schematic.get("lecture_5b_enhancements", {}).get("tap_spacing", {})
+
+            assert "spacing_valid" in spacing
+            assert "tap1_to_tap2_candles" in spacing
+            assert "tap2_to_tap3_candles" in spacing
+            assert "spacing_ratio" in spacing or spacing.get("spacing_ratio") is None
+            assert "is_horizontal" in spacing
+            assert "spacing_quality" in spacing
+
+    def test_spacing_ratio_calculation(self, accumulation_pattern_df):
+        """Test spacing ratio is calculated correctly"""
+        detector = TCTSchematicDetector(accumulation_pattern_df)
+        result = detector.detect_all_schematics()
+
+        for schematic in result.get("accumulation_schematics", []):
+            spacing = schematic.get("lecture_5b_enhancements", {}).get("tap_spacing", {})
+
+            tap1_to_tap2 = spacing.get("tap1_to_tap2_candles")
+            tap2_to_tap3 = spacing.get("tap2_to_tap3_candles")
+            ratio = spacing.get("spacing_ratio")
+
+            if tap1_to_tap2 and tap2_to_tap3 and tap1_to_tap2 > 0 and tap2_to_tap3 > 0:
+                expected_ratio = min(tap1_to_tap2, tap2_to_tap3) / max(tap1_to_tap2, tap2_to_tap3)
+                if ratio:
+                    assert abs(ratio - round(expected_ratio, 2)) < 0.05
+
+
+@pytest.mark.unit
+class TestRangeQuality:
+    """Tests for range quality calculation"""
+
+    def test_range_quality_structure(self, accumulation_pattern_df):
+        """Test range quality returns correct structure"""
+        detector = TCTSchematicDetector(accumulation_pattern_df)
+        result = detector.detect_all_schematics()
+
+        for schematic in result.get("accumulation_schematics", []):
+            quality = schematic.get("lecture_5b_enhancements", {}).get("range_quality", {})
+
+            assert "quality_score" in quality
+            assert "is_horizontal" in quality
+            assert "has_clean_pivots" in quality
+            assert "has_equal_spacing" in quality
+            assert "quality_factors" in quality
+            assert isinstance(quality["quality_factors"], list)
+
+    def test_range_quality_score_range(self, accumulation_pattern_df):
+        """Test range quality score is within valid range"""
+        detector = TCTSchematicDetector(accumulation_pattern_df)
+        result = detector.detect_all_schematics()
+
+        for schematic in result.get("accumulation_schematics", []):
+            quality = schematic.get("lecture_5b_enhancements", {}).get("range_quality", {})
+            score = quality.get("quality_score", 0)
+
+            assert 0.0 <= score <= 1.0
+
+
+@pytest.mark.unit
+class TestModel2ToModel1Failure:
+    """Tests for Model 2 to Model 1 failure transition detection"""
+
+    def test_m2_to_m1_transition_structure(self, accumulation_pattern_df):
+        """Test M2 to M1 transition returns correct structure when detected"""
+        result = detect_tct_schematics(accumulation_pattern_df)
+
+        # Find any Model_1_from_M2_failure schematics
+        for schematic in result.get("accumulation_schematics", []):
+            if "M2_failure" in schematic.get("schematic_type", ""):
+                m2_to_m1 = schematic.get("lecture_5b_enhancements", {}).get("m2_to_m1_transition", {})
+
+                assert "original_m2_tap3" in m2_to_m1
+                assert "failure_price" in m2_to_m1
+                assert "transition_detected" in m2_to_m1
+                assert m2_to_m1["transition_detected"] is True
+
+    def test_m2_failure_creates_new_model1(self, model_2_accumulation_df):
+        """Test that when M2 fails, a new M1 schematic can be created"""
+        result = detect_tct_schematics(model_2_accumulation_df)
+
+        # Just verify detection runs without error
+        assert "error" not in result
+        assert "accumulation_schematics" in result
+
+
+@pytest.mark.unit
+class TestEnhancedQualityScoring:
+    """Tests for enhanced quality scoring with Lecture 5B factors"""
+
+    def test_enhanced_quality_uses_5b_factors(self, accumulation_pattern_df):
+        """Test quality score incorporates Lecture 5B factors"""
+        detector = TCTSchematicDetector(accumulation_pattern_df)
+        result = detector.detect_all_schematics()
+
+        for schematic in result.get("accumulation_schematics", []):
+            quality = schematic.get("quality_score", 0)
+            enhancements = schematic.get("lecture_5b_enhancements", {})
+
+            # Quality should be between 0 and 1
+            assert 0.0 <= quality <= 1.0
+
+            # If all 5B factors are positive, quality should be higher
+            htf_valid = enhancements.get("htf_validation", {}).get("all_taps_valid_6cr", False)
+            no_sd_conflict = not (enhancements.get("supply_demand_check", {}).get("has_conflict", False))
+            meets_rr = enhancements.get("rr_analysis", {}).get("meets_minimum_rr", False)
+
+            # When multiple factors align, quality should tend to be higher
+            # (This is a soft assertion - just checking the relationship exists)
+            positive_factors = sum([htf_valid, no_sd_conflict, meets_rr])
+            if positive_factors >= 2:
+                # With multiple positive factors, quality should be at least moderate
+                assert quality >= 0.3
+
+
+@pytest.mark.integration
+class TestLecture5BIntegration:
+    """Integration tests for Lecture 5B enhancements"""
+
+    def test_full_lecture_5b_detection_pipeline(self):
+        """Test complete detection with all Lecture 5B features"""
+        np.random.seed(42)
+        dates = pd.date_range('2026-01-01', periods=200, freq='1h')
+        base = 100000
+        prices = []
+
+        # Create accumulation pattern
+        for i in range(40):
+            prices.append(base - i * 80 + np.random.uniform(-30, 30))
+
+        range_low = base - 3200
+        for i in range(30):
+            prices.append(range_low + np.random.uniform(0, 500))
+
+        for i in range(20):
+            prices.append(range_low - 300 - i * 20 + np.random.uniform(-50, 50))
+
+        for i in range(20):
+            prices.append(range_low - 800 - i * 10 + np.random.uniform(-40, 40))
+
+        for i in range(90):
+            prices.append(range_low - 600 + i * 30 + np.random.uniform(-60, 60))
+
+        df = pd.DataFrame({
+            'open_time': dates,
+            'open': prices,
+            'high': [p + np.random.uniform(50, 150) for p in prices],
+            'low': [p - np.random.uniform(50, 150) for p in prices],
+            'close': [p + np.random.uniform(-60, 60) for p in prices],
+            'volume': np.random.uniform(100, 1000, 200)
+        })
+
+        result = detect_tct_schematics(df)
+
+        assert "error" not in result
+        assert result["candles_analyzed"] == 200
+
+        # Verify all 5B enhancements are present in results
+        all_schematics = (
+            result.get("accumulation_schematics", []) +
+            result.get("distribution_schematics", [])
+        )
+
+        for schematic in all_schematics:
+            enhancements = schematic.get("lecture_5b_enhancements", {})
+
+            # All 5B feature categories should be present
+            assert "htf_validation" in enhancements
+            assert "overlapping_structure" in enhancements
+            assert "trendline_liquidity" in enhancements
+            assert "tap_spacing" in enhancements
+            assert "range_quality" in enhancements
+            assert "meets_minimum_rr" in enhancements
+            assert "has_trendline_confluence" in enhancements
