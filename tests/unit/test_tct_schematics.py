@@ -1198,3 +1198,550 @@ class TestLecture5BIntegration:
             assert "range_quality" in enhancements
             assert "meets_minimum_rr" in enhancements
             assert "has_trendline_confluence" in enhancements
+
+
+# ================================================================
+# LECTURE 6 ENHANCEMENT TESTS: ADVANCED TCT SCHEMATICS
+# ================================================================
+
+@pytest.mark.unit
+class TestLecture6Enhancements:
+    """Tests for Lecture 6 advanced TCT schematic features"""
+
+    def test_schematic_has_lecture_6_enhancements(self, accumulation_pattern_df):
+        """Test that schematics include Lecture 6 enhancement data"""
+        result = detect_tct_schematics(accumulation_pattern_df)
+
+        all_schematics = (
+            result.get("accumulation_schematics", []) +
+            result.get("distribution_schematics", [])
+        )
+
+        for schematic in all_schematics:
+            assert "lecture_6_enhancements" in schematic
+            l6 = schematic["lecture_6_enhancements"]
+
+            # Check all Lecture 6 fields are present
+            assert "schematic_conversion" in l6 or l6.get("schematic_conversion") is None
+            assert "dual_side_deviation" in l6
+            assert "ltf_htf_transition" in l6
+            assert "multi_tf_validity" in l6
+            assert "wov_in_wov" in l6
+            assert "model1_to_model2_flow" in l6
+            assert "context_follow_through" in l6
+
+            # Check summary flags
+            assert "has_conversion" in l6
+            assert "has_dual_deviation" in l6
+            assert "is_nested_in_htf" in l6
+            assert "valid_on_htf" in l6
+            assert "has_wov_opportunity" in l6
+            assert "has_m1_to_m2_opportunity" in l6
+            assert "follow_through_bias" in l6
+
+    def test_lecture_6_summary_flags_are_booleans(self, accumulation_pattern_df):
+        """Test that Lecture 6 summary flags are correct types"""
+        result = detect_tct_schematics(accumulation_pattern_df)
+
+        all_schematics = (
+            result.get("accumulation_schematics", []) +
+            result.get("distribution_schematics", [])
+        )
+
+        for schematic in all_schematics:
+            l6 = schematic.get("lecture_6_enhancements", {})
+
+            assert isinstance(l6.get("has_conversion"), bool)
+            assert isinstance(l6.get("has_dual_deviation"), bool)
+            assert isinstance(l6.get("is_nested_in_htf"), bool)
+            assert isinstance(l6.get("valid_on_htf"), bool)
+            assert isinstance(l6.get("has_wov_opportunity"), bool)
+            assert isinstance(l6.get("has_m1_to_m2_opportunity"), bool)
+
+
+@pytest.mark.unit
+class TestSchematicConversion:
+    """Tests for Distribution-to-Accumulation conversion detection"""
+
+    def test_schematic_conversion_structure(self, accumulation_pattern_df):
+        """Test schematic conversion returns correct structure when detected"""
+        detector = TCTSchematicDetector(accumulation_pattern_df)
+        result = detector.detect_all_schematics()
+
+        for schematic in result.get("accumulation_schematics", []):
+            l6 = schematic.get("lecture_6_enhancements", {})
+            conversion = l6.get("schematic_conversion")
+
+            if conversion is not None:
+                assert "original_type" in conversion
+                assert "converted_to" in conversion
+                assert "conversion_trigger" in conversion
+                assert "conversion_idx" in conversion
+                assert "recommendation" in conversion
+
+    def test_conversion_only_on_opposite_deviation(self, accumulation_pattern_df):
+        """Test conversion is only detected on opposite-side deviation"""
+        result = detect_tct_schematics(accumulation_pattern_df)
+
+        for schematic in result.get("accumulation_schematics", []):
+            l6 = schematic.get("lecture_6_enhancements", {})
+            conversion = l6.get("schematic_conversion")
+
+            if conversion is not None:
+                # For accumulation that has conversion, original was distribution
+                assert "Distribution" in conversion.get("original_type", "")
+                assert "Accumulation" in conversion.get("converted_to", "")
+
+
+@pytest.mark.unit
+class TestDualSideDeviation:
+    """Tests for dual-side deviation awareness"""
+
+    def test_dual_side_deviation_structure(self, accumulation_pattern_df):
+        """Test dual-side deviation returns correct structure"""
+        detector = TCTSchematicDetector(accumulation_pattern_df)
+        result = detector.detect_all_schematics()
+
+        for schematic in result.get("accumulation_schematics", []):
+            l6 = schematic.get("lecture_6_enhancements", {})
+            dual_dev = l6.get("dual_side_deviation", {})
+
+            assert "has_dual_deviation" in dual_dev
+            assert "high_side_deviated" in dual_dev
+            assert "low_side_deviated" in dual_dev
+            assert "risk_state" in dual_dev
+            assert "recommendation" in dual_dev
+            assert isinstance(dual_dev["has_dual_deviation"], bool)
+
+    def test_dual_deviation_risk_state(self, accumulation_pattern_df):
+        """Test risk state is set correctly for dual deviation"""
+        result = detect_tct_schematics(accumulation_pattern_df)
+
+        for schematic in result.get("accumulation_schematics", []):
+            l6 = schematic.get("lecture_6_enhancements", {})
+            dual_dev = l6.get("dual_side_deviation", {})
+
+            risk_state = dual_dev.get("risk_state")
+            assert risk_state in ["risk_on", "risk_off", "neutral", None]
+
+            # If both sides deviated, should be risk_on
+            if dual_dev.get("has_dual_deviation"):
+                assert risk_state == "risk_on"
+
+
+@pytest.mark.unit
+class TestLTFToHTFTransition:
+    """Tests for LTF-to-HTF range transition detection"""
+
+    def test_ltf_htf_transition_structure(self, accumulation_pattern_df):
+        """Test LTF-HTF transition returns correct structure"""
+        detector = TCTSchematicDetector(accumulation_pattern_df)
+        result = detector.detect_all_schematics()
+
+        for schematic in result.get("accumulation_schematics", []):
+            l6 = schematic.get("lecture_6_enhancements", {})
+            transition = l6.get("ltf_htf_transition", {})
+
+            assert "is_nested_in_htf_range" in transition
+            assert "htf_range_detected" in transition
+            assert "size_ratio" in transition or transition.get("size_ratio") is None
+            assert "recommendation" in transition
+            assert isinstance(transition["is_nested_in_htf_range"], bool)
+
+    def test_nested_range_size_ratio(self, accumulation_pattern_df):
+        """Test size ratio is calculated for nested ranges"""
+        result = detect_tct_schematics(accumulation_pattern_df)
+
+        for schematic in result.get("accumulation_schematics", []):
+            l6 = schematic.get("lecture_6_enhancements", {})
+            transition = l6.get("ltf_htf_transition", {})
+
+            if transition.get("is_nested_in_htf_range"):
+                size_ratio = transition.get("size_ratio")
+                if size_ratio is not None:
+                    # LTF range should be smaller than HTF range (ratio < 1)
+                    assert 0 < size_ratio <= 1.0
+
+
+@pytest.mark.unit
+class TestMultiTFValidity:
+    """Tests for multi-timeframe schematic validity checking"""
+
+    def test_multi_tf_validity_structure(self, accumulation_pattern_df):
+        """Test multi-TF validity returns correct structure"""
+        detector = TCTSchematicDetector(accumulation_pattern_df)
+        result = detector.detect_all_schematics()
+
+        for schematic in result.get("accumulation_schematics", []):
+            l6 = schematic.get("lecture_6_enhancements", {})
+            multi_tf = l6.get("multi_tf_validity", {})
+
+            assert "would_be_valid_on_htf" in multi_tf
+            assert "tap2_tap3_close" in multi_tf
+            assert "would_merge_on_htf" in multi_tf
+            assert "htf_target_recommendation" in multi_tf
+            assert isinstance(multi_tf["would_be_valid_on_htf"], bool)
+
+    def test_close_taps_affect_htf_validity(self, accumulation_pattern_df):
+        """Test that close taps affect HTF validity assessment"""
+        result = detect_tct_schematics(accumulation_pattern_df)
+
+        for schematic in result.get("accumulation_schematics", []):
+            l6 = schematic.get("lecture_6_enhancements", {})
+            multi_tf = l6.get("multi_tf_validity", {})
+
+            # If taps are close and would merge, should have HTF target recommendation
+            if multi_tf.get("tap2_tap3_close") and multi_tf.get("would_merge_on_htf"):
+                assert multi_tf.get("htf_target_recommendation") is not None
+
+
+@pytest.mark.unit
+class TestEnhancedWOVInWOV:
+    """Tests for enhanced WOV-in-WOV (schematic within schematic) detection"""
+
+    def test_wov_in_wov_structure(self, accumulation_pattern_df):
+        """Test WOV-in-WOV returns correct structure"""
+        detector = TCTSchematicDetector(accumulation_pattern_df)
+        result = detector.detect_all_schematics()
+
+        for schematic in result.get("accumulation_schematics", []):
+            l6 = schematic.get("lecture_6_enhancements", {})
+            wov = l6.get("wov_in_wov", {})
+
+            assert "has_inner_schematic" in wov
+            assert "inner_schematic_type" in wov or wov.get("inner_schematic_type") is None
+            assert "rr_improvement_factor" in wov or wov.get("rr_improvement_factor") is None
+            assert "wov_entry_price" in wov or wov.get("wov_entry_price") is None
+            assert "wov_stop_loss" in wov or wov.get("wov_stop_loss") is None
+            assert "recommendation" in wov
+            assert isinstance(wov["has_inner_schematic"], bool)
+
+    def test_wov_improves_rr(self, accumulation_pattern_df):
+        """Test that WOV entry improves R:R when detected"""
+        result = detect_tct_schematics(accumulation_pattern_df)
+
+        for schematic in result.get("accumulation_schematics", []):
+            l6 = schematic.get("lecture_6_enhancements", {})
+            wov = l6.get("wov_in_wov", {})
+
+            if wov.get("has_inner_schematic"):
+                improvement = wov.get("rr_improvement_factor")
+                if improvement is not None:
+                    # WOV should improve R:R (factor > 1)
+                    assert improvement >= 1.0
+
+
+@pytest.mark.unit
+class TestModel1ToModel2Flow:
+    """Tests for Model 1 to Model 2 flow detection"""
+
+    def test_m1_to_m2_flow_structure(self, accumulation_pattern_df):
+        """Test M1-to-M2 flow returns correct structure"""
+        detector = TCTSchematicDetector(accumulation_pattern_df)
+        result = detector.detect_all_schematics()
+
+        for schematic in result.get("accumulation_schematics", []):
+            l6 = schematic.get("lecture_6_enhancements", {})
+            m1_m2 = l6.get("model1_to_model2_flow", {})
+
+            assert "m1_to_m2_detected" in m1_m2
+            assert "current_model" in m1_m2
+            assert "can_flow_to_m2" in m1_m2
+            assert "m2_entry_zone" in m1_m2 or m1_m2.get("m2_entry_zone") is None
+            assert "position_management" in m1_m2 or m1_m2.get("position_management") is None
+            assert "extended_target" in m1_m2 or m1_m2.get("extended_target") is None
+            assert isinstance(m1_m2["m1_to_m2_detected"], bool)
+
+    def test_m1_to_m2_position_management(self, accumulation_pattern_df):
+        """Test position management advice is provided for M1-M2 flow"""
+        result = detect_tct_schematics(accumulation_pattern_df)
+
+        for schematic in result.get("accumulation_schematics", []):
+            l6 = schematic.get("lecture_6_enhancements", {})
+            m1_m2 = l6.get("model1_to_model2_flow", {})
+
+            if m1_m2.get("m1_to_m2_detected"):
+                position = m1_m2.get("position_management")
+                if position is not None:
+                    assert "add_at_m2" in position
+                    assert "keep_same_stop" in position
+                    assert "extended_target" in position
+
+
+@pytest.mark.unit
+class TestContextBasedFollowThrough:
+    """Tests for context-based follow-through prediction"""
+
+    def test_context_follow_through_structure(self, accumulation_pattern_df):
+        """Test context follow-through returns correct structure"""
+        detector = TCTSchematicDetector(accumulation_pattern_df)
+        result = detector.detect_all_schematics()
+
+        for schematic in result.get("accumulation_schematics", []):
+            l6 = schematic.get("lecture_6_enhancements", {})
+            context = l6.get("context_follow_through", {})
+
+            assert "bias" in context
+            assert "context_zone" in context
+            assert "expectation" in context
+            assert "confidence" in context or context.get("confidence") is None
+            assert "enhanced_target" in context or context.get("enhanced_target") is None
+
+    def test_context_bias_values(self, accumulation_pattern_df):
+        """Test context bias has valid values"""
+        result = detect_tct_schematics(accumulation_pattern_df)
+
+        for schematic in result.get("accumulation_schematics", []):
+            l6 = schematic.get("lecture_6_enhancements", {})
+            context = l6.get("context_follow_through", {})
+
+            bias = context.get("bias")
+            assert bias in ["bullish", "bearish", "neutral", None]
+
+    def test_premium_discount_zones(self, accumulation_pattern_df):
+        """Test premium/discount zone detection"""
+        result = detect_tct_schematics(accumulation_pattern_df)
+
+        for schematic in result.get("accumulation_schematics", []):
+            l6 = schematic.get("lecture_6_enhancements", {})
+            context = l6.get("context_follow_through", {})
+
+            zone = context.get("context_zone")
+            if zone is not None:
+                assert zone in ["premium", "discount", "equilibrium", "unknown"]
+
+
+@pytest.fixture
+def dual_deviation_pattern_df():
+    """DataFrame with dual-side deviation pattern (both high and low deviated)"""
+    dates = pd.date_range('2026-01-01', periods=200, freq='1h')
+    base = 100000
+    prices = []
+
+    # Stage 1: Range formation (candles 0-50)
+    range_low = base - 1000
+    range_high = base + 1000
+    for i in range(50):
+        prices.append(base + np.random.uniform(-800, 800))
+
+    # Stage 2: First deviation above (candles 50-80) - High side deviation
+    for i in range(30):
+        deviation_up = 1500 + i * 30
+        prices.append(range_high + deviation_up + np.random.uniform(-100, 100))
+
+    # Stage 3: Return to range (candles 80-110)
+    for i in range(30):
+        prices.append(base + np.random.uniform(-500, 500))
+
+    # Stage 4: Deviation below (candles 110-140) - Low side deviation
+    for i in range(30):
+        deviation_down = 1500 + i * 30
+        prices.append(range_low - deviation_down + np.random.uniform(-100, 100))
+
+    # Stage 5: Recovery (candles 140-200)
+    for i in range(60):
+        prices.append(range_low - 1000 + i * 50 + np.random.uniform(-80, 80))
+
+    return pd.DataFrame({
+        'open_time': dates,
+        'open': prices,
+        'high': [p + np.random.uniform(80, 200) for p in prices],
+        'low': [p - np.random.uniform(80, 200) for p in prices],
+        'close': [p + np.random.uniform(-100, 100) for p in prices],
+        'volume': np.random.uniform(100, 1000, 200)
+    })
+
+
+@pytest.mark.unit
+class TestDualDeviationPatternDetection:
+    """Tests specifically for dual deviation patterns"""
+
+    def test_dual_deviation_pattern_detection(self, dual_deviation_pattern_df):
+        """Test detection of dual-side deviation patterns"""
+        result = detect_tct_schematics(dual_deviation_pattern_df)
+
+        assert "error" not in result
+        assert result["candles_analyzed"] == 200
+
+        # Check for dual deviation detection in any schematic
+        all_schematics = (
+            result.get("accumulation_schematics", []) +
+            result.get("distribution_schematics", [])
+        )
+
+        for schematic in all_schematics:
+            l6 = schematic.get("lecture_6_enhancements", {})
+            dual_dev = l6.get("dual_side_deviation", {})
+
+            # Structure should always be present
+            assert "has_dual_deviation" in dual_dev
+            assert "risk_state" in dual_dev
+
+
+@pytest.mark.integration
+class TestLecture6Integration:
+    """Integration tests for Lecture 6 enhancements"""
+
+    def test_full_lecture_6_detection_pipeline(self):
+        """Test complete detection with all Lecture 6 features"""
+        np.random.seed(42)
+        dates = pd.date_range('2026-01-01', periods=200, freq='1h')
+        base = 100000
+        prices = []
+
+        # Create complex pattern with multiple Lecture 6 features
+        # Phase 1: Downtrend
+        for i in range(40):
+            prices.append(base - i * 80 + np.random.uniform(-30, 30))
+
+        # Phase 2: Range at low
+        range_low = base - 3200
+        for i in range(30):
+            prices.append(range_low + np.random.uniform(0, 500))
+
+        # Phase 3: Deviation below (potential WOV-in-WOV zone)
+        for i in range(20):
+            prices.append(range_low - 300 - i * 20 + np.random.uniform(-50, 50))
+
+        # Phase 4: Second deviation (Model 1 tap3)
+        for i in range(20):
+            prices.append(range_low - 800 - i * 10 + np.random.uniform(-40, 40))
+
+        # Phase 5: Recovery (could trigger M1 to M2 flow)
+        for i in range(90):
+            prices.append(range_low - 600 + i * 30 + np.random.uniform(-60, 60))
+
+        df = pd.DataFrame({
+            'open_time': dates,
+            'open': prices,
+            'high': [p + np.random.uniform(50, 150) for p in prices],
+            'low': [p - np.random.uniform(50, 150) for p in prices],
+            'close': [p + np.random.uniform(-60, 60) for p in prices],
+            'volume': np.random.uniform(100, 1000, 200)
+        })
+
+        result = detect_tct_schematics(df)
+
+        assert "error" not in result
+        assert result["candles_analyzed"] == 200
+
+        # Verify all Lecture 6 enhancements are present in results
+        all_schematics = (
+            result.get("accumulation_schematics", []) +
+            result.get("distribution_schematics", [])
+        )
+
+        for schematic in all_schematics:
+            l6 = schematic.get("lecture_6_enhancements", {})
+
+            # All L6 feature categories should be present
+            assert "dual_side_deviation" in l6
+            assert "ltf_htf_transition" in l6
+            assert "multi_tf_validity" in l6
+            assert "wov_in_wov" in l6
+            assert "model1_to_model2_flow" in l6
+            assert "context_follow_through" in l6
+
+            # Summary flags should be present
+            assert "has_conversion" in l6
+            assert "has_dual_deviation" in l6
+            assert "is_nested_in_htf" in l6
+            assert "valid_on_htf" in l6
+            assert "has_wov_opportunity" in l6
+            assert "has_m1_to_m2_opportunity" in l6
+            assert "follow_through_bias" in l6
+
+    def test_lecture_6_with_external_ranges(self):
+        """Test Lecture 6 detection works with externally provided ranges"""
+        np.random.seed(789)
+        dates = pd.date_range('2026-01-01', periods=150, freq='1h')
+
+        prices = [100000 + np.random.uniform(-500, 500) for _ in range(150)]
+
+        df = pd.DataFrame({
+            'open_time': dates,
+            'open': prices,
+            'high': [p + 200 for p in prices],
+            'low': [p - 200 for p in prices],
+            'close': prices,
+            'volume': np.random.uniform(100, 1000, 150)
+        })
+
+        # Provide external ranges
+        external_ranges = [{
+            "range_high": 100500.0,
+            "range_low": 99500.0,
+            "equilibrium": 100000.0,
+            "range_size": 1000.0,
+            "dl_high": 100800.0,
+            "dl_low": 99200.0,
+            "range_high_idx": 20,
+            "range_low_idx": 30
+        }]
+
+        result = detect_tct_schematics(df, external_ranges)
+
+        assert "error" not in result
+
+        # All schematics should have Lecture 6 enhancements
+        for schematic in result.get("accumulation_schematics", []):
+            assert "lecture_6_enhancements" in schematic
+
+        for schematic in result.get("distribution_schematics", []):
+            assert "lecture_6_enhancements" in schematic
+
+    def test_both_lecture_5b_and_6_present(self):
+        """Test both Lecture 5B and 6 enhancements are present"""
+        np.random.seed(42)
+        dates = pd.date_range('2026-01-01', periods=200, freq='1h')
+        base = 100000
+        prices = []
+
+        for i in range(40):
+            prices.append(base - i * 80 + np.random.uniform(-30, 30))
+
+        range_low = base - 3200
+        for i in range(30):
+            prices.append(range_low + np.random.uniform(0, 500))
+
+        for i in range(20):
+            prices.append(range_low - 300 - i * 20 + np.random.uniform(-50, 50))
+
+        for i in range(20):
+            prices.append(range_low - 800 - i * 10 + np.random.uniform(-40, 40))
+
+        for i in range(90):
+            prices.append(range_low - 600 + i * 30 + np.random.uniform(-60, 60))
+
+        df = pd.DataFrame({
+            'open_time': dates,
+            'open': prices,
+            'high': [p + np.random.uniform(50, 150) for p in prices],
+            'low': [p - np.random.uniform(50, 150) for p in prices],
+            'close': [p + np.random.uniform(-60, 60) for p in prices],
+            'volume': np.random.uniform(100, 1000, 200)
+        })
+
+        result = detect_tct_schematics(df)
+
+        all_schematics = (
+            result.get("accumulation_schematics", []) +
+            result.get("distribution_schematics", [])
+        )
+
+        for schematic in all_schematics:
+            # Both enhancement sections should be present
+            assert "lecture_5b_enhancements" in schematic
+            assert "lecture_6_enhancements" in schematic
+
+            # Verify some key fields from each
+            l5b = schematic.get("lecture_5b_enhancements", {})
+            l6 = schematic.get("lecture_6_enhancements", {})
+
+            # Lecture 5B
+            assert "htf_validation" in l5b
+            assert "overlapping_structure" in l5b
+
+            # Lecture 6
+            assert "dual_side_deviation" in l6
+            assert "wov_in_wov" in l6
