@@ -4312,7 +4312,7 @@ async def get_tct_schematics():
 
         current_price = float(ltf_df.iloc[-1]["close"])
 
-        # Convert DataFrames to list of dicts for processing
+        # Detect ranges for both timeframes (convert to list for range detection)
         def df_to_candles(df):
             candles = []
             for _, row in df.iterrows():
@@ -4326,46 +4326,54 @@ async def get_tct_schematics():
                 })
             return candles
 
-        htf_candles = df_to_candles(htf_df)
-        ltf_candles = df_to_candles(ltf_df)
+        htf_candles_list = df_to_candles(htf_df)
+        ltf_candles_list = df_to_candles(ltf_df)
 
         # Detect ranges for both timeframes
-        htf_ranges = await detect_best_range(htf_candles)
-        ltf_ranges = await detect_best_range(ltf_candles)
+        htf_ranges = await detect_best_range(htf_candles_list)
+        ltf_ranges = await detect_best_range(ltf_candles_list)
 
         # Convert single range to list if needed
         htf_range_list = [htf_ranges] if htf_ranges and not isinstance(htf_ranges, list) else (htf_ranges or [])
         ltf_range_list = [ltf_ranges] if ltf_ranges and not isinstance(ltf_ranges, list) else (ltf_ranges or [])
 
-        # Detect TCT schematics on both timeframes
-        htf_schematics = detect_tct_schematics(htf_candles, htf_range_list)
-        ltf_schematics = detect_tct_schematics(ltf_candles, ltf_range_list)
+        # Detect TCT schematics on both timeframes (pass DataFrame, not list)
+        htf_schematics_result = detect_tct_schematics(htf_df, htf_range_list)
+        ltf_schematics_result = detect_tct_schematics(ltf_df, ltf_range_list)
+
+        # Extract schematic lists from result dict
+        htf_schematics = (
+            htf_schematics_result.get("accumulation_schematics", []) +
+            htf_schematics_result.get("distribution_schematics", [])
+        )
+        ltf_schematics = (
+            ltf_schematics_result.get("accumulation_schematics", []) +
+            ltf_schematics_result.get("distribution_schematics", [])
+        )
 
         # Filter and sort schematics by quality
         def filter_active_schematics(schematics, current_price):
             """Filter to schematics that are still valid for trading"""
             active = []
             for s in schematics:
+                if not isinstance(s, dict):
+                    continue
                 # Check if schematic is still valid (price hasn't hit target or stop)
-                if s.get('trade_management'):
-                    tm = s['trade_management']
-                    entry = tm.get('entry_price')
-                    target = tm.get('target_price')
-                    stop = tm.get('stop_loss')
+                entry = s.get('entry', {}).get('price')
+                target = s.get('target', {}).get('price')
+                stop = s.get('stop_loss', {}).get('price')
 
-                    if entry and target and stop:
-                        # For long (accumulation)
-                        if s['schematic_type'] in ['model_1_accumulation', 'model_2_accumulation']:
-                            if current_price < target and current_price > stop:
-                                active.append(s)
-                        # For short (distribution)
-                        elif s['schematic_type'] in ['model_1_distribution', 'model_2_distribution']:
-                            if current_price > target and current_price < stop:
-                                active.append(s)
-                    else:
-                        # No trade management yet, still forming
-                        active.append(s)
+                if entry and target and stop:
+                    # For long (accumulation)
+                    if s.get('direction') == 'bullish':
+                        if current_price < target and current_price > stop:
+                            active.append(s)
+                    # For short (distribution)
+                    elif s.get('direction') == 'bearish':
+                        if current_price > target and current_price < stop:
+                            active.append(s)
                 else:
+                    # No complete trade management yet, still include
                     active.append(s)
             return sorted(active, key=lambda x: x.get('quality_score', 0), reverse=True)
 
