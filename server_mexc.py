@@ -17,6 +17,36 @@ from loguru import logger
 
 from tct_schematics import detect_tct_schematics
 
+
+# ================================================================
+# NUMPY SERIALIZATION HELPER
+# ================================================================
+
+def convert_numpy_types(obj):
+    """
+    Recursively convert numpy types to Python native types for JSON serialization.
+    Handles: numpy.bool_, numpy.int64, numpy.float64, numpy.ndarray, etc.
+    """
+    if isinstance(obj, dict):
+        return {k: convert_numpy_types(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_numpy_types(item) for item in obj]
+    elif isinstance(obj, tuple):
+        return tuple(convert_numpy_types(item) for item in obj)
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif pd.isna(obj):
+        return None
+    else:
+        return obj
+
+
 # ================================================================
 # CONFIGURATION
 # ================================================================
@@ -3937,7 +3967,8 @@ async def detect_ranges():
             quality = r.get("quality", {}).get("quality_label", "UNKNOWN")
             ltf_quality_dist[quality] = ltf_quality_dist.get(quality, 0) + 1
 
-        return JSONResponse({
+        # Convert numpy types to native Python types for JSON serialization
+        response_data = convert_numpy_types({
             "symbol": SYMBOL,
             "current_price": current_price,
             "methodology": "TCT Mentorship Lecture 2 - Ranges",
@@ -3996,6 +4027,7 @@ async def detect_ranges():
                 "bad_bos_deviation": "Candle close deviation - closes back inside quickly"
             }
         })
+        return JSONResponse(response_data)
 
     except Exception as e:
         logger.error(f"[RANGES_ERROR] {e}")
@@ -4352,10 +4384,11 @@ async def get_tct_schematics():
                 'forming': sum(1 for s in schematics if s.get('status') == 'forming'),
             }
 
-        return JSONResponse({
+        # Convert numpy types to native Python types for JSON serialization
+        response_data = convert_numpy_types({
             "symbol": SYMBOL,
             "current_price": current_price,
-            "methodology": "TCT Mentorship Lecture 5A - TCT Schematics",
+            "methodology": "TCT Mentorship Lecture 5A + 5B - TCT Schematics",
             "htf_schematics": {
                 "timeframe": "4h",
                 "schematics": htf_active[:5],  # Top 5 by quality
@@ -4381,6 +4414,7 @@ async def get_tct_schematics():
                 "best_ltf_quality": ltf_active[0].get('quality_score', 0) if ltf_active else 0,
             }
         })
+        return JSONResponse(response_data)
 
     except Exception as e:
         logger.error(f"[SCHEMATICS_ERROR] {e}")
