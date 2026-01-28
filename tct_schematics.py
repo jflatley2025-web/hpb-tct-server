@@ -1,11 +1,12 @@
 """
-tct_schematics.py — TCT Schematics Detection (Lecture 5A + 5B Advanced Methodology)
+tct_schematics.py — TCT Schematics Detection (Lecture 5A + 5B + 6 Advanced Methodology)
 Author: HPB-TCT Dev Team
-Date: 2026-01-26
+Date: 2026-01-27
 
 Detects TCT Schematics (Accumulation & Distribution Models 1 and 2) based on:
 - TCT 2024 mentorship - Lecture 5A | TCT schematics (core methodology)
 - TCT 2024 mentorship - Lecture 5B | TCT schematics (advanced enhancements)
+- TCT 2024 mentorship - Lecture 6 | Advanced TCT schematics
 - Wyckoff methodology simplified with TCT rules
 
 TCT Schematic Key Concepts (Lecture 5A):
@@ -26,6 +27,23 @@ Advanced Concepts (Lecture 5B):
 - Model 2 failure → Model 1 transition: Detect when M2 fails and converts to M1
 - Range quality/rationality: Horizontal price action with logical tap distances
 
+Advanced Concepts (Lecture 6):
+- Distribution-to-Accumulation conversion: Distribution can turn into accumulation when price
+  deviates the low instead of breaking it (and vice versa)
+- Dual-side deviation awareness: When both sides already deviated, watch structure for confirmation
+  of which direction (risk-on for long = bullish BOS, risk-off for short = bearish BOS)
+- LTF-to-HTF range transition: Low timeframe ranges can grow into high timeframe ranges
+  (LTF break → MTF structure → HTF range)
+- Multi-timeframe schematic validity: Same range can have different schematics on different TFs
+  (LTF tap2/tap3 may disappear on HTF, can trade both sequentially)
+- WOV-in-WOV (schematic within schematic): Third tap of larger schematic contains its own
+  TCT schematic, dramatically improving R:R (e.g., from 2.2 to 9 to 21)
+- Model 1 → Model 2 flow: Model 1 confirms, but creates 4th tap (HL/LH) that becomes valid
+  3rd tap from Model 2 perspective. Allows trailing stop and adding position.
+  Usually indicates strong follow-through beyond range extreme.
+- Context-based follow-through prediction: Premium pricing = expect distribution,
+  Discount pricing = expect accumulation. Bigger trend affects follow-through.
+
 Terminology:
 - Accumulation: Trending down → range forms → breaks upside (reversal)
 - Re-accumulation: Trending up → range forms → breaks upside (continuation)
@@ -44,7 +62,7 @@ logger = logging.getLogger("TCT-Schematics")
 
 class TCTSchematicDetector:
     """
-    Main TCT Schematic Detection Engine implementing Lecture 5A + 5B methodology.
+    Main TCT Schematic Detection Engine implementing Lecture 5A + 5B + 6 methodology.
 
     Pure TCT Methodology (Lecture 5A):
     - Model 1 Accumulation: Tap1 (range low) → Tap2 (deviation lower) → Tap3 (deviation even lower)
@@ -61,6 +79,15 @@ class TCTSchematicDetector:
     - Model 2 → Model 1 failure transition detection
     - Range quality scoring based on horizontal price action
 
+    Advanced Features (Lecture 6):
+    - Distribution-to-Accumulation conversion: Detect when distribution turns into accumulation
+    - Dual-side deviation awareness: Handle ranges with deviations on both sides
+    - LTF-to-HTF range transition: Detect low timeframe ranges growing into higher timeframes
+    - Multi-TF schematic validity: Same range can have different schematics on different TFs
+    - WOV-in-WOV: Third tap contains its own schematic for dramatically improved R:R
+    - Model 1 → Model 2 flow: Detect when M1 flows into M2 for position management
+    - Context-based follow-through prediction: Use premium/discount to predict direction
+
     Entry Confirmation:
     - Watch structure from highest/lowest point between Tap2 and Tap3
     - When structure breaks back to bullish/bearish = entry confirmation
@@ -73,6 +100,13 @@ class TCTSchematicDetector:
     MIN_RR_RATIO = 2.0  # Lecture 5B: Minimum 1:2 R:R requirement
     TAP_SPACING_TOLERANCE = 0.25  # 25% tolerance for equal tap spacing
     RANGE_QUALITY_MIN = 0.6  # Minimum range quality score for valid schematic
+
+    # Lecture 6 constants
+    PREMIUM_THRESHOLD = 0.75  # Above 75% of range = premium (expect distribution)
+    DISCOUNT_THRESHOLD = 0.25  # Below 25% of range = discount (expect accumulation)
+    LTF_HTF_SIZE_RATIO = 0.4  # LTF range should be max 40% of HTF range to be nested
+    WOV_IN_WOV_MIN_RR_IMPROVEMENT = 2.0  # WOV entry should at least double R:R
+    M1_TO_M2_FOLLOW_THROUGH_BONUS = 1.5  # M1→M2 typically extends target by 50%
 
     def __init__(self, candles: pd.DataFrame):
         """Initialize with candle data."""
@@ -1060,6 +1094,49 @@ class TCTSchematicDetector:
         # Determine if entry is safe (no S/D conflicts)
         entry_is_safe = not (sd_zone_check and sd_zone_check.get("has_conflict", False))
 
+        # ============================================================
+        # LECTURE 6 ENHANCEMENTS: ADVANCED TCT SCHEMATICS
+        # ============================================================
+
+        # Build preliminary schematic for Lecture 6 methods that need schematic input
+        preliminary_schematic = {
+            "schematic_type": schematic_type,
+            "direction": "bullish",
+            "model": model_type,
+            "tap1": tap1,
+            "tap2": tap2,
+            "tap3": tap3,
+            "bos_confirmation": bos,
+            "entry": {"price": entry_price},
+            "stop_loss": {"price": stop_loss},
+            "target": {"price": target}
+        }
+
+        # 1. Schematic conversion detection (Distribution converting to Accumulation)
+        schematic_conversion = self._detect_schematic_conversion(preliminary_schematic, range_data)
+
+        # 2. Dual-side deviation awareness
+        dual_side_deviation = self._detect_dual_side_deviation(
+            range_data, tap2, tap3, schematic_type
+        )
+
+        # 3. LTF-to-HTF range transition detection
+        ltf_htf_transition = self._detect_ltf_to_htf_range_transition(range_data, tap3["idx"])
+
+        # 4. Multi-timeframe schematic validity
+        multi_tf_validity = self._detect_multi_tf_schematic_validity(tap1, tap2, tap3, range_data)
+
+        # 5. Enhanced WOV-in-WOV (schematic within schematic)
+        wov_in_wov = self._detect_enhanced_wov_in_wov(tap3, range_data, schematic_type)
+
+        # 6. Model 1 to Model 2 flow detection
+        m1_to_m2_flow = self._detect_model1_to_model2_flow(preliminary_schematic, range_data)
+
+        # 7. Context-based follow-through prediction
+        context_follow_through = self._calculate_context_based_follow_through(
+            range_data, schematic_type, tap3
+        )
+
         return {
             "schematic_type": schematic_type,
             "direction": "bullish",
@@ -1108,6 +1185,25 @@ class TCTSchematicDetector:
                 "range_quality": range_quality,
                 "meets_minimum_rr": rr_analysis["meets_minimum_rr"] if rr_analysis else False,
                 "has_trendline_confluence": trendline_liq.get("provides_confluence", False)
+            },
+            # Lecture 6 enhanced fields: Advanced TCT Schematics
+            "lecture_6_enhancements": {
+                "schematic_conversion": schematic_conversion,
+                "dual_side_deviation": dual_side_deviation,
+                "ltf_htf_transition": ltf_htf_transition,
+                "multi_tf_validity": multi_tf_validity,
+                "wov_in_wov": wov_in_wov,
+                "model1_to_model2_flow": m1_to_m2_flow,
+                "context_follow_through": context_follow_through,
+                # Summary flags for quick reference
+                "has_conversion": schematic_conversion is not None,
+                "has_dual_deviation": dual_side_deviation.get("has_dual_deviation", False),
+                "is_nested_in_htf": ltf_htf_transition.get("is_nested_in_htf_range", False),
+                "valid_on_htf": multi_tf_validity.get("would_be_valid_on_htf", False),
+                "has_wov_opportunity": wov_in_wov.get("has_inner_schematic", False),
+                "has_m1_to_m2_opportunity": m1_to_m2_flow.get("m1_to_m2_detected", False),
+                "follow_through_bias": context_follow_through.get("bias", "neutral"),
+                "enhanced_target": context_follow_through.get("enhanced_target")
             },
             "timestamp": datetime.utcnow().isoformat()
         }
@@ -1194,6 +1290,49 @@ class TCTSchematicDetector:
         # Determine if entry is safe (no S/D conflicts)
         entry_is_safe = not (sd_zone_check and sd_zone_check.get("has_conflict", False))
 
+        # ============================================================
+        # LECTURE 6 ENHANCEMENTS: ADVANCED TCT SCHEMATICS
+        # ============================================================
+
+        # Build preliminary schematic for Lecture 6 methods that need schematic input
+        preliminary_schematic = {
+            "schematic_type": schematic_type,
+            "direction": "bearish",
+            "model": model_type,
+            "tap1": tap1,
+            "tap2": tap2,
+            "tap3": tap3,
+            "bos_confirmation": bos,
+            "entry": {"price": entry_price},
+            "stop_loss": {"price": stop_loss},
+            "target": {"price": target}
+        }
+
+        # 1. Schematic conversion detection (Accumulation converting to Distribution)
+        schematic_conversion = self._detect_schematic_conversion(preliminary_schematic, range_data)
+
+        # 2. Dual-side deviation awareness
+        dual_side_deviation = self._detect_dual_side_deviation(
+            range_data, tap2, tap3, schematic_type
+        )
+
+        # 3. LTF-to-HTF range transition detection
+        ltf_htf_transition = self._detect_ltf_to_htf_range_transition(range_data, tap3["idx"])
+
+        # 4. Multi-timeframe schematic validity
+        multi_tf_validity = self._detect_multi_tf_schematic_validity(tap1, tap2, tap3, range_data)
+
+        # 5. Enhanced WOV-in-WOV (schematic within schematic)
+        wov_in_wov = self._detect_enhanced_wov_in_wov(tap3, range_data, schematic_type)
+
+        # 6. Model 1 to Model 2 flow detection
+        m1_to_m2_flow = self._detect_model1_to_model2_flow(preliminary_schematic, range_data)
+
+        # 7. Context-based follow-through prediction
+        context_follow_through = self._calculate_context_based_follow_through(
+            range_data, schematic_type, tap3
+        )
+
         return {
             "schematic_type": schematic_type,
             "direction": "bearish",
@@ -1242,6 +1381,25 @@ class TCTSchematicDetector:
                 "range_quality": range_quality,
                 "meets_minimum_rr": rr_analysis["meets_minimum_rr"] if rr_analysis else False,
                 "has_trendline_confluence": trendline_liq.get("provides_confluence", False)
+            },
+            # Lecture 6 enhanced fields: Advanced TCT Schematics
+            "lecture_6_enhancements": {
+                "schematic_conversion": schematic_conversion,
+                "dual_side_deviation": dual_side_deviation,
+                "ltf_htf_transition": ltf_htf_transition,
+                "multi_tf_validity": multi_tf_validity,
+                "wov_in_wov": wov_in_wov,
+                "model1_to_model2_flow": m1_to_m2_flow,
+                "context_follow_through": context_follow_through,
+                # Summary flags for quick reference
+                "has_conversion": schematic_conversion is not None,
+                "has_dual_deviation": dual_side_deviation.get("has_dual_deviation", False),
+                "is_nested_in_htf": ltf_htf_transition.get("is_nested_in_htf_range", False),
+                "valid_on_htf": multi_tf_validity.get("would_be_valid_on_htf", False),
+                "has_wov_opportunity": wov_in_wov.get("has_inner_schematic", False),
+                "has_m1_to_m2_opportunity": m1_to_m2_flow.get("m1_to_m2_detected", False),
+                "follow_through_bias": context_follow_through.get("bias", "neutral"),
+                "enhanced_target": context_follow_through.get("enhanced_target")
             },
             "timestamp": datetime.utcnow().isoformat()
         }
@@ -2007,6 +2165,1029 @@ class TCTSchematicDetector:
 
         except Exception as e:
             logger.debug(f"Error calculating range quality: {e}")
+
+        return result
+
+    # ================================================================
+    # LECTURE 6: ADVANCED TCT SCHEMATICS
+    # ================================================================
+
+    def _detect_schematic_conversion(self, schematic: Dict, range_data: Dict) -> Optional[Dict]:
+        """
+        Lecture 6: Detect when a schematic converts to the opposite type.
+
+        TCT 6: "The same way if price starts deviating the low confirming a potential
+        TCT accumulation schematic, the same way price could be confirming a TCT
+        distribution once that range high target of the accumulation gets hit but
+        starts to deviate"
+
+        TCT 6: "A distribution can always go over into an accumulation just like
+        the accumulation can go over into a distribution"
+
+        Args:
+            schematic: The original schematic that may be converting
+            range_data: Range data for the schematic
+
+        Returns:
+            Dict with conversion info if detected, None otherwise
+        """
+        result = {
+            "conversion_detected": False,
+            "original_type": schematic.get("schematic_type"),
+            "converted_type": None,
+            "conversion_trigger": None,
+            "new_tap3_price": None,
+            "new_tap3_idx": None,
+            "follow_through_expectation": None
+        }
+
+        try:
+            original_type = schematic.get("schematic_type", "")
+            target_price = schematic.get("target", {}).get("price")
+            tap3_idx = schematic.get("tap3", {}).get("idx", 0)
+            range_high = range_data["range_high"]
+            range_low = range_data["range_low"]
+
+            if not target_price or tap3_idx >= len(self.candles) - 10:
+                return result
+
+            # Search for conversion after schematic confirmation
+            search_start = tap3_idx + 5
+            search_end = min(tap3_idx + 50, len(self.candles) - 5)
+
+            if "Accumulation" in original_type:
+                # Accumulation targets range high
+                # Conversion happens if price reaches target then deviates it,
+                # potentially starting a distribution
+
+                for i in range(search_start, search_end):
+                    candle = self.candles.iloc[i]
+
+                    # Check if target (range high) was reached
+                    if candle["high"] >= target_price:
+                        # Now look for deviation above range high (start of distribution)
+                        deviation_high = candle["high"]
+                        deviation_idx = i
+
+                        # Find the highest point of this deviation
+                        for j in range(i, min(i + 15, len(self.candles))):
+                            if self.candles.iloc[j]["high"] > deviation_high:
+                                deviation_high = self.candles.iloc[j]["high"]
+                                deviation_idx = j
+                            # Check if it came back inside (valid deviation)
+                            if self.candles.iloc[j]["close"] < range_high:
+                                # This is a valid deviation - potential distribution starting
+                                result["conversion_detected"] = True
+                                result["converted_type"] = "Model_2_Distribution"
+                                result["conversion_trigger"] = "target_hit_then_deviated"
+                                result["new_tap3_price"] = float(deviation_high)
+                                result["new_tap3_idx"] = deviation_idx
+                                result["follow_through_expectation"] = "expect_rotation_to_low"
+                                return result
+
+            elif "Distribution" in original_type:
+                # Distribution targets range low
+                # Conversion happens if price reaches target then deviates it,
+                # potentially starting an accumulation
+
+                for i in range(search_start, search_end):
+                    candle = self.candles.iloc[i]
+
+                    # Check if target (range low) was reached
+                    if candle["low"] <= target_price:
+                        # Now look for deviation below range low (start of accumulation)
+                        deviation_low = candle["low"]
+                        deviation_idx = i
+
+                        # Find the lowest point of this deviation
+                        for j in range(i, min(i + 15, len(self.candles))):
+                            if self.candles.iloc[j]["low"] < deviation_low:
+                                deviation_low = self.candles.iloc[j]["low"]
+                                deviation_idx = j
+                            # Check if it came back inside (valid deviation)
+                            if self.candles.iloc[j]["close"] > range_low:
+                                # This is a valid deviation - potential accumulation starting
+                                result["conversion_detected"] = True
+                                result["converted_type"] = "Model_2_Accumulation"
+                                result["conversion_trigger"] = "target_hit_then_deviated"
+                                result["new_tap3_price"] = float(deviation_low)
+                                result["new_tap3_idx"] = deviation_idx
+                                result["follow_through_expectation"] = "expect_rotation_to_high"
+                                return result
+
+        except Exception as e:
+            logger.debug(f"Error detecting schematic conversion: {e}")
+
+        return result
+
+    def _detect_dual_side_deviation(self, range_data: Dict, tap2: Dict, tap3: Dict,
+                                     schematic_type: str) -> Dict:
+        """
+        Lecture 6: Detect when range has deviations on both sides prior to confirmation.
+
+        TCT 6: "It happens quite often that prior to confirming either the accumulation
+        or the distribution you have deviations on both sides"
+
+        TCT 6: "In the situations where you do have deviations on both ends, you can't
+        just target the opposite range extreme point once your confirmations have been
+        met because there's always the possibility of price turning into an opposite
+        model 2 schematic"
+
+        Args:
+            range_data: Range data
+            tap2: Current Tap2
+            tap3: Current Tap3
+            schematic_type: Type of schematic being evaluated
+
+        Returns:
+            Dict with dual-side deviation info and risk triggers
+        """
+        result = {
+            "has_dual_side_deviation": False,
+            "high_side_deviated": False,
+            "low_side_deviated": False,
+            "high_deviation_price": None,
+            "low_deviation_price": None,
+            "extreme_demand_zone": None,
+            "extreme_supply_zone": None,
+            "extreme_liquidity_high": None,
+            "extreme_liquidity_low": None,
+            "risk_on_trigger": None,  # When to go risk-on for direction
+            "risk_off_trigger": None,  # When to take profit/exit
+            "watch_structure_from": None,
+            "can_convert_to_opposite": False
+        }
+
+        try:
+            range_high = range_data["range_high"]
+            range_low = range_data["range_low"]
+            dl_high = range_data["dl_high"]
+            dl_low = range_data["dl_low"]
+
+            # Determine the search window
+            range_high_idx = range_data.get("range_high_idx", 0)
+            range_low_idx = range_data.get("range_low_idx", 0)
+            tap3_idx = tap3.get("idx", 0)
+
+            search_start = min(range_high_idx, range_low_idx)
+            search_end = tap3_idx + 5
+
+            # Check for deviation on both sides
+            for i in range(search_start, min(search_end, len(self.candles))):
+                candle = self.candles.iloc[i]
+
+                # Check high side deviation
+                if candle["high"] > range_high and candle["close"] <= dl_high:
+                    if not result["high_side_deviated"]:
+                        result["high_side_deviated"] = True
+                        result["high_deviation_price"] = float(candle["high"])
+
+                # Check low side deviation
+                if candle["low"] < range_low and candle["close"] >= dl_low:
+                    if not result["low_side_deviated"]:
+                        result["low_side_deviated"] = True
+                        result["low_deviation_price"] = float(candle["low"])
+
+            # If both sides are deviated
+            result["has_dual_side_deviation"] = result["high_side_deviated"] and result["low_side_deviated"]
+
+            if result["has_dual_side_deviation"]:
+                result["can_convert_to_opposite"] = True
+
+                # Find extreme S/D zones
+                result["extreme_demand_zone"] = self._find_extreme_demand(range_data, tap3_idx)
+                result["extreme_supply_zone"] = self._find_extreme_supply(range_data, tap3_idx)
+
+                # Find extreme liquidity levels
+                if result["low_deviation_price"]:
+                    result["extreme_liquidity_low"] = {
+                        "price": result["low_deviation_price"],
+                        "type": "extreme_sell_side_liquidity"
+                    }
+                if result["high_deviation_price"]:
+                    result["extreme_liquidity_high"] = {
+                        "price": result["high_deviation_price"],
+                        "type": "extreme_buy_side_liquidity"
+                    }
+
+                # Set risk triggers based on current schematic type
+                if "Accumulation" in schematic_type:
+                    # For accumulation: BOS bullish = risk-on for long, BOS bearish = risk-off
+                    result["risk_on_trigger"] = {
+                        "type": "bullish_bos",
+                        "description": "Break of structure bullish confirms accumulation",
+                        "watch_level": result["low_deviation_price"]
+                    }
+                    result["risk_off_trigger"] = {
+                        "type": "bearish_bos",
+                        "description": "Break of structure bearish - potential distribution forming",
+                        "watch_level": result["high_deviation_price"]
+                    }
+                    result["watch_structure_from"] = "low_up"
+
+                else:  # Distribution
+                    # For distribution: BOS bearish = risk-on for short, BOS bullish = risk-off
+                    result["risk_on_trigger"] = {
+                        "type": "bearish_bos",
+                        "description": "Break of structure bearish confirms distribution",
+                        "watch_level": result["high_deviation_price"]
+                    }
+                    result["risk_off_trigger"] = {
+                        "type": "bullish_bos",
+                        "description": "Break of structure bullish - potential accumulation forming",
+                        "watch_level": result["low_deviation_price"]
+                    }
+                    result["watch_structure_from"] = "high_down"
+
+        except Exception as e:
+            logger.debug(f"Error detecting dual-side deviation: {e}")
+
+        return result
+
+    def _detect_ltf_to_htf_range_transition(self, range_data: Dict, tap3_idx: int) -> Dict:
+        """
+        Lecture 6: Detect when a low timeframe range is growing into a high timeframe range.
+
+        TCT 6: "What you'll see after an aggressive expansion is Market structure trending
+        up and we know after an aggressive expansion price loves to create a range and
+        that range will always start with a low time frame break"
+
+        TCT 6: "You have those low time frame breaks, they will make up for a higher
+        time frame Market structure that will have its own little range"
+
+        TCT 6: "This is exactly how a low time frame range goes over into a high time
+        frame range it happens all the time"
+
+        Args:
+            range_data: Current range data
+            tap3_idx: Index of Tap3
+
+        Returns:
+            Dict with LTF-to-HTF transition info
+        """
+        result = {
+            "transition_detected": False,
+            "original_range": range_data,
+            "expanded_range": None,
+            "transition_type": None,  # "upside_expansion" or "downside_expansion"
+            "new_range_high": None,
+            "new_range_low": None,
+            "expansion_factor": None,
+            "recommendation": None
+        }
+
+        try:
+            range_high = range_data["range_high"]
+            range_low = range_data["range_low"]
+            range_size = range_data["range_size"]
+
+            # Look for expansion beyond the current range after Tap3
+            search_start = tap3_idx + 1
+            search_end = min(tap3_idx + 40, len(self.candles) - 5)
+
+            highest_high = range_high
+            lowest_low = range_low
+            highest_idx = None
+            lowest_idx = None
+
+            for i in range(search_start, search_end):
+                candle = self.candles.iloc[i]
+
+                if candle["high"] > highest_high:
+                    highest_high = float(candle["high"])
+                    highest_idx = i
+
+                if candle["low"] < lowest_low:
+                    lowest_low = float(candle["low"])
+                    lowest_idx = i
+
+            # Check if range expanded significantly
+            new_range_size = highest_high - lowest_low
+            expansion = new_range_size / range_size if range_size > 0 else 1
+
+            # If range expanded by more than 50%, it's transitioning to HTF
+            if expansion > 1.5:
+                result["transition_detected"] = True
+                result["new_range_high"] = highest_high
+                result["new_range_low"] = lowest_low
+                result["expansion_factor"] = round(expansion, 2)
+
+                if highest_idx and highest_idx > tap3_idx + 5:
+                    result["transition_type"] = "upside_expansion"
+                    result["recommendation"] = "Zoom out - LTF range became HTF accumulation zone"
+                elif lowest_idx and lowest_idx > tap3_idx + 5:
+                    result["transition_type"] = "downside_expansion"
+                    result["recommendation"] = "Zoom out - LTF range became HTF distribution zone"
+                else:
+                    result["transition_type"] = "both_sides_expansion"
+                    result["recommendation"] = "Zoom out - LTF range became larger HTF range"
+
+                result["expanded_range"] = {
+                    "range_high": highest_high,
+                    "range_low": lowest_low,
+                    "range_size": new_range_size,
+                    "equilibrium": (highest_high + lowest_low) / 2,
+                    "dl_high": highest_high + (new_range_size * self.DEVIATION_LIMIT_PERCENT),
+                    "dl_low": lowest_low - (new_range_size * self.DEVIATION_LIMIT_PERCENT)
+                }
+
+        except Exception as e:
+            logger.debug(f"Error detecting LTF-to-HTF transition: {e}")
+
+        return result
+
+    def _detect_multi_tf_schematic_validity(self, tap1: Dict, tap2: Dict, tap3: Dict,
+                                            range_data: Dict) -> Dict:
+        """
+        Lecture 6: Check if schematic taps are valid on multiple timeframes.
+
+        TCT 6: "Your tab two and your tab three on the five just look like one deviation
+        on the 30"
+
+        TCT 6: "So you can kind of trade a model two twice okay you can trade it twice
+        one time on the 5 to 10 minute that already hit its Target and then we came back
+        for a higher time frame model two"
+
+        TCT 6: "Always when you're tap two and your tap three are way more narrow and
+        close by than your tab one and your tab two right... if I zoom out this will
+        probably look like one deviation"
+
+        Args:
+            tap1, tap2, tap3: Tap dictionaries
+            range_data: Range data
+
+        Returns:
+            Dict with multi-TF validity info and potential HTF schematic
+        """
+        result = {
+            "has_multi_tf_opportunity": False,
+            "tap_distance_ratio": None,  # tap2-tap3 distance vs tap1-tap2 distance
+            "ltf_schematic_valid": True,
+            "htf_schematic_potential": False,
+            "htf_tap2_price": None,  # Tap2 if viewed from HTF
+            "htf_extreme_sd": None,  # Extreme S/D zone for HTF tap3
+            "recommendation": None
+        }
+
+        try:
+            tap1_idx = tap1.get("idx", 0)
+            tap2_idx = tap2.get("idx", 0)
+            tap3_idx = tap3.get("idx", 0)
+            tap2_price = tap2.get("price", 0)
+            tap3_price = tap3.get("price", 0)
+
+            # Calculate distances
+            tap1_to_tap2 = tap2_idx - tap1_idx
+            tap2_to_tap3 = tap3_idx - tap2_idx
+
+            if tap1_to_tap2 > 0:
+                result["tap_distance_ratio"] = round(tap2_to_tap3 / tap1_to_tap2, 2)
+
+                # If tap2-tap3 is much closer than tap1-tap2, HTF sees them as one deviation
+                if result["tap_distance_ratio"] < 0.5:
+                    result["has_multi_tf_opportunity"] = True
+                    result["htf_schematic_potential"] = True
+
+                    # On HTF, tap2 and tap3 merge into one deviation
+                    # The "tap2" on HTF would be the more extreme of the two
+                    if "Accumulation" in range_data.get("direction", ""):
+                        result["htf_tap2_price"] = min(tap2_price, tap3_price)
+                    else:
+                        result["htf_tap2_price"] = max(tap2_price, tap3_price)
+
+                    # Find extreme S/D for potential HTF tap3
+                    result["htf_extreme_sd"] = self._find_extreme_supply(range_data, tap3_idx)
+                    if not result["htf_extreme_sd"]:
+                        result["htf_extreme_sd"] = self._find_extreme_demand(range_data, tap3_idx)
+
+                    result["recommendation"] = (
+                        "Trade LTF schematic first. After target hit, watch for price "
+                        "return to extreme S/D for HTF schematic entry with larger R:R"
+                    )
+
+        except Exception as e:
+            logger.debug(f"Error detecting multi-TF validity: {e}")
+
+        return result
+
+    def _detect_enhanced_wov_in_wov(self, tap3: Dict, range_data: Dict,
+                                    schematic_type: str) -> Dict:
+        """
+        Lecture 6: Enhanced WOV-in-WOV detection - schematic within schematic.
+
+        TCT 6: "What I mean when I'm talking about WOV and WOV is that our third tap
+        okay our third tap of our initial TCT schematic has its own little TCT schematic"
+
+        TCT 6: "This way we can have an entry confirmation way earlier than the original
+        break of structure level causing our risk to reward to improve drastically"
+
+        TCT 6: "Where we had that 2.2 R reward now we have nine... which is an absolute
+        Banger of a trade"
+
+        This is an enhanced version that specifically looks for complete schematics
+        within the third tap, not just nested ranges.
+
+        Args:
+            tap3: Tap3 dictionary
+            range_data: Range data for outer schematic
+            schematic_type: Type of outer schematic
+
+        Returns:
+            Dict with enhanced WOV-in-WOV info
+        """
+        result = {
+            "has_wov_in_wov": False,
+            "inner_schematic_type": None,
+            "inner_tap1": None,
+            "inner_tap2": None,
+            "inner_tap3": None,
+            "inner_bos": None,
+            "inner_entry_price": None,
+            "inner_stop_loss": None,
+            "outer_target": None,
+            "standard_rr": None,
+            "wov_optimized_rr": None,
+            "rr_improvement_factor": None,
+            "entry_improvement_pips": None
+        }
+
+        try:
+            tap3_idx = tap3.get("idx", 0)
+            tap3_price = tap3.get("price", 0)
+
+            if tap3_idx >= len(self.candles) - 20:
+                return result
+
+            # Search for inner schematic structure within the tap3 area
+            search_start = max(0, tap3_idx - 15)
+            search_end = min(tap3_idx + 20, len(self.candles) - 5)
+
+            inner_candles = self.candles.iloc[search_start:search_end].copy()
+            inner_candles.reset_index(drop=True, inplace=True)
+
+            if len(inner_candles) < 15:
+                return result
+
+            # Look for inner schematic based on outer schematic type
+            if "Distribution" in schematic_type:
+                # For distribution tap3 (which is a high), look for inner distribution
+                inner_schematic = self._find_inner_distribution_schematic(
+                    inner_candles, tap3_price, range_data
+                )
+            else:  # Accumulation
+                # For accumulation tap3 (which is a low), look for inner accumulation
+                inner_schematic = self._find_inner_accumulation_schematic(
+                    inner_candles, tap3_price, range_data
+                )
+
+            if inner_schematic:
+                result["has_wov_in_wov"] = True
+                result["inner_schematic_type"] = inner_schematic.get("type")
+                result["inner_tap1"] = inner_schematic.get("tap1")
+                result["inner_tap2"] = inner_schematic.get("tap2")
+                result["inner_tap3"] = inner_schematic.get("tap3")
+                result["inner_bos"] = inner_schematic.get("bos")
+                result["inner_entry_price"] = inner_schematic.get("entry_price")
+                result["inner_stop_loss"] = inner_schematic.get("stop_loss")
+
+                # Calculate R:R comparison
+                outer_entry = range_data.get("equilibrium")  # Typical standard entry area
+
+                if "Distribution" in schematic_type:
+                    result["outer_target"] = range_data["range_low"]
+
+                    # Standard R:R (entering at BOS level near range)
+                    if outer_entry and tap3_price:
+                        standard_risk = tap3_price - outer_entry
+                        standard_reward = outer_entry - range_data["range_low"]
+                        if standard_risk > 0:
+                            result["standard_rr"] = round(standard_reward / standard_risk, 2)
+
+                    # WOV optimized R:R (entering at inner schematic BOS)
+                    if result["inner_entry_price"] and result["inner_stop_loss"]:
+                        wov_risk = result["inner_stop_loss"] - result["inner_entry_price"]
+                        wov_reward = result["inner_entry_price"] - range_data["range_low"]
+                        if wov_risk > 0:
+                            result["wov_optimized_rr"] = round(wov_reward / wov_risk, 2)
+
+                else:  # Accumulation
+                    result["outer_target"] = range_data["range_high"]
+
+                    # Standard R:R
+                    if outer_entry and tap3_price:
+                        standard_risk = outer_entry - tap3_price
+                        standard_reward = range_data["range_high"] - outer_entry
+                        if standard_risk > 0:
+                            result["standard_rr"] = round(standard_reward / standard_risk, 2)
+
+                    # WOV optimized R:R
+                    if result["inner_entry_price"] and result["inner_stop_loss"]:
+                        wov_risk = result["inner_entry_price"] - result["inner_stop_loss"]
+                        wov_reward = range_data["range_high"] - result["inner_entry_price"]
+                        if wov_risk > 0:
+                            result["wov_optimized_rr"] = round(wov_reward / wov_risk, 2)
+
+                # Calculate improvement factor
+                if result["standard_rr"] and result["wov_optimized_rr"]:
+                    result["rr_improvement_factor"] = round(
+                        result["wov_optimized_rr"] / result["standard_rr"], 2
+                    )
+
+                # Calculate entry improvement in price units
+                if result["inner_entry_price"] and outer_entry:
+                    result["entry_improvement_pips"] = abs(
+                        result["inner_entry_price"] - outer_entry
+                    )
+
+        except Exception as e:
+            logger.debug(f"Error detecting enhanced WOV-in-WOV: {e}")
+
+        return result
+
+    def _find_inner_distribution_schematic(self, candles: pd.DataFrame, tap3_price: float,
+                                           outer_range: Dict) -> Optional[Dict]:
+        """Find an inner distribution schematic within the tap3 area."""
+        try:
+            # Look for structure: higher highs forming a range, then deviation
+            swing_highs = []
+            swing_lows = []
+
+            for i in range(3, len(candles) - 3):
+                if self._is_local_swing_high(candles, i):
+                    swing_highs.append({"idx": i, "price": float(candles.iloc[i]["high"])})
+                if self._is_local_swing_low(candles, i):
+                    swing_lows.append({"idx": i, "price": float(candles.iloc[i]["low"])})
+
+            if len(swing_highs) < 2 or len(swing_lows) < 1:
+                return None
+
+            # Find potential inner range high and low
+            inner_range_high = max(swing_highs, key=lambda x: x["price"])
+            inner_range_low = min(swing_lows, key=lambda x: x["price"])
+
+            inner_range_size = inner_range_high["price"] - inner_range_low["price"]
+
+            # Inner range should be smaller than outer range
+            if inner_range_size > outer_range["range_size"] * self.LTF_HTF_SIZE_RATIO:
+                return None
+
+            # Look for deviation pattern
+            # Find tap1 (range high), tap2 (first deviation higher), tap3 (lower high)
+            tap1 = inner_range_high
+
+            # Look for tap2 (higher than tap1)
+            tap2 = None
+            for sh in swing_highs:
+                if sh["idx"] > tap1["idx"] and sh["price"] > tap1["price"]:
+                    tap2 = sh
+                    break
+
+            if not tap2:
+                return None
+
+            # Look for tap3 (lower high, lower than tap2)
+            tap3 = None
+            for sh in swing_highs:
+                if sh["idx"] > tap2["idx"] and sh["price"] < tap2["price"]:
+                    tap3 = sh
+                    break
+
+            if not tap3:
+                return None
+
+            # Look for BOS (break of structure bearish)
+            bos = None
+            for i in range(tap3["idx"] + 1, len(candles) - 1):
+                current_low = float(candles.iloc[i]["low"])
+                # Find previous swing low to break
+                for sl in swing_lows:
+                    if sl["idx"] < i and current_low < sl["price"]:
+                        bos = {
+                            "idx": i,
+                            "price": current_low,
+                            "broke_level": sl["price"]
+                        }
+                        break
+                if bos:
+                    break
+
+            if bos:
+                return {
+                    "type": "Inner_Model_2_Distribution",
+                    "tap1": tap1,
+                    "tap2": tap2,
+                    "tap3": tap3,
+                    "bos": bos,
+                    "entry_price": bos["price"],
+                    "stop_loss": tap3["price"]
+                }
+
+        except Exception as e:
+            logger.debug(f"Error finding inner distribution: {e}")
+
+        return None
+
+    def _find_inner_accumulation_schematic(self, candles: pd.DataFrame, tap3_price: float,
+                                           outer_range: Dict) -> Optional[Dict]:
+        """Find an inner accumulation schematic within the tap3 area."""
+        try:
+            # Look for structure: lower lows forming a range, then deviation
+            swing_highs = []
+            swing_lows = []
+
+            for i in range(3, len(candles) - 3):
+                if self._is_local_swing_high(candles, i):
+                    swing_highs.append({"idx": i, "price": float(candles.iloc[i]["high"])})
+                if self._is_local_swing_low(candles, i):
+                    swing_lows.append({"idx": i, "price": float(candles.iloc[i]["low"])})
+
+            if len(swing_lows) < 2 or len(swing_highs) < 1:
+                return None
+
+            # Find potential inner range high and low
+            inner_range_high = max(swing_highs, key=lambda x: x["price"])
+            inner_range_low = min(swing_lows, key=lambda x: x["price"])
+
+            inner_range_size = inner_range_high["price"] - inner_range_low["price"]
+
+            # Inner range should be smaller than outer range
+            if inner_range_size > outer_range["range_size"] * self.LTF_HTF_SIZE_RATIO:
+                return None
+
+            # Look for deviation pattern
+            # Find tap1 (range low), tap2 (first deviation lower), tap3 (higher low)
+            tap1 = inner_range_low
+
+            # Look for tap2 (lower than tap1)
+            tap2 = None
+            for sl in swing_lows:
+                if sl["idx"] > tap1["idx"] and sl["price"] < tap1["price"]:
+                    tap2 = sl
+                    break
+
+            if not tap2:
+                return None
+
+            # Look for tap3 (higher low, higher than tap2)
+            tap3 = None
+            for sl in swing_lows:
+                if sl["idx"] > tap2["idx"] and sl["price"] > tap2["price"]:
+                    tap3 = sl
+                    break
+
+            if not tap3:
+                return None
+
+            # Look for BOS (break of structure bullish)
+            bos = None
+            for i in range(tap3["idx"] + 1, len(candles) - 1):
+                current_high = float(candles.iloc[i]["high"])
+                # Find previous swing high to break
+                for sh in swing_highs:
+                    if sh["idx"] < i and current_high > sh["price"]:
+                        bos = {
+                            "idx": i,
+                            "price": current_high,
+                            "broke_level": sh["price"]
+                        }
+                        break
+                if bos:
+                    break
+
+            if bos:
+                return {
+                    "type": "Inner_Model_2_Accumulation",
+                    "tap1": tap1,
+                    "tap2": tap2,
+                    "tap3": tap3,
+                    "bos": bos,
+                    "entry_price": bos["price"],
+                    "stop_loss": tap3["price"]
+                }
+
+        except Exception as e:
+            logger.debug(f"Error finding inner accumulation: {e}")
+
+        return None
+
+    def _is_local_swing_high(self, candles: pd.DataFrame, idx: int, lookback: int = 2) -> bool:
+        """Check for local swing high in a candle subset."""
+        if idx < lookback or idx >= len(candles) - lookback:
+            return False
+
+        current = candles.iloc[idx]["high"]
+
+        for i in range(idx - lookback, idx):
+            if candles.iloc[i]["high"] >= current:
+                return False
+
+        for i in range(idx + 1, idx + lookback + 1):
+            if candles.iloc[i]["high"] >= current:
+                return False
+
+        return True
+
+    def _is_local_swing_low(self, candles: pd.DataFrame, idx: int, lookback: int = 2) -> bool:
+        """Check for local swing low in a candle subset."""
+        if idx < lookback or idx >= len(candles) - lookback:
+            return False
+
+        current = candles.iloc[idx]["low"]
+
+        for i in range(idx - lookback, idx):
+            if candles.iloc[i]["low"] <= current:
+                return False
+
+        for i in range(idx + 1, idx + lookback + 1):
+            if candles.iloc[i]["low"] <= current:
+                return False
+
+        return True
+
+    def _detect_model1_to_model2_flow(self, schematic: Dict, range_data: Dict) -> Dict:
+        """
+        Lecture 6: Detect when a Model 1 schematic flows into a Model 2.
+
+        TCT 6: "What could happen is that price follows up with a higher low for a
+        higher high and then maybe comes back down sweeping that liquidity before
+        moving higher"
+
+        TCT 6: "So it's kind of a model one that flows over into a model two and
+        this happens quite often"
+
+        TCT 6: "Usually schematics where the model one flows over into a model two
+        they have follow through towards the upside... meaning he's fully positioning
+        himself to push price higher"
+
+        Args:
+            schematic: The original Model 1 schematic
+            range_data: Range data
+
+        Returns:
+            Dict with M1-to-M2 flow info and position management suggestions
+        """
+        result = {
+            "m1_to_m2_flow_detected": False,
+            "original_tap3": schematic.get("tap3"),
+            "new_tap3_higher_low": None,  # For accumulation
+            "new_tap3_lower_high": None,  # For distribution
+            "new_wov_point": None,
+            "trail_stop_to": None,
+            "add_position_trigger": None,
+            "expected_follow_through": None,
+            "extended_target": None,
+            "position_management": {}
+        }
+
+        try:
+            model_type = schematic.get("model", "")
+            if "Model_1" not in model_type:
+                return result
+
+            schematic_type = schematic.get("schematic_type", "")
+            tap3 = schematic.get("tap3", {})
+            tap3_idx = tap3.get("idx", 0)
+            tap3_price = tap3.get("price", 0)
+
+            if tap3_idx >= len(self.candles) - 15:
+                return result
+
+            # Search for 4th tap forming after the original Model 1 tap3
+            search_start = tap3_idx + 3
+            search_end = min(tap3_idx + 30, len(self.candles) - 5)
+
+            if "Accumulation" in schematic_type:
+                # Look for price coming back to form a higher low (Model 2 tap3)
+                # First, price should move up (confirming M1), then come back down
+
+                # Check if price moved up first (M1 working)
+                highest_after_tap3 = tap3_price
+                for i in range(search_start, search_end):
+                    if self.candles.iloc[i]["high"] > highest_after_tap3:
+                        highest_after_tap3 = float(self.candles.iloc[i]["high"])
+
+                # If price moved up, now look for a higher low coming back
+                if highest_after_tap3 > tap3_price:
+                    for i in range(search_start, search_end):
+                        if self._is_swing_low(i):
+                            potential_hl_price = float(self.candles.iloc[i]["low"])
+
+                            # Must be higher than tap3 (Model 2 requirement)
+                            if potential_hl_price > tap3_price:
+                                # Check if it sweeps extreme liquidity or mitigates extreme demand
+                                extreme_liq = self._find_extreme_liquidity_for_accumulation(
+                                    tap3_idx, tap3_price
+                                )
+                                extreme_demand = self._find_extreme_demand(range_data, i)
+
+                                grabs_liq = extreme_liq and potential_hl_price <= extreme_liq.get("price", float('inf'))
+                                mitigates_demand = extreme_demand and (
+                                    extreme_demand["bottom"] <= potential_hl_price <= extreme_demand["top"]
+                                )
+
+                                if grabs_liq or mitigates_demand:
+                                    result["m1_to_m2_flow_detected"] = True
+                                    result["new_tap3_higher_low"] = {
+                                        "idx": i,
+                                        "price": potential_hl_price,
+                                        "grabs_extreme_liquidity": grabs_liq,
+                                        "mitigates_extreme_demand": mitigates_demand
+                                    }
+                                    result["new_wov_point"] = potential_hl_price
+
+                                    # Position management
+                                    result["trail_stop_to"] = potential_hl_price * 0.998  # Just below new HL
+                                    result["add_position_trigger"] = {
+                                        "type": "bullish_bos_from_hl",
+                                        "description": "Add position on BOS bullish from higher low"
+                                    }
+
+                                    # Extended target (usually 50% beyond range high)
+                                    range_high = range_data["range_high"]
+                                    range_size = range_data["range_size"]
+                                    result["extended_target"] = range_high + (range_size * self.M1_TO_M2_FOLLOW_THROUGH_BONUS - 1)
+                                    result["expected_follow_through"] = "strong_upside_beyond_range_high"
+
+                                    result["position_management"] = {
+                                        "step_1": "Trail stop to new higher low (new WOV point)",
+                                        "step_2": "Add position on BOS confirmation from higher low",
+                                        "step_3": "Target extended beyond range high due to M1→M2 confluence",
+                                        "risk_freed": "Original risk reduced, can re-deploy freed risk"
+                                    }
+                                    break
+
+            else:  # Distribution
+                # Look for price coming back to form a lower high (Model 2 tap3)
+                # First, price should move down (confirming M1), then come back up
+
+                lowest_after_tap3 = tap3_price
+                for i in range(search_start, search_end):
+                    if self.candles.iloc[i]["low"] < lowest_after_tap3:
+                        lowest_after_tap3 = float(self.candles.iloc[i]["low"])
+
+                # If price moved down, now look for a lower high coming back
+                if lowest_after_tap3 < tap3_price:
+                    for i in range(search_start, search_end):
+                        if self._is_swing_high(i):
+                            potential_lh_price = float(self.candles.iloc[i]["high"])
+
+                            # Must be lower than tap3 (Model 2 requirement)
+                            if potential_lh_price < tap3_price:
+                                # Check if it grabs extreme liquidity or mitigates extreme supply
+                                extreme_liq = self._find_extreme_liquidity_for_distribution(
+                                    tap3_idx, tap3_price
+                                )
+                                extreme_supply = self._find_extreme_supply(range_data, i)
+
+                                grabs_liq = extreme_liq and potential_lh_price >= extreme_liq.get("price", 0)
+                                mitigates_supply = extreme_supply and (
+                                    extreme_supply["bottom"] <= potential_lh_price <= extreme_supply["top"]
+                                )
+
+                                if grabs_liq or mitigates_supply:
+                                    result["m1_to_m2_flow_detected"] = True
+                                    result["new_tap3_lower_high"] = {
+                                        "idx": i,
+                                        "price": potential_lh_price,
+                                        "grabs_extreme_liquidity": grabs_liq,
+                                        "mitigates_extreme_supply": mitigates_supply
+                                    }
+                                    result["new_wov_point"] = potential_lh_price
+
+                                    # Position management
+                                    result["trail_stop_to"] = potential_lh_price * 1.002  # Just above new LH
+                                    result["add_position_trigger"] = {
+                                        "type": "bearish_bos_from_lh",
+                                        "description": "Add position on BOS bearish from lower high"
+                                    }
+
+                                    # Extended target
+                                    range_low = range_data["range_low"]
+                                    range_size = range_data["range_size"]
+                                    result["extended_target"] = range_low - (range_size * (self.M1_TO_M2_FOLLOW_THROUGH_BONUS - 1))
+                                    result["expected_follow_through"] = "strong_downside_beyond_range_low"
+
+                                    result["position_management"] = {
+                                        "step_1": "Trail stop to new lower high (new WOV point)",
+                                        "step_2": "Add position on BOS confirmation from lower high",
+                                        "step_3": "Target extended beyond range low due to M1→M2 confluence",
+                                        "risk_freed": "Original risk reduced, can re-deploy freed risk"
+                                    }
+                                    break
+
+        except Exception as e:
+            logger.debug(f"Error detecting M1-to-M2 flow: {e}")
+
+        return result
+
+    def _calculate_context_based_follow_through(self, range_data: Dict,
+                                                 schematic_type: str) -> Dict:
+        """
+        Lecture 6: Calculate follow-through expectation based on context.
+
+        TCT 6: "What do you think makes more sense an accumulation or a distribution
+        obviously it will be a distribution because prices in ranges they rotate you
+        just had a rotation towards the Range High now we can come back down again"
+
+        TCT 6: "You don't want to try and catch a crazy long in the extreme premium
+        pricing of the range"
+
+        TCT 6: "We want to be looking for bigger shorts in the premium section of
+        the range and bigger Longs in the discount section"
+
+        Args:
+            range_data: Range data
+            schematic_type: Type of schematic
+
+        Returns:
+            Dict with context-based follow-through prediction
+        """
+        result = {
+            "current_position_in_range": None,  # "premium", "discount", "equilibrium"
+            "position_percentage": None,
+            "expected_follow_through": None,
+            "confidence_level": None,  # "high", "medium", "low"
+            "reasoning": None,
+            "recommendation": None
+        }
+
+        try:
+            range_high = range_data["range_high"]
+            range_low = range_data["range_low"]
+            range_size = range_data["range_size"]
+            equilibrium = range_data["equilibrium"]
+
+            # Get current price (last candle close)
+            current_price = float(self.candles.iloc[-1]["close"])
+
+            # Calculate position within range
+            if range_size > 0:
+                position_pct = (current_price - range_low) / range_size
+                result["position_percentage"] = round(position_pct * 100, 1)
+
+                # Classify position
+                if position_pct >= self.PREMIUM_THRESHOLD:
+                    result["current_position_in_range"] = "premium"
+                elif position_pct <= self.DISCOUNT_THRESHOLD:
+                    result["current_position_in_range"] = "discount"
+                else:
+                    result["current_position_in_range"] = "equilibrium"
+
+            # Determine follow-through expectation
+            if "Accumulation" in schematic_type:
+                if result["current_position_in_range"] == "discount":
+                    result["expected_follow_through"] = "strong"
+                    result["confidence_level"] = "high"
+                    result["reasoning"] = (
+                        "Accumulation in discount zone aligns with range rotation "
+                        "dynamics - expect strong follow-through to range high"
+                    )
+                    result["recommendation"] = "Trade with full position size"
+                elif result["current_position_in_range"] == "equilibrium":
+                    result["expected_follow_through"] = "moderate"
+                    result["confidence_level"] = "medium"
+                    result["reasoning"] = (
+                        "Accumulation near equilibrium - decent follow-through "
+                        "expected but watch for distribution forming at highs"
+                    )
+                    result["recommendation"] = "Trade with standard position size"
+                else:  # Premium
+                    result["expected_follow_through"] = "weak"
+                    result["confidence_level"] = "low"
+                    result["reasoning"] = (
+                        "Accumulation in premium zone contradicts range rotation - "
+                        "price may struggle, distribution more likely"
+                    )
+                    result["recommendation"] = "Consider skipping or reduced size"
+
+            else:  # Distribution
+                if result["current_position_in_range"] == "premium":
+                    result["expected_follow_through"] = "strong"
+                    result["confidence_level"] = "high"
+                    result["reasoning"] = (
+                        "Distribution in premium zone aligns with range rotation "
+                        "dynamics - expect strong follow-through to range low"
+                    )
+                    result["recommendation"] = "Trade with full position size"
+                elif result["current_position_in_range"] == "equilibrium":
+                    result["expected_follow_through"] = "moderate"
+                    result["confidence_level"] = "medium"
+                    result["reasoning"] = (
+                        "Distribution near equilibrium - decent follow-through "
+                        "expected but watch for accumulation forming at lows"
+                    )
+                    result["recommendation"] = "Trade with standard position size"
+                else:  # Discount
+                    result["expected_follow_through"] = "weak"
+                    result["confidence_level"] = "low"
+                    result["reasoning"] = (
+                        "Distribution in discount zone contradicts range rotation - "
+                        "price may struggle, accumulation more likely"
+                    )
+                    result["recommendation"] = "Consider skipping or reduced size"
+
+        except Exception as e:
+            logger.debug(f"Error calculating context follow-through: {e}")
 
         return result
 

@@ -3607,6 +3607,15 @@ async def dashboard():
                 const has6CR = enhancements.htf_validation?.all_taps_valid_6cr;
                 const hasTrendline = enhancements.has_trendline_confluence;
 
+                // Lecture 6 enhancements
+                const l6 = s.lecture_6_enhancements || {};
+                const hasConversion = l6.has_conversion;
+                const hasDualDev = l6.has_dual_deviation;
+                const hasWOV = l6.has_wov_opportunity;
+                const hasM1toM2 = l6.has_m1_to_m2_opportunity;
+                const followBias = l6.follow_through_bias;
+                const enhancedTarget = l6.enhanced_target;
+
                 html += '<div class="schematic-item ' + typeClass + '">';
                 html += '<div class="schematic-header">';
                 html += '<span class="schematic-type">' + typeLabel + '</span>';
@@ -3628,6 +3637,18 @@ async def dashboard():
                 if (has6CR) html += '<span class="safe">6CR Valid</span>';
                 if (hasTrendline) html += '<span class="safe">TL Confluence</span>';
                 html += '</div>';
+
+                // Lecture 6 advanced indicators
+                if (hasConversion || hasDualDev || hasWOV || hasM1toM2 || followBias) {
+                    html += '<div class="schematic-meta l6-indicators" style="margin-top:4px;border-top:1px solid #333;padding-top:4px;">';
+                    if (hasConversion) html += '<span style="color:#ff9800;">Converted</span>';
+                    if (hasDualDev) html += '<span style="color:#e91e63;">Dual Dev</span>';
+                    if (hasWOV) html += '<span style="color:#00bcd4;">WOV Entry</span>';
+                    if (hasM1toM2) html += '<span style="color:#9c27b0;">M1→M2</span>';
+                    if (followBias && followBias !== 'neutral') html += '<span style="color:#8bc34a;">' + followBias + '</span>';
+                    if (enhancedTarget) html += '<span style="color:#ffc107;">Ext: $' + enhancedTarget.toLocaleString(undefined, {maximumFractionDigits: 0}) + '</span>';
+                    html += '</div>';
+                }
                 html += '</div>';
             });
 
@@ -4294,13 +4315,22 @@ async def validate_current_setup():
 @app.get("/api/schematics")
 async def get_tct_schematics():
     """
-    TCT Schematics endpoint - Lecture 5A methodology
+    TCT Schematics endpoint - Lecture 5A + 5B + 6 Advanced methodology
 
     Detects TCT Accumulation and Distribution schematics:
     - Model 1: Two successive deviations (Tap1 → Tap2 → Tap3 deeper)
     - Model 2: One deviation then higher low/lower high at extreme liquidity or demand/supply
 
-    Returns schematics with entry, stop loss, and target levels.
+    Lecture 6 Advanced Features:
+    - Schematic conversion (distribution → accumulation and vice versa)
+    - Dual-side deviation awareness with risk-on/risk-off triggers
+    - LTF-to-HTF range transition detection
+    - Multi-timeframe schematic validity checking
+    - WOV-in-WOV (schematic within schematic) for R:R optimization
+    - Model 1 to Model 2 flow with position management
+    - Context-based follow-through prediction (premium/discount zones)
+
+    Returns schematics with entry, stop loss, target levels, and advanced enhancements.
     """
     try:
         # Fetch HTF (4h) and LTF (15m) candles
@@ -4396,7 +4426,7 @@ async def get_tct_schematics():
         response_data = convert_numpy_types({
             "symbol": SYMBOL,
             "current_price": current_price,
-            "methodology": "TCT Mentorship Lecture 5A + 5B - TCT Schematics",
+            "methodology": "TCT Mentorship Lecture 5A + 5B + 6 - Advanced TCT Schematics",
             "htf_schematics": {
                 "timeframe": "4h",
                 "schematics": htf_active[:5],  # Top 5 by quality
@@ -4414,6 +4444,15 @@ async def get_tct_schematics():
                 "stop_loss": "Below Tap3 for longs, above Tap3 for shorts",
                 "target": "Opposite range extreme (Wyckoff high for longs, Wyckoff low for shorts)",
                 "six_candle_rule": "Each tap pivot must pass 6-candle rule for valid schematic on that timeframe"
+            },
+            "lecture_6_rules": {
+                "schematic_conversion": "Distribution can convert to accumulation (and vice versa) when opposite deviation occurs",
+                "dual_side_deviation": "When both sides deviate, trigger risk-on (more aggressive) until range extreme breaks",
+                "ltf_htf_transition": "LTF schematics can grow into HTF ranges - watch for nested structures",
+                "multi_tf_validity": "Check if tap2/tap3 close enough to merge on HTF - affects target selection",
+                "wov_in_wov": "Look for schematic within schematic for dramatic R:R improvement",
+                "m1_to_m2_flow": "Model 1 can flow into Model 2 - add to position at M2 entry, same stop, extended target",
+                "context_follow_through": "Premium zone expects distribution, discount zone expects accumulation"
             },
             "summary": {
                 "total_htf_schematics": len(htf_active),
