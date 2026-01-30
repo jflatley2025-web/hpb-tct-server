@@ -2491,7 +2491,8 @@ async def root():
             "lecture_1": "Market Structure (MarketStructure class)",
             "lecture_2": "Ranges (TCTRangeDetector, TCTDeviationDetector, TCTPremiumDiscountClassifier)",
             "lecture_3": "Supply & Demand (StructureSupplyDemand, ZoneScoring, ZoneRefinement)",
-            "lecture_4": "Liquidity (LiquidityDetector, LiquidityCurveGenerator, ExtremeLiquidityTarget)"
+            "lecture_4": "Liquidity (LiquidityDetector, LiquidityCurveGenerator, ExtremeLiquidityTarget)",
+            "lecture_7": "Risk Management (Position Sizing, Leverage, Compounding, Equity Simulation)"
         }
     }
 
@@ -2549,11 +2550,143 @@ async def get_candles(interval: str = "4h", limit: int = 100):
         logger.error(f"[CANDLES_ERROR] {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
 
+@app.get("/api/risk-calculator")
+async def risk_calculator(
+    account_balance: float = 10000,
+    risk_pct: float = 1.0,
+    stop_loss_pct: float = 0.26,
+    risk_reward: float = 3.0,
+    market: str = "crypto",
+    gold_price: float = 2000,
+    leverage: float = 10.0
+):
+    """
+    TCT Lecture 7 — Risk Management Calculator.
+
+    Calculates position size, leverage requirements, margin, and projected outcomes
+    using the TCT risk management methodology.
+
+    Args:
+        account_balance: Total account balance in USD
+        risk_pct: Risk percentage per trade (1-3% recommended)
+        stop_loss_pct: Stop-loss size as percentage of position
+        risk_reward: Target risk-to-reward ratio
+        market: Market type (crypto, forex, gold)
+        gold_price: Current gold price (only used if market=gold)
+        leverage: Leverage being used
+
+    Returns:
+        Complete risk management profile with position sizing, leverage, and projections.
+    """
+    try:
+        risk_amount = account_balance * (risk_pct / 100)
+
+        # Position size formulas from TCT Lecture 7
+        if stop_loss_pct <= 0:
+            return JSONResponse({"error": "Stop-loss percentage must be greater than 0"}, status_code=400)
+
+        raw_position_size = (risk_amount / stop_loss_pct) * 100
+
+        if market == "forex":
+            position_size_lots = raw_position_size / 100000
+            position_display = {"lots": round(position_size_lots, 4), "units": round(raw_position_size, 2)}
+        elif market == "gold":
+            lot_value = gold_price * 100
+            position_size_lots = raw_position_size / lot_value if lot_value > 0 else 0
+            position_display = {"lots": round(position_size_lots, 4), "lot_value": round(lot_value, 2), "units": round(raw_position_size, 2)}
+        else:
+            position_display = {"usd": round(raw_position_size, 2)}
+
+        # Leverage calculation
+        min_leverage_needed = raw_position_size / account_balance if account_balance > 0 else 0
+        used_margin = raw_position_size / leverage if leverage > 0 else raw_position_size
+        free_margin = account_balance - used_margin
+
+        # Profit/Loss at SL and TP
+        loss_at_sl = risk_amount
+        profit_at_tp = risk_amount * risk_reward
+        tp_pct_gain = (profit_at_tp / account_balance) * 100
+
+        # Compounding projection (5% per week, 35 trading weeks)
+        weekly_rate = 0.05
+        weeks_per_year = 35
+        compounding = []
+        balance = account_balance
+        for year in range(1, 4):
+            balance = balance * ((1 + weekly_rate) ** weeks_per_year)
+            compounding.append({"year": year, "balance": round(balance, 2)})
+
+        # Losing streak simulation (6 losses then wins at given RR)
+        streak_balance = account_balance
+        loss_multiplier = 1 - (risk_pct / 100)
+        win_multiplier = 1 + (risk_pct * risk_reward / 100)
+
+        losing_streak = []
+        for i in range(6):
+            streak_balance *= loss_multiplier
+            losing_streak.append({"trade": i + 1, "balance": round(streak_balance, 2), "result": "loss"})
+
+        winning_streak = []
+        for i in range(3):
+            streak_balance *= win_multiplier
+            winning_streak.append({"trade": 7 + i, "balance": round(streak_balance, 2), "result": "win"})
+
+        net_result_pct = ((streak_balance - account_balance) / account_balance) * 100
+
+        profile = {
+            "inputs": {
+                "account_balance": account_balance,
+                "risk_pct": risk_pct,
+                "risk_amount": round(risk_amount, 2),
+                "stop_loss_pct": stop_loss_pct,
+                "risk_reward": risk_reward,
+                "market": market,
+                "leverage": leverage
+            },
+            "position_sizing": {
+                "position_size": round(raw_position_size, 2),
+                **position_display
+            },
+            "leverage_analysis": {
+                "min_leverage_needed": round(min_leverage_needed, 2),
+                "leverage_used": leverage,
+                "used_margin": round(used_margin, 2),
+                "free_margin": round(free_margin, 2),
+                "margin_pct_of_account": round((used_margin / account_balance) * 100, 2) if account_balance > 0 else 0
+            },
+            "trade_outcome": {
+                "loss_at_stop": round(loss_at_sl, 2),
+                "profit_at_target": round(profit_at_tp, 2),
+                "tp_account_gain_pct": round(tp_pct_gain, 2)
+            },
+            "compounding_projection": compounding,
+            "streak_simulation": {
+                "scenario": f"6 losses then 3 wins at {risk_reward}R",
+                "trades": losing_streak + winning_streak,
+                "final_balance": round(streak_balance, 2),
+                "net_result_pct": round(net_result_pct, 2)
+            },
+            "rules": {
+                "risk_range": "1-3% of account per trade",
+                "min_rr": "2:1 minimum, 2.3-3:1 average",
+                "margin_mode": "Always use ISOLATED margin",
+                "liquidation_warning": "Ensure liquidation price stays outside stop-loss range",
+                "weekly_target": "5% per week (~1% per day)"
+            }
+        }
+
+        return JSONResponse(convert_numpy_types(profile))
+
+    except Exception as e:
+        logger.error(f"[RISK_CALC_ERROR] {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard():
     """
     Interactive TCT Dashboard with candlestick chart and all TCT metrics.
-    Displays: Market Structure, Ranges, Supply/Demand Zones, Liquidity, Deviations.
+    Displays: Market Structure, Ranges, Supply/Demand Zones, Liquidity, Deviations, Risk Management.
     """
     html_content = """
 <!DOCTYPE html>
@@ -2831,6 +2964,232 @@ async def dashboard():
             font-size: 0.75rem;
         }
         .tf-btn.active { background: #00d4ff; color: #0a0a0f; border-color: #00d4ff; }
+
+        /* ===== RISK MANAGEMENT (TCT Lecture 7) ===== */
+        .risk-section { border-left: 3px solid #ffc107; }
+        .risk-section h3 { color: #ffc107 !important; }
+        .risk-input-group {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 6px;
+            margin-bottom: 8px;
+        }
+        .risk-input {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+        .risk-input label {
+            font-size: 0.65rem;
+            color: #888;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .risk-input input, .risk-input select {
+            background: #1a1a2e;
+            border: 1px solid #2d2d44;
+            border-radius: 4px;
+            padding: 5px 8px;
+            color: #e0e0e0;
+            font-size: 0.8rem;
+            font-family: inherit;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        .risk-input input:focus, .risk-input select:focus {
+            border-color: #ffc107;
+        }
+        .risk-input.full-width {
+            grid-column: 1 / -1;
+        }
+        .calc-btn {
+            background: linear-gradient(135deg, #ffc107, #ff9800);
+            color: #0a0a0f;
+            border: none;
+            padding: 8px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            font-weight: 700;
+            width: 100%;
+            margin-top: 4px;
+            letter-spacing: 0.5px;
+            transition: opacity 0.2s;
+        }
+        .calc-btn:hover { opacity: 0.85; }
+        .risk-results {
+            margin-top: 10px;
+            display: none;
+        }
+        .risk-results.active { display: block; }
+        .risk-result-card {
+            background: #1a1a2e;
+            border-radius: 6px;
+            padding: 10px;
+            margin-bottom: 8px;
+        }
+        .risk-result-card h4 {
+            font-size: 0.75rem;
+            color: #ffc107;
+            margin-bottom: 6px;
+            padding-bottom: 4px;
+            border-bottom: 1px solid #2d2d44;
+        }
+        .result-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 3px 0;
+            font-size: 0.75rem;
+        }
+        .result-row .r-label { color: #888; }
+        .result-row .r-value { color: #e0e0e0; font-weight: 600; }
+        .result-row .r-value.profit { color: #00ff88; }
+        .result-row .r-value.loss { color: #ff4444; }
+        .result-row .r-value.highlight { color: #ffc107; }
+        .result-row .r-value.info { color: #00d4ff; }
+
+        /* Risk tabs */
+        .risk-tabs {
+            display: flex;
+            gap: 2px;
+            margin-bottom: 10px;
+            background: #0a0a0f;
+            border-radius: 4px;
+            padding: 2px;
+        }
+        .risk-tab {
+            flex: 1;
+            padding: 5px 4px;
+            text-align: center;
+            font-size: 0.65rem;
+            color: #888;
+            background: transparent;
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+            font-family: inherit;
+            transition: all 0.2s;
+        }
+        .risk-tab.active {
+            background: #ffc107;
+            color: #0a0a0f;
+            font-weight: 700;
+        }
+        .risk-tab-content { display: none; }
+        .risk-tab-content.active { display: block; }
+
+        /* Equity chart */
+        .equity-chart-container {
+            background: #1a1a2e;
+            border-radius: 6px;
+            padding: 10px;
+            margin-top: 8px;
+        }
+        .equity-canvas {
+            width: 100%;
+            height: 160px;
+            display: block;
+        }
+        .equity-legend {
+            display: flex;
+            justify-content: center;
+            gap: 15px;
+            margin-top: 6px;
+            font-size: 0.65rem;
+        }
+        .equity-legend span {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .legend-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+        .legend-dot.trader-a { background: #00ff88; }
+        .legend-dot.trader-b { background: #ff4444; }
+
+        /* Compounding table */
+        .compound-table {
+            width: 100%;
+            font-size: 0.7rem;
+            border-collapse: collapse;
+            margin-top: 6px;
+        }
+        .compound-table th {
+            color: #888;
+            font-weight: 600;
+            text-align: left;
+            padding: 4px 6px;
+            border-bottom: 1px solid #2d2d44;
+            font-size: 0.65rem;
+        }
+        .compound-table td {
+            padding: 4px 6px;
+            color: #e0e0e0;
+        }
+        .compound-table tr:nth-child(even) td {
+            background: rgba(255, 255, 255, 0.02);
+        }
+        .compound-growth { color: #00ff88 !important; font-weight: 600; }
+
+        /* Streak simulation */
+        .streak-bar-container {
+            display: flex;
+            gap: 2px;
+            align-items: flex-end;
+            height: 80px;
+            margin-top: 8px;
+            padding: 0 4px;
+        }
+        .streak-bar {
+            flex: 1;
+            border-radius: 2px 2px 0 0;
+            position: relative;
+            min-height: 4px;
+            transition: height 0.3s ease;
+        }
+        .streak-bar.loss-bar { background: linear-gradient(to top, #ff4444, #ff6b6b); }
+        .streak-bar.win-bar { background: linear-gradient(to top, #00ff88, #00ffaa); }
+        .streak-bar .bar-label {
+            position: absolute;
+            bottom: -16px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 0.55rem;
+            color: #666;
+            white-space: nowrap;
+        }
+        .streak-result {
+            text-align: center;
+            margin-top: 22px;
+            font-size: 0.75rem;
+            padding: 6px;
+            border-radius: 4px;
+        }
+        .streak-result.positive {
+            background: rgba(0, 255, 136, 0.1);
+            color: #00ff88;
+        }
+        .streak-result.negative {
+            background: rgba(255, 68, 68, 0.1);
+            color: #ff4444;
+        }
+
+        /* Warning box */
+        .risk-warning {
+            background: rgba(255, 193, 7, 0.08);
+            border: 1px solid rgba(255, 193, 7, 0.3);
+            border-radius: 4px;
+            padding: 8px;
+            margin-top: 8px;
+            font-size: 0.65rem;
+            color: #ffc107;
+            line-height: 1.4;
+        }
+        .risk-warning strong { color: #ff9800; }
     </style>
 </head>
 <body>
@@ -2992,6 +3351,196 @@ async def dashboard():
                 <div id="schematicsContent">
                     <div class="metric-row">
                         <span class="label">Loading...</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Risk Management (Lecture 7) -->
+            <div class="metric-card risk-section">
+                <h3>Risk Management <span class="badge" style="background:rgba(255,193,7,0.2);color:#ffc107;">L7</span></h3>
+                <div class="tct-lecture">TCT Lecture 7 — "The Most Important Lecture"</div>
+
+                <div class="risk-tabs">
+                    <button class="risk-tab active" data-tab="calculator" onclick="switchRiskTab('calculator')">Calculator</button>
+                    <button class="risk-tab" data-tab="equity" onclick="switchRiskTab('equity')">Equity Sim</button>
+                    <button class="risk-tab" data-tab="compound" onclick="switchRiskTab('compound')">Compound</button>
+                </div>
+
+                <!-- Tab 1: Position Size Calculator -->
+                <div class="risk-tab-content active" id="tab-calculator">
+                    <div class="risk-input-group">
+                        <div class="risk-input">
+                            <label>Account Balance ($)</label>
+                            <input type="number" id="riskBalance" value="10000" min="1" step="100">
+                        </div>
+                        <div class="risk-input">
+                            <label>Risk Per Trade (%)</label>
+                            <input type="number" id="riskPct" value="1" min="0.1" max="3" step="0.1">
+                        </div>
+                        <div class="risk-input">
+                            <label>Stop-Loss Size (%)</label>
+                            <input type="number" id="riskSL" value="0.26" min="0.01" max="50" step="0.01">
+                        </div>
+                        <div class="risk-input">
+                            <label>Risk:Reward</label>
+                            <input type="number" id="riskRR" value="3" min="0.5" max="20" step="0.1">
+                        </div>
+                        <div class="risk-input">
+                            <label>Market</label>
+                            <select id="riskMarket" onchange="toggleGoldPrice()">
+                                <option value="crypto">Crypto</option>
+                                <option value="forex">Forex</option>
+                                <option value="gold">Gold</option>
+                            </select>
+                        </div>
+                        <div class="risk-input">
+                            <label>Leverage (x)</label>
+                            <input type="number" id="riskLeverage" value="10" min="1" max="200" step="1">
+                        </div>
+                        <div class="risk-input" id="goldPriceGroup" style="display:none;">
+                            <label>Gold Price ($)</label>
+                            <input type="number" id="goldPrice" value="2000" min="100" step="10">
+                        </div>
+                    </div>
+                    <button class="calc-btn" onclick="calculateRisk()">CALCULATE POSITION</button>
+
+                    <div class="risk-results" id="riskResults">
+                        <!-- Position Sizing -->
+                        <div class="risk-result-card">
+                            <h4>Position Sizing</h4>
+                            <div class="result-row">
+                                <span class="r-label">Risk Amount</span>
+                                <span class="r-value loss" id="resRiskAmt">--</span>
+                            </div>
+                            <div class="result-row">
+                                <span class="r-label">Position Size</span>
+                                <span class="r-value highlight" id="resPosSize">--</span>
+                            </div>
+                            <div class="result-row" id="resLotsRow" style="display:none;">
+                                <span class="r-label">Lots</span>
+                                <span class="r-value highlight" id="resLots">--</span>
+                            </div>
+                        </div>
+
+                        <!-- Leverage & Margin -->
+                        <div class="risk-result-card">
+                            <h4>Leverage & Margin</h4>
+                            <div class="result-row">
+                                <span class="r-label">Min Leverage Needed</span>
+                                <span class="r-value info" id="resMinLev">--</span>
+                            </div>
+                            <div class="result-row">
+                                <span class="r-label">Used Margin</span>
+                                <span class="r-value" id="resMargin">--</span>
+                            </div>
+                            <div class="result-row">
+                                <span class="r-label">Free Margin</span>
+                                <span class="r-value profit" id="resFreeMargin">--</span>
+                            </div>
+                        </div>
+
+                        <!-- Trade Outcome -->
+                        <div class="risk-result-card">
+                            <h4>Trade Outcome</h4>
+                            <div class="result-row">
+                                <span class="r-label">Loss at Stop</span>
+                                <span class="r-value loss" id="resLoss">--</span>
+                            </div>
+                            <div class="result-row">
+                                <span class="r-label">Profit at Target</span>
+                                <span class="r-value profit" id="resProfit">--</span>
+                            </div>
+                            <div class="result-row">
+                                <span class="r-label">Account Gain</span>
+                                <span class="r-value profit" id="resGainPct">--</span>
+                            </div>
+                        </div>
+
+                        <!-- Streak Simulation -->
+                        <div class="risk-result-card">
+                            <h4>Worst-Case Streak (6L then 3W)</h4>
+                            <div class="streak-bar-container" id="streakBars"></div>
+                            <div class="streak-result" id="streakResult"></div>
+                        </div>
+
+                        <div class="risk-warning">
+                            <strong>TCT Rules:</strong> Risk 1-3% per trade. Always use ISOLATED margin. Ensure liquidation price stays outside your stop-loss. Leverage does NOT determine risk — position size does.
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tab 2: Equity Simulator (Trader A vs B) -->
+                <div class="risk-tab-content" id="tab-equity">
+                    <div class="risk-input-group">
+                        <div class="risk-input">
+                            <label>Starting Balance ($)</label>
+                            <input type="number" id="eqBalance" value="10000" min="100" step="100">
+                        </div>
+                        <div class="risk-input">
+                            <label>Num Trades</label>
+                            <input type="number" id="eqTrades" value="50" min="10" max="200" step="5">
+                        </div>
+                        <div class="risk-input">
+                            <label>Trader A Risk (%)</label>
+                            <input type="number" id="eqRiskA" value="1" min="0.5" max="3" step="0.5">
+                        </div>
+                        <div class="risk-input">
+                            <label>Trader B Risk (%)</label>
+                            <input type="number" id="eqRiskB" value="10" min="3" max="50" step="1">
+                        </div>
+                    </div>
+                    <button class="calc-btn" onclick="simulateEquity()">SIMULATE EQUITY CURVES</button>
+                    <div class="equity-chart-container" id="equityChartContainer" style="display:none;">
+                        <canvas id="equityCanvas" class="equity-canvas"></canvas>
+                        <div class="equity-legend">
+                            <span><span class="legend-dot trader-a"></span> Trader A (disciplined)</span>
+                            <span><span class="legend-dot trader-b"></span> Trader B (over-risking)</span>
+                        </div>
+                        <div class="result-row" style="margin-top:8px;">
+                            <span class="r-label">Trader A Final</span>
+                            <span class="r-value profit" id="eqFinalA">--</span>
+                        </div>
+                        <div class="result-row">
+                            <span class="r-label">Trader B Final</span>
+                            <span class="r-value loss" id="eqFinalB">--</span>
+                        </div>
+                    </div>
+                    <div class="risk-warning" style="margin-top:8px;">
+                        <strong>Trader A</strong> risks small, grows steadily. <strong>Trader B</strong> over-risks, gets "spikes of hope" but always reverts to net zero. Trading is a longevity game.
+                    </div>
+                </div>
+
+                <!-- Tab 3: Compounding Projections -->
+                <div class="risk-tab-content" id="tab-compound">
+                    <div class="risk-input-group">
+                        <div class="risk-input">
+                            <label>Starting Capital ($)</label>
+                            <input type="number" id="compBalance" value="10000" min="100" step="100">
+                        </div>
+                        <div class="risk-input">
+                            <label>Weekly Gain (%)</label>
+                            <input type="number" id="compWeekly" value="5" min="1" max="20" step="0.5">
+                        </div>
+                        <div class="risk-input">
+                            <label>Trading Weeks/Year</label>
+                            <input type="number" id="compWeeks" value="35" min="20" max="52" step="1">
+                        </div>
+                        <div class="risk-input">
+                            <label>Years</label>
+                            <input type="number" id="compYears" value="3" min="1" max="10" step="1">
+                        </div>
+                    </div>
+                    <button class="calc-btn" onclick="calculateCompounding()">PROJECT GROWTH</button>
+                    <div id="compoundResults" style="display:none;">
+                        <table class="compound-table">
+                            <thead>
+                                <tr><th>Year</th><th>Balance</th><th>Growth</th></tr>
+                            </thead>
+                            <tbody id="compoundBody"></tbody>
+                        </table>
+                        <div class="risk-warning" style="margin-top:8px;">
+                            <strong>5% per week</strong> = ~1% per day. Achievable with just 2 setups/week at 2.5 R:R. The power of compounding turns small, consistent gains into life-changing wealth.
+                        </div>
                     </div>
                 </div>
             </div>
@@ -3664,6 +4213,261 @@ async def dashboard():
                 await refreshData();
             });
         });
+
+        // ===== RISK MANAGEMENT FUNCTIONS (TCT Lecture 7) =====
+
+        function switchRiskTab(tabName) {
+            document.querySelectorAll('.risk-tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.risk-tab-content').forEach(c => c.classList.remove('active'));
+            document.querySelector(`.risk-tab[data-tab="${tabName}"]`).classList.add('active');
+            document.getElementById('tab-' + tabName).classList.add('active');
+        }
+
+        function toggleGoldPrice() {
+            const market = document.getElementById('riskMarket').value;
+            document.getElementById('goldPriceGroup').style.display = market === 'gold' ? 'flex' : 'none';
+        }
+
+        function fmt(n) {
+            return '$' + n.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+        }
+
+        function calculateRisk() {
+            const balance = parseFloat(document.getElementById('riskBalance').value) || 10000;
+            const riskPct = parseFloat(document.getElementById('riskPct').value) || 1;
+            const slPct = parseFloat(document.getElementById('riskSL').value) || 0.26;
+            const rr = parseFloat(document.getElementById('riskRR').value) || 3;
+            const market = document.getElementById('riskMarket').value;
+            const leverage = parseFloat(document.getElementById('riskLeverage').value) || 10;
+            const goldPrice = parseFloat(document.getElementById('goldPrice').value) || 2000;
+
+            if (slPct <= 0) return;
+
+            // Core TCT Lecture 7 formula: Position Size = (Risk $ / SL%) x 100
+            const riskAmount = balance * (riskPct / 100);
+            const positionSize = (riskAmount / slPct) * 100;
+
+            // Leverage
+            const minLeverage = positionSize / balance;
+            const usedMargin = positionSize / leverage;
+            const freeMargin = balance - usedMargin;
+
+            // Trade outcome
+            const lossAtSL = riskAmount;
+            const profitAtTP = riskAmount * rr;
+            const gainPct = (profitAtTP / balance) * 100;
+
+            // Update UI
+            document.getElementById('resRiskAmt').textContent = '-' + fmt(riskAmount);
+            document.getElementById('resPosSize').textContent = fmt(positionSize);
+            document.getElementById('resMinLev').textContent = minLeverage.toFixed(2) + 'x';
+            document.getElementById('resMargin').textContent = fmt(usedMargin);
+            document.getElementById('resFreeMargin').textContent = fmt(freeMargin);
+            document.getElementById('resLoss').textContent = '-' + fmt(lossAtSL);
+            document.getElementById('resProfit').textContent = '+' + fmt(profitAtTP);
+            document.getElementById('resGainPct').textContent = '+' + gainPct.toFixed(2) + '%';
+
+            // Lots display for forex/gold
+            const lotsRow = document.getElementById('resLotsRow');
+            if (market === 'forex') {
+                lotsRow.style.display = 'flex';
+                document.getElementById('resLots').textContent = (positionSize / 100000).toFixed(4) + ' lots';
+            } else if (market === 'gold') {
+                lotsRow.style.display = 'flex';
+                const lotVal = goldPrice * 100;
+                document.getElementById('resLots').textContent = (positionSize / lotVal).toFixed(4) + ' lots';
+            } else {
+                lotsRow.style.display = 'none';
+            }
+
+            // Streak simulation (6 losses then 3 wins)
+            const lossMult = 1 - (riskPct / 100);
+            const winMult = 1 + (riskPct * rr / 100);
+            let streakBal = balance;
+            const trades = [];
+
+            for (let i = 0; i < 6; i++) {
+                streakBal *= lossMult;
+                trades.push({balance: streakBal, result: 'loss'});
+            }
+            for (let i = 0; i < 3; i++) {
+                streakBal *= winMult;
+                trades.push({balance: streakBal, result: 'win'});
+            }
+
+            // Draw streak bars
+            const barsEl = document.getElementById('streakBars');
+            const minBal = Math.min(...trades.map(t => t.balance));
+            const maxBal = Math.max(balance, ...trades.map(t => t.balance));
+            const range = maxBal - minBal;
+
+            barsEl.innerHTML = '';
+            trades.forEach((t, i) => {
+                const pct = range > 0 ? ((t.balance - minBal) / range) * 100 : 50;
+                const bar = document.createElement('div');
+                bar.className = 'streak-bar ' + (t.result === 'loss' ? 'loss-bar' : 'win-bar');
+                bar.style.height = Math.max(8, pct) + '%';
+                bar.innerHTML = '<span class="bar-label">T' + (i+1) + '</span>';
+                barsEl.appendChild(bar);
+            });
+
+            const netPct = ((streakBal - balance) / balance) * 100;
+            const resultEl = document.getElementById('streakResult');
+            resultEl.className = 'streak-result ' + (netPct >= 0 ? 'positive' : 'negative');
+            resultEl.textContent = 'After 6L + 3W: ' + fmt(streakBal) + ' (' + (netPct >= 0 ? '+' : '') + netPct.toFixed(2) + '%)';
+
+            document.getElementById('riskResults').classList.add('active');
+        }
+
+        function simulateEquity() {
+            const balance = parseFloat(document.getElementById('eqBalance').value) || 10000;
+            const numTrades = parseInt(document.getElementById('eqTrades').value) || 50;
+            const riskA = parseFloat(document.getElementById('eqRiskA').value) || 1;
+            const riskB = parseFloat(document.getElementById('eqRiskB').value) || 10;
+            const winRate = 0.70; // TCT 70% win rate
+            const avgRR = 2.3;   // TCT average R:R
+
+            // Simulate Trader A (disciplined, 1% risk)
+            let balA = balance;
+            const curveA = [balA];
+            // Simulate Trader B (over-risking, 10% risk)
+            let balB = balance;
+            const curveB = [balB];
+
+            // Use seeded pseudo-random for consistency
+            let seed = 42;
+            function seededRandom() {
+                seed = (seed * 16807) % 2147483647;
+                return (seed - 1) / 2147483646;
+            }
+
+            for (let i = 0; i < numTrades; i++) {
+                const rand = seededRandom();
+                const isWin = rand < winRate;
+
+                if (isWin) {
+                    balA *= (1 + (riskA * avgRR / 100));
+                    balB *= (1 + (riskB * avgRR / 100));
+                } else {
+                    balA *= (1 - riskA / 100);
+                    balB *= (1 - riskB / 100);
+                }
+                // Trader B occasionally revenge trades (extra loss)
+                if (!isWin && seededRandom() < 0.4) {
+                    balB *= (1 - riskB * 1.5 / 100);
+                }
+                curveA.push(balA);
+                curveB.push(Math.max(0, balB));
+            }
+
+            // Draw equity chart on canvas
+            const container = document.getElementById('equityChartContainer');
+            container.style.display = 'block';
+            const canvas = document.getElementById('equityCanvas');
+            const ctx = canvas.getContext('2d');
+
+            // Set actual pixel dimensions
+            canvas.width = canvas.clientWidth * 2;
+            canvas.height = canvas.clientHeight * 2;
+            ctx.scale(2, 2);
+
+            const w = canvas.clientWidth;
+            const h = canvas.clientHeight;
+            const padding = {top: 10, right: 10, bottom: 20, left: 50};
+
+            ctx.clearRect(0, 0, w, h);
+
+            // Find min/max across both curves
+            const allVals = [...curveA, ...curveB];
+            const minVal = Math.min(...allVals) * 0.95;
+            const maxVal = Math.max(...allVals) * 1.05;
+
+            const chartW = w - padding.left - padding.right;
+            const chartH = h - padding.top - padding.bottom;
+
+            function toX(i) { return padding.left + (i / numTrades) * chartW; }
+            function toY(v) { return padding.top + chartH - ((v - minVal) / (maxVal - minVal)) * chartH; }
+
+            // Grid lines
+            ctx.strokeStyle = '#1e1e2d';
+            ctx.lineWidth = 0.5;
+            for (let i = 0; i <= 4; i++) {
+                const y = padding.top + (chartH / 4) * i;
+                ctx.beginPath();
+                ctx.moveTo(padding.left, y);
+                ctx.lineTo(w - padding.right, y);
+                ctx.stroke();
+
+                const val = maxVal - ((maxVal - minVal) / 4) * i;
+                ctx.fillStyle = '#666';
+                ctx.font = '9px sans-serif';
+                ctx.textAlign = 'right';
+                ctx.fillText('$' + Math.round(val).toLocaleString(), padding.left - 4, y + 3);
+            }
+
+            // Starting balance line
+            ctx.strokeStyle = '#2d2d44';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath();
+            ctx.moveTo(padding.left, toY(balance));
+            ctx.lineTo(w - padding.right, toY(balance));
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Draw Trader B first (behind)
+            ctx.strokeStyle = '#ff4444';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            curveB.forEach((v, i) => {
+                if (i === 0) ctx.moveTo(toX(i), toY(v));
+                else ctx.lineTo(toX(i), toY(v));
+            });
+            ctx.stroke();
+
+            // Draw Trader A (on top)
+            ctx.strokeStyle = '#00ff88';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            curveA.forEach((v, i) => {
+                if (i === 0) ctx.moveTo(toX(i), toY(v));
+                else ctx.lineTo(toX(i), toY(v));
+            });
+            ctx.stroke();
+
+            // Update final values
+            document.getElementById('eqFinalA').textContent = fmt(balA);
+            document.getElementById('eqFinalB').textContent = fmt(Math.max(0, balB));
+        }
+
+        function calculateCompounding() {
+            const balance = parseFloat(document.getElementById('compBalance').value) || 10000;
+            const weeklyPct = parseFloat(document.getElementById('compWeekly').value) || 5;
+            const weeksPerYear = parseInt(document.getElementById('compWeeks').value) || 35;
+            const years = parseInt(document.getElementById('compYears').value) || 3;
+
+            const rate = weeklyPct / 100;
+            const body = document.getElementById('compoundBody');
+            body.innerHTML = '';
+
+            // Add starting row
+            let row = document.createElement('tr');
+            row.innerHTML = '<td>Start</td><td>' + fmt(balance) + '</td><td>--</td>';
+            body.appendChild(row);
+
+            let bal = balance;
+            for (let y = 1; y <= years; y++) {
+                const prevBal = bal;
+                bal = bal * Math.pow(1 + rate, weeksPerYear);
+                const growth = ((bal - prevBal) / prevBal) * 100;
+
+                row = document.createElement('tr');
+                row.innerHTML = '<td>Year ' + y + '</td><td class="compound-growth">' + fmt(bal) + '</td><td class="compound-growth">+' + growth.toFixed(0) + '%</td>';
+                body.appendChild(row);
+            }
+
+            document.getElementById('compoundResults').style.display = 'block';
+        }
 
         // Initialize
         initChart();
