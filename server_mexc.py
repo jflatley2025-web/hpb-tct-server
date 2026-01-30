@@ -17,6 +17,7 @@ from loguru import logger
 
 from tct_schematics import detect_tct_schematics
 from po3_schematics import detect_po3_schematics
+from trade_execution import generate_execution_plan, calculate_leverage_comparison, calculate_capital_allocation
 
 
 # ================================================================
@@ -2494,7 +2495,8 @@ async def root():
             "lecture_3": "Supply & Demand (StructureSupplyDemand, ZoneScoring, ZoneRefinement)",
             "lecture_4": "Liquidity (LiquidityDetector, LiquidityCurveGenerator, ExtremeLiquidityTarget)",
             "lecture_7": "Risk Management (Position Sizing, Leverage, Compounding, Equity Simulation)",
-            "lecture_8": "PO3 Schematics (Power of Three: Range → Manipulation → Expansion)"
+            "lecture_8": "PO3 Schematics (Power of Three: Range → Manipulation → Expansion)",
+            "lecture_9": "Trade Execution (Position Sizing, Leverage Safety, Partial TPs, Trailing SL)"
         }
     }
 
@@ -3291,6 +3293,85 @@ async def dashboard():
             color: #666;
             margin-top: 3px;
         }
+        /* Trade Execution (Lecture 9) — Teal/Cyan theme */
+        .exec-section { border-left: 3px solid #00bcd4; }
+        .exec-section .tct-lecture { color: #00bcd4; }
+        .exec-tabs { display: flex; gap: 4px; margin: 10px 0 8px; }
+        .exec-tab {
+            flex: 1; padding: 6px 8px; border: 1px solid #2d2d44;
+            background: #12121a; color: #888; font-size: 0.7rem;
+            border-radius: 4px; cursor: pointer; text-align: center;
+        }
+        .exec-tab.active { background: rgba(0,188,212,0.15); color: #00bcd4; border-color: #00bcd4; }
+        .exec-tab-content { display: none; }
+        .exec-tab-content.active { display: block; }
+        .exec-input-group {
+            display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 10px;
+        }
+        .exec-input { display: flex; flex-direction: column; gap: 3px; }
+        .exec-input label { font-size: 0.65rem; color: #888; text-transform: uppercase; }
+        .exec-input input, .exec-input select {
+            background: #12121a; border: 1px solid #2d2d44; color: #e0e0e0;
+            padding: 6px 8px; border-radius: 4px; font-size: 0.8rem;
+        }
+        .exec-input input:focus { border-color: #00bcd4; outline: none; }
+        .exec-btn {
+            width: 100%; padding: 8px; background: linear-gradient(135deg, #00bcd4, #0097a7);
+            color: #fff; border: none; border-radius: 4px; cursor: pointer;
+            font-size: 0.8rem; font-weight: 600; margin-bottom: 10px;
+        }
+        .exec-btn:hover { opacity: 0.9; }
+        .exec-results { display: none; }
+        .exec-results.active { display: block; }
+        .exec-result-card {
+            background: #12121a; border-radius: 6px; padding: 10px;
+            margin-bottom: 8px; border: 1px solid #1e1e2d;
+        }
+        .exec-result-card h4 {
+            color: #00bcd4; font-size: 0.75rem; margin: 0 0 8px;
+            text-transform: uppercase; letter-spacing: 0.5px;
+        }
+        .exec-result-card .result-row {
+            display: flex; justify-content: space-between;
+            padding: 3px 0; font-size: 0.75rem;
+        }
+        .exec-result-card .r-label { color: #888; }
+        .exec-result-card .r-value { color: #e0e0e0; font-weight: 500; }
+        .exec-result-card .r-value.safe { color: #00ff88; }
+        .exec-result-card .r-value.danger { color: #ff4444; }
+        .exec-result-card .r-value.highlight { color: #00bcd4; }
+        .exec-result-card .r-value.profit { color: #00ff88; }
+        .exec-result-card .r-value.loss { color: #ff4444; }
+        .exec-checklist {
+            list-style: none; padding: 0; margin: 0;
+        }
+        .exec-checklist li {
+            padding: 4px 0; font-size: 0.7rem; color: #ccc;
+            border-bottom: 1px solid #1e1e2d;
+        }
+        .exec-checklist li:before { content: "✓ "; color: #00bcd4; font-weight: bold; }
+        .lev-compare-table {
+            width: 100%; border-collapse: collapse; font-size: 0.65rem;
+        }
+        .lev-compare-table th {
+            background: #1e1e2d; color: #00bcd4; padding: 4px 6px;
+            text-align: left; font-weight: 500;
+        }
+        .lev-compare-table td {
+            padding: 4px 6px; border-bottom: 1px solid #1e1e2d; color: #ccc;
+        }
+        .lev-compare-table tr.safe-row td { color: #00ff88; }
+        .lev-compare-table tr.danger-row td { color: #ff4444; }
+        .exec-warning {
+            background: rgba(255,68,68,0.1); border: 1px solid rgba(255,68,68,0.3);
+            border-radius: 4px; padding: 8px; margin-top: 8px;
+            font-size: 0.7rem; color: #ff8888;
+        }
+        .exec-info {
+            background: rgba(0,188,212,0.1); border: 1px solid rgba(0,188,212,0.3);
+            border-radius: 4px; padding: 8px; margin-top: 8px;
+            font-size: 0.7rem; color: #80deea;
+        }
     </style>
 </head>
 <body>
@@ -3652,6 +3733,226 @@ async def dashboard():
                         </table>
                         <div class="risk-warning" style="margin-top:8px;">
                             <strong>5% per week</strong> = ~1% per day. Achievable with just 2 setups/week at 2.5 R:R. The power of compounding turns small, consistent gains into life-changing wealth.
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Trade Execution (Lecture 9) -->
+            <div class="metric-card exec-section">
+                <h3>Trade Execution <span class="badge" style="background:rgba(0,188,212,0.2);color:#00bcd4;">L9</span></h3>
+                <div class="tct-lecture">TCT Lecture 9 — Exchange Settings, Leverage Safety & Execution Plan</div>
+
+                <div class="exec-tabs">
+                    <button class="exec-tab active" data-tab="exec-planner" onclick="switchExecTab('exec-planner')">Planner</button>
+                    <button class="exec-tab" data-tab="exec-leverage" onclick="switchExecTab('exec-leverage')">Leverage</button>
+                    <button class="exec-tab" data-tab="exec-capital" onclick="switchExecTab('exec-capital')">Capital</button>
+                </div>
+
+                <!-- Tab 1: Execution Planner -->
+                <div class="exec-tab-content active" id="tab-exec-planner">
+                    <div class="exec-input-group">
+                        <div class="exec-input">
+                            <label>Account Balance ($)</label>
+                            <input type="number" id="execBalance" value="10000" min="1" step="100">
+                        </div>
+                        <div class="exec-input">
+                            <label>Risk Per Trade (%)</label>
+                            <input type="number" id="execRiskPct" value="1" min="0.1" max="3" step="0.1">
+                        </div>
+                        <div class="exec-input">
+                            <label>Entry Price ($)</label>
+                            <input type="number" id="execEntry" value="100000" min="0.01" step="0.01">
+                        </div>
+                        <div class="exec-input">
+                            <label>Stop-Loss Price ($)</label>
+                            <input type="number" id="execSL" value="99500" min="0.01" step="0.01">
+                        </div>
+                        <div class="exec-input">
+                            <label>Take-Profit Price ($)</label>
+                            <input type="number" id="execTP" value="101500" min="0.01" step="0.01">
+                        </div>
+                        <div class="exec-input">
+                            <label>TP2 Price (optional)</label>
+                            <input type="number" id="execTP2" value="" min="0.01" step="0.01" placeholder="Auto">
+                        </div>
+                        <div class="exec-input">
+                            <label>Direction</label>
+                            <select id="execDirection">
+                                <option value="long">LONG</option>
+                                <option value="short">SHORT</option>
+                            </select>
+                        </div>
+                        <div class="exec-input">
+                            <label>Leverage (x)</label>
+                            <input type="number" id="execLeverage" value="10" min="1" max="400" step="1">
+                        </div>
+                    </div>
+                    <button class="exec-btn" onclick="generateExecutionPlan()">GENERATE EXECUTION PLAN</button>
+
+                    <div class="exec-results" id="execResults">
+                        <!-- Exchange Settings -->
+                        <div class="exec-result-card">
+                            <h4>Exchange Settings</h4>
+                            <div class="result-row">
+                                <span class="r-label">Margin Mode</span>
+                                <span class="r-value highlight">ISOLATED</span>
+                            </div>
+                            <div class="result-row">
+                                <span class="r-label">Order Type</span>
+                                <span class="r-value">MARKET (95%)</span>
+                            </div>
+                            <div class="result-row">
+                                <span class="r-label">Quantity Mode</span>
+                                <span class="r-value">By Quantity (USDT)</span>
+                            </div>
+                            <div class="result-row">
+                                <span class="r-label">Direction</span>
+                                <span class="r-value highlight" id="execResDirection">--</span>
+                            </div>
+                        </div>
+
+                        <!-- Position Sizing -->
+                        <div class="exec-result-card">
+                            <h4>Position Sizing</h4>
+                            <div class="result-row">
+                                <span class="r-label">Risk Amount</span>
+                                <span class="r-value loss" id="execResRisk">--</span>
+                            </div>
+                            <div class="result-row">
+                                <span class="r-label">SL Distance</span>
+                                <span class="r-value" id="execResSLPct">--</span>
+                            </div>
+                            <div class="result-row">
+                                <span class="r-label">Position Size</span>
+                                <span class="r-value highlight" id="execResPos">--</span>
+                            </div>
+                        </div>
+
+                        <!-- Leverage Safety -->
+                        <div class="exec-result-card">
+                            <h4>Leverage Safety Check</h4>
+                            <div class="result-row">
+                                <span class="r-label">Selected Leverage</span>
+                                <span class="r-value" id="execResLev">--</span>
+                            </div>
+                            <div class="result-row">
+                                <span class="r-label">Margin Required</span>
+                                <span class="r-value" id="execResMargin">--</span>
+                            </div>
+                            <div class="result-row">
+                                <span class="r-label">Liquidation Price</span>
+                                <span class="r-value" id="execResLiq">--</span>
+                            </div>
+                            <div class="result-row">
+                                <span class="r-label">SL vs Liq Gap</span>
+                                <span class="r-value" id="execResGap">--</span>
+                            </div>
+                            <div class="result-row">
+                                <span class="r-label">Safety Status</span>
+                                <span class="r-value" id="execResSafety">--</span>
+                            </div>
+                            <div class="result-row">
+                                <span class="r-label">Max Safe Leverage</span>
+                                <span class="r-value highlight" id="execResMaxLev">--</span>
+                            </div>
+                        </div>
+
+                        <!-- Trade Outcome -->
+                        <div class="exec-result-card">
+                            <h4>Trade Outcome</h4>
+                            <div class="result-row">
+                                <span class="r-label">Risk : Reward</span>
+                                <span class="r-value highlight" id="execResRR">--</span>
+                            </div>
+                            <div class="result-row">
+                                <span class="r-label">Loss at SL</span>
+                                <span class="r-value loss" id="execResLoss">--</span>
+                            </div>
+                            <div class="result-row">
+                                <span class="r-label">Profit at TP</span>
+                                <span class="r-value profit" id="execResProfit">--</span>
+                            </div>
+                            <div class="result-row">
+                                <span class="r-label">Account Gain</span>
+                                <span class="r-value profit" id="execResGain">--</span>
+                            </div>
+                        </div>
+
+                        <!-- Partial TPs -->
+                        <div class="exec-result-card">
+                            <h4>Partial Take Profits</h4>
+                            <div id="execTPLevels"></div>
+                            <div class="result-row" style="border-top:1px solid #2d2d44;margin-top:4px;padding-top:4px;">
+                                <span class="r-label">Total Expected Profit</span>
+                                <span class="r-value profit" id="execResTotalTP">--</span>
+                            </div>
+                        </div>
+
+                        <!-- Execution Checklist -->
+                        <div class="exec-result-card">
+                            <h4>Execution Checklist</h4>
+                            <ul class="exec-checklist" id="execChecklist"></ul>
+                        </div>
+
+                        <div class="exec-info">
+                            <strong>TCT Rule:</strong> Leverage only changes margin-to-position ratio, NOT risk. Same position = same risk regardless of leverage. But liquidation must ALWAYS be outside your stop-loss.
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tab 2: Leverage Comparison -->
+                <div class="exec-tab-content" id="tab-exec-leverage">
+                    <div class="exec-info" style="margin-top:0;margin-bottom:10px;">
+                        Same position size across different leverages. Risk stays constant — only margin changes. Fill in the planner first, then view comparison here.
+                    </div>
+                    <div id="leverageCompare">
+                        <table class="lev-compare-table">
+                            <thead>
+                                <tr><th>Leverage</th><th>Margin</th><th>Liq Price</th><th>Gap to SL</th><th>Status</th></tr>
+                            </thead>
+                            <tbody id="levCompareBody">
+                                <tr><td colspan="5" style="text-align:center;color:#666;">Generate plan first</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Tab 3: Capital Allocation -->
+                <div class="exec-tab-content" id="tab-exec-capital">
+                    <div class="exec-input-group">
+                        <div class="exec-input">
+                            <label>Total Capital ($)</label>
+                            <input type="number" id="execCapital" value="50000" min="100" step="100">
+                        </div>
+                        <div class="exec-input">
+                            <label>Exchange Allocation (%)</label>
+                            <input type="number" id="execExchangePct" value="50" min="10" max="100" step="5">
+                        </div>
+                    </div>
+                    <button class="exec-btn" onclick="calculateCapital()">CALCULATE ALLOCATION</button>
+                    <div class="exec-results" id="capitalResults">
+                        <div class="exec-result-card">
+                            <h4>Capital Management</h4>
+                            <div class="result-row">
+                                <span class="r-label">Total Capital</span>
+                                <span class="r-value" id="capTotal">--</span>
+                            </div>
+                            <div class="result-row">
+                                <span class="r-label">On Exchange</span>
+                                <span class="r-value highlight" id="capExchange">--</span>
+                            </div>
+                            <div class="result-row">
+                                <span class="r-label">Off Exchange (Cold Storage)</span>
+                                <span class="r-value" id="capOff">--</span>
+                            </div>
+                            <div class="result-row">
+                                <span class="r-label">Recommendation</span>
+                                <span class="r-value" id="capRec">--</span>
+                            </div>
+                        </div>
+                        <div class="exec-info">
+                            <strong>TCT Lecture 9:</strong> Never put all your money on one exchange. Keep 50-70% in cold storage or spread across wallets. Only risk what you can afford on-exchange.
                         </div>
                     </div>
                 </div>
@@ -4698,6 +4999,138 @@ async def dashboard():
             document.getElementById('compoundResults').style.display = 'block';
         }
 
+        // ========== Trade Execution (Lecture 9) Functions ==========
+        function switchExecTab(tabName) {
+            document.querySelectorAll('.exec-tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.exec-tab-content').forEach(c => c.classList.remove('active'));
+            document.querySelector(`.exec-tab[data-tab="${tabName}"]`).classList.add('active');
+            document.getElementById('tab-' + tabName).classList.add('active');
+        }
+
+        async function generateExecutionPlan() {
+            const balance = parseFloat(document.getElementById('execBalance').value) || 10000;
+            const riskPct = parseFloat(document.getElementById('execRiskPct').value) || 1;
+            const entry = parseFloat(document.getElementById('execEntry').value) || 100000;
+            const sl = parseFloat(document.getElementById('execSL').value) || 99500;
+            const tp = parseFloat(document.getElementById('execTP').value) || 101500;
+            const tp2 = parseFloat(document.getElementById('execTP2').value) || 0;
+            const direction = document.getElementById('execDirection').value;
+            const leverage = parseFloat(document.getElementById('execLeverage').value) || 10;
+
+            let url = `/api/trade-execution?account_balance=${balance}&risk_pct=${riskPct}&entry_price=${entry}&stop_loss_price=${sl}&take_profit_price=${tp}&direction=${direction}&leverage=${leverage}`;
+            if (tp2 > 0) url += `&tp2_price=${tp2}`;
+
+            try {
+                const data = await fetchWithRetry(url, {}, 2, 15000);
+                if (data.error) {
+                    alert('Error: ' + data.error);
+                    return;
+                }
+                updateExecutionUI(data);
+            } catch (e) {
+                alert('Execution plan error: ' + e.message);
+            }
+        }
+
+        function updateExecutionUI(data) {
+            const ps = data.position_sizing || {};
+            const la = data.leverage_analysis || {};
+            const to = data.trade_outcome || {};
+            const pt = data.partial_take_profits || {};
+            const safety = la.safety || {};
+
+            // Direction
+            document.getElementById('execResDirection').textContent = (ps.entry_price ? data.execution_plan?.direction || '--' : '--');
+
+            // Position sizing
+            document.getElementById('execResRisk').textContent = '-' + fmt(ps.risk_amount || 0);
+            document.getElementById('execResSLPct').textContent = (ps.stop_loss_pct || 0).toFixed(4) + '%';
+            document.getElementById('execResPos').textContent = fmt(ps.position_size || 0);
+
+            // Leverage safety
+            document.getElementById('execResLev').textContent = (la.selected_leverage || 0) + 'x';
+            document.getElementById('execResMargin').textContent = fmt(la.margin_required || 0);
+            document.getElementById('execResLiq').textContent = fmt(la.liquidation_price || 0);
+
+            const gapEl = document.getElementById('execResGap');
+            gapEl.textContent = fmt(Math.abs(safety.gap || 0)) + ' (' + (safety.gap_pct || 0).toFixed(4) + '%)';
+
+            const safetyEl = document.getElementById('execResSafety');
+            if (safety.is_safe) {
+                safetyEl.textContent = 'SAFE';
+                safetyEl.className = 'r-value safe';
+            } else {
+                safetyEl.textContent = 'DANGER';
+                safetyEl.className = 'r-value danger';
+            }
+
+            document.getElementById('execResMaxLev').textContent = (la.max_safe_leverage || 0) + 'x';
+
+            // Trade outcome
+            document.getElementById('execResRR').textContent = '1 : ' + (to.risk_reward || 0);
+            document.getElementById('execResLoss').textContent = '-' + fmt(to.loss_at_sl || 0);
+            document.getElementById('execResProfit').textContent = '+' + fmt(to.profit_at_tp || 0);
+            document.getElementById('execResGain').textContent = '+' + (to.tp_account_gain_pct || 0) + '%';
+
+            // Partial TPs
+            const tpContainer = document.getElementById('execTPLevels');
+            tpContainer.innerHTML = '';
+            if (pt.tp_levels) {
+                pt.tp_levels.forEach((tp, i) => {
+                    tpContainer.innerHTML += `
+                        <div class="result-row">
+                            <span class="r-label">TP${i+1} @ ${fmt(tp.price)} (${tp.close_pct}%)</span>
+                            <span class="r-value profit">+${fmt(tp.profit)}</span>
+                        </div>`;
+                });
+            }
+            document.getElementById('execResTotalTP').textContent = '+' + fmt(pt.total_profit || 0);
+
+            // Checklist
+            const checkEl = document.getElementById('execChecklist');
+            checkEl.innerHTML = '';
+            if (data.execution_checklist) {
+                data.execution_checklist.forEach(item => {
+                    if (item) {
+                        const li = document.createElement('li');
+                        li.textContent = item;
+                        checkEl.appendChild(li);
+                    }
+                });
+            }
+
+            // Leverage comparison table
+            const levBody = document.getElementById('levCompareBody');
+            levBody.innerHTML = '';
+            if (la.comparison) {
+                la.comparison.forEach(c => {
+                    const row = document.createElement('tr');
+                    row.className = c.is_safe ? 'safe-row' : 'danger-row';
+                    row.innerHTML = `<td>${c.leverage}x</td><td>${fmt(c.margin)}</td><td>${fmt(c.liquidation_price)}</td><td>${fmt(Math.abs(c.gap_to_sl))}</td><td>${c.is_safe ? 'SAFE' : 'DANGER'}</td>`;
+                    levBody.appendChild(row);
+                });
+            }
+
+            document.getElementById('execResults').classList.add('active');
+        }
+
+        function calculateCapital() {
+            const capital = parseFloat(document.getElementById('execCapital').value) || 50000;
+            const pct = parseFloat(document.getElementById('execExchangePct').value) || 50;
+
+            const onExchange = capital * (pct / 100);
+            const offExchange = capital - onExchange;
+
+            document.getElementById('capTotal').textContent = fmt(capital);
+            document.getElementById('capExchange').textContent = fmt(onExchange);
+            document.getElementById('capOff').textContent = fmt(offExchange);
+            document.getElementById('capRec').textContent = pct <= 50
+                ? 'Good — conservative allocation'
+                : 'Caution — consider reducing to 30-50%';
+            document.getElementById('capRec').className = 'r-value ' + (pct <= 50 ? 'safe' : 'danger');
+            document.getElementById('capitalResults').classList.add('active');
+        }
+
         // Initialize
         initChart();
         refreshData();
@@ -5631,6 +6064,55 @@ async def get_po3_schematics():
 
     except Exception as e:
         logger.error(f"[PO3_ERROR] {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/trade-execution")
+async def trade_execution_endpoint(
+    account_balance: float = 10000,
+    risk_pct: float = 1.0,
+    entry_price: float = 100000,
+    stop_loss_price: float = 99500,
+    take_profit_price: float = 101500,
+    direction: str = "long",
+    leverage: float = 10,
+    tp2_price: float = None
+):
+    """
+    TCT Lecture 9 — Trade Execution Planner.
+
+    Generates a complete execution plan including position sizing,
+    leverage safety analysis (liquidation vs SL), partial take profits,
+    and capital management — all following TCT methodology.
+
+    Key Rules:
+    - Always ISOLATED margin mode
+    - Order by quantity (USDT)
+    - Market orders 95% of the time (BOS entries)
+    - Liquidation price must ALWAYS be outside stop-loss zone
+    - Trail SL to breakeven, then increase leverage + reduce margin
+    """
+    try:
+        plan = generate_execution_plan(
+            account_balance=account_balance,
+            risk_pct=risk_pct,
+            entry_price=entry_price,
+            stop_loss_price=stop_loss_price,
+            take_profit_price=take_profit_price,
+            direction=direction,
+            leverage=leverage,
+            tp2_price=tp2_price
+        )
+
+        if "error" in plan:
+            return JSONResponse({"error": plan["error"]}, status_code=400)
+
+        return JSONResponse(convert_numpy_types(plan))
+
+    except Exception as e:
+        logger.error(f"[TRADE_EXECUTION_ERROR] {e}")
         import traceback
         logger.error(traceback.format_exc())
         return JSONResponse({"error": str(e)}, status_code=500)
