@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse, HTMLResponse
 from loguru import logger
 
 from tct_schematics import detect_tct_schematics
+from po3_schematics import detect_po3_schematics
 
 
 # ================================================================
@@ -2492,7 +2493,8 @@ async def root():
             "lecture_2": "Ranges (TCTRangeDetector, TCTDeviationDetector, TCTPremiumDiscountClassifier)",
             "lecture_3": "Supply & Demand (StructureSupplyDemand, ZoneScoring, ZoneRefinement)",
             "lecture_4": "Liquidity (LiquidityDetector, LiquidityCurveGenerator, ExtremeLiquidityTarget)",
-            "lecture_7": "Risk Management (Position Sizing, Leverage, Compounding, Equity Simulation)"
+            "lecture_7": "Risk Management (Position Sizing, Leverage, Compounding, Equity Simulation)",
+            "lecture_8": "PO3 Schematics (Power of Three: Range → Manipulation → Expansion)"
         }
     }
 
@@ -3190,6 +3192,105 @@ async def dashboard():
             line-height: 1.4;
         }
         .risk-warning strong { color: #ff9800; }
+
+        /* ===== PO3 SCHEMATICS (TCT Lecture 8) ===== */
+        .po3-section { border-left: 3px solid #e040fb; }
+        .po3-section h3 { color: #e040fb !important; }
+        .po3-item {
+            background: #1a1a2e;
+            border-radius: 6px;
+            padding: 10px;
+            margin-bottom: 8px;
+            border-left: 3px solid #e040fb;
+        }
+        .po3-item.bullish { border-left-color: #00ff88; }
+        .po3-item.bearish { border-left-color: #ff4444; }
+        .po3-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 6px;
+        }
+        .po3-type {
+            font-size: 0.75rem;
+            font-weight: bold;
+            color: #e0e0e0;
+        }
+        .po3-phase {
+            font-size: 0.6rem;
+            padding: 2px 6px;
+            border-radius: 3px;
+            text-transform: uppercase;
+            font-weight: 600;
+        }
+        .po3-phase.range { background: rgba(224, 64, 251, 0.2); color: #e040fb; }
+        .po3-phase.manipulation { background: rgba(255, 152, 0, 0.2); color: #ff9800; }
+        .po3-phase.manipulation_complete { background: rgba(0, 188, 212, 0.2); color: #00bcd4; }
+        .po3-phase.expansion { background: rgba(0, 255, 136, 0.2); color: #00ff88; }
+        .po3-quality {
+            font-size: 0.65rem;
+            padding: 2px 6px;
+            border-radius: 3px;
+            background: rgba(224, 64, 251, 0.2);
+            color: #e040fb;
+        }
+        .po3-levels {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 6px;
+            margin-top: 6px;
+        }
+        .po3-level-box {
+            text-align: center;
+            padding: 4px;
+            border-radius: 4px;
+            font-size: 0.7rem;
+        }
+        .po3-level-box.entry { background: rgba(0, 212, 255, 0.15); color: #00d4ff; }
+        .po3-level-box.stop { background: rgba(255, 68, 68, 0.15); color: #ff4444; }
+        .po3-level-box.target { background: rgba(0, 255, 136, 0.15); color: #00ff88; }
+        .po3-level-label { font-size: 0.6rem; color: #888; display: block; }
+        .po3-level-price { font-weight: bold; }
+        .po3-meta {
+            display: flex;
+            gap: 8px;
+            margin-top: 6px;
+            font-size: 0.65rem;
+            color: #888;
+            flex-wrap: wrap;
+        }
+        .po3-meta .rr { color: #ffc107; }
+        .po3-meta .tct-model { color: #00bcd4; }
+        .po3-meta .exception { color: #ff9800; }
+        .po3-meta .compression { color: #8bc34a; }
+        .po3-meta .liq-both { color: #9c27b0; }
+        .po3-manip-bar {
+            margin-top: 6px;
+            background: #12121a;
+            border-radius: 4px;
+            padding: 6px;
+        }
+        .po3-manip-bar .bar-track {
+            height: 6px;
+            background: #2d2d44;
+            border-radius: 3px;
+            position: relative;
+            overflow: hidden;
+        }
+        .po3-manip-bar .bar-fill {
+            height: 100%;
+            border-radius: 3px;
+            transition: width 0.3s;
+        }
+        .po3-manip-bar .bar-fill.bullish { background: linear-gradient(90deg, #ff4444, #00ff88); }
+        .po3-manip-bar .bar-fill.bearish { background: linear-gradient(90deg, #00ff88, #ff4444); }
+        .po3-manip-labels {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.6rem;
+            color: #666;
+            margin-top: 3px;
+        }
     </style>
 </head>
 <body>
@@ -3349,6 +3450,17 @@ async def dashboard():
                 <h3>TCT Schematics <span class="badge badge-neutral" id="schematicsBadge">--</span></h3>
                 <div class="tct-lecture">Lecture 5A + 5B Methodology</div>
                 <div id="schematicsContent">
+                    <div class="metric-row">
+                        <span class="label">Loading...</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- PO3 Schematics (Lecture 8) -->
+            <div class="metric-card po3-section">
+                <h3>PO3 Schematics <span class="badge badge-neutral" id="po3Badge">--</span></h3>
+                <div class="tct-lecture">Lecture 8 — Power of Three: Range → Manipulation → Expansion</div>
+                <div id="po3Content">
                     <div class="metric-row">
                         <span class="label">Loading...</span>
                     </div>
@@ -3777,6 +3889,7 @@ async def dashboard():
             setLoading('liqCount', true);
             setLoading('actionBadge', true);
             setLoading('schematicsBadge', true);
+            setLoading('po3Badge', true);
 
             // Fetch candles and update chart
             lastCandles = await fetchCandles(currentTimeframe, 100);
@@ -3789,12 +3902,13 @@ async def dashboard():
             clearPriceLines();
 
             // Fetch all API data in parallel with individual error handling
-            const [rangesResult, zonesResult, liqResult, valResult, schematicsResult] = await Promise.allSettled([
+            const [rangesResult, zonesResult, liqResult, valResult, schematicsResult, po3Result] = await Promise.allSettled([
                 fetchWithRetry('/api/ranges', {}, 3, 25000),
                 fetchWithRetry('/api/zones', {}, 3, 25000),
                 fetchWithRetry('/api/liquidity', {}, 3, 25000),
                 fetchWithRetry('/api/validate', {}, 3, 25000),
-                fetchWithRetry('/api/schematics', {}, 3, 30000)
+                fetchWithRetry('/api/schematics', {}, 3, 30000),
+                fetchWithRetry('/api/po3', {}, 3, 30000)
             ]);
 
             // Process ranges (pass candles for range band)
@@ -3836,6 +3950,14 @@ async def dashboard():
             } else {
                 console.error('Schematics error:', schematicsResult.reason || schematicsResult.value?.error);
                 setError('schematicsBadge');
+            }
+
+            // Process PO3 schematics
+            if (po3Result.status === 'fulfilled' && !po3Result.value.error) {
+                updatePO3UI(po3Result.value);
+            } else {
+                console.error('PO3 error:', po3Result.reason || po3Result.value?.error);
+                setError('po3Badge');
             }
 
             isLoading = false;
@@ -4213,6 +4335,113 @@ async def dashboard():
                 await refreshData();
             });
         });
+
+        // ===== PO3 SCHEMATICS FUNCTIONS (TCT Lecture 8) =====
+
+        function updatePO3UI(data) {
+            const contentEl = document.getElementById('po3Content');
+            const badgeEl = document.getElementById('po3Badge');
+
+            if (data.error) {
+                contentEl.innerHTML = '<div class="metric-row"><span class="label">Error loading PO3</span></div>';
+                badgeEl.textContent = 'ERR';
+                badgeEl.className = 'badge badge-bearish';
+                return;
+            }
+
+            // Combine HTF and LTF PO3 schematics
+            const htfPO3 = data.htf_po3?.schematics || [];
+            const ltfPO3 = data.ltf_po3?.schematics || [];
+            const allPO3 = [...htfPO3.slice(0, 3), ...ltfPO3.slice(0, 3)];
+
+            if (allPO3.length === 0) {
+                contentEl.innerHTML = '<div class="metric-row"><span class="label">No active PO3 schematics detected</span></div>' +
+                    '<div class="metric-row" style="margin-top:4px;"><span class="label" style="font-size:0.6rem;color:#666;">PO3 = Range → Manipulation → Expansion</span></div>';
+                badgeEl.textContent = '0';
+                badgeEl.className = 'badge badge-neutral';
+                return;
+            }
+
+            // Update badge
+            const totalCount = (data.htf_po3?.summary?.total || 0) + (data.ltf_po3?.summary?.total || 0);
+            const hasBull = allPO3.some(p => p.direction === 'bullish');
+            const hasBear = allPO3.some(p => p.direction === 'bearish');
+            badgeEl.textContent = totalCount;
+            badgeEl.className = 'badge badge-' + (hasBull && !hasBear ? 'bullish' : hasBear && !hasBull ? 'bearish' : 'neutral');
+
+            let html = '';
+            allPO3.forEach((p) => {
+                const isBull = p.direction === 'bullish';
+                const dirClass = isBull ? 'bullish' : 'bearish';
+                const typeLabel = isBull ? 'BULLISH PO3' : 'BEARISH PO3';
+                const quality = Math.round((p.quality_score || 0) * 100);
+                const phase = p.phase || 'range';
+                const entry = p.entry?.price;
+                const stop = p.stop_loss?.price;
+                const target = p.target?.price;
+                const rr = p.risk_reward;
+
+                html += '<div class="po3-item ' + dirClass + '">';
+
+                // Header: type + phase + quality
+                html += '<div class="po3-header">';
+                html += '<span class="po3-type">' + typeLabel + '</span>';
+                html += '<span class="po3-phase ' + phase.replace(' ', '_') + '">' + phase.replace('_', ' ') + '</span>';
+                html += '<span class="po3-quality">' + quality + '%</span>';
+                html += '</div>';
+
+                // Entry/Stop/Target levels
+                if (entry && stop && target) {
+                    html += '<div class="po3-levels">';
+                    html += '<div class="po3-level-box entry"><span class="po3-level-label">ENTRY</span><span class="po3-level-price">$' + entry.toLocaleString(undefined, {maximumFractionDigits: 0}) + '</span></div>';
+                    html += '<div class="po3-level-box stop"><span class="po3-level-label">STOP</span><span class="po3-level-price">$' + stop.toLocaleString(undefined, {maximumFractionDigits: 0}) + '</span></div>';
+                    html += '<div class="po3-level-box target"><span class="po3-level-label">TARGET</span><span class="po3-level-price">$' + target.toLocaleString(undefined, {maximumFractionDigits: 0}) + '</span></div>';
+                    html += '</div>';
+                }
+
+                // Manipulation depth bar
+                const manipInfo = p.manipulation || {};
+                const devPct = manipInfo.deviation_pct || 0;
+                const dl2Pct = 30; // DL2 is 30% of range
+                const barWidth = Math.min(100, (devPct / dl2Pct) * 100);
+
+                html += '<div class="po3-manip-bar">';
+                html += '<div class="bar-track">';
+                html += '<div class="bar-fill ' + dirClass + '" style="width:' + barWidth + '%"></div>';
+                html += '</div>';
+                html += '<div class="po3-manip-labels">';
+                html += '<span>Dev: ' + devPct.toFixed(1) + '%</span>';
+                html += '<span>DL2: ' + dl2Pct + '%</span>';
+                html += '</div>';
+                html += '</div>';
+
+                // Meta tags
+                html += '<div class="po3-meta">';
+                if (rr) html += '<span class="rr">R:R ' + rr.toFixed(1) + '</span>';
+                if (p.tct_model?.detected) html += '<span class="tct-model">TCT ' + (p.tct_model.type || 'Model') + '</span>';
+                if (p.exception) {
+                    const excLabel = p.exception === 'exception_1_two_tap' ? '2-Tap' : p.exception === 'exception_2_internal_tct' ? 'Internal TCT' : p.exception;
+                    html += '<span class="exception">' + excLabel + '</span>';
+                }
+                if (p.has_compression) html += '<span class="compression">Compressed</span>';
+                if (p.has_liquidity_both_sides) html += '<span class="liq-both">Dual Liq</span>';
+                if (p.has_expansion) html += '<span style="color:#00ff88;">Expanding</span>';
+                html += '</div>';
+
+                // Range info
+                if (p.range) {
+                    html += '<div style="margin-top:4px;font-size:0.6rem;color:#555;">';
+                    html += 'Range: $' + (p.range.low || 0).toLocaleString(undefined, {maximumFractionDigits: 0});
+                    html += ' — $' + (p.range.high || 0).toLocaleString(undefined, {maximumFractionDigits: 0});
+                    html += ' (' + (p.range.size_pct || 0) + '%)';
+                    html += '</div>';
+                }
+
+                html += '</div>';
+            });
+
+            contentEl.innerHTML = html;
+        }
 
         // ===== RISK MANAGEMENT FUNCTIONS (TCT Lecture 7) =====
 
@@ -5272,6 +5501,140 @@ async def get_tct_schematics():
         import traceback
         logger.error(traceback.format_exc())
         return JSONResponse({"error": str(e)}, status_code=500)
+
+@app.get("/api/po3")
+async def get_po3_schematics():
+    """
+    PO3 (Power of Three) Schematics endpoint — TCT Lecture 8
+
+    Detects PO3 manipulation plays: Range → Manipulation → Expansion.
+    - Bullish PO3: Range → breakdown below low → accumulation → expansion up
+    - Bearish PO3: Range → breakout above high → distribution → expansion down
+
+    Requirements:
+    - Manipulation must stay inside DL2 (30% of range)
+    - Must contain TCT model (accumulation/distribution) in manipulation phase
+    - Good RTZ quality in the range
+
+    Also detects Exception 1 (2-tap) and Exception 2 (Internal TCT).
+    """
+    try:
+        # Fetch HTF (4h) and LTF (15m) candles
+        htf_df = await fetch_mexc_candles(SYMBOL, "4h", 200)
+        ltf_df = await fetch_mexc_candles(SYMBOL, "15m", 200)
+
+        if htf_df is None or ltf_df is None:
+            return JSONResponse({"error": "Failed to fetch candle data"}, status_code=500)
+
+        current_price = float(ltf_df.iloc[-1]["close"])
+
+        # Convert DataFrames to candle lists for range detection
+        def df_to_candles(df):
+            candles = []
+            for _, row in df.iterrows():
+                candles.append({
+                    'open_time': str(row['open_time']),
+                    'open': float(row['open']),
+                    'high': float(row['high']),
+                    'low': float(row['low']),
+                    'close': float(row['close']),
+                    'volume': float(row['volume'])
+                })
+            return candles
+
+        htf_candles_list = df_to_candles(htf_df)
+        ltf_candles_list = df_to_candles(ltf_df)
+
+        # Detect ranges for both timeframes
+        htf_ranges = await detect_best_range(htf_candles_list)
+        ltf_ranges = await detect_best_range(ltf_candles_list)
+
+        htf_range_list = [htf_ranges] if htf_ranges and not isinstance(htf_ranges, list) else (htf_ranges or [])
+        ltf_range_list = [ltf_ranges] if ltf_ranges and not isinstance(ltf_ranges, list) else (ltf_ranges or [])
+
+        # Detect PO3 schematics on both timeframes
+        htf_po3_result = detect_po3_schematics(htf_df, htf_range_list)
+        ltf_po3_result = detect_po3_schematics(ltf_df, ltf_range_list)
+
+        # Combine PO3 detections
+        htf_bullish = htf_po3_result.get("bullish_po3", [])
+        htf_bearish = htf_po3_result.get("bearish_po3", [])
+        ltf_bullish = ltf_po3_result.get("bullish_po3", [])
+        ltf_bearish = ltf_po3_result.get("bearish_po3", [])
+
+        # Filter active PO3s (still valid for trading)
+        def filter_active_po3(po3_list, current_price):
+            active = []
+            for p in po3_list:
+                if not isinstance(p, dict):
+                    continue
+                entry = p.get("entry", {}).get("price")
+                target = p.get("target", {}).get("price")
+                stop = p.get("stop_loss", {}).get("price")
+                if entry and target and stop:
+                    if p.get("direction") == "bullish":
+                        if current_price < target and current_price > stop:
+                            active.append(p)
+                    elif p.get("direction") == "bearish":
+                        if current_price > target and current_price < stop:
+                            active.append(p)
+                else:
+                    active.append(p)
+            return sorted(active, key=lambda x: x.get("quality_score", 0), reverse=True)
+
+        htf_active = filter_active_po3(htf_bullish + htf_bearish, current_price)
+        ltf_active = filter_active_po3(ltf_bullish + ltf_bearish, current_price)
+
+        response_data = convert_numpy_types({
+            "symbol": SYMBOL,
+            "current_price": current_price,
+            "methodology": "TCT Mentorship Lecture 8 - PO3 Schematics (Power of Three)",
+            "htf_po3": {
+                "timeframe": "4h",
+                "schematics": htf_active[:5],
+                "summary": {
+                    "total": len(htf_active),
+                    "bullish": sum(1 for p in htf_active if p.get("direction") == "bullish"),
+                    "bearish": sum(1 for p in htf_active if p.get("direction") == "bearish"),
+                    "in_expansion": sum(1 for p in htf_active if p.get("phase") == "expansion"),
+                    "in_manipulation": sum(1 for p in htf_active if p.get("phase") in ("manipulation", "manipulation_complete")),
+                }
+            },
+            "ltf_po3": {
+                "timeframe": "15m",
+                "schematics": ltf_active[:5],
+                "summary": {
+                    "total": len(ltf_active),
+                    "bullish": sum(1 for p in ltf_active if p.get("direction") == "bullish"),
+                    "bearish": sum(1 for p in ltf_active if p.get("direction") == "bearish"),
+                    "in_expansion": sum(1 for p in ltf_active if p.get("phase") == "expansion"),
+                    "in_manipulation": sum(1 for p in ltf_active if p.get("phase") in ("manipulation", "manipulation_complete")),
+                }
+            },
+            "po3_rules": {
+                "range": "4H+ range with good RTZ quality and compression",
+                "manipulation": "Breakout/breakdown must stay inside DL2 (30% of range)",
+                "tct_model": "Must contain TCT accumulation (bullish) or distribution (bearish) in manipulation phase",
+                "expansion": "Target extends to opposite range extreme for maximum R:R",
+                "exception_1": "2-tap: Single deviation with excellent RTZ — skip third tap",
+                "exception_2": "Internal TCT: Model forms in manipulation without sweeping range extreme",
+                "key_rule": "When a TCT model fails, look for potential PO3 setup"
+            },
+            "summary": {
+                "total_htf_po3": len(htf_active),
+                "total_ltf_po3": len(ltf_active),
+                "best_htf_quality": htf_active[0].get("quality_score", 0) if htf_active else 0,
+                "best_ltf_quality": ltf_active[0].get("quality_score", 0) if ltf_active else 0,
+            }
+        })
+        return JSONResponse(response_data)
+
+    except Exception as e:
+        logger.error(f"[PO3_ERROR] {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return JSONResponse({"error": str(e)}, status_code=500)
+
 
 # ================================================================
 # ENTRY POINT
