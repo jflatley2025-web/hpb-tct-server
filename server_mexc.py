@@ -59,6 +59,30 @@ MEXC_KEY = os.getenv("MEXC_KEY")
 MEXC_SECRET = os.getenv("MEXC_SECRET")
 MEXC_URL_BASE = "https://api.mexc.com"
 
+# Load leverage coin list for pair selection
+COIN_LIST = []
+COIN_LIST_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "leverage_coin_list_extended.txt")
+try:
+    with open(COIN_LIST_PATH, "r") as f:
+        for line in f:
+            pair = line.strip()
+            # Filter out non-pair lines and dated futures contracts
+            if pair and pair.endswith("USDT") and "-" not in pair and not pair.endswith(".txt"):
+                COIN_LIST.append(pair)
+    COIN_LIST = sorted(set(COIN_LIST))
+    logger.info(f"[INIT] Loaded {len(COIN_LIST)} trading pairs from coin list")
+except FileNotFoundError:
+    COIN_LIST = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"]
+    logger.warning(f"[INIT] Coin list file not found, using defaults")
+
+def resolve_symbol(symbol_param: Optional[str] = None) -> str:
+    """Resolve which symbol to use: param override or global default."""
+    if symbol_param:
+        s = symbol_param.strip().upper().replace("/", "").replace("-", "")
+        if s:
+            return s
+    return SYMBOL
+
 app = FastAPI(title="HPB–TCT v21.2 MEXC Server", version="21.2")
 
 latest_ranges = {"LTF": [], "HTF": []}
@@ -2505,31 +2529,65 @@ async def get_status():
     return {"status": "OK", "symbol": SYMBOL, "timestamp": datetime.utcnow().isoformat()}
 
 @app.get("/api/price")
-async def live_price():
-    url = f"{MEXC_URL_BASE}/api/v3/ticker/price?symbol={SYMBOL}"
+async def live_price(symbol: Optional[str] = None):
+    sym = resolve_symbol(symbol)
+    url = f"{MEXC_URL_BASE}/api/v3/ticker/price?symbol={sym}"
     try:
         async with httpx.AsyncClient(timeout=10) as c:
             r = await c.get(url)
             if r.status_code == 200:
-                return {"symbol": SYMBOL, "price": float(r.json()["price"])}
+                return {"symbol": sym, "price": float(r.json()["price"])}
             return {"error": f"HTTP {r.status_code}"}
     except Exception as e:
         return {"error": str(e)}
 
+@app.get("/api/coin-list")
+async def get_coin_list():
+    """Return the full list of available trading pairs, categorized."""
+    # Major pairs for quick access
+    majors = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT",
+              "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT", "LTCUSDT", "MATICUSDT"]
+    # DeFi
+    defi = ["AAVEUSDT", "UNIUSDT", "MKRUSDT", "COMPUSDT", "CRVUSDT", "SNXUSDT",
+            "LDOUSDT", "DYDXUSDT", "GMXUSDT", "PENDLEUSDT", "JUPUSDT", "RAYDIUMUSDT"]
+    # Layer 1/2
+    layer = ["APTUSDT", "SEIUSDT", "SUIUSDT", "NEARUSDT", "ATOMUSDT", "ICPUSDT",
+             "INJUSDT", "TIAUSDT", "MANTAUSDT", "ARBUSDT", "OPUSDT", "STRKUSDT"]
+    # Meme
+    meme = ["1000PEPEUSDT", "1000FLOKIUSDT", "1000BONKUSDT", "SHIBUSDT", "WIFUSDT",
+            "BOMEUSDT", "MEWUSDT", "POPCATUSDT", "GOATUSDT", "PNUTUSDT", "FARTCOINUSDT"]
+    # AI
+    ai = ["RENDERUSDT", "FETUSDT", "AGIXUSDT", "OCEANUSDT", "AIXBTUSDT", "TAOBTCUSDT",
+          "GRASSUSDT", "CGPTUSDT", "AIOZUSDT"]
+
+    return {
+        "total": len(COIN_LIST),
+        "categories": {
+            "majors": [p for p in majors if p in COIN_LIST],
+            "defi": [p for p in defi if p in COIN_LIST],
+            "layer_1_2": [p for p in layer if p in COIN_LIST],
+            "meme": [p for p in meme if p in COIN_LIST],
+            "ai": [p for p in ai if p in COIN_LIST],
+        },
+        "all": COIN_LIST
+    }
+
 @app.get("/api/candles")
-async def get_candles(interval: str = "4h", limit: int = 100):
+async def get_candles(interval: str = "4h", limit: int = 100, symbol: Optional[str] = None):
     """
     Fetch candles from MEXC - server-side to avoid CORS issues.
 
     Args:
         interval: Timeframe (1m, 5m, 15m, 1h, 4h, 1d)
         limit: Number of candles (max 1000)
+        symbol: Trading pair (defaults to BTCUSDT)
 
     Returns:
         List of candles with time, open, high, low, close
     """
     try:
-        df = await fetch_mexc_candles(SYMBOL, interval, min(limit, 500))
+        sym = resolve_symbol(symbol)
+        df = await fetch_mexc_candles(sym, interval, min(limit, 500))
         if df is None:
             return JSONResponse({"error": "Failed to fetch candles from MEXC"}, status_code=500)
 
@@ -2545,7 +2603,7 @@ async def get_candles(interval: str = "4h", limit: int = 100):
             })
 
         return {
-            "symbol": SYMBOL,
+            "symbol": sym,
             "interval": interval,
             "count": len(candles),
             "candles": candles
@@ -2959,6 +3017,63 @@ async def dashboard():
             gap: 8px;
             align-items: center;
         }
+        .pair-search-wrapper {
+            position: relative;
+            display: inline-block;
+        }
+        .pair-search {
+            background: #1a1a2e;
+            color: #00d4ff;
+            border: 1px solid #2d2d44;
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            font-weight: 700;
+            min-width: 140px;
+            width: 140px;
+            cursor: text;
+        }
+        .pair-search:focus { outline: none; border-color: #00d4ff; box-shadow: 0 0 0 2px rgba(0,212,255,0.2); }
+        .pair-search::placeholder { color: #555; font-weight: 400; }
+        .pair-dropdown {
+            display: none;
+            position: absolute;
+            top: 100%;
+            left: 0;
+            background: #12121a;
+            border: 1px solid #2d2d44;
+            border-radius: 6px;
+            max-height: 400px;
+            overflow-y: auto;
+            z-index: 1000;
+            min-width: 260px;
+            margin-top: 4px;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+        }
+        .pair-dropdown.open { display: block; }
+        .pair-dropdown-group { padding: 4px 0; }
+        .pair-dropdown-group-label {
+            padding: 6px 12px 4px;
+            font-size: 0.6rem;
+            color: #00d4ff;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            font-weight: 600;
+            border-bottom: 1px solid #1a1a2e;
+        }
+        .pair-dropdown-item {
+            padding: 6px 12px;
+            font-size: 0.78rem;
+            color: #ccc;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .pair-dropdown-item:hover { background: #1a1a2e; color: #00d4ff; }
+        .pair-dropdown-item.active { background: rgba(0,212,255,0.1); color: #00d4ff; font-weight: 600; }
+        .pair-dropdown-item .pair-base { font-weight: 600; }
+        .pair-dropdown-item .pair-quote { color: #555; font-size: 0.65rem; }
         .tf-dropdown {
             background: #1a1a2e;
             color: #00d4ff;
@@ -3484,9 +3599,16 @@ async def dashboard():
 </head>
 <body>
     <div class="header">
-        <h1>HPB-TCT Dashboard <span class="symbol">BTCUSDT</span></h1>
+        <h1>HPB-TCT Dashboard <span class="symbol" id="headerSymbol">BTCUSDT</span></h1>
         <div style="display: flex; align-items: center; gap: 15px;">
             <div class="timeframe-selector">
+                <div>
+                    <span class="tf-label">Pair</span>
+                    <div class="pair-search-wrapper">
+                        <input type="text" id="pairSearch" class="pair-search" value="BTCUSDT" autocomplete="off" spellcheck="false">
+                        <div class="pair-dropdown" id="pairDropdown"></div>
+                    </div>
+                </div>
                 <div>
                     <span class="tf-label">Timeframe</span>
                     <select id="tfDropdown" class="tf-dropdown">
@@ -4103,6 +4225,8 @@ async def dashboard():
         let chart, candleSeries, lineSeries = [];
         let additionalSeries = []; // For liquidity curves
         let currentTimeframe = '4h';
+        let currentSymbol = 'BTCUSDT';
+        let coinList = { categories: {}, all: [] };
         let isLoading = false;
         let lastCandles = []; // Store candles for index-to-time mapping
 
@@ -4197,7 +4321,7 @@ async def dashboard():
         async function fetchCandles(interval = '4h', limit = 100) {
             try {
                 const data = await fetchWithRetry(
-                    `/api/candles?interval=${interval}&limit=${limit}`,
+                    `/api/candles?interval=${interval}&limit=${limit}&symbol=${currentSymbol}`,
                     {}, 3, 20000
                 );
                 if (data.error) {
@@ -4343,12 +4467,12 @@ async def dashboard():
 
             // Fetch all API data in parallel with individual error handling
             const [rangesResult, zonesResult, liqResult, valResult, schematicsResult, po3Result] = await Promise.allSettled([
-                fetchWithRetry('/api/ranges', {}, 3, 25000),
-                fetchWithRetry('/api/zones', {}, 3, 25000),
-                fetchWithRetry('/api/liquidity', {}, 3, 25000),
-                fetchWithRetry('/api/validate', {}, 3, 25000),
-                fetchWithRetry('/api/schematics', {}, 3, 30000),
-                fetchWithRetry('/api/po3', {}, 3, 30000)
+                fetchWithRetry(`/api/ranges?symbol=${currentSymbol}`, {}, 3, 25000),
+                fetchWithRetry(`/api/zones?symbol=${currentSymbol}`, {}, 3, 25000),
+                fetchWithRetry(`/api/liquidity?symbol=${currentSymbol}`, {}, 3, 25000),
+                fetchWithRetry(`/api/validate?symbol=${currentSymbol}`, {}, 3, 25000),
+                fetchWithRetry(`/api/schematics?symbol=${currentSymbol}`, {}, 3, 30000),
+                fetchWithRetry(`/api/po3?symbol=${currentSymbol}`, {}, 3, 30000)
             ]);
 
             // Process ranges (pass candles for range band)
@@ -4783,6 +4907,162 @@ async def dashboard():
             currentTimeframe = e.target.value;
             await refreshData();
         });
+
+        // ===== PAIR SELECTOR =====
+        const pairSearchEl = document.getElementById('pairSearch');
+        const pairDropdownEl = document.getElementById('pairDropdown');
+        let pairDropdownOpen = false;
+
+        // Load coin list from server
+        async function loadCoinList() {
+            try {
+                const data = await fetchWithRetry('/api/coin-list', {}, 2, 10000);
+                if (data && data.all) {
+                    coinList = data;
+                    console.log('Loaded', data.total, 'trading pairs');
+                }
+            } catch (e) {
+                console.error('Failed to load coin list:', e);
+            }
+        }
+
+        // Render the pair dropdown
+        function renderPairDropdown(filter = '') {
+            const f = filter.toUpperCase();
+            let html = '';
+
+            const categoryLabels = {
+                'majors': 'Majors',
+                'defi': 'DeFi',
+                'layer_1_2': 'Layer 1 / Layer 2',
+                'meme': 'Meme',
+                'ai': 'AI & Compute'
+            };
+
+            // If filtering, show flat list
+            if (f.length > 0) {
+                const matches = coinList.all.filter(p => p.includes(f)).slice(0, 40);
+                if (matches.length === 0) {
+                    html = '<div class="pair-dropdown-item" style="color:#666;cursor:default;">No matches</div>';
+                } else {
+                    matches.forEach(pair => {
+                        const base = pair.replace('USDT', '');
+                        const isActive = pair === currentSymbol ? ' active' : '';
+                        html += '<div class="pair-dropdown-item' + isActive + '" data-pair="' + pair + '">';
+                        html += '<span class="pair-base">' + base + '</span>';
+                        html += '<span class="pair-quote">/ USDT</span>';
+                        html += '</div>';
+                    });
+                }
+            } else {
+                // Show categorized
+                for (const [cat, label] of Object.entries(categoryLabels)) {
+                    const pairs = coinList.categories[cat] || [];
+                    if (pairs.length > 0) {
+                        html += '<div class="pair-dropdown-group">';
+                        html += '<div class="pair-dropdown-group-label">' + label + '</div>';
+                        pairs.forEach(pair => {
+                            const base = pair.replace('USDT', '');
+                            const isActive = pair === currentSymbol ? ' active' : '';
+                            html += '<div class="pair-dropdown-item' + isActive + '" data-pair="' + pair + '">';
+                            html += '<span class="pair-base">' + base + '</span>';
+                            html += '<span class="pair-quote">/ USDT</span>';
+                            html += '</div>';
+                        });
+                        html += '</div>';
+                    }
+                }
+                // Also show "All Pairs" section for remaining
+                html += '<div class="pair-dropdown-group">';
+                html += '<div class="pair-dropdown-group-label">All Pairs (' + coinList.all.length + ')</div>';
+                coinList.all.slice(0, 30).forEach(pair => {
+                    const base = pair.replace('USDT', '');
+                    const isActive = pair === currentSymbol ? ' active' : '';
+                    html += '<div class="pair-dropdown-item' + isActive + '" data-pair="' + pair + '">';
+                    html += '<span class="pair-base">' + base + '</span>';
+                    html += '<span class="pair-quote">/ USDT</span>';
+                    html += '</div>';
+                });
+                if (coinList.all.length > 30) {
+                    html += '<div class="pair-dropdown-item" style="color:#555;cursor:default;font-style:italic;">Type to search ' + (coinList.all.length - 30) + ' more...</div>';
+                }
+                html += '</div>';
+            }
+
+            pairDropdownEl.innerHTML = html;
+
+            // Add click handlers
+            pairDropdownEl.querySelectorAll('.pair-dropdown-item[data-pair]').forEach(item => {
+                item.addEventListener('click', () => {
+                    selectPair(item.dataset.pair);
+                });
+            });
+        }
+
+        async function selectPair(pair) {
+            currentSymbol = pair;
+            pairSearchEl.value = pair;
+            document.getElementById('headerSymbol').textContent = pair;
+            closePairDropdown();
+            await refreshData();
+        }
+
+        function openPairDropdown() {
+            if (!pairDropdownOpen) {
+                pairDropdownOpen = true;
+                pairDropdownEl.classList.add('open');
+                renderPairDropdown(pairSearchEl.value === currentSymbol ? '' : pairSearchEl.value);
+            }
+        }
+
+        function closePairDropdown() {
+            pairDropdownOpen = false;
+            pairDropdownEl.classList.remove('open');
+        }
+
+        pairSearchEl.addEventListener('focus', () => {
+            pairSearchEl.select();
+            openPairDropdown();
+        });
+
+        pairSearchEl.addEventListener('input', () => {
+            openPairDropdown();
+            renderPairDropdown(pairSearchEl.value);
+        });
+
+        pairSearchEl.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                const val = pairSearchEl.value.toUpperCase().trim();
+                // Check if valid pair
+                if (coinList.all.includes(val)) {
+                    selectPair(val);
+                } else if (coinList.all.includes(val + 'USDT')) {
+                    selectPair(val + 'USDT');
+                } else {
+                    // Try first match
+                    const match = coinList.all.find(p => p.includes(val));
+                    if (match) selectPair(match);
+                }
+                e.preventDefault();
+            } else if (e.key === 'Escape') {
+                pairSearchEl.value = currentSymbol;
+                closePairDropdown();
+                pairSearchEl.blur();
+            }
+        });
+
+        // Close dropdown when clicking outside
+        document.addEventListener('click', (e) => {
+            if (!e.target.closest('.pair-search-wrapper')) {
+                if (pairDropdownOpen) {
+                    pairSearchEl.value = currentSymbol;
+                    closePairDropdown();
+                }
+            }
+        });
+
+        // Load coin list on startup
+        loadCoinList();
 
         // Map timeframe to optimal candle count
         function getCandleLimit(tf) {
@@ -5852,7 +6132,7 @@ async def dashboard():
     return HTMLResponse(content=html_content)
 
 @app.get("/api/zones")
-async def detect_zones():
+async def detect_zones(symbol: Optional[str] = None):
     """
     Detect and score Supply/Demand zones using TCT Mentorship methodology.
 
@@ -5863,9 +6143,10 @@ async def detect_zones():
         - Top zones sorted by strength
     """
     try:
+        sym = resolve_symbol(symbol)
         # Fetch candles
-        htf_df = await fetch_mexc_candles(SYMBOL, "4h", 100)
-        ltf_df = await fetch_mexc_candles(SYMBOL, "15m", 200)
+        htf_df = await fetch_mexc_candles(sym, "4h", 100)
+        ltf_df = await fetch_mexc_candles(sym, "15m", 200)
 
         if htf_df is None or ltf_df is None:
             return JSONResponse({"error": "Failed to fetch data"}, status_code=500)
@@ -5989,7 +6270,7 @@ async def detect_zones():
         htf_low_quality = [z for z in htf_fresh if z.get("pivot_quality", {}).get("quality_label", "") == "LOW_QUALITY"]
 
         return JSONResponse({
-            "symbol": SYMBOL,
+            "symbol": sym,
             "current_price": current_price,
             "methodology": "TCT Mentorship Lecture 3 + 38-Page PDF Enhanced",
             "htf_zones": {
@@ -6029,7 +6310,7 @@ async def detect_zones():
         return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.get("/api/ranges")
-async def detect_ranges():
+async def detect_ranges(symbol: Optional[str] = None):
     """
     Detect and analyze ranges using PURE TCT Lecture 2 methodology.
 
@@ -6056,9 +6337,10 @@ async def detect_ranges():
         - Trading targets based on range zones
     """
     try:
+        sym = resolve_symbol(symbol)
         # Fetch candles
-        htf_df = await fetch_mexc_candles(SYMBOL, "4h", 100)
-        ltf_df = await fetch_mexc_candles(SYMBOL, "15m", 200)
+        htf_df = await fetch_mexc_candles(sym, "4h", 100)
+        ltf_df = await fetch_mexc_candles(sym, "15m", 200)
 
         if htf_df is None or ltf_df is None:
             return JSONResponse({"error": "Failed to fetch data"}, status_code=500)
@@ -6164,7 +6446,7 @@ async def detect_ranges():
 
         # Convert numpy types to native Python types for JSON serialization
         response_data = convert_numpy_types({
-            "symbol": SYMBOL,
+            "symbol": sym,
             "current_price": current_price,
             "methodology": "TCT Mentorship Lecture 2 - Ranges",
             "htf_ranges": {
@@ -6229,7 +6511,7 @@ async def detect_ranges():
         return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.get("/api/liquidity")
-async def detect_liquidity():
+async def detect_liquidity(symbol: Optional[str] = None):
     """
     Detect liquidity pools, curves, and targets using PURE TCT Lecture 4 methodology.
 
@@ -6253,9 +6535,10 @@ async def detect_liquidity():
         - Integration with S&D zones (high-probability vs low-probability)
     """
     try:
+        sym = resolve_symbol(symbol)
         # Fetch candles
-        htf_df = await fetch_mexc_candles(SYMBOL, "4h", 100)
-        ltf_df = await fetch_mexc_candles(SYMBOL, "15m", 200)
+        htf_df = await fetch_mexc_candles(sym, "4h", 100)
+        ltf_df = await fetch_mexc_candles(sym, "15m", 200)
 
         if htf_df is None or ltf_df is None:
             return JSONResponse({"error": "Failed to fetch data"}, status_code=500)
@@ -6379,7 +6662,7 @@ async def detect_liquidity():
                 target["is_swept"] = current_price > target_price
 
         return JSONResponse({
-            "symbol": SYMBOL,
+            "symbol": sym,
             "current_price": current_price,
             "methodology": "TCT Mentorship Lecture 4 - Liquidity",
             "htf_liquidity": {
@@ -6444,11 +6727,12 @@ async def detect_liquidity():
         return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.get("/api/validate")
-async def validate_current_setup():
+async def validate_current_setup(symbol: Optional[str] = None):
     """Complete 7-gate validation endpoint"""
     try:
-        htf_df = await fetch_mexc_candles(SYMBOL, "4h", 100)
-        ltf_df = await fetch_mexc_candles(SYMBOL, "15m", 100)
+        sym = resolve_symbol(symbol)
+        htf_df = await fetch_mexc_candles(sym, "4h", 100)
+        ltf_df = await fetch_mexc_candles(sym, "15m", 100)
 
         if htf_df is None or ltf_df is None:
             return JSONResponse({"error": "Failed to fetch data", "Action": "NO_TRADE"}, status_code=500)
@@ -6474,7 +6758,7 @@ async def validate_current_setup():
             "ltf_candles": ltf_df,
             "detected_range": detected_range,
             "current_price": current_price,
-            "symbol": SYMBOL
+            "symbol": sym
         }
 
         result = validate_gates(context)
@@ -6487,7 +6771,7 @@ async def validate_current_setup():
         return JSONResponse({"error": str(e), "Action": "NO_TRADE"}, status_code=500)
 
 @app.get("/api/schematics")
-async def get_tct_schematics():
+async def get_tct_schematics(symbol: Optional[str] = None):
     """
     TCT Schematics endpoint - Lecture 5A + 5B + 6 Advanced methodology
 
@@ -6507,9 +6791,10 @@ async def get_tct_schematics():
     Returns schematics with entry, stop loss, target levels, and advanced enhancements.
     """
     try:
+        sym = resolve_symbol(symbol)
         # Fetch HTF (4h) and LTF (15m) candles
-        htf_df = await fetch_mexc_candles(SYMBOL, "4h", 200)
-        ltf_df = await fetch_mexc_candles(SYMBOL, "15m", 200)
+        htf_df = await fetch_mexc_candles(sym, "4h", 200)
+        ltf_df = await fetch_mexc_candles(sym, "15m", 200)
 
         if htf_df is None or ltf_df is None:
             return JSONResponse({"error": "Failed to fetch candle data"}, status_code=500)
@@ -6598,7 +6883,7 @@ async def get_tct_schematics():
 
         # Convert numpy types to native Python types for JSON serialization
         response_data = convert_numpy_types({
-            "symbol": SYMBOL,
+            "symbol": sym,
             "current_price": current_price,
             "methodology": "TCT Mentorship Lecture 5A + 5B + 6 - Advanced TCT Schematics",
             "htf_schematics": {
@@ -6644,7 +6929,7 @@ async def get_tct_schematics():
         return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.get("/api/po3")
-async def get_po3_schematics():
+async def get_po3_schematics(symbol: Optional[str] = None):
     """
     PO3 (Power of Three) Schematics endpoint — TCT Lecture 8
 
@@ -6660,9 +6945,10 @@ async def get_po3_schematics():
     Also detects Exception 1 (2-tap) and Exception 2 (Internal TCT).
     """
     try:
+        sym = resolve_symbol(symbol)
         # Fetch HTF (4h) and LTF (15m) candles
-        htf_df = await fetch_mexc_candles(SYMBOL, "4h", 200)
-        ltf_df = await fetch_mexc_candles(SYMBOL, "15m", 200)
+        htf_df = await fetch_mexc_candles(sym, "4h", 200)
+        ltf_df = await fetch_mexc_candles(sym, "15m", 200)
 
         if htf_df is None or ltf_df is None:
             return JSONResponse({"error": "Failed to fetch candle data"}, status_code=500)
@@ -6727,7 +7013,7 @@ async def get_po3_schematics():
         ltf_active = filter_active_po3(ltf_bullish + ltf_bearish, current_price)
 
         response_data = convert_numpy_types({
-            "symbol": SYMBOL,
+            "symbol": sym,
             "current_price": current_price,
             "methodology": "TCT Mentorship Lecture 8 - PO3 Schematics (Power of Three)",
             "htf_po3": {
