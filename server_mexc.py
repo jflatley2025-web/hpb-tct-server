@@ -2956,7 +2956,43 @@ async def dashboard():
         .refresh-btn:hover { background: #00b8e6; }
         .timeframe-selector {
             display: flex;
-            gap: 5px;
+            gap: 8px;
+            align-items: center;
+        }
+        .tf-dropdown {
+            background: #1a1a2e;
+            color: #00d4ff;
+            border: 1px solid #2d2d44;
+            padding: 6px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            font-weight: 600;
+            appearance: none;
+            -webkit-appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%2300d4ff' viewBox='0 0 16 16'%3E%3Cpath d='M1.5 5.5l6.5 6.5 6.5-6.5'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 8px center;
+            padding-right: 28px;
+            min-width: 80px;
+        }
+        .tf-dropdown:hover { border-color: #00d4ff; }
+        .tf-dropdown:focus { outline: none; border-color: #00d4ff; box-shadow: 0 0 0 2px rgba(0,212,255,0.2); }
+        .tf-dropdown option {
+            background: #1a1a2e;
+            color: #e0e0e0;
+            padding: 4px;
+        }
+        .tf-dropdown optgroup {
+            background: #12121a;
+            color: #00d4ff;
+            font-weight: 600;
+        }
+        .tf-label {
+            font-size: 0.65rem;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
         }
         .tf-btn {
             background: #1a1a2e;
@@ -2968,6 +3004,78 @@ async def dashboard():
             font-size: 0.75rem;
         }
         .tf-btn.active { background: #00d4ff; color: #0a0a0f; border-color: #00d4ff; }
+        /* === HIGHEST PROBABILITY SETUP PANEL === */
+        .setup-panel {
+            background: linear-gradient(135deg, rgba(0,212,255,0.08) 0%, rgba(0,255,136,0.05) 100%);
+            border: 1px solid rgba(0,212,255,0.3);
+            border-radius: 8px;
+            padding: 10px 14px;
+            margin-bottom: 10px;
+        }
+        .setup-panel h3 {
+            font-size: 0.8rem;
+            color: #00d4ff;
+            margin-bottom: 8px;
+            padding-bottom: 6px;
+            border-bottom: 1px solid rgba(0,212,255,0.2);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .setup-direction {
+            font-size: 0.75rem;
+            font-weight: 700;
+            padding: 2px 8px;
+            border-radius: 4px;
+        }
+        .setup-direction.long { background: rgba(0,255,136,0.2); color: #00ff88; }
+        .setup-direction.short { background: rgba(255,68,68,0.2); color: #ff4444; }
+        .setup-direction.none { background: rgba(255,193,7,0.2); color: #ffc107; }
+        .setup-levels {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 6px;
+            margin: 8px 0;
+        }
+        .setup-level-box {
+            text-align: center;
+            padding: 6px 4px;
+            border-radius: 4px;
+            font-size: 0.7rem;
+        }
+        .setup-level-box.entry { background: rgba(0,212,255,0.15); border: 1px solid rgba(0,212,255,0.3); }
+        .setup-level-box.sl { background: rgba(255,68,68,0.15); border: 1px solid rgba(255,68,68,0.3); }
+        .setup-level-box.tp { background: rgba(0,255,136,0.15); border: 1px solid rgba(0,255,136,0.3); }
+        .setup-level-label { display: block; font-size: 0.6rem; color: #888; margin-bottom: 2px; }
+        .setup-level-price { display: block; font-weight: 600; color: #e0e0e0; }
+        .setup-meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-top: 6px;
+        }
+        .setup-tag {
+            font-size: 0.6rem;
+            padding: 2px 6px;
+            border-radius: 3px;
+            background: rgba(255,255,255,0.05);
+            color: #aaa;
+        }
+        .setup-tag.good { background: rgba(0,255,136,0.15); color: #00ff88; }
+        .setup-tag.warn { background: rgba(255,193,7,0.15); color: #ffc107; }
+        .setup-tag.bad { background: rgba(255,68,68,0.15); color: #ff4444; }
+        .setup-confidence {
+            height: 4px;
+            background: #1a1a2e;
+            border-radius: 2px;
+            margin-top: 8px;
+            overflow: hidden;
+        }
+        .setup-confidence-fill {
+            height: 100%;
+            border-radius: 2px;
+            transition: width 0.5s ease;
+        }
 
         /* ===== RISK MANAGEMENT (TCT Lecture 7) ===== */
         .risk-section { border-left: 3px solid #ffc107; }
@@ -3379,8 +3487,28 @@ async def dashboard():
         <h1>HPB-TCT Dashboard <span class="symbol">BTCUSDT</span></h1>
         <div style="display: flex; align-items: center; gap: 15px;">
             <div class="timeframe-selector">
-                <button class="tf-btn" data-tf="15m">15m</button>
-                <button class="tf-btn active" data-tf="4h">4H</button>
+                <div>
+                    <span class="tf-label">Timeframe</span>
+                    <select id="tfDropdown" class="tf-dropdown">
+                        <optgroup label="Low Timeframes (LTF)">
+                            <option value="1m">1m</option>
+                            <option value="5m">5m</option>
+                            <option value="15m">15m</option>
+                            <option value="30m">30m</option>
+                        </optgroup>
+                        <optgroup label="Mid Timeframes">
+                            <option value="1h">1H</option>
+                            <option value="2h">2H</option>
+                            <option value="4h" selected>4H</option>
+                            <option value="8h">8H</option>
+                        </optgroup>
+                        <optgroup label="High Timeframes (HTF)">
+                            <option value="1d">1D</option>
+                            <option value="1W">1W</option>
+                            <option value="1M">1M</option>
+                        </optgroup>
+                    </select>
+                </div>
             </div>
             <div class="price-display" id="currentPrice">--</div>
             <button class="refresh-btn" onclick="refreshData()">Refresh</button>
@@ -3393,6 +3521,17 @@ async def dashboard():
         </div>
 
         <div class="metrics-panel">
+            <!-- Highest Probability Setup -->
+            <div class="setup-panel" id="setupPanel">
+                <h3>Highest Probability Setup <span class="setup-direction none" id="setupDirection">--</span></h3>
+                <div id="setupContent">
+                    <div class="metric-row"><span class="label">Analyzing timeframe...</span></div>
+                </div>
+                <div class="setup-confidence">
+                    <div class="setup-confidence-fill" id="setupConfidence" style="width: 0%; background: #ffc107;"></div>
+                </div>
+            </div>
+
             <!-- Market Structure -->
             <div class="metric-card">
                 <h3>Market Structure <span class="badge badge-neutral" id="trendBadge">--</span></h3>
@@ -4193,7 +4332,7 @@ async def dashboard():
             setLoading('po3Badge', true);
 
             // Fetch candles and update chart
-            lastCandles = await fetchCandles(currentTimeframe, 100);
+            lastCandles = await fetchCandles(currentTimeframe, getCandleLimit(currentTimeframe));
             if (lastCandles.length > 0) {
                 candleSeries.setData(lastCandles);
                 const lastPrice = lastCandles[lastCandles.length - 1].close;
@@ -4260,6 +4399,18 @@ async def dashboard():
                 console.error('PO3 error:', po3Result.reason || po3Result.value?.error);
                 setError('po3Badge');
             }
+
+            // ===== HIGHEST PROBABILITY SETUP ANALYSIS & TCT CHART OVERLAYS =====
+            const rangesData = rangesResult.status === 'fulfilled' ? rangesResult.value : null;
+            const zonesData = zonesResult.status === 'fulfilled' ? zonesResult.value : null;
+            const liqData = liqResult.status === 'fulfilled' ? liqResult.value : null;
+            const schematicsData = schematicsResult.status === 'fulfilled' ? schematicsResult.value : null;
+            const po3Data = po3Result.status === 'fulfilled' ? po3Result.value : null;
+            const valData = valResult.status === 'fulfilled' ? valResult.value : null;
+
+            const bestSetup = analyzeHighestProbabilitySetup(rangesData, zonesData, liqData, schematicsData, po3Data, valData, lastCandles);
+            renderSetupPanel(bestSetup);
+            drawTCTModelOverlays(bestSetup, lastCandles);
 
             isLoading = false;
         }
@@ -4627,15 +4778,572 @@ async def dashboard():
             contentEl.innerHTML = html;
         }
 
-        // Timeframe selector
-        document.querySelectorAll('.tf-btn').forEach(btn => {
-            btn.addEventListener('click', async () => {
-                document.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('active'));
-                btn.classList.add('active');
-                currentTimeframe = btn.dataset.tf;
-                await refreshData();
-            });
+        // Timeframe dropdown selector
+        document.getElementById('tfDropdown').addEventListener('change', async (e) => {
+            currentTimeframe = e.target.value;
+            await refreshData();
         });
+
+        // Map timeframe to optimal candle count
+        function getCandleLimit(tf) {
+            const limits = {
+                '1m': 200, '5m': 200, '15m': 200, '30m': 150,
+                '1h': 150, '2h': 120, '4h': 100, '8h': 80,
+                '1d': 120, '1W': 100, '1M': 60
+            };
+            return limits[tf] || 100;
+        }
+
+        // Get the HTF timeframe corresponding to any selected timeframe
+        function getHTFForTimeframe(tf) {
+            const htfMap = {
+                '1m': '15m', '5m': '1h', '15m': '4h', '30m': '4h',
+                '1h': '4h', '2h': '1d', '4h': '1d', '8h': '1d',
+                '1d': '1W', '1W': '1M', '1M': '1M'
+            };
+            return htfMap[tf] || '1d';
+        }
+
+        // ===== TCT MODEL SCHEMATIC OVERLAYS =====
+        // Based on TCT model schematics: parabolic curves, S/R zones, SL trails, targets
+
+        // Draw a parabolic curve (ascending lows or descending highs) on chart
+        function drawParabolicCurve(candles, direction = 'bullish') {
+            if (!candles || candles.length < 10) return;
+
+            const isBullish = direction === 'bullish';
+            const pivotPoints = [];
+
+            // Find swing points for the curve
+            for (let i = 3; i < candles.length - 3; i++) {
+                if (isBullish) {
+                    // Ascending lows - find swing lows
+                    const isSwingLow = candles[i].low <= candles[i-1].low && candles[i].low <= candles[i-2].low &&
+                                       candles[i].low <= candles[i+1].low && candles[i].low <= candles[i+2].low;
+                    if (isSwingLow) {
+                        pivotPoints.push({ time: candles[i].time, value: candles[i].low, idx: i });
+                    }
+                } else {
+                    // Descending highs - find swing highs
+                    const isSwingHigh = candles[i].high >= candles[i-1].high && candles[i].high >= candles[i-2].high &&
+                                        candles[i].high >= candles[i+1].high && candles[i].high >= candles[i+2].high;
+                    if (isSwingHigh) {
+                        pivotPoints.push({ time: candles[i].time, value: candles[i].high, idx: i });
+                    }
+                }
+            }
+
+            if (pivotPoints.length < 3) return;
+
+            // Filter for ascending (bullish) or descending (bearish) pattern
+            const filteredPivots = [];
+            for (let i = 0; i < pivotPoints.length; i++) {
+                if (filteredPivots.length === 0) {
+                    filteredPivots.push(pivotPoints[i]);
+                } else {
+                    const last = filteredPivots[filteredPivots.length - 1];
+                    if (isBullish && pivotPoints[i].value >= last.value) {
+                        filteredPivots.push(pivotPoints[i]);
+                    } else if (!isBullish && pivotPoints[i].value <= last.value) {
+                        filteredPivots.push(pivotPoints[i]);
+                    }
+                }
+            }
+
+            if (filteredPivots.length < 3) return;
+
+            // Interpolate a smooth parabolic curve between pivot points
+            const curveData = [];
+            for (let i = 0; i < filteredPivots.length - 1; i++) {
+                const p1 = filteredPivots[i];
+                const p2 = filteredPivots[i + 1];
+                const startIdx = p1.idx;
+                const endIdx = p2.idx;
+
+                for (let j = startIdx; j <= endIdx; j++) {
+                    const t = (j - startIdx) / (endIdx - startIdx);
+                    // Parabolic interpolation (quadratic ease)
+                    const eased = isBullish ? t * t : 1 - (1 - t) * (1 - t);
+                    const value = p1.value + (p2.value - p1.value) * eased;
+                    curveData.push({ time: candles[j].time, value: value });
+                }
+            }
+
+            // Extend curve forward (projection)
+            const lastPivot = filteredPivots[filteredPivots.length - 1];
+            const secondLast = filteredPivots[filteredPivots.length - 2];
+            const slope = (lastPivot.value - secondLast.value) / (lastPivot.idx - secondLast.idx);
+
+            for (let j = lastPivot.idx + 1; j < candles.length; j++) {
+                const accel = isBullish ? 1.15 : 0.85;
+                const projValue = lastPivot.value + slope * (j - lastPivot.idx) * accel;
+                curveData.push({ time: candles[j].time, value: projValue });
+            }
+
+            if (curveData.length >= 2) {
+                // Deduplicate by time
+                const seen = new Set();
+                const uniqueData = curveData.filter(d => {
+                    if (seen.has(d.time)) return false;
+                    seen.add(d.time);
+                    return true;
+                });
+
+                const color = isBullish ? 'rgba(0, 255, 136, 0.6)' : 'rgba(255, 68, 68, 0.6)';
+                const curveSeries = chart.addLineSeries({
+                    color: color,
+                    lineWidth: 2,
+                    lineStyle: LightweightCharts.LineStyle.Dotted,
+                    crosshairMarkerVisible: false,
+                    priceLineVisible: false,
+                    lastValueVisible: false,
+                    priceScaleId: 'right',
+                });
+                curveSeries.setData(uniqueData);
+                additionalSeries.push(curveSeries);
+            }
+        }
+
+        // Draw shaded resistance/support zone (like the pink/red zones in TradingView screenshots)
+        function drawZoneBox(high, low, candles, type = 'resistance', startIdx = 0) {
+            if (!candles || candles.length === 0 || !high || !low) return;
+
+            const start = Math.max(0, startIdx);
+            const startTime = candles[start].time;
+            const endTime = candles[candles.length - 1].time;
+
+            let topColor, bottomColor, lineColor;
+            if (type === 'resistance' || type === 'supply') {
+                topColor = 'rgba(255, 107, 107, 0.25)';
+                bottomColor = 'rgba(255, 107, 107, 0.08)';
+                lineColor = 'rgba(255, 107, 107, 0.6)';
+            } else if (type === 'target' || type === 'demand') {
+                topColor = 'rgba(130, 130, 255, 0.20)';
+                bottomColor = 'rgba(130, 130, 255, 0.06)';
+                lineColor = 'rgba(130, 130, 255, 0.5)';
+            } else {
+                topColor = 'rgba(255, 193, 7, 0.15)';
+                bottomColor = 'rgba(255, 193, 7, 0.05)';
+                lineColor = 'rgba(255, 193, 7, 0.4)';
+            }
+
+            // Upper boundary line
+            const upperData = [];
+            const lowerData = [];
+            for (let i = start; i < candles.length; i++) {
+                upperData.push({ time: candles[i].time, value: high });
+                lowerData.push({ time: candles[i].time, value: low });
+            }
+
+            if (upperData.length < 2) return;
+
+            // Upper line
+            const upperSeries = chart.addLineSeries({
+                color: lineColor,
+                lineWidth: 1,
+                lineStyle: LightweightCharts.LineStyle.Solid,
+                crosshairMarkerVisible: false,
+                priceLineVisible: false,
+                lastValueVisible: false,
+                priceScaleId: 'right',
+            });
+            upperSeries.setData(upperData);
+            additionalSeries.push(upperSeries);
+
+            // Lower line
+            const lowerSeries = chart.addLineSeries({
+                color: lineColor,
+                lineWidth: 1,
+                lineStyle: LightweightCharts.LineStyle.Solid,
+                crosshairMarkerVisible: false,
+                priceLineVisible: false,
+                lastValueVisible: false,
+                priceScaleId: 'right',
+            });
+            lowerSeries.setData(lowerData);
+            additionalSeries.push(lowerSeries);
+
+            // Fill area (using area series trick)
+            const fillSeries = chart.addAreaSeries({
+                topColor: topColor,
+                bottomColor: bottomColor,
+                lineColor: 'rgba(0,0,0,0)',
+                lineWidth: 0,
+                priceScaleId: 'right',
+                lastValueVisible: false,
+                priceLineVisible: false,
+            });
+            fillSeries.setData(upperData);
+            additionalSeries.push(fillSeries);
+        }
+
+        // Draw stop loss trail line
+        function drawSLTrail(price, candles, startIdx = 0, label = 'SL Trail') {
+            if (!candles || candles.length === 0 || !price) return;
+
+            const start = Math.max(0, startIdx);
+            const trailData = [];
+            for (let i = start; i < candles.length; i++) {
+                trailData.push({ time: candles[i].time, value: price });
+            }
+
+            if (trailData.length < 2) return;
+
+            const trailSeries = chart.addLineSeries({
+                color: 'rgba(255, 107, 182, 0.7)',
+                lineWidth: 2,
+                lineStyle: LightweightCharts.LineStyle.Dashed,
+                crosshairMarkerVisible: false,
+                priceLineVisible: true,
+                lastValueVisible: true,
+                priceScaleId: 'right',
+                title: label,
+            });
+            trailSeries.setData(trailData);
+            additionalSeries.push(trailSeries);
+        }
+
+        // Draw key horizontal level (like the thick black lines in the screenshots)
+        function drawKeyLevel(price, candles, color = '#ffffff', label = '', lineWidth = 2) {
+            if (!candles || candles.length === 0 || !price) return;
+
+            const levelData = candles.map(c => ({ time: c.time, value: price }));
+            const levelSeries = chart.addLineSeries({
+                color: color,
+                lineWidth: lineWidth,
+                lineStyle: LightweightCharts.LineStyle.Solid,
+                crosshairMarkerVisible: false,
+                priceLineVisible: false,
+                lastValueVisible: false,
+                priceScaleId: 'right',
+            });
+            levelSeries.setData(levelData);
+            additionalSeries.push(levelSeries);
+
+            if (label) {
+                lineSeries.push(addPriceLine(price, color, label, 0, lineWidth));
+            }
+        }
+
+        // Add trade entry/exit markers to chart
+        function addTradeMarkers(candles, entry, sl, tp, direction = 'long') {
+            if (!candles || candles.length < 5 || !entry) return;
+
+            const markers = [];
+            const lastIdx = candles.length - 1;
+
+            // Find candle closest to entry price
+            let entryIdx = lastIdx - 3;
+            let minDiff = Infinity;
+            for (let i = Math.max(0, lastIdx - 20); i <= lastIdx; i++) {
+                const diff = Math.abs(candles[i].close - entry);
+                if (diff < minDiff) {
+                    minDiff = diff;
+                    entryIdx = i;
+                }
+            }
+
+            const isLong = direction === 'long';
+
+            markers.push({
+                time: candles[entryIdx].time,
+                position: isLong ? 'belowBar' : 'aboveBar',
+                color: '#00d4ff',
+                shape: isLong ? 'arrowUp' : 'arrowDown',
+                text: 'ENTRY'
+            });
+
+            if (sl) {
+                // SL marker at a nearby candle
+                const slIdx = Math.min(lastIdx, entryIdx + 1);
+                markers.push({
+                    time: candles[slIdx].time,
+                    position: isLong ? 'belowBar' : 'aboveBar',
+                    color: '#ff4444',
+                    shape: 'circle',
+                    text: 'SL'
+                });
+            }
+
+            if (tp) {
+                // TP marker
+                const tpIdx = Math.min(lastIdx, entryIdx + 2);
+                markers.push({
+                    time: candles[tpIdx].time,
+                    position: isLong ? 'aboveBar' : 'belowBar',
+                    color: '#00ff88',
+                    shape: 'circle',
+                    text: 'TP'
+                });
+            }
+
+            if (markers.length > 0) {
+                markers.sort((a, b) => a.time - b.time);
+                candleSeries.setMarkers(markers);
+            }
+        }
+
+        // ===== HIGHEST PROBABILITY SETUP ANALYSIS =====
+
+        function analyzeHighestProbabilitySetup(rangesData, zonesData, liqData, schematicsData, po3Data, valData, candles) {
+            const setup = {
+                direction: 'none',
+                confidence: 0,
+                entry: null,
+                stop: null,
+                target: null,
+                rr: null,
+                source: null,
+                tags: [],
+                resistanceZones: [],
+                supportZones: [],
+                keyLevels: [],
+                slTrail: null,
+            };
+
+            // Collect all candidate setups with scores
+            const candidates = [];
+
+            // 1. Check TCT Schematics (highest priority - Lecture 5/6)
+            if (schematicsData) {
+                const htfS = schematicsData.htf_schematics?.schematics || [];
+                const ltfS = schematicsData.ltf_schematics?.schematics || [];
+                [...htfS, ...ltfS].forEach(s => {
+                    if (s.entry?.price && s.stop_loss?.price && s.target?.price) {
+                        const quality = s.quality_score || 0;
+                        const rr = s.risk_reward || 0;
+                        const isConfirmed = s.is_confirmed ? 1 : 0;
+                        const has6CR = s.lecture_5b_enhancements?.htf_validation?.all_taps_valid_6cr ? 1 : 0;
+                        const hasTL = s.lecture_5b_enhancements?.has_trendline_confluence ? 1 : 0;
+                        const l6Score = (s.lecture_6_enhancements?.has_conversion ? 0.1 : 0) +
+                                       (s.lecture_6_enhancements?.has_dual_deviation ? 0.1 : 0) +
+                                       (s.lecture_6_enhancements?.has_wov_opportunity ? 0.05 : 0);
+
+                        const score = (quality * 40) + (Math.min(rr, 5) * 8) + (isConfirmed * 15) + (has6CR * 10) + (hasTL * 5) + (l6Score * 100);
+
+                        candidates.push({
+                            score,
+                            direction: s.direction === 'bullish' ? 'long' : 'short',
+                            entry: s.entry.price,
+                            stop: s.stop_loss.price,
+                            target: s.lecture_6_enhancements?.enhanced_target || s.target.price,
+                            rr: rr,
+                            source: 'TCT Schematic (' + (s.schematic_type || 'unknown').replace(/_/g, ' ') + ')',
+                            tags: [
+                                quality >= 0.7 ? { text: 'HQ ' + Math.round(quality * 100) + '%', cls: 'good' } : { text: 'Q ' + Math.round(quality * 100) + '%', cls: 'warn' },
+                                isConfirmed ? { text: 'Confirmed', cls: 'good' } : null,
+                                has6CR ? { text: '6CR Valid', cls: 'good' } : null,
+                                hasTL ? { text: 'TL Confluence', cls: 'good' } : null,
+                                s.lecture_6_enhancements?.has_conversion ? { text: 'Converted', cls: 'good' } : null,
+                                rr >= 3 ? { text: 'R:R ' + rr.toFixed(1), cls: 'good' } : { text: 'R:R ' + rr.toFixed(1), cls: 'warn' },
+                            ].filter(Boolean),
+                        });
+                    }
+                });
+            }
+
+            // 2. Check PO3 Schematics (Lecture 8)
+            if (po3Data) {
+                const htfP = po3Data.htf_po3?.schematics || [];
+                const ltfP = po3Data.ltf_po3?.schematics || [];
+                [...htfP, ...ltfP].forEach(p => {
+                    if (p.entry?.price && p.stop_loss?.price && p.target?.price) {
+                        const quality = p.quality_score || 0;
+                        const rr = p.risk_reward || 0;
+                        const hasExpansion = p.has_expansion ? 1 : 0;
+                        const hasTCTModel = p.tct_model?.detected ? 1 : 0;
+
+                        const score = (quality * 35) + (Math.min(rr, 5) * 7) + (hasExpansion * 12) + (hasTCTModel * 10);
+
+                        candidates.push({
+                            score,
+                            direction: p.direction === 'bullish' ? 'long' : 'short',
+                            entry: p.entry.price,
+                            stop: p.stop_loss.price,
+                            target: p.target.price,
+                            rr: rr,
+                            source: 'PO3 (' + (p.phase || 'range').replace(/_/g, ' ') + ')',
+                            tags: [
+                                { text: 'PO3', cls: 'good' },
+                                quality >= 0.6 ? { text: Math.round(quality * 100) + '%', cls: 'good' } : { text: Math.round(quality * 100) + '%', cls: 'warn' },
+                                hasExpansion ? { text: 'Expanding', cls: 'good' } : null,
+                                hasTCTModel ? { text: 'TCT Model', cls: 'good' } : null,
+                                rr >= 3 ? { text: 'R:R ' + rr.toFixed(1), cls: 'good' } : { text: 'R:R ' + rr.toFixed(1), cls: 'warn' },
+                            ].filter(Boolean),
+                        });
+                    }
+                });
+            }
+
+            // 3. Check gate validation for directional bias
+            let gateBias = 'none';
+            if (valData && valData.gates) {
+                const action = valData.Action || '';
+                if (action.includes('LONG') || action.includes('VALID')) gateBias = 'long';
+                else if (action.includes('SHORT')) gateBias = 'short';
+            }
+
+            // 4. Use range data for S/R zones overlay
+            if (rangesData) {
+                const activeRange = rangesData.htf_ranges?.active_range || rangesData.ltf_ranges?.active_range;
+                if (activeRange) {
+                    const high = activeRange.range_high || activeRange.high;
+                    const low = activeRange.range_low || activeRange.low;
+                    if (high) setup.keyLevels.push({ price: high, label: 'Range High', color: '#ff4444' });
+                    if (low) setup.keyLevels.push({ price: low, label: 'Range Low', color: '#00ff88' });
+                }
+            }
+
+            // 5. Collect zone data for overlays
+            if (zonesData) {
+                const topZones = zonesData.htf_zones?.top_3_high_quality || zonesData.htf_zones?.top_3_all || [];
+                topZones.forEach(z => {
+                    if (z.type === 'supply' || z.top > (rangesData?.current_price || 0)) {
+                        setup.resistanceZones.push({ high: z.top, low: z.bottom });
+                    } else {
+                        setup.supportZones.push({ high: z.top, low: z.bottom });
+                    }
+                });
+            }
+
+            // Pick best candidate
+            if (candidates.length > 0) {
+                // Boost candidates that match gate bias
+                candidates.forEach(c => {
+                    if (gateBias !== 'none' && c.direction === gateBias) {
+                        c.score *= 1.3;
+                    }
+                });
+
+                candidates.sort((a, b) => b.score - a.score);
+                const best = candidates[0];
+
+                setup.direction = best.direction;
+                setup.confidence = Math.min(100, Math.round(best.score));
+                setup.entry = best.entry;
+                setup.stop = best.stop;
+                setup.target = best.target;
+                setup.rr = best.rr;
+                setup.source = best.source;
+                setup.tags = best.tags;
+
+                // Calculate SL trail (midpoint between entry and target)
+                if (setup.entry && setup.target) {
+                    setup.slTrail = setup.entry + (setup.target - setup.entry) * 0.33;
+                }
+            } else {
+                // No active setup
+                setup.tags = [{ text: 'No Active Setup', cls: 'warn' }];
+                if (gateBias !== 'none') {
+                    setup.direction = gateBias;
+                    setup.tags.push({ text: 'Gate Bias: ' + gateBias.toUpperCase(), cls: 'warn' });
+                }
+            }
+
+            return setup;
+        }
+
+        // Render the highest probability setup in sidebar
+        function renderSetupPanel(setup) {
+            const dirEl = document.getElementById('setupDirection');
+            dirEl.textContent = setup.direction === 'long' ? 'LONG' : setup.direction === 'short' ? 'SHORT' : 'NO SETUP';
+            dirEl.className = 'setup-direction ' + setup.direction;
+
+            const contentEl = document.getElementById('setupContent');
+            let html = '';
+
+            if (setup.entry && setup.stop && setup.target) {
+                html += '<div class="setup-levels">';
+                html += '<div class="setup-level-box entry"><span class="setup-level-label">ENTRY</span><span class="setup-level-price">$' + setup.entry.toLocaleString(undefined, {maximumFractionDigits: 2}) + '</span></div>';
+                html += '<div class="setup-level-box sl"><span class="setup-level-label">STOP</span><span class="setup-level-price">$' + setup.stop.toLocaleString(undefined, {maximumFractionDigits: 2}) + '</span></div>';
+                html += '<div class="setup-level-box tp"><span class="setup-level-label">TARGET</span><span class="setup-level-price">$' + setup.target.toLocaleString(undefined, {maximumFractionDigits: 2}) + '</span></div>';
+                html += '</div>';
+
+                if (setup.source) {
+                    html += '<div class="metric-row"><span class="label">Source</span><span class="value" style="font-size:0.7rem;">' + setup.source + '</span></div>';
+                }
+            }
+
+            if (setup.tags.length > 0) {
+                html += '<div class="setup-meta">';
+                setup.tags.forEach(tag => {
+                    html += '<span class="setup-tag ' + tag.cls + '">' + tag.text + '</span>';
+                });
+                html += '</div>';
+            }
+
+            contentEl.innerHTML = html || '<div class="metric-row"><span class="label">No high probability setup on this timeframe</span></div>';
+
+            // Confidence bar
+            const confEl = document.getElementById('setupConfidence');
+            const confPct = Math.min(100, setup.confidence);
+            confEl.style.width = confPct + '%';
+            if (confPct >= 70) confEl.style.background = '#00ff88';
+            else if (confPct >= 40) confEl.style.background = '#ffc107';
+            else confEl.style.background = '#ff4444';
+        }
+
+        // Draw all TCT model overlays on chart based on setup data
+        function drawTCTModelOverlays(setup, candles) {
+            if (!candles || candles.length < 10) return;
+
+            // 1. Draw parabolic curve (like the cup-shaped curves in the screenshots)
+            if (setup.direction === 'long') {
+                drawParabolicCurve(candles, 'bullish');
+            } else if (setup.direction === 'short') {
+                drawParabolicCurve(candles, 'bearish');
+            } else {
+                // Draw both to show market structure
+                drawParabolicCurve(candles, 'bullish');
+            }
+
+            // 2. Draw resistance zones (pink/red shaded areas from screenshots)
+            setup.resistanceZones.forEach(z => {
+                drawZoneBox(z.high, z.low, candles, 'resistance');
+            });
+
+            // 3. Draw support/target zones (blue/purple shaded areas)
+            setup.supportZones.forEach(z => {
+                drawZoneBox(z.high, z.low, candles, 'target');
+            });
+
+            // 4. Draw key levels (thick horizontal lines like in screenshots)
+            setup.keyLevels.forEach(level => {
+                drawKeyLevel(level.price, candles, level.color, level.label);
+            });
+
+            // 5. Draw entry/stop/target on chart if we have a setup
+            if (setup.entry && setup.stop && setup.target) {
+                // Entry level (cyan)
+                drawKeyLevel(setup.entry, candles, '#00d4ff', 'Entry', 1);
+
+                // Stop level (red dashed)
+                const slData = candles.map(c => ({ time: c.time, value: setup.stop }));
+                const slSeries = chart.addLineSeries({
+                    color: 'rgba(255, 68, 68, 0.8)',
+                    lineWidth: 1,
+                    lineStyle: LightweightCharts.LineStyle.Dashed,
+                    crosshairMarkerVisible: false,
+                    priceLineVisible: false,
+                    lastValueVisible: false,
+                    priceScaleId: 'right',
+                });
+                slSeries.setData(slData);
+                additionalSeries.push(slSeries);
+
+                // Target zone (shaded blue/purple area around target)
+                const targetRange = Math.abs(setup.target - setup.entry) * 0.05;
+                drawZoneBox(setup.target + targetRange, setup.target - targetRange, candles, 'target', Math.floor(candles.length * 0.5));
+
+                // SL Trail line
+                if (setup.slTrail) {
+                    drawSLTrail(setup.slTrail, candles, Math.floor(candles.length * 0.6), 'SL Trail');
+                }
+
+                // Add trade markers
+                addTradeMarkers(candles, setup.entry, setup.stop, setup.target, setup.direction);
+            }
+        }
 
         // ===== PO3 SCHEMATICS FUNCTIONS (TCT Lecture 8) =====
 
