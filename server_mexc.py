@@ -154,11 +154,17 @@ class MarketStructure:
 
     @staticmethod
     def _is_bullish_candle(candle) -> bool:
-        return float(candle["close"]) > float(candle["open"])
+        if "open" in candle.index:
+            return float(candle["close"]) > float(candle["open"])
+        # Fallback: treat as bullish if close > low midpoint (no open available)
+        return float(candle["close"]) > (float(candle["high"]) + float(candle["low"])) / 2
 
     @staticmethod
     def _is_bearish_candle(candle) -> bool:
-        return float(candle["close"]) < float(candle["open"])
+        if "open" in candle.index:
+            return float(candle["close"]) < float(candle["open"])
+        # Fallback: treat as bearish if close < high/low midpoint
+        return float(candle["close"]) < (float(candle["high"]) + float(candle["low"])) / 2
 
     # ---- 6-candle rule pivot detection --------------------------
 
