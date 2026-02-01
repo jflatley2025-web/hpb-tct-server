@@ -2671,9 +2671,11 @@ async def run_full_scan():
         if (i + 1) % 50 == 0:
             logger.info(f"[SCANNER] Progress: {i + 1}/{len(COIN_LIST)} pairs scanned, {len(all_setups)} setups found")
 
-    # Sort all setups by confidence score and take top 5
+    # Sort all setups by confidence score (highest first) and take top 5
     all_setups.sort(key=lambda x: x["confidence_score"], reverse=True)
-    top_5_setups = all_setups[:5]
+    # Only replace top 5 if this scan found results; otherwise keep previous results visible
+    if all_setups:
+        top_5_setups = all_setups[:5]
 
     end_time = datetime.utcnow()
     duration = (end_time - start_time).total_seconds()
@@ -2683,9 +2685,10 @@ async def run_full_scan():
     scanner_status["scan_duration_sec"] = round(duration)
     scanner_status["next_scan"] = (end_time + pd.Timedelta(seconds=SCANNER_INTERVAL_SEC)).isoformat()
 
+    kept = " (kept previous)" if not all_setups and top_5_setups else ""
     logger.info(
         f"[SCANNER] Scan complete in {duration:.0f}s — "
-        f"{len(COIN_LIST)} pairs, {len(all_setups)} setups found, "
+        f"{len(COIN_LIST)} pairs, {len(all_setups)} setups found{kept}, "
         f"Top 5: {[s['symbol'] + '/' + s['timeframe'] for s in top_5_setups]}"
     )
 
@@ -6500,7 +6503,7 @@ async def dashboard():
                 if (status.is_scanning) {
                     contentEl.innerHTML = '<div class="top5-empty">Scanning ' + (status.total_pairs || 0) + ' pairs across 4 timeframes...</div>';
                 } else {
-                    contentEl.innerHTML = '<div class="top5-empty">No active setups found — next scan: 4h</div>';
+                    contentEl.innerHTML = '<div class="top5-empty">Waiting for first scan to complete...</div>';
                 }
                 return;
             }
