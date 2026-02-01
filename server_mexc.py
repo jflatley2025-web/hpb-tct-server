@@ -3271,7 +3271,7 @@ async def run_full_scan():
     Scan all pairs across key timeframes and compile the top 5 highest probability setups.
     Runs as a background task every 4 hours.
     """
-    global top_5_setups, scanner_status
+    global top_5_setups
 
     if scanner_status["is_scanning"]:
         logger.info("[SCANNER] Scan already in progress, skipping")
