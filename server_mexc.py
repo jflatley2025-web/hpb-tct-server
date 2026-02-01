@@ -2469,26 +2469,55 @@ def validate_gates(context: Dict) -> Dict:
 # DATA FETCHING
 # ================================================================
 
+# Shared httpx client — reuses connections instead of opening one per request
+_shared_client: Optional[httpx.AsyncClient] = None
+_scanner_consecutive_errors = 0  # Track consecutive fetch errors for adaptive backoff
+
+async def _get_shared_client() -> httpx.AsyncClient:
+    global _shared_client
+    if _shared_client is None or _shared_client.is_closed:
+        _shared_client = httpx.AsyncClient(
+            timeout=15,
+            limits=httpx.Limits(max_connections=5, max_keepalive_connections=3),
+        )
+    return _shared_client
+
 async def fetch_mexc_candles(symbol: str, interval: str, limit: int = 200) -> Optional[pd.DataFrame]:
+    global _scanner_consecutive_errors
     url = f"{MEXC_URL_BASE}/api/v3/klines"
     params = {"symbol": symbol, "interval": interval, "limit": limit}
 
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            r = await client.get(url, params=params)
-            if r.status_code != 200:
-                return None
+        client = await _get_shared_client()
+        r = await client.get(url, params=params)
 
-            df = pd.DataFrame(r.json(), columns=[
-                "open_time", "open", "high", "low", "close", "volume",
-                "close_time", "quote_vol"
-            ])
-            df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
-            for c in ["open", "high", "low", "close", "volume"]:
-                df[c] = df[c].astype(float)
-            return df
+        if r.status_code == 429:
+            # Rate limited — back off significantly
+            _scanner_consecutive_errors += 1
+            logger.warning(f"[MEXC] Rate limited (429) for {symbol}/{interval}, backing off")
+            await asyncio.sleep(min(5 * _scanner_consecutive_errors, 30))
+            return None
+
+        if r.status_code != 200:
+            _scanner_consecutive_errors += 1
+            return None
+
+        _scanner_consecutive_errors = max(0, _scanner_consecutive_errors - 1)  # Decay on success
+        data = r.json()
+        if not data or not isinstance(data, list):
+            return None
+
+        df = pd.DataFrame(data, columns=[
+            "open_time", "open", "high", "low", "close", "volume",
+            "close_time", "quote_vol"
+        ])
+        df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+        for c in ["open", "high", "low", "close", "volume"]:
+            df[c] = df[c].astype(float)
+        return df
     except Exception as e:
-        logger.error(f"[MEXC_FETCH_ERROR] {e}")
+        _scanner_consecutive_errors += 1
+        logger.error(f"[MEXC_FETCH_ERROR] {symbol}/{interval}: {e}")
         return None
 
 async def detect_best_range(candles: List) -> Optional[Dict]:
@@ -2654,6 +2683,9 @@ async def run_full_scan():
 
     all_setups = []
 
+    global _scanner_consecutive_errors
+    _scanner_consecutive_errors = 0  # Reset at scan start
+
     for i, symbol in enumerate(COIN_LIST):
         scanner_status["pairs_scanned"] = i + 1
 
@@ -2665,8 +2697,16 @@ async def run_full_scan():
             except Exception as e:
                 logger.debug(f"[SCANNER] Exception for {symbol}/{tf}: {e}")
 
-            # Rate limiting - small delay between requests to avoid hammering the exchange
-            await asyncio.sleep(0.15)
+            # Adaptive rate limiting: slow down when errors accumulate
+            base_delay = 0.35
+            if _scanner_consecutive_errors > 10:
+                delay = min(base_delay + (_scanner_consecutive_errors * 0.5), 10.0)
+                logger.info(f"[SCANNER] Throttling: {delay:.1f}s delay (errors={_scanner_consecutive_errors})")
+            elif _scanner_consecutive_errors > 3:
+                delay = base_delay + (_scanner_consecutive_errors * 0.2)
+            else:
+                delay = base_delay
+            await asyncio.sleep(delay)
 
         # Log progress every 50 pairs
         if (i + 1) % 50 == 0:
@@ -2844,6 +2884,15 @@ async def startup_event():
     logger.info(f"[SCANNER] Background scanner started — interval: {SCANNER_INTERVAL_SEC}s ({SCANNER_INTERVAL_SEC // 3600}h)")
 
 
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Clean up shared httpx client on shutdown."""
+    global _shared_client
+    if _shared_client and not _shared_client.is_closed:
+        await _shared_client.aclose()
+        _shared_client = None
+
+
 # ================================================================
 # ENDPOINTS
 # ================================================================
@@ -2949,10 +2998,11 @@ async def get_forming_setups():
 
 
 @app.get("/api/schematic-data")
-async def get_schematic_data(symbol: str, timeframe: str = "4h"):
+async def get_schematic_data(symbol: str, timeframe: str = "4h", type: str = "tct"):
     """
     Return full schematic + candle data for the schematic chart page.
     Fetches fresh candles and runs schematic detection with full tap/range data.
+    type='tct' for TCT schematics, type='po3' for PO3 schematics.
     """
     try:
         df = await fetch_mexc_candles(symbol, timeframe, 200)
@@ -2990,42 +3040,72 @@ async def get_schematic_data(symbol: str, timeframe: str = "4h"):
         detected_range = await detect_best_range(candles_list)
         range_list = [detected_range] if detected_range and not isinstance(detected_range, list) else (detected_range or [])
 
-        schematics_result = detect_tct_schematics(df, range_list)
+        if type == "po3":
+            # PO3 schematic detection
+            po3_result = detect_po3_schematics(df, range_list)
+            all_po3 = po3_result.get("bullish_po3", []) + po3_result.get("bearish_po3", [])
 
-        all_schematics = (
-            schematics_result.get("accumulation_schematics", []) +
-            schematics_result.get("distribution_schematics", [])
-        )
+            # Convert PO3 range indices to timestamps
+            po3_with_timestamps = []
+            for p in all_po3:
+                if not isinstance(p, dict):
+                    continue
+                po3 = dict(p)
+                ri = po3.get("range_indices", {})
+                for idx_key in ["range_start", "range_end", "manipulation_start", "manipulation_end"]:
+                    idx = ri.get(idx_key)
+                    if idx is not None and 0 <= idx < len(candles_json):
+                        ri[idx_key + "_time"] = candles_json[idx]["time"]
+                po3_with_timestamps.append(po3)
 
-        # Convert schematic tap indices to timestamps for chart overlay
-        schematics_with_timestamps = []
-        for s in all_schematics:
-            if not isinstance(s, dict):
-                continue
-            sch = dict(s)
-            # Map tap indices to candle timestamps
-            for tap_key in ['tap1', 'tap2', 'tap3']:
-                tap = sch.get(tap_key)
-                if tap and isinstance(tap, dict) and 'idx' in tap:
-                    idx = int(tap['idx'])
+            return convert_numpy_types({
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "type": "po3",
+                "current_price": current_price,
+                "candles": candles_json,
+                "po3_schematics": po3_with_timestamps,
+                "ranges": range_list,
+            })
+        else:
+            # TCT schematic detection
+            schematics_result = detect_tct_schematics(df, range_list)
+
+            all_schematics = (
+                schematics_result.get("accumulation_schematics", []) +
+                schematics_result.get("distribution_schematics", [])
+            )
+
+            # Convert schematic tap indices to timestamps for chart overlay
+            schematics_with_timestamps = []
+            for s in all_schematics:
+                if not isinstance(s, dict):
+                    continue
+                sch = dict(s)
+                # Map tap indices to candle timestamps
+                for tap_key in ['tap1', 'tap2', 'tap3']:
+                    tap = sch.get(tap_key)
+                    if tap and isinstance(tap, dict) and 'idx' in tap:
+                        idx = int(tap['idx'])
+                        if 0 <= idx < len(candles_json):
+                            tap['time'] = candles_json[idx]['time']
+                # Map BOS index
+                bos = sch.get('bos_confirmation')
+                if bos and isinstance(bos, dict) and 'bos_idx' in bos:
+                    idx = int(bos['bos_idx'])
                     if 0 <= idx < len(candles_json):
-                        tap['time'] = candles_json[idx]['time']
-            # Map BOS index
-            bos = sch.get('bos_confirmation')
-            if bos and isinstance(bos, dict) and 'bos_idx' in bos:
-                idx = int(bos['bos_idx'])
-                if 0 <= idx < len(candles_json):
-                    bos['bos_time'] = candles_json[idx]['time']
-            schematics_with_timestamps.append(sch)
+                        bos['bos_time'] = candles_json[idx]['time']
+                schematics_with_timestamps.append(sch)
 
-        return convert_numpy_types({
-            "symbol": symbol,
-            "timeframe": timeframe,
-            "current_price": current_price,
-            "candles": candles_json,
-            "schematics": schematics_with_timestamps,
-            "ranges": range_list,
-        })
+            return convert_numpy_types({
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "type": "tct",
+                "current_price": current_price,
+                "candles": candles_json,
+                "schematics": schematics_with_timestamps,
+                "ranges": range_list,
+            })
 
     except Exception as e:
         logger.error(f"[SCHEMATIC-DATA] Error for {symbol}/{timeframe}: {e}")
@@ -3033,17 +3113,18 @@ async def get_schematic_data(symbol: str, timeframe: str = "4h"):
 
 
 @app.get("/schematic-chart", response_class=HTMLResponse)
-async def schematic_chart_page(symbol: str = "BTCUSDT", timeframe: str = "4h"):
+async def schematic_chart_page(symbol: str = "BTCUSDT", timeframe: str = "4h", type: str = "tct"):
     """
-    Dedicated schematic chart page showing TCT model overlays
-    with range boxes, S/D zones, tap circles, BOS markers, and deviation limits.
+    Dedicated schematic chart page showing TCT model overlays (type=tct) or PO3 overlays (type=po3).
+    Range boxes, S/D zones, tap circles, BOS markers, deviation limits, PO3 phases.
     """
+    chart_type = type  # tct or po3
     html = """<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TCT Schematic — """ + symbol + """ """ + timeframe.upper() + """</title>
+    <title>""" + ("PO3" if chart_type == "po3" else "TCT") + """ Schematic — """ + symbol + """ """ + timeframe.upper() + """</title>
     <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -3113,6 +3194,7 @@ async def schematic_chart_page(symbol: str = "BTCUSDT", timeframe: str = "4h"):
     <script>
         const SYMBOL = '""" + symbol + """';
         const TIMEFRAME = '""" + timeframe + """';
+        const CHART_TYPE = '""" + chart_type + """';
 
         let chart, candleSeries;
         const overlays = [];
@@ -3313,9 +3395,138 @@ async def schematic_chart_page(symbol: str = "BTCUSDT", timeframe: str = "4h"):
             cardsEl.innerHTML = cardsHTML;
         }
 
+        function drawPO3Schematics(data) {
+            const candles = data.candles;
+            const po3List = data.po3_schematics || [];
+            const cardsEl = document.getElementById('schematicCards');
+
+            if (po3List.length === 0) {
+                cardsEl.innerHTML = '<div class="schematic-card"><div class="sc-title" style="color:#888;">No PO3 schematics detected on this timeframe</div></div>';
+                return;
+            }
+
+            let cardsHTML = '';
+            const allMarkers = [];
+
+            po3List.forEach((p, idx) => {
+                const isBull = p.direction === 'bullish';
+                const dirCls = isBull ? 'bullish' : 'bearish';
+                const dirLabel = isBull ? 'Bullish PO3' : 'Bearish PO3';
+                const phase = (p.phase || 'range').replace(/_/g, ' ');
+                const entry = p.entry?.price;
+                const stop = p.stop_loss?.price;
+                const target = p.target?.price;
+                const rr = p.risk_reward;
+                const quality = p.quality_score;
+                const ri = p.range_indices || {};
+                const rangeInfo = p.range || {};
+
+                // Draw range box
+                if (rangeInfo.high && rangeInfo.low) {
+                    const startIdx = ri.range_start || 0;
+                    drawZone(rangeInfo.high, rangeInfo.low, candles, 'rgb(128,128,128)', startIdx);
+
+                    // Equilibrium line
+                    if (rangeInfo.equilibrium) {
+                        drawHLine(rangeInfo.equilibrium, 'rgba(128,128,128,0.4)', 'EQ', LightweightCharts.LineStyle.Dotted, 1);
+                    }
+                }
+
+                // Draw manipulation zone
+                const manipInfo = p.manipulation || {};
+                if (isBull && manipInfo.low && rangeInfo.low) {
+                    drawZone(rangeInfo.low, manipInfo.low, candles, 'rgb(255,68,68)', ri.manipulation_start || 0);
+                } else if (!isBull && manipInfo.high && rangeInfo.high) {
+                    drawZone(manipInfo.high || rangeInfo.high, rangeInfo.high, candles, 'rgb(0,255,136)', ri.manipulation_start || 0);
+                }
+
+                // DL2 limit line
+                if (manipInfo.dl2_limit) {
+                    drawHLine(manipInfo.dl2_limit, 'rgba(255,193,7,0.5)', 'DL2', LightweightCharts.LineStyle.Dotted, 1);
+                }
+
+                // Phase markers
+                if (ri.range_start_time) {
+                    allMarkers.push({
+                        time: ri.range_start_time,
+                        position: 'aboveBar',
+                        color: '#888',
+                        shape: 'square',
+                        text: 'Range Start',
+                    });
+                }
+                if (ri.manipulation_start_time) {
+                    allMarkers.push({
+                        time: ri.manipulation_start_time,
+                        position: isBull ? 'belowBar' : 'aboveBar',
+                        color: '#ff4444',
+                        shape: 'circle',
+                        text: 'Manipulation',
+                    });
+                }
+                if (ri.manipulation_end_time) {
+                    allMarkers.push({
+                        time: ri.manipulation_end_time,
+                        position: isBull ? 'belowBar' : 'aboveBar',
+                        color: '#e040fb',
+                        shape: 'circle',
+                        text: 'Manip End',
+                    });
+                }
+
+                // Entry/Stop/Target lines (first PO3 only to avoid clutter)
+                if (idx === 0) {
+                    if (entry) drawHLine(entry, '#00d4ff', 'Entry', LightweightCharts.LineStyle.Solid, 2);
+                    if (stop) drawHLine(stop, '#ff4444', 'Stop Loss', LightweightCharts.LineStyle.Dashed, 1);
+                    if (target) drawHLine(target, '#00ff88', 'Target', LightweightCharts.LineStyle.Dashed, 1);
+                }
+
+                // Card HTML
+                cardsHTML += '<div class="schematic-card ' + (p.has_expansion ? 'confirmed' : 'forming') + '">';
+                cardsHTML += '<div class="sc-title ' + dirCls + '">' + dirLabel;
+                cardsHTML += '<span class="sc-status ' + (p.has_expansion ? 'confirmed' : 'forming') + '">' + phase.toUpperCase() + '</span></div>';
+
+                if (entry) cardsHTML += '<div class="sc-row"><span>Entry</span><span class="val">' + fmt(entry) + '</span></div>';
+                if (stop) cardsHTML += '<div class="sc-row"><span>Stop Loss</span><span class="val">' + fmt(stop) + '</span></div>';
+                if (target) cardsHTML += '<div class="sc-row"><span>Target</span><span class="val">' + fmt(target) + '</span></div>';
+                if (rr) cardsHTML += '<div class="sc-row"><span>R:R</span><span class="val">' + rr.toFixed(1) + '</span></div>';
+                if (quality) cardsHTML += '<div class="sc-row"><span>Quality</span><span class="val">' + Math.round(quality * 100) + '%</span></div>';
+
+                // Manipulation depth
+                const devPct = manipInfo.deviation_pct || 0;
+                cardsHTML += '<div class="sc-row"><span>Dev Depth</span><span class="val">' + devPct.toFixed(1) + '% / 30%</span></div>';
+
+                // TCT model inside manipulation
+                if (p.tct_model?.detected) {
+                    cardsHTML += '<div class="sc-row"><span>TCT Model</span><span class="val" style="color:#e040fb;">' + (p.tct_model.type || 'detected') + '</span></div>';
+                }
+
+                // Exception type
+                if (p.exception) {
+                    const excLabel = p.exception === 'exception_1_two_tap' ? '2-Tap Exception' : p.exception === 'exception_2_internal_tct' ? 'Internal TCT' : p.exception;
+                    cardsHTML += '<div class="sc-row"><span>Exception</span><span class="val" style="color:#ffc107;">' + excLabel + '</span></div>';
+                }
+
+                // Range info
+                if (rangeInfo.high && rangeInfo.low) {
+                    cardsHTML += '<div class="sc-row"><span>Range</span><span class="val">' + fmt(rangeInfo.low) + ' — ' + fmt(rangeInfo.high) + '</span></div>';
+                }
+
+                cardsHTML += '</div>';
+            });
+
+            // Set all markers
+            if (allMarkers.length > 0) {
+                allMarkers.sort((a, b) => a.time - b.time);
+                candleSeries.setMarkers(allMarkers);
+            }
+
+            cardsEl.innerHTML = cardsHTML;
+        }
+
         async function loadData() {
             try {
-                const resp = await fetch('/api/schematic-data?symbol=' + SYMBOL + '&timeframe=' + TIMEFRAME);
+                const resp = await fetch('/api/schematic-data?symbol=' + SYMBOL + '&timeframe=' + TIMEFRAME + '&type=' + CHART_TYPE);
                 const data = await resp.json();
 
                 if (data.error) {
@@ -3328,7 +3539,11 @@ async def schematic_chart_page(symbol: str = "BTCUSDT", timeframe: str = "4h"):
                     candleSeries.setData(data.candles);
                 }
 
-                drawSchematics(data);
+                if (CHART_TYPE === 'po3') {
+                    drawPO3Schematics(data);
+                } else {
+                    drawSchematics(data);
+                }
             } catch (e) {
                 console.error('Failed to load schematic data:', e);
             }
@@ -3780,8 +3995,41 @@ async def dashboard():
         }
         .schematic-meta .rr { color: #ffc107; }
         .schematic-meta .safe { color: #00ff88; }
-        .schematic-meta .unsafe { color: #ff4444;
+        .schematic-meta .unsafe { color: #ff4444; }
+
+        /* Timeframe group labels and clickable schematic links */
+        .tf-group-label {
+            font-size: 0.65rem; font-weight: 700; color: #888; text-transform: uppercase;
+            letter-spacing: 0.5px; margin: 8px 0 4px 0; padding-bottom: 2px;
+            border-bottom: 1px solid #222;
         }
+        .schematic-link {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 7px 10px; margin-bottom: 4px; border-radius: 5px;
+            background: #1a1a2e; border-left: 3px solid #555;
+            text-decoration: none; color: #e0e0e0; transition: background 0.15s;
+            cursor: pointer;
+        }
+        .schematic-link:hover { background: #252540; }
+        .schematic-link.accumulation, .schematic-link.bullish { border-left-color: #00ff88; }
+        .schematic-link.distribution, .schematic-link.bearish { border-left-color: #ff4444; }
+        .sl-label { font-size: 0.72rem; font-weight: 600; min-width: 70px; }
+        .sl-tags { display: flex; gap: 4px; flex: 1; justify-content: center; }
+        .sl-tag {
+            font-size: 0.58rem; padding: 1px 5px; border-radius: 3px;
+            background: rgba(255,255,255,0.06); color: #aaa;
+        }
+        .sl-tag.confirmed { background: rgba(0,255,136,0.15); color: #00ff88; }
+        .sl-tag.forming { background: rgba(255,193,7,0.15); color: #ffc107; }
+        .sl-tag.rr { background: rgba(255,193,7,0.12); color: #ffc107; }
+        .sl-tag.phase { background: rgba(0,212,255,0.12); color: #00d4ff; }
+        .sl-tag.expanding { background: rgba(0,255,136,0.15); color: #00ff88; }
+        .sl-quality {
+            font-size: 0.62rem; padding: 1px 6px; border-radius: 3px;
+            background: rgba(0,212,255,0.15); color: #00d4ff; min-width: 32px;
+            text-align: center;
+        }
+
         .refresh-btn {
             background: #00d4ff;
             color: #0a0a0f;
@@ -5789,88 +6037,69 @@ async def dashboard():
                 return;
             }
 
-            // Combine HTF and LTF schematics
-            const htfSchematics = data.htf_schematics?.schematics || [];
-            const ltfSchematics = data.ltf_schematics?.schematics || [];
-            const allSchematics = [...htfSchematics.slice(0, 2), ...ltfSchematics.slice(0, 2)];
+            const sym = data.symbol || currentSymbol;
+
+            // Collect schematics from all timeframes
+            const tfGroups = [
+                { key: 'htf', label: 'HTF', data: data.htf_schematics },
+                { key: 'mtf', label: 'MTF', data: data.mtf_schematics },
+                { key: 'ltf', label: 'LTF', data: data.ltf_schematics },
+            ];
+
+            let totalCount = 0;
+            let allSchematics = [];
+            tfGroups.forEach(g => {
+                const s = g.data?.schematics || [];
+                totalCount += g.data?.summary?.total || 0;
+                s.forEach(sc => { sc._tfLabel = g.label; sc._tf = g.data?.timeframe || ''; });
+                allSchematics.push(...s);
+            });
 
             if (allSchematics.length === 0) {
-                contentEl.innerHTML = '<div class="metric-row"><span class="label">No active schematics detected</span></div>';
+                contentEl.innerHTML = '<div class="metric-row"><span class="label">No active schematics on ' + sym + '</span></div>';
                 badgeEl.textContent = '0';
                 badgeEl.className = 'badge badge-neutral';
                 return;
             }
 
-            // Update badge
-            const totalCount = (data.htf_schematics?.summary?.total || 0) + (data.ltf_schematics?.summary?.total || 0);
             const hasAccum = allSchematics.some(s => s.direction === 'bullish');
             const hasDist = allSchematics.some(s => s.direction === 'bearish');
             badgeEl.textContent = totalCount;
             badgeEl.className = 'badge badge-' + (hasAccum && !hasDist ? 'bullish' : hasDist && !hasAccum ? 'bearish' : 'neutral');
 
-            // Build schematic cards
+            // Build compact clickable cards grouped by timeframe
             let html = '';
-            allSchematics.forEach((s, i) => {
-                const isAccum = s.direction === 'bullish';
-                const typeClass = isAccum ? 'accumulation' : 'distribution';
-                const typeLabel = s.schematic_type?.replace(/_/g, ' ').toUpperCase() || (isAccum ? 'ACCUMULATION' : 'DISTRIBUTION');
-                const quality = Math.round((s.quality_score || 0) * 100);
-                const entry = s.entry?.price;
-                const stop = s.stop_loss?.price;
-                const target = s.target?.price;
-                const rr = s.risk_reward;
-                const isSafe = s.entry?.is_safe !== false;
-                const isConfirmed = s.is_confirmed;
+            tfGroups.forEach(g => {
+                const schematics = g.data?.schematics || [];
+                if (schematics.length === 0) return;
 
-                // Lecture 5B enhancements
-                const enhancements = s.lecture_5b_enhancements || {};
-                const meetsRR = enhancements.meets_minimum_rr;
-                const has6CR = enhancements.htf_validation?.all_taps_valid_6cr;
-                const hasTrendline = enhancements.has_trendline_confluence;
+                html += '<div class="tf-group-label">' + g.label + ' (' + (g.data?.timeframe || '') + ')</div>';
 
-                // Lecture 6 enhancements
-                const l6 = s.lecture_6_enhancements || {};
-                const hasConversion = l6.has_conversion;
-                const hasDualDev = l6.has_dual_deviation;
-                const hasWOV = l6.has_wov_opportunity;
-                const hasM1toM2 = l6.has_m1_to_m2_opportunity;
-                const followBias = l6.follow_through_bias;
-                const enhancedTarget = l6.enhanced_target;
+                schematics.forEach(s => {
+                    const isAccum = s.direction === 'bullish';
+                    const dirClass = isAccum ? 'accumulation' : 'distribution';
+                    const typeRaw = s.schematic_type || (isAccum ? 'accumulation' : 'distribution');
+                    const isM2 = typeRaw.includes('model_2') || typeRaw.includes('Model_2');
+                    const modelTag = isM2 ? 'M2' : 'M1';
+                    const dirTag = isAccum ? 'Accum' : 'Dist';
+                    const label = modelTag + ' ' + dirTag;
+                    const quality = Math.round((s.quality_score || 0) * 100);
+                    const isConfirmed = s.is_confirmed;
+                    const rr = s.risk_reward;
+                    const tf = g.data?.timeframe || '';
 
-                html += '<div class="schematic-item ' + typeClass + '">';
-                html += '<div class="schematic-header">';
-                html += '<span class="schematic-type">' + typeLabel + '</span>';
-                html += '<span class="schematic-quality">' + quality + '%</span>';
-                html += '</div>';
+                    const chartUrl = '/schematic-chart?symbol=' + encodeURIComponent(sym) + '&timeframe=' + encodeURIComponent(tf);
 
-                if (entry && stop && target) {
-                    html += '<div class="schematic-levels">';
-                    html += '<div class="level-box entry"><span class="level-label">ENTRY</span><span class="level-price">$' + entry.toLocaleString(undefined, {maximumFractionDigits: 0}) + '</span></div>';
-                    html += '<div class="level-box stop"><span class="level-label">STOP</span><span class="level-price">$' + stop.toLocaleString(undefined, {maximumFractionDigits: 0}) + '</span></div>';
-                    html += '<div class="level-box target"><span class="level-label">TARGET</span><span class="level-price">$' + target.toLocaleString(undefined, {maximumFractionDigits: 0}) + '</span></div>';
-                    html += '</div>';
-                }
-
-                html += '<div class="schematic-meta">';
-                if (rr) html += '<span class="rr">R:R ' + rr.toFixed(1) + '</span>';
-                html += '<span class="' + (isSafe ? 'safe' : 'unsafe') + '">' + (isSafe ? 'Safe Entry' : 'Caution: S/D Zone') + '</span>';
-                if (isConfirmed) html += '<span class="safe">Confirmed</span>';
-                if (has6CR) html += '<span class="safe">6CR Valid</span>';
-                if (hasTrendline) html += '<span class="safe">TL Confluence</span>';
-                html += '</div>';
-
-                // Lecture 6 advanced indicators
-                if (hasConversion || hasDualDev || hasWOV || hasM1toM2 || followBias) {
-                    html += '<div class="schematic-meta l6-indicators" style="margin-top:4px;border-top:1px solid #333;padding-top:4px;">';
-                    if (hasConversion) html += '<span style="color:#ff9800;">Converted</span>';
-                    if (hasDualDev) html += '<span style="color:#e91e63;">Dual Dev</span>';
-                    if (hasWOV) html += '<span style="color:#00bcd4;">WOV Entry</span>';
-                    if (hasM1toM2) html += '<span style="color:#9c27b0;">M1→M2</span>';
-                    if (followBias && followBias !== 'neutral') html += '<span style="color:#8bc34a;">' + followBias + '</span>';
-                    if (enhancedTarget) html += '<span style="color:#ffc107;">Ext: $' + enhancedTarget.toLocaleString(undefined, {maximumFractionDigits: 0}) + '</span>';
-                    html += '</div>';
-                }
-                html += '</div>';
+                    html += '<a href="' + chartUrl + '" target="_blank" class="schematic-link ' + dirClass + '">';
+                    html += '<span class="sl-label">' + label + '</span>';
+                    html += '<span class="sl-tags">';
+                    if (isConfirmed) html += '<span class="sl-tag confirmed">BOS</span>';
+                    else html += '<span class="sl-tag forming">Forming</span>';
+                    if (rr) html += '<span class="sl-tag rr">' + rr.toFixed(1) + 'R</span>';
+                    html += '</span>';
+                    html += '<span class="sl-quality">' + quality + '%</span>';
+                    html += '</a>';
+                });
             });
 
             contentEl.innerHTML = html;
@@ -6612,95 +6841,65 @@ async def dashboard():
                 return;
             }
 
-            // Combine HTF and LTF PO3 schematics
-            const htfPO3 = data.htf_po3?.schematics || [];
-            const ltfPO3 = data.ltf_po3?.schematics || [];
-            const allPO3 = [...htfPO3.slice(0, 3), ...ltfPO3.slice(0, 3)];
+            const sym = data.symbol || currentSymbol;
+
+            // Collect PO3 from all timeframes
+            const tfGroups = [
+                { key: 'htf', label: 'HTF', data: data.htf_po3 },
+                { key: 'mtf', label: 'MTF', data: data.mtf_po3 },
+                { key: 'ltf', label: 'LTF', data: data.ltf_po3 },
+            ];
+
+            let totalCount = 0;
+            let allPO3 = [];
+            tfGroups.forEach(g => {
+                const s = g.data?.schematics || [];
+                totalCount += g.data?.summary?.total || 0;
+                s.forEach(p => { p._tfLabel = g.label; p._tf = g.data?.timeframe || ''; });
+                allPO3.push(...s);
+            });
 
             if (allPO3.length === 0) {
-                contentEl.innerHTML = '<div class="metric-row"><span class="label">No active PO3 schematics detected</span></div>' +
+                contentEl.innerHTML = '<div class="metric-row"><span class="label">No active PO3 on ' + sym + '</span></div>' +
                     '<div class="metric-row" style="margin-top:4px;"><span class="label" style="font-size:0.6rem;color:#666;">PO3 = Range → Manipulation → Expansion</span></div>';
                 badgeEl.textContent = '0';
                 badgeEl.className = 'badge badge-neutral';
                 return;
             }
 
-            // Update badge
-            const totalCount = (data.htf_po3?.summary?.total || 0) + (data.ltf_po3?.summary?.total || 0);
             const hasBull = allPO3.some(p => p.direction === 'bullish');
             const hasBear = allPO3.some(p => p.direction === 'bearish');
             badgeEl.textContent = totalCount;
             badgeEl.className = 'badge badge-' + (hasBull && !hasBear ? 'bullish' : hasBear && !hasBull ? 'bearish' : 'neutral');
 
             let html = '';
-            allPO3.forEach((p) => {
-                const isBull = p.direction === 'bullish';
-                const dirClass = isBull ? 'bullish' : 'bearish';
-                const typeLabel = isBull ? 'BULLISH PO3' : 'BEARISH PO3';
-                const quality = Math.round((p.quality_score || 0) * 100);
-                const phase = p.phase || 'range';
-                const entry = p.entry?.price;
-                const stop = p.stop_loss?.price;
-                const target = p.target?.price;
-                const rr = p.risk_reward;
+            tfGroups.forEach(g => {
+                const schematics = g.data?.schematics || [];
+                if (schematics.length === 0) return;
 
-                html += '<div class="po3-item ' + dirClass + '">';
+                html += '<div class="tf-group-label">' + g.label + ' (' + (g.data?.timeframe || '') + ')</div>';
 
-                // Header: type + phase + quality
-                html += '<div class="po3-header">';
-                html += '<span class="po3-type">' + typeLabel + '</span>';
-                html += '<span class="po3-phase ' + phase.replace(' ', '_') + '">' + phase.replace('_', ' ') + '</span>';
-                html += '<span class="po3-quality">' + quality + '%</span>';
-                html += '</div>';
+                schematics.forEach(p => {
+                    const isBull = p.direction === 'bullish';
+                    const dirClass = isBull ? 'bullish' : 'bearish';
+                    const dirTag = isBull ? 'Bull' : 'Bear';
+                    const phase = (p.phase || 'range').replace(/_/g, ' ');
+                    const quality = Math.round((p.quality_score || 0) * 100);
+                    const rr = p.risk_reward;
+                    const tf = g.data?.timeframe || '';
 
-                // Entry/Stop/Target levels
-                if (entry && stop && target) {
-                    html += '<div class="po3-levels">';
-                    html += '<div class="po3-level-box entry"><span class="po3-level-label">ENTRY</span><span class="po3-level-price">$' + entry.toLocaleString(undefined, {maximumFractionDigits: 0}) + '</span></div>';
-                    html += '<div class="po3-level-box stop"><span class="po3-level-label">STOP</span><span class="po3-level-price">$' + stop.toLocaleString(undefined, {maximumFractionDigits: 0}) + '</span></div>';
-                    html += '<div class="po3-level-box target"><span class="po3-level-label">TARGET</span><span class="po3-level-price">$' + target.toLocaleString(undefined, {maximumFractionDigits: 0}) + '</span></div>';
-                    html += '</div>';
-                }
+                    const chartUrl = '/schematic-chart?symbol=' + encodeURIComponent(sym) + '&timeframe=' + encodeURIComponent(tf) + '&type=po3';
 
-                // Manipulation depth bar
-                const manipInfo = p.manipulation || {};
-                const devPct = manipInfo.deviation_pct || 0;
-                const dl2Pct = 30; // DL2 is 30% of range
-                const barWidth = Math.min(100, (devPct / dl2Pct) * 100);
-
-                html += '<div class="po3-manip-bar">';
-                html += '<div class="bar-track">';
-                html += '<div class="bar-fill ' + dirClass + '" style="width:' + barWidth + '%"></div>';
-                html += '</div>';
-                html += '<div class="po3-manip-labels">';
-                html += '<span>Dev: ' + devPct.toFixed(1) + '%</span>';
-                html += '<span>DL2: ' + dl2Pct + '%</span>';
-                html += '</div>';
-                html += '</div>';
-
-                // Meta tags
-                html += '<div class="po3-meta">';
-                if (rr) html += '<span class="rr">R:R ' + rr.toFixed(1) + '</span>';
-                if (p.tct_model?.detected) html += '<span class="tct-model">TCT ' + (p.tct_model.type || 'Model') + '</span>';
-                if (p.exception) {
-                    const excLabel = p.exception === 'exception_1_two_tap' ? '2-Tap' : p.exception === 'exception_2_internal_tct' ? 'Internal TCT' : p.exception;
-                    html += '<span class="exception">' + excLabel + '</span>';
-                }
-                if (p.has_compression) html += '<span class="compression">Compressed</span>';
-                if (p.has_liquidity_both_sides) html += '<span class="liq-both">Dual Liq</span>';
-                if (p.has_expansion) html += '<span style="color:#00ff88;">Expanding</span>';
-                html += '</div>';
-
-                // Range info
-                if (p.range) {
-                    html += '<div style="margin-top:4px;font-size:0.6rem;color:#555;">';
-                    html += 'Range: $' + (p.range.low || 0).toLocaleString(undefined, {maximumFractionDigits: 0});
-                    html += ' — $' + (p.range.high || 0).toLocaleString(undefined, {maximumFractionDigits: 0});
-                    html += ' (' + (p.range.size_pct || 0) + '%)';
-                    html += '</div>';
-                }
-
-                html += '</div>';
+                    html += '<a href="' + chartUrl + '" target="_blank" class="schematic-link ' + dirClass + '">';
+                    html += '<span class="sl-label">PO3 ' + dirTag + '</span>';
+                    html += '<span class="sl-tags">';
+                    html += '<span class="sl-tag phase">' + phase + '</span>';
+                    if (rr) html += '<span class="sl-tag rr">' + rr.toFixed(1) + 'R</span>';
+                    if (p.has_expansion) html += '<span class="sl-tag expanding">Exp</span>';
+                    html += '</span>';
+                    html += '<span class="sl-quality">' + quality + '%</span>';
+                    html += '</a>';
+                });
             });
 
             contentEl.innerHTML = html;
@@ -7931,16 +8130,23 @@ async def get_tct_schematics(symbol: Optional[str] = None):
     """
     try:
         sym = resolve_symbol(symbol)
-        # Fetch HTF (4h) and LTF (15m) candles
-        htf_df = await fetch_mexc_candles(sym, "4h", 200)
-        ltf_df = await fetch_mexc_candles(sym, "15m", 200)
 
-        if htf_df is None or ltf_df is None:
+        # Multi-timeframe scanning: HTF (4h), MTF (1h), LTF (15m)
+        timeframes = {"htf": "4h", "mtf": "1h", "ltf": "15m"}
+        dfs = {}
+        for tf_key, tf_val in timeframes.items():
+            df = await fetch_mexc_candles(sym, tf_val, 200)
+            if df is not None and len(df) >= 30:
+                dfs[tf_key] = df
+
+        if not dfs:
             return JSONResponse({"error": "Failed to fetch candle data"}, status_code=500)
 
-        current_price = float(ltf_df.iloc[-1]["close"])
+        # Use finest available timeframe for current price
+        price_df = dfs.get("ltf") or dfs.get("mtf") or dfs.get("htf")
+        current_price = float(price_df.iloc[-1]["close"])
 
-        # Detect ranges for both timeframes (convert to list for range detection)
+        # Detect ranges for each timeframe (convert to list for range detection)
         def df_to_candles(df):
             candles = []
             for _, row in df.iterrows():
@@ -7954,31 +8160,6 @@ async def get_tct_schematics(symbol: Optional[str] = None):
                 })
             return candles
 
-        htf_candles_list = df_to_candles(htf_df)
-        ltf_candles_list = df_to_candles(ltf_df)
-
-        # Detect ranges for both timeframes
-        htf_ranges = await detect_best_range(htf_candles_list)
-        ltf_ranges = await detect_best_range(ltf_candles_list)
-
-        # Convert single range to list if needed
-        htf_range_list = [htf_ranges] if htf_ranges and not isinstance(htf_ranges, list) else (htf_ranges or [])
-        ltf_range_list = [ltf_ranges] if ltf_ranges and not isinstance(ltf_ranges, list) else (ltf_ranges or [])
-
-        # Detect TCT schematics on both timeframes (pass DataFrame, not list)
-        htf_schematics_result = detect_tct_schematics(htf_df, htf_range_list)
-        ltf_schematics_result = detect_tct_schematics(ltf_df, ltf_range_list)
-
-        # Extract schematic lists from result dict
-        htf_schematics = (
-            htf_schematics_result.get("accumulation_schematics", []) +
-            htf_schematics_result.get("distribution_schematics", [])
-        )
-        ltf_schematics = (
-            ltf_schematics_result.get("accumulation_schematics", []) +
-            ltf_schematics_result.get("distribution_schematics", [])
-        )
-
         # Filter and sort schematics by quality
         def filter_active_schematics(schematics, current_price):
             """Filter to schematics that are still valid for trading"""
@@ -7986,29 +8167,21 @@ async def get_tct_schematics(symbol: Optional[str] = None):
             for s in schematics:
                 if not isinstance(s, dict):
                     continue
-                # Check if schematic is still valid (price hasn't hit target or stop)
                 entry = s.get('entry', {}).get('price')
                 target = s.get('target', {}).get('price')
                 stop = s.get('stop_loss', {}).get('price')
 
                 if entry and target and stop:
-                    # For long (accumulation)
                     if s.get('direction') == 'bullish':
                         if current_price < target and current_price > stop:
                             active.append(s)
-                    # For short (distribution)
                     elif s.get('direction') == 'bearish':
                         if current_price > target and current_price < stop:
                             active.append(s)
                 else:
-                    # No complete trade management yet, still include
                     active.append(s)
             return sorted(active, key=lambda x: x.get('quality_score', 0), reverse=True)
 
-        htf_active = filter_active_schematics(htf_schematics, current_price)
-        ltf_active = filter_active_schematics(ltf_schematics, current_price)
-
-        # Summarize schematics
         def summarize_schematics(schematics):
             return {
                 'total': len(schematics),
@@ -8020,21 +8193,44 @@ async def get_tct_schematics(symbol: Optional[str] = None):
                 'forming': sum(1 for s in schematics if s.get('status') == 'forming'),
             }
 
+        # Scan each timeframe for schematics
+        tf_results = {}
+        for tf_key, tf_val in timeframes.items():
+            if tf_key not in dfs:
+                tf_results[tf_key] = {"timeframe": tf_val, "schematics": [], "summary": summarize_schematics([])}
+                continue
+
+            df = dfs[tf_key]
+            candles_list = df_to_candles(df)
+            detected_range = await detect_best_range(candles_list)
+            range_list = [detected_range] if detected_range and not isinstance(detected_range, list) else (detected_range or [])
+
+            schematics_result = detect_tct_schematics(df, range_list)
+            all_schematics = (
+                schematics_result.get("accumulation_schematics", []) +
+                schematics_result.get("distribution_schematics", [])
+            )
+
+            # Tag each schematic with its timeframe
+            for s in all_schematics:
+                if isinstance(s, dict):
+                    s["timeframe"] = tf_val
+
+            active = filter_active_schematics(all_schematics, current_price)
+            tf_results[tf_key] = {
+                "timeframe": tf_val,
+                "schematics": active[:5],
+                "summary": summarize_schematics(active)
+            }
+
         # Convert numpy types to native Python types for JSON serialization
         response_data = convert_numpy_types({
             "symbol": sym,
             "current_price": current_price,
             "methodology": "TCT Mentorship Lecture 5A + 5B + 6 - Advanced TCT Schematics",
-            "htf_schematics": {
-                "timeframe": "4h",
-                "schematics": htf_active[:5],  # Top 5 by quality
-                "summary": summarize_schematics(htf_active)
-            },
-            "ltf_schematics": {
-                "timeframe": "15m",
-                "schematics": ltf_active[:5],  # Top 5 by quality
-                "summary": summarize_schematics(ltf_active)
-            },
+            "htf_schematics": tf_results.get("htf", {"timeframe": "4h", "schematics": [], "summary": summarize_schematics([])}),
+            "mtf_schematics": tf_results.get("mtf", {"timeframe": "1h", "schematics": [], "summary": summarize_schematics([])}),
+            "ltf_schematics": tf_results.get("ltf", {"timeframe": "15m", "schematics": [], "summary": summarize_schematics([])}),
             "trading_rules": {
                 "model_1": "Two successive deviations - Tap2 below Tap1, Tap3 below Tap2 (accumulation) or above (distribution)",
                 "model_2": "One deviation then higher low/lower high - must grab extreme liquidity OR mitigate extreme demand/supply",
@@ -8043,20 +8239,10 @@ async def get_tct_schematics(symbol: Optional[str] = None):
                 "target": "Opposite range extreme (Wyckoff high for longs, Wyckoff low for shorts)",
                 "six_candle_rule": "Each tap pivot must pass 6-candle rule for valid schematic on that timeframe"
             },
-            "lecture_6_rules": {
-                "schematic_conversion": "Distribution can convert to accumulation (and vice versa) when opposite deviation occurs",
-                "dual_side_deviation": "When both sides deviate, trigger risk-on (more aggressive) until range extreme breaks",
-                "ltf_htf_transition": "LTF schematics can grow into HTF ranges - watch for nested structures",
-                "multi_tf_validity": "Check if tap2/tap3 close enough to merge on HTF - affects target selection",
-                "wov_in_wov": "Look for schematic within schematic for dramatic R:R improvement",
-                "m1_to_m2_flow": "Model 1 can flow into Model 2 - add to position at M2 entry, same stop, extended target",
-                "context_follow_through": "Premium zone expects distribution, discount zone expects accumulation"
-            },
             "summary": {
-                "total_htf_schematics": len(htf_active),
-                "total_ltf_schematics": len(ltf_active),
-                "best_htf_quality": htf_active[0].get('quality_score', 0) if htf_active else 0,
-                "best_ltf_quality": ltf_active[0].get('quality_score', 0) if ltf_active else 0,
+                "total_htf_schematics": len(tf_results.get("htf", {}).get("schematics", [])),
+                "total_mtf_schematics": len(tf_results.get("mtf", {}).get("schematics", [])),
+                "total_ltf_schematics": len(tf_results.get("ltf", {}).get("schematics", [])),
             }
         })
         return JSONResponse(response_data)
@@ -8085,16 +8271,21 @@ async def get_po3_schematics(symbol: Optional[str] = None):
     """
     try:
         sym = resolve_symbol(symbol)
-        # Fetch HTF (4h) and LTF (15m) candles
-        htf_df = await fetch_mexc_candles(sym, "4h", 200)
-        ltf_df = await fetch_mexc_candles(sym, "15m", 200)
 
-        if htf_df is None or ltf_df is None:
+        # Multi-timeframe scanning: HTF (4h), MTF (1h), LTF (15m)
+        timeframes = {"htf": "4h", "mtf": "1h", "ltf": "15m"}
+        dfs = {}
+        for tf_key, tf_val in timeframes.items():
+            df = await fetch_mexc_candles(sym, tf_val, 200)
+            if df is not None and len(df) >= 50:
+                dfs[tf_key] = df
+
+        if not dfs:
             return JSONResponse({"error": "Failed to fetch candle data"}, status_code=500)
 
-        current_price = float(ltf_df.iloc[-1]["close"])
+        price_df = dfs.get("ltf") or dfs.get("mtf") or dfs.get("htf")
+        current_price = float(price_df.iloc[-1]["close"])
 
-        # Convert DataFrames to candle lists for range detection
         def df_to_candles(df):
             candles = []
             for _, row in df.iterrows():
@@ -8108,27 +8299,6 @@ async def get_po3_schematics(symbol: Optional[str] = None):
                 })
             return candles
 
-        htf_candles_list = df_to_candles(htf_df)
-        ltf_candles_list = df_to_candles(ltf_df)
-
-        # Detect ranges for both timeframes
-        htf_ranges = await detect_best_range(htf_candles_list)
-        ltf_ranges = await detect_best_range(ltf_candles_list)
-
-        htf_range_list = [htf_ranges] if htf_ranges and not isinstance(htf_ranges, list) else (htf_ranges or [])
-        ltf_range_list = [ltf_ranges] if ltf_ranges and not isinstance(ltf_ranges, list) else (ltf_ranges or [])
-
-        # Detect PO3 schematics on both timeframes
-        htf_po3_result = detect_po3_schematics(htf_df, htf_range_list)
-        ltf_po3_result = detect_po3_schematics(ltf_df, ltf_range_list)
-
-        # Combine PO3 detections
-        htf_bullish = htf_po3_result.get("bullish_po3", [])
-        htf_bearish = htf_po3_result.get("bearish_po3", [])
-        ltf_bullish = ltf_po3_result.get("bullish_po3", [])
-        ltf_bearish = ltf_po3_result.get("bearish_po3", [])
-
-        # Filter active PO3s (still valid for trading)
         def filter_active_po3(po3_list, current_price):
             active = []
             for p in po3_list:
@@ -8148,35 +8318,49 @@ async def get_po3_schematics(symbol: Optional[str] = None):
                     active.append(p)
             return sorted(active, key=lambda x: x.get("quality_score", 0), reverse=True)
 
-        htf_active = filter_active_po3(htf_bullish + htf_bearish, current_price)
-        ltf_active = filter_active_po3(ltf_bullish + ltf_bearish, current_price)
+        def summarize_po3(po3_list):
+            return {
+                "total": len(po3_list),
+                "bullish": sum(1 for p in po3_list if p.get("direction") == "bullish"),
+                "bearish": sum(1 for p in po3_list if p.get("direction") == "bearish"),
+                "in_expansion": sum(1 for p in po3_list if p.get("phase") == "expansion"),
+                "in_manipulation": sum(1 for p in po3_list if p.get("phase") in ("manipulation", "manipulation_complete")),
+            }
+
+        # Scan each timeframe for PO3 schematics
+        tf_results = {}
+        for tf_key, tf_val in timeframes.items():
+            if tf_key not in dfs:
+                tf_results[tf_key] = {"timeframe": tf_val, "schematics": [], "summary": summarize_po3([])}
+                continue
+
+            df = dfs[tf_key]
+            candles_list = df_to_candles(df)
+            detected_range = await detect_best_range(candles_list)
+            range_list = [detected_range] if detected_range and not isinstance(detected_range, list) else (detected_range or [])
+
+            po3_result = detect_po3_schematics(df, range_list)
+            all_po3 = po3_result.get("bullish_po3", []) + po3_result.get("bearish_po3", [])
+
+            # Tag each PO3 with its timeframe
+            for p in all_po3:
+                if isinstance(p, dict):
+                    p["timeframe"] = tf_val
+
+            active = filter_active_po3(all_po3, current_price)
+            tf_results[tf_key] = {
+                "timeframe": tf_val,
+                "schematics": active[:5],
+                "summary": summarize_po3(active)
+            }
 
         response_data = convert_numpy_types({
             "symbol": sym,
             "current_price": current_price,
             "methodology": "TCT Mentorship Lecture 8 - PO3 Schematics (Power of Three)",
-            "htf_po3": {
-                "timeframe": "4h",
-                "schematics": htf_active[:5],
-                "summary": {
-                    "total": len(htf_active),
-                    "bullish": sum(1 for p in htf_active if p.get("direction") == "bullish"),
-                    "bearish": sum(1 for p in htf_active if p.get("direction") == "bearish"),
-                    "in_expansion": sum(1 for p in htf_active if p.get("phase") == "expansion"),
-                    "in_manipulation": sum(1 for p in htf_active if p.get("phase") in ("manipulation", "manipulation_complete")),
-                }
-            },
-            "ltf_po3": {
-                "timeframe": "15m",
-                "schematics": ltf_active[:5],
-                "summary": {
-                    "total": len(ltf_active),
-                    "bullish": sum(1 for p in ltf_active if p.get("direction") == "bullish"),
-                    "bearish": sum(1 for p in ltf_active if p.get("direction") == "bearish"),
-                    "in_expansion": sum(1 for p in ltf_active if p.get("phase") == "expansion"),
-                    "in_manipulation": sum(1 for p in ltf_active if p.get("phase") in ("manipulation", "manipulation_complete")),
-                }
-            },
+            "htf_po3": tf_results.get("htf", {"timeframe": "4h", "schematics": [], "summary": summarize_po3([])}),
+            "mtf_po3": tf_results.get("mtf", {"timeframe": "1h", "schematics": [], "summary": summarize_po3([])}),
+            "ltf_po3": tf_results.get("ltf", {"timeframe": "15m", "schematics": [], "summary": summarize_po3([])}),
             "po3_rules": {
                 "range": "4H+ range with good RTZ quality and compression",
                 "manipulation": "Breakout/breakdown must stay inside DL2 (30% of range)",
@@ -8187,10 +8371,9 @@ async def get_po3_schematics(symbol: Optional[str] = None):
                 "key_rule": "When a TCT model fails, look for potential PO3 setup"
             },
             "summary": {
-                "total_htf_po3": len(htf_active),
-                "total_ltf_po3": len(ltf_active),
-                "best_htf_quality": htf_active[0].get("quality_score", 0) if htf_active else 0,
-                "best_ltf_quality": ltf_active[0].get("quality_score", 0) if ltf_active else 0,
+                "total_htf_po3": len(tf_results.get("htf", {}).get("schematics", [])),
+                "total_mtf_po3": len(tf_results.get("mtf", {}).get("schematics", [])),
+                "total_ltf_po3": len(tf_results.get("ltf", {}).get("schematics", [])),
             }
         })
         return JSONResponse(response_data)
