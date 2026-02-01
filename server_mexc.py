@@ -106,59 +106,552 @@ logging.basicConfig(level=logging.INFO)
 logger.info(f"[INIT] HPB–TCT v21.2 Ready — Symbol={SYMBOL}, Port={PORT}")
 
 # ================================================================
-# MARKET STRUCTURE
+# MARKET STRUCTURE  (TCT Mentorship – Lecture 1)
+# ================================================================
+# Rules implemented from PDF:
+#   1. 6-candle rule for pivots: 2 consecutive bullish + 2 consecutive
+#      bearish (or vice-versa) stacked = 6 candles.  Inside-bar candles
+#      do NOT count.
+#   2. Market structure HIGH confirmed when price revisits the MS low.
+#      MS HIGH = highest point between low creation and low re-touch.
+#   3. Market structure LOW confirmed when price revisits the MS high.
+#      MS LOW = lowest point between high creation and high re-touch.
+#   4. BOS = closing price above MS high (bullish) or below MS low
+#      (bearish).  Must be a candle CLOSE, not just a wick.
+#   5. Valid bullish structure: L → H → HL → HH.
+#      Valid bearish structure: H → L → LH → LL.
+#   6. Three levels of structure:
+#        Level 1 – primary trend direction (most important).
+#        Level 2 – always opposite direction of Level 1.
+#        Level 3 – refined structure of most recent Level 2 expansion.
+#      Domino effect: break L3 → confirms rotation to L2,
+#                     break L2 → confirms rotation to L1.
+#   7. Level 3 can ONLY be used when no S/D zone protects price from
+#      reaching Level 1.
+#   8. Expectational Order Flow (EOF):
+#        Bullish trend → expect HL for HH.
+#        Bearish trend → expect LH for LL.
+#        BOS in opposite direction = trend shift.
 # ================================================================
 
 class MarketStructure:
-    """Detects market structure using 6-candle rule"""
+    """
+    TCT Lecture 1 – Market Structure detection engine.
+
+    Detects valid pivot points using the 6-candle rule, classifies
+    market structure into Level 1 / Level 2 / Level 3 hierarchies,
+    identifies BOS (Break of Structure) events, and derives
+    Expectational Order Flow for all downstream TCT steps.
+    """
+
+    # ---- helpers ------------------------------------------------
+
+    @staticmethod
+    def _is_inside_bar(candle, prev_candle) -> bool:
+        """Inside bar: high and low are inside the previous bar's high and low."""
+        return (float(candle["high"]) <= float(prev_candle["high"]) and
+                float(candle["low"]) >= float(prev_candle["low"]))
+
+    @staticmethod
+    def _is_bullish_candle(candle) -> bool:
+        return float(candle["close"]) > float(candle["open"])
+
+    @staticmethod
+    def _is_bearish_candle(candle) -> bool:
+        return float(candle["close"]) < float(candle["open"])
+
+    # ---- 6-candle rule pivot detection --------------------------
+
+    @staticmethod
+    def _find_6cr_pivots(candles: pd.DataFrame) -> Dict:
+        """
+        Find valid pivot highs and lows using the TCT 6-candle rule.
+
+        A valid pivot HIGH requires:
+          - At least 2 consecutive non-inside-bar bullish candles leading up
+          - Followed by at least 2 consecutive non-inside-bar bearish candles
+          - The pivot is the candle with the highest HIGH in the transition zone
+
+        A valid pivot LOW requires:
+          - At least 2 consecutive non-inside-bar bearish candles leading down
+          - Followed by at least 2 consecutive non-inside-bar bullish candles
+          - The pivot is the candle with the lowest LOW in the transition zone
+
+        Inside bar candles are skipped (they don't count toward the 2-2 rule).
+        """
+        n = len(candles)
+        if n < 6:
+            return {"highs": [], "lows": []}
+
+        # Pre-compute candle direction (skip inside bars)
+        directions = []  # list of (original_idx, 'bull' | 'bear' | 'inside')
+        for i in range(n):
+            c = candles.iloc[i]
+            if i > 0 and MarketStructure._is_inside_bar(c, candles.iloc[i - 1]):
+                directions.append((i, "inside"))
+            elif MarketStructure._is_bullish_candle(c):
+                directions.append((i, "bull"))
+            elif MarketStructure._is_bearish_candle(c):
+                directions.append((i, "bear"))
+            else:
+                # doji – treat as inside
+                directions.append((i, "inside"))
+
+        # Filter out inside bars for sequence detection
+        non_inside = [(idx, d) for idx, d in directions if d != "inside"]
+
+        pivot_highs = []
+        pivot_lows = []
+
+        # Slide through non-inside candles looking for 2-bull then 2-bear (pivot high)
+        # and 2-bear then 2-bull (pivot low)
+        for k in range(len(non_inside) - 3):
+            i0, d0 = non_inside[k]
+            i1, d1 = non_inside[k + 1]
+            i2, d2 = non_inside[k + 2]
+            i3, d3 = non_inside[k + 3]
+
+            # Pivot HIGH: 2 bull → 2 bear
+            if d0 == "bull" and d1 == "bull" and d2 == "bear" and d3 == "bear":
+                # The pivot HIGH is the candle with the highest high in the
+                # range from i0..i3 (inclusive of any inside bars between them)
+                search_start = i0
+                search_end = i3
+                best_idx = search_start
+                best_high = float(candles.iloc[search_start]["high"])
+                for j in range(search_start, min(search_end + 1, n)):
+                    h = float(candles.iloc[j]["high"])
+                    if h > best_high:
+                        best_high = h
+                        best_idx = j
+                # Avoid duplicates at same index
+                if not pivot_highs or pivot_highs[-1]["idx"] != best_idx:
+                    pivot_highs.append({"idx": int(best_idx), "price": best_high})
+
+            # Pivot LOW: 2 bear → 2 bull
+            if d0 == "bear" and d1 == "bear" and d2 == "bull" and d3 == "bull":
+                search_start = i0
+                search_end = i3
+                best_idx = search_start
+                best_low = float(candles.iloc[search_start]["low"])
+                for j in range(search_start, min(search_end + 1, n)):
+                    lo = float(candles.iloc[j]["low"])
+                    if lo < best_low:
+                        best_low = lo
+                        best_idx = j
+                if not pivot_lows or pivot_lows[-1]["idx"] != best_idx:
+                    pivot_lows.append({"idx": int(best_idx), "price": best_low})
+
+        return {"highs": pivot_highs, "lows": pivot_lows}
+
+    # ---- Confirmed MS highs / lows (Lecture 1 rule) -------------
+
+    @staticmethod
+    def _confirm_structure_points(candles: pd.DataFrame, pivot_highs: list, pivot_lows: list) -> Dict:
+        """
+        Confirm market structure highs and lows per Lecture 1:
+
+        MS HIGH = highest point between two consecutive lows, confirmed
+                  when the second low is created (price revisits the low).
+        MS LOW  = lowest point between two consecutive highs, confirmed
+                  when the second high is created (price revisits the high).
+
+        Returns confirmed MS highs and MS lows with confirmation indices.
+        """
+        ms_highs = []
+        ms_lows = []
+
+        # Confirmed MS Highs: between consecutive pivot lows, the highest high
+        for i in range(len(pivot_lows) - 1):
+            low1 = pivot_lows[i]
+            low2 = pivot_lows[i + 1]
+            start_idx = low1["idx"]
+            end_idx = low2["idx"]
+            if start_idx >= end_idx:
+                continue
+            # Find highest high in the range between the two lows
+            best_high = -float('inf')
+            best_idx = start_idx
+            for j in range(start_idx, min(end_idx + 1, len(candles))):
+                h = float(candles.iloc[j]["high"])
+                if h > best_high:
+                    best_high = h
+                    best_idx = j
+            ms_highs.append({
+                "idx": int(best_idx),
+                "price": best_high,
+                "confirmed_at_idx": int(end_idx),
+                "confirmed_by_low_idx": int(low2["idx"]),
+            })
+
+        # Confirmed MS Lows: between consecutive pivot highs, the lowest low
+        for i in range(len(pivot_highs) - 1):
+            high1 = pivot_highs[i]
+            high2 = pivot_highs[i + 1]
+            start_idx = high1["idx"]
+            end_idx = high2["idx"]
+            if start_idx >= end_idx:
+                continue
+            best_low = float('inf')
+            best_idx = start_idx
+            for j in range(start_idx, min(end_idx + 1, len(candles))):
+                lo = float(candles.iloc[j]["low"])
+                if lo < best_low:
+                    best_low = lo
+                    best_idx = j
+            ms_lows.append({
+                "idx": int(best_idx),
+                "price": best_low,
+                "confirmed_at_idx": int(end_idx),
+                "confirmed_by_high_idx": int(high2["idx"]),
+            })
+
+        return {"ms_highs": ms_highs, "ms_lows": ms_lows}
+
+    # ---- BOS detection ------------------------------------------
+
+    @staticmethod
+    def _detect_bos_events(candles: pd.DataFrame, ms_highs: list, ms_lows: list) -> list:
+        """
+        Detect all Break of Structure events.
+
+        Bullish BOS: candle CLOSE above a confirmed MS high.
+        Bearish BOS: candle CLOSE below a confirmed MS low.
+
+        Returns list of BOS events with type, price, index, and which
+        MS level was broken.
+        """
+        bos_events = []
+        n = len(candles)
+
+        for ms_h in ms_highs:
+            # Search candles after the MS high was confirmed
+            search_start = ms_h["confirmed_at_idx"] + 1
+            for j in range(search_start, n):
+                close_price = float(candles.iloc[j]["close"])
+                if close_price > ms_h["price"]:
+                    bos_events.append({
+                        "type": "bullish",
+                        "bos_idx": int(j),
+                        "bos_price": close_price,
+                        "broken_level": ms_h["price"],
+                        "broken_level_idx": ms_h["idx"],
+                    })
+                    break  # Only first BOS per MS high
+
+        for ms_l in ms_lows:
+            search_start = ms_l["confirmed_at_idx"] + 1
+            for j in range(search_start, n):
+                close_price = float(candles.iloc[j]["close"])
+                if close_price < ms_l["price"]:
+                    bos_events.append({
+                        "type": "bearish",
+                        "bos_idx": int(j),
+                        "bos_price": close_price,
+                        "broken_level": ms_l["price"],
+                        "broken_level_idx": ms_l["idx"],
+                    })
+                    break
+
+        # Sort by index
+        bos_events.sort(key=lambda x: x["bos_idx"])
+        return bos_events
+
+    # ---- Trend classification -----------------------------------
+
+    @staticmethod
+    def _classify_trend(ms_highs: list, ms_lows: list) -> str:
+        """
+        Classify trend from confirmed MS points.
+
+        Bullish: HH + HL (higher highs AND higher lows)
+        Bearish: LH + LL (lower highs AND lower lows)
+        Ranging: mixed
+        Neutral: insufficient data
+        """
+        if len(ms_highs) < 2 or len(ms_lows) < 2:
+            if len(ms_highs) >= 2:
+                h1, h2 = ms_highs[-2]["price"], ms_highs[-1]["price"]
+                return "bullish" if h2 > h1 else "bearish"
+            if len(ms_lows) >= 2:
+                l1, l2 = ms_lows[-2]["price"], ms_lows[-1]["price"]
+                return "bullish" if l2 > l1 else "bearish"
+            return "neutral"
+
+        h1, h2 = ms_highs[-2]["price"], ms_highs[-1]["price"]
+        l1, l2 = ms_lows[-2]["price"], ms_lows[-1]["price"]
+
+        higher_highs = h2 > h1
+        higher_lows = l2 > l1
+        lower_highs = h2 < h1
+        lower_lows = l2 < l1
+
+        if higher_highs and higher_lows:
+            return "bullish"
+        elif lower_highs and lower_lows:
+            return "bearish"
+        else:
+            return "ranging"
+
+    # ---- Expectational Order Flow (EOF) -------------------------
+
+    @staticmethod
+    def _get_eof(trend: str, bos_events: list) -> Dict:
+        """
+        Determine Expectational Order Flow.
+
+        Bullish trend + bullish BOS → expect HL for HH (continuation)
+        Bearish trend + bearish BOS → expect LH for LL (continuation)
+        Bullish trend + bearish BOS → trend shift, expect LH for LL
+        Bearish trend + bullish BOS → trend shift, expect HL for HH
+        """
+        last_bos = bos_events[-1] if bos_events else None
+
+        if not last_bos:
+            if trend == "bullish":
+                return {"expectation": "higher_low_for_higher_high", "trend_shift": False, "bias": "bullish"}
+            elif trend == "bearish":
+                return {"expectation": "lower_high_for_lower_low", "trend_shift": False, "bias": "bearish"}
+            return {"expectation": "undetermined", "trend_shift": False, "bias": "neutral"}
+
+        if trend == "bullish" and last_bos["type"] == "bullish":
+            return {"expectation": "higher_low_for_higher_high", "trend_shift": False, "bias": "bullish"}
+        elif trend == "bearish" and last_bos["type"] == "bearish":
+            return {"expectation": "lower_high_for_lower_low", "trend_shift": False, "bias": "bearish"}
+        elif trend == "bullish" and last_bos["type"] == "bearish":
+            return {"expectation": "lower_high_for_lower_low", "trend_shift": True, "bias": "bearish"}
+        elif trend == "bearish" and last_bos["type"] == "bullish":
+            return {"expectation": "higher_low_for_higher_high", "trend_shift": True, "bias": "bullish"}
+        else:
+            return {"expectation": "undetermined", "trend_shift": False, "bias": "neutral"}
+
+    # ---- Level 1 / 2 / 3 structure hierarchy --------------------
+
+    @staticmethod
+    def _classify_levels(candles: pd.DataFrame, ms_highs: list, ms_lows: list,
+                         bos_events: list, trend: str) -> Dict:
+        """
+        Classify market structure into Level 1, 2, and 3.
+
+        Level 1: Primary trend – drawn bottom-to-top (bullish) or
+                 top-to-bottom (bearish). Most important structure pool.
+        Level 2: Always opposite direction of Level 1.
+                 If L1 up → L2 drawn top-to-bottom (trending down).
+        Level 3: Refined structure of most recent Level 2 expansion.
+                 Used via domino effect for early entries.
+        """
+        result = {
+            "level_1": {"trend": trend, "highs": [], "lows": [], "bos": []},
+            "level_2": {"trend": "", "highs": [], "lows": [], "bos": []},
+            "level_3": {"trend": "", "highs": [], "lows": [], "bos": []},
+        }
+
+        if not ms_highs and not ms_lows:
+            return result
+
+        # Level 1 = the main trend's confirmed points
+        result["level_1"]["highs"] = ms_highs
+        result["level_1"]["lows"] = ms_lows
+        result["level_1"]["bos"] = bos_events
+
+        # Level 2 = opposite direction
+        # If Level 1 bullish (bottom-to-top), Level 2 is drawn top-to-bottom
+        # Level 2 looks at the LAST expansion leg and finds counter-trend structure
+        l2_trend = "bearish" if trend == "bullish" else "bullish" if trend == "bearish" else "neutral"
+        result["level_2"]["trend"] = l2_trend
+
+        if len(ms_highs) >= 1 and len(ms_lows) >= 1:
+            # Level 2 focuses on the pullback from the most recent MS high
+            # (bullish L1) or from the most recent MS low (bearish L1).
+            if trend == "bullish" and ms_highs:
+                # L2 = counter-trend within the last expansion up
+                last_high = ms_highs[-1]
+                # Find structure within the pullback from last high
+                l2_start = last_high["idx"]
+                l2_end = len(candles) - 1
+                if l2_end - l2_start > 5:
+                    l2_subset = candles.iloc[l2_start:l2_end + 1].reset_index(drop=True)
+                    l2_pivots = MarketStructure._find_6cr_pivots(l2_subset)
+                    l2_confirmed = MarketStructure._confirm_structure_points(
+                        l2_subset, l2_pivots["highs"], l2_pivots["lows"]
+                    )
+                    # Adjust indices back to original
+                    for h in l2_confirmed["ms_highs"]:
+                        h["idx"] += l2_start
+                        h["confirmed_at_idx"] += l2_start
+                    for lo in l2_confirmed["ms_lows"]:
+                        lo["idx"] += l2_start
+                        lo["confirmed_at_idx"] += l2_start
+                    result["level_2"]["highs"] = l2_confirmed["ms_highs"]
+                    result["level_2"]["lows"] = l2_confirmed["ms_lows"]
+                    # L2 BOS
+                    l2_bos = MarketStructure._detect_bos_events(
+                        candles, l2_confirmed["ms_highs"], l2_confirmed["ms_lows"]
+                    )
+                    result["level_2"]["bos"] = l2_bos
+
+            elif trend == "bearish" and ms_lows:
+                last_low = ms_lows[-1]
+                l2_start = last_low["idx"]
+                l2_end = len(candles) - 1
+                if l2_end - l2_start > 5:
+                    l2_subset = candles.iloc[l2_start:l2_end + 1].reset_index(drop=True)
+                    l2_pivots = MarketStructure._find_6cr_pivots(l2_subset)
+                    l2_confirmed = MarketStructure._confirm_structure_points(
+                        l2_subset, l2_pivots["highs"], l2_pivots["lows"]
+                    )
+                    for h in l2_confirmed["ms_highs"]:
+                        h["idx"] += l2_start
+                        h["confirmed_at_idx"] += l2_start
+                    for lo in l2_confirmed["ms_lows"]:
+                        lo["idx"] += l2_start
+                        lo["confirmed_at_idx"] += l2_start
+                    result["level_2"]["highs"] = l2_confirmed["ms_highs"]
+                    result["level_2"]["lows"] = l2_confirmed["ms_lows"]
+                    l2_bos = MarketStructure._detect_bos_events(
+                        candles, l2_confirmed["ms_highs"], l2_confirmed["ms_lows"]
+                    )
+                    result["level_2"]["bos"] = l2_bos
+
+        # Level 3 = refined structure of most recent Level 2 expansion
+        l2_highs = result["level_2"]["highs"]
+        l2_lows = result["level_2"]["lows"]
+        l3_trend = trend  # L3 refines L2's last expansion, same dir as L1
+
+        if l2_trend == "bearish" and l2_lows:
+            # Most recent L2 expansion is the last downward leg
+            last_l2_low = l2_lows[-1]
+            # Refine structure from the high before this low down to the low
+            l3_start = max(0, last_l2_low["idx"] - 20)
+            l3_end = min(len(candles) - 1, last_l2_low["idx"] + 10)
+            if l3_end - l3_start > 5:
+                l3_subset = candles.iloc[l3_start:l3_end + 1].reset_index(drop=True)
+                l3_pivots = MarketStructure._find_6cr_pivots(l3_subset)
+                l3_confirmed = MarketStructure._confirm_structure_points(
+                    l3_subset, l3_pivots["highs"], l3_pivots["lows"]
+                )
+                for h in l3_confirmed["ms_highs"]:
+                    h["idx"] += l3_start
+                    h["confirmed_at_idx"] += l3_start
+                for lo in l3_confirmed["ms_lows"]:
+                    lo["idx"] += l3_start
+                    lo["confirmed_at_idx"] += l3_start
+                result["level_3"]["highs"] = l3_confirmed["ms_highs"]
+                result["level_3"]["lows"] = l3_confirmed["ms_lows"]
+                result["level_3"]["trend"] = l3_trend
+                l3_bos = MarketStructure._detect_bos_events(
+                    candles, l3_confirmed["ms_highs"], l3_confirmed["ms_lows"]
+                )
+                result["level_3"]["bos"] = l3_bos
+
+        elif l2_trend == "bullish" and l2_highs:
+            last_l2_high = l2_highs[-1]
+            l3_start = max(0, last_l2_high["idx"] - 20)
+            l3_end = min(len(candles) - 1, last_l2_high["idx"] + 10)
+            if l3_end - l3_start > 5:
+                l3_subset = candles.iloc[l3_start:l3_end + 1].reset_index(drop=True)
+                l3_pivots = MarketStructure._find_6cr_pivots(l3_subset)
+                l3_confirmed = MarketStructure._confirm_structure_points(
+                    l3_subset, l3_pivots["highs"], l3_pivots["lows"]
+                )
+                for h in l3_confirmed["ms_highs"]:
+                    h["idx"] += l3_start
+                    h["confirmed_at_idx"] += l3_start
+                for lo in l3_confirmed["ms_lows"]:
+                    lo["idx"] += l3_start
+                    lo["confirmed_at_idx"] += l3_start
+                result["level_3"]["highs"] = l3_confirmed["ms_highs"]
+                result["level_3"]["lows"] = l3_confirmed["ms_lows"]
+                result["level_3"]["trend"] = l3_trend
+                l3_bos = MarketStructure._detect_bos_events(
+                    candles, l3_confirmed["ms_highs"], l3_confirmed["ms_lows"]
+                )
+                result["level_3"]["bos"] = l3_bos
+
+        return result
+
+    # ---- Main public API ----------------------------------------
 
     @staticmethod
     def detect_pivots(candles: pd.DataFrame) -> Dict:
+        """
+        Full TCT Lecture 1 market structure analysis.
+
+        Returns a dict compatible with the old API (has 'highs', 'lows',
+        'trend') PLUS new fields: 'ms_highs', 'ms_lows', 'bos_events',
+        'eof', 'levels', 'pivot_highs_6cr', 'pivot_lows_6cr'.
+        """
         if len(candles) < 6:
-            return {"highs": [], "lows": [], "trend": "neutral"}
+            return {
+                "highs": [], "lows": [], "trend": "neutral",
+                "ms_highs": [], "ms_lows": [], "bos_events": [],
+                "eof": {"expectation": "undetermined", "trend_shift": False, "bias": "neutral"},
+                "levels": {
+                    "level_1": {"trend": "neutral", "highs": [], "lows": [], "bos": []},
+                    "level_2": {"trend": "neutral", "highs": [], "lows": [], "bos": []},
+                    "level_3": {"trend": "neutral", "highs": [], "lows": [], "bos": []},
+                },
+                "pivot_highs_6cr": [], "pivot_lows_6cr": [],
+            }
 
-        pivots = {"highs": [], "lows": []}
+        # Step 1: Find 6-candle-rule validated pivots
+        raw_pivots = MarketStructure._find_6cr_pivots(candles)
+        pivot_highs = raw_pivots["highs"]
+        pivot_lows = raw_pivots["lows"]
 
-        for i in range(2, len(candles) - 2):
-            if (
-                candles.iloc[i - 2]["close"] < candles.iloc[i - 1]["close"]
-                and candles.iloc[i - 1]["close"] < candles.iloc[i]["close"]
-                and candles.iloc[i]["close"] > candles.iloc[i + 1]["close"]
-                and candles.iloc[i + 1]["close"] > candles.iloc[i + 2]["close"]
-            ):
-                pivots["highs"].append({"idx": int(i), "price": float(candles.iloc[i]["high"])})
+        # Step 2: Confirm MS highs and MS lows (Lecture 1 confirmation rule)
+        confirmed = MarketStructure._confirm_structure_points(candles, pivot_highs, pivot_lows)
+        ms_highs = confirmed["ms_highs"]
+        ms_lows = confirmed["ms_lows"]
 
-            if (
-                candles.iloc[i - 2]["close"] > candles.iloc[i - 1]["close"]
-                and candles.iloc[i - 1]["close"] > candles.iloc[i]["close"]
-                and candles.iloc[i]["close"] < candles.iloc[i + 1]["close"]
-                and candles.iloc[i + 1]["close"] < candles.iloc[i + 2]["close"]
-            ):
-                pivots["lows"].append({"idx": int(i), "price": float(candles.iloc[i]["low"])})
+        # Step 3: Classify trend
+        trend = MarketStructure._classify_trend(ms_highs, ms_lows)
 
-        if len(pivots["highs"]) >= 2 and len(pivots["lows"]) >= 2:
-            h1, h2 = pivots["highs"][-2:]
-            l1, l2 = pivots["lows"][-2:]
-            if h2["price"] > h1["price"] and l2["price"] > l1["price"]:
-                pivots["trend"] = "bullish"
-            elif h2["price"] < h1["price"] and l2["price"] < l1["price"]:
-                pivots["trend"] = "bearish"
-            else:
-                pivots["trend"] = "ranging"
-        else:
-            pivots["trend"] = "neutral"
+        # Step 4: Detect BOS events
+        bos_events = MarketStructure._detect_bos_events(candles, ms_highs, ms_lows)
 
-        return pivots
+        # Step 5: Determine Expectational Order Flow
+        eof = MarketStructure._get_eof(trend, bos_events)
+
+        # Step 6: Classify Level 1 / 2 / 3
+        levels = MarketStructure._classify_levels(candles, ms_highs, ms_lows, bos_events, trend)
+
+        return {
+            # Backward-compatible fields (old API)
+            "highs": pivot_highs,
+            "lows": pivot_lows,
+            "trend": trend,
+            # New detailed fields
+            "ms_highs": ms_highs,
+            "ms_lows": ms_lows,
+            "bos_events": bos_events,
+            "eof": eof,
+            "levels": levels,
+            "pivot_highs_6cr": pivot_highs,
+            "pivot_lows_6cr": pivot_lows,
+        }
 
     @staticmethod
     def detect_bos(candles: pd.DataFrame, pivots: Dict) -> Optional[Dict]:
-        if not pivots["highs"] or not pivots["lows"]:
+        """
+        Backward-compatible BOS detection.
+        Now uses confirmed MS highs/lows and checks candle CLOSE (not wick).
+        """
+        bos_events = pivots.get("bos_events", [])
+        if bos_events:
+            last_bos = bos_events[-1]
+            return {"type": last_bos["type"], "price": last_bos["bos_price"]}
+
+        # Fallback: check current close against last MS levels
+        ms_highs = pivots.get("ms_highs", pivots.get("highs", []))
+        ms_lows = pivots.get("ms_lows", pivots.get("lows", []))
+        if not ms_highs and not ms_lows:
             return None
 
-        price = candles.iloc[-1]["close"]
-        if price > pivots["highs"][-1]["price"]:
+        price = float(candles.iloc[-1]["close"])
+        if ms_highs and price > ms_highs[-1]["price"]:
             return {"type": "bullish", "price": price}
-        if price < pivots["lows"][-1]["price"]:
+        if ms_lows and price < ms_lows[-1]["price"]:
             return {"type": "bearish", "price": price}
         return None
 
@@ -305,17 +798,23 @@ class OrderBlock:
 
 class StructureSupplyDemand:
     """
-    Detects Structure Supply/Demand zones.
+    Detects Structure Supply/Demand zones using TCT Lecture 1 market structure.
 
-    Structure S/D represents multiple candles with FVG following market structure.
-    - Demand: Entire bullish structure move before bearish expansion (with FVG)
-    - Supply: Entire bearish structure move before bullish expansion (with FVG)
+    Structure S/D represents multiple candles with FVG following confirmed
+    market structure (6-candle rule pivots, confirmed MS highs/lows, BOS).
+    - Demand: Bullish structure move (confirmed HL) with FVG → zone at the HL
+    - Supply: Bearish structure move (confirmed LH) with FVG → zone at the LH
     """
 
     @staticmethod
     def detect_structure_zones(candles: pd.DataFrame, fvgs: Dict, pivots: Dict) -> Dict:
         """
-        Detect Structure Supply/Demand zones using market structure and FVGs.
+        Detect Structure Supply/Demand zones using confirmed MS points and FVGs.
+
+        Uses TCT Lecture 1 market structure:
+        - MS highs/lows (confirmed via 6-candle rule)
+        - BOS events (candle CLOSE through MS level)
+        - EOF (expectational order flow) for bias confirmation
 
         Args:
             candles: DataFrame with OHLC data
@@ -327,61 +826,123 @@ class StructureSupplyDemand:
         demand_zones = []
         supply_zones = []
 
-        # Process bullish structure (demand zones)
+        ms_highs = pivots.get("ms_highs", [])
+        ms_lows = pivots.get("ms_lows", [])
+        bos_events = pivots.get("bos_events", [])
+        trend = pivots.get("trend", "neutral")
+        eof = pivots.get("eof", {})
+
+        # --- Demand zones: FVG near confirmed MS lows (higher lows in bullish) ---
         for fvg in fvgs.get("bullish_fvgs", []):
             idx = fvg["idx"]
             if idx < 5:
                 continue
 
-            # Look for structure move before this FVG
             structure_start = max(0, idx - 10)
             structure_candles = candles.iloc[structure_start:idx]
 
-            # Check if this forms a bullish structure (higher lows)
-            lows = structure_candles["low"].values
-            if len(lows) >= 2:
-                # Simple check: are recent lows generally higher?
-                is_bullish_structure = lows[-1] > lows[0]
+            # Check confirmed MS structure: is there a confirmed MS low near this FVG?
+            at_confirmed_ms_low = False
+            ms_low_match = None
+            for ms_l in ms_lows:
+                if abs(ms_l["idx"] - idx) <= 12:
+                    at_confirmed_ms_low = True
+                    ms_low_match = ms_l
+                    break
 
-                if is_bullish_structure:
-                    demand_zones.append({
-                        "type": "demand",
-                        "top": float(structure_candles["high"].max()),
-                        "bottom": float(structure_candles["low"].min()),
-                        "start_idx": structure_start,
-                        "end_idx": idx,
-                        "fvg": fvg,
-                        "candle_count": len(structure_candles),
-                        "mitigated": False
-                    })
+            # Check for higher lows in the local region (confirmed structure)
+            has_bullish_structure = False
+            nearby_lows = [l for l in ms_lows if structure_start <= l["idx"] <= idx + 2]
+            if len(nearby_lows) >= 2:
+                has_bullish_structure = nearby_lows[-1]["price"] > nearby_lows[-2]["price"]
+            elif len(nearby_lows) >= 1:
+                # Single confirmed MS low with bullish FVG = valid demand
+                has_bullish_structure = True
 
-        # Process bearish structure (supply zones)
+            # Fallback: simple direction check if no confirmed MS lows nearby
+            if not at_confirmed_ms_low and not has_bullish_structure:
+                lows = structure_candles["low"].values
+                if len(lows) >= 2:
+                    has_bullish_structure = lows[-1] > lows[0]
+
+            if has_bullish_structure or at_confirmed_ms_low:
+                # Score: zones at confirmed MS lows with BOS are strongest
+                ms_quality = "confirmed" if at_confirmed_ms_low else "inferred"
+                has_bos_support = any(
+                    b["type"] == "bullish" and abs(b["bos_idx"] - idx) <= 10
+                    for b in bos_events
+                )
+
+                demand_zones.append({
+                    "type": "demand",
+                    "top": float(structure_candles["high"].max()),
+                    "bottom": float(structure_candles["low"].min()),
+                    "start_idx": structure_start,
+                    "end_idx": idx,
+                    "fvg": fvg,
+                    "candle_count": len(structure_candles),
+                    "mitigated": False,
+                    "ms_quality": ms_quality,
+                    "at_ms_low": at_confirmed_ms_low,
+                    "ms_low": ms_low_match,
+                    "has_bos_support": has_bos_support,
+                    "eof_aligned": eof.get("bias") == "bullish",
+                })
+
+        # --- Supply zones: FVG near confirmed MS highs (lower highs in bearish) ---
         for fvg in fvgs.get("bearish_fvgs", []):
             idx = fvg["idx"]
             if idx < 5:
                 continue
 
-            # Look for structure move before this FVG
             structure_start = max(0, idx - 10)
             structure_candles = candles.iloc[structure_start:idx]
 
-            # Check if this forms a bearish structure (lower highs)
-            highs = structure_candles["high"].values
-            if len(highs) >= 2:
-                # Simple check: are recent highs generally lower?
-                is_bearish_structure = highs[-1] < highs[0]
+            # Check confirmed MS structure: is there a confirmed MS high near this FVG?
+            at_confirmed_ms_high = False
+            ms_high_match = None
+            for ms_h in ms_highs:
+                if abs(ms_h["idx"] - idx) <= 12:
+                    at_confirmed_ms_high = True
+                    ms_high_match = ms_h
+                    break
 
-                if is_bearish_structure:
-                    supply_zones.append({
-                        "type": "supply",
-                        "top": float(structure_candles["high"].max()),
-                        "bottom": float(structure_candles["low"].min()),
-                        "start_idx": structure_start,
-                        "end_idx": idx,
-                        "fvg": fvg,
-                        "candle_count": len(structure_candles),
-                        "mitigated": False
-                    })
+            # Check for lower highs in the local region (confirmed structure)
+            has_bearish_structure = False
+            nearby_highs = [h for h in ms_highs if structure_start <= h["idx"] <= idx + 2]
+            if len(nearby_highs) >= 2:
+                has_bearish_structure = nearby_highs[-1]["price"] < nearby_highs[-2]["price"]
+            elif len(nearby_highs) >= 1:
+                has_bearish_structure = True
+
+            # Fallback: simple direction check
+            if not at_confirmed_ms_high and not has_bearish_structure:
+                highs = structure_candles["high"].values
+                if len(highs) >= 2:
+                    has_bearish_structure = highs[-1] < highs[0]
+
+            if has_bearish_structure or at_confirmed_ms_high:
+                ms_quality = "confirmed" if at_confirmed_ms_high else "inferred"
+                has_bos_support = any(
+                    b["type"] == "bearish" and abs(b["bos_idx"] - idx) <= 10
+                    for b in bos_events
+                )
+
+                supply_zones.append({
+                    "type": "supply",
+                    "top": float(structure_candles["high"].max()),
+                    "bottom": float(structure_candles["low"].min()),
+                    "start_idx": structure_start,
+                    "end_idx": idx,
+                    "fvg": fvg,
+                    "candle_count": len(structure_candles),
+                    "mitigated": False,
+                    "ms_quality": ms_quality,
+                    "at_ms_high": at_confirmed_ms_high,
+                    "ms_high": ms_high_match,
+                    "has_bos_support": has_bos_support,
+                    "eof_aligned": eof.get("bias") == "bearish",
+                })
 
         return {"demand_zones": demand_zones, "supply_zones": supply_zones}
 
@@ -534,21 +1095,23 @@ class ZoneScoring:
 
     @staticmethod
     def _is_at_pivot(zone_mid: float, pivots: Dict, zone_type: str) -> bool:
-        """Check if zone is at a pivot point."""
+        """Check if zone is at a confirmed MS pivot point (TCT Lecture 1)."""
         tolerance = 0.005  # 0.5% tolerance
 
         if zone_type == "demand":
-            # Check swing lows
-            for pivot in pivots.get("lows", [])[-3:]:  # Last 3 lows
+            # Prefer confirmed MS lows, fall back to raw pivots
+            ms_lows = pivots.get("ms_lows", pivots.get("lows", []))
+            for pivot in ms_lows[-3:]:  # Last 3 confirmed MS lows
                 pivot_price = pivot.get("price", 0)
-                if abs(zone_mid - pivot_price) / pivot_price < tolerance:
+                if pivot_price > 0 and abs(zone_mid - pivot_price) / pivot_price < tolerance:
                     return True
 
         elif zone_type == "supply":
-            # Check swing highs
-            for pivot in pivots.get("highs", [])[-3:]:  # Last 3 highs
+            # Prefer confirmed MS highs, fall back to raw pivots
+            ms_highs = pivots.get("ms_highs", pivots.get("highs", []))
+            for pivot in ms_highs[-3:]:  # Last 3 confirmed MS highs
                 pivot_price = pivot.get("price", 0)
-                if abs(zone_mid - pivot_price) / pivot_price < tolerance:
+                if pivot_price > 0 and abs(zone_mid - pivot_price) / pivot_price < tolerance:
                     return True
 
         return False
@@ -1597,50 +2160,76 @@ class LiquidityDetector:
         """
         Detect BSL (above highs) and SSL (below lows) liquidity pools.
 
-        TCT Methodology:
-        - Primary highs/lows = visible pivot points (major liquidity)
-        - Internal highs/lows = between primaries (less significant)
-        - Equal highs/lows = exact same price (amazing liquidity targets)
+        TCT Methodology (using Lecture 1 confirmed MS points):
+        - Confirmed MS highs/lows = primary liquidity (strongest)
+        - 6CR pivots not confirmed as MS = internal liquidity
+        - Equal highs/lows = amazing liquidity targets
+        - BOS events indicate which levels have been grabbed
 
         Returns: Dict with bsl_pools and ssl_pools lists
         """
         bsl_pools = []  # Buy-side liquidity (above price)
         ssl_pools = []  # Sell-side liquidity (below price)
 
-        # Classify pivots as primary vs internal (TCT: visible pivots vs between pivots)
-        primary_highs, internal_highs = LiquidityDetector._classify_primary_vs_internal(
-            pivots.get("highs", []), is_highs=True
-        )
+        # Use confirmed MS highs/lows as primary (TCT Lecture 1)
+        ms_highs = pivots.get("ms_highs", [])
+        ms_lows = pivots.get("ms_lows", [])
+        raw_highs = pivots.get("highs", [])
+        raw_lows = pivots.get("lows", [])
+        bos_events = pivots.get("bos_events", [])
 
-        primary_lows, internal_lows = LiquidityDetector._classify_primary_vs_internal(
-            pivots.get("lows", []), is_lows=True
-        )
+        # Confirmed MS points are primary; remaining 6CR pivots are internal
+        ms_high_idxs = {h["idx"] for h in ms_highs}
+        ms_low_idxs = {l["idx"] for l in ms_lows}
+
+        primary_highs = ms_highs if ms_highs else []
+        internal_highs = [h for h in raw_highs if h["idx"] not in ms_high_idxs]
+
+        primary_lows = ms_lows if ms_lows else []
+        internal_lows = [l for l in raw_lows if l["idx"] not in ms_low_idxs]
+
+        # Fallback: if no confirmed MS points, use window-based classification
+        if not primary_highs and raw_highs:
+            primary_highs, internal_highs = LiquidityDetector._classify_primary_vs_internal(
+                raw_highs, is_highs=True
+            )
+        if not primary_lows and raw_lows:
+            primary_lows, internal_lows = LiquidityDetector._classify_primary_vs_internal(
+                raw_lows, is_lows=True
+            )
+
+        # BOS-grabbed levels: levels that were broken by a BOS candle close
+        grabbed_high_prices = {b["broken_level"] for b in bos_events if b["type"] == "bullish"}
+        grabbed_low_prices = {b["broken_level"] for b in bos_events if b["type"] == "bearish"}
 
         # Detect equal highs (TCT: "amazing liquidity targets")
+        all_high_prices = [p["price"] for p in (ms_highs or raw_highs)]
         equal_highs = LiquidityDetector._detect_equal_levels(
-            [p["price"] for p in pivots.get("highs", [])],
-            tolerance=0.0001  # Exact same price level (e.g., 1.07833 = 1.07833)
+            all_high_prices,
+            tolerance=0.0001
         )
 
         # Detect equal lows (TCT: "amazing liquidity targets")
+        all_low_prices = [p["price"] for p in (ms_lows or raw_lows)]
         equal_lows = LiquidityDetector._detect_equal_levels(
-            [p["price"] for p in pivots.get("lows", [])],
-            tolerance=0.0001  # Exact same price level
+            all_low_prices,
+            tolerance=0.0001
         )
 
-        # Create BSL pools from primary highs
-        # TCT: Primary highs are visible pivot points representing liquidity above
+        # Create BSL pools from primary highs (confirmed MS highs)
         for pivot in primary_highs:
             price = pivot["price"]
 
+            # Check if level was already grabbed by BOS (candle CLOSE above)
+            is_grabbed = any(abs(price - gp) / price < 0.001 for gp in grabbed_high_prices)
+
             # TCT: Check if this is a non-liquidity high (grabbed liquidity from left)
             is_non_liquidity = LiquidityDetector._is_non_liquidity_high(
-                pivot, pivots.get("highs", []), candles
+                pivot, raw_highs or primary_highs, candles
             )
 
-            # TCT: Only use liquidity highs (not non-liquidity highs) for BSL pools
-            if not is_non_liquidity:
-                # TCT: Equal highs are "amazing liquidity targets"
+            # TCT: Only use liquidity highs (not non-liquidity, not already grabbed)
+            if not is_non_liquidity and not is_grabbed:
                 is_equal = any(abs(price - eq) / eq < 0.0001 for eq in equal_highs)
 
                 bsl_pools.append({
@@ -1649,23 +2238,25 @@ class LiquidityDetector:
                     "idx": int(pivot["idx"]),
                     "is_primary": True,
                     "is_equal": bool(is_equal),
-                    "strength": 1.0 if is_equal else 0.8,  # TCT: Equal = stronger
+                    "is_confirmed_ms": True,
+                    "strength": 1.0 if is_equal else 0.85,
                     "distance_from_price": float((price - current_price) / current_price * 100)
                 })
 
-        # Create SSL pools from primary lows
-        # TCT: Primary lows are visible pivot points representing liquidity below
+        # Create SSL pools from primary lows (confirmed MS lows)
         for pivot in primary_lows:
             price = pivot["price"]
 
-            # TCT: Check if this is a non-liquidity low (grabbed liquidity from left)
+            # Check if level was already grabbed by BOS (candle CLOSE below)
+            is_grabbed = any(abs(price - gp) / price < 0.001 for gp in grabbed_low_prices)
+
+            # TCT: Check if this is a non-liquidity low
             is_non_liquidity = LiquidityDetector._is_non_liquidity_low(
-                pivot, pivots.get("lows", []), candles
+                pivot, raw_lows or primary_lows, candles
             )
 
-            # TCT: Only use liquidity lows (not non-liquidity lows) for SSL pools
-            if not is_non_liquidity:
-                # TCT: Equal lows are "amazing liquidity targets"
+            # TCT: Only use liquidity lows (not non-liquidity, not already grabbed)
+            if not is_non_liquidity and not is_grabbed:
                 is_equal = any(abs(price - eq) / eq < 0.0001 for eq in equal_lows)
 
                 ssl_pools.append({
@@ -1674,36 +2265,42 @@ class LiquidityDetector:
                     "idx": int(pivot["idx"]),
                     "is_primary": True,
                     "is_equal": bool(is_equal),
-                    "strength": 1.0 if is_equal else 0.8,  # TCT: Equal = stronger
+                    "is_confirmed_ms": True,
+                    "strength": 1.0 if is_equal else 0.85,
                     "distance_from_price": float((current_price - price) / current_price * 100)
                 })
 
         # TCT: Add internal highs/lows as weaker liquidity (stacking up)
-        # "Internal highs stacking up here" creating buy-side liquidity
+        # These are 6CR pivots NOT confirmed as MS highs/lows
         for pivot in internal_highs:
             price = pivot["price"]
-            bsl_pools.append({
-                "type": "BSL",
-                "price": float(price),
-                "idx": int(pivot["idx"]),
-                "is_primary": False,
-                "is_equal": False,
-                "strength": 0.5,  # TCT: Internal = weaker than primary
-                "distance_from_price": float((price - current_price) / current_price * 100)
-            })
+            is_grabbed = any(abs(price - gp) / price < 0.001 for gp in grabbed_high_prices)
+            if not is_grabbed:
+                bsl_pools.append({
+                    "type": "BSL",
+                    "price": float(price),
+                    "idx": int(pivot["idx"]),
+                    "is_primary": False,
+                    "is_equal": False,
+                    "is_confirmed_ms": False,
+                    "strength": 0.5,
+                    "distance_from_price": float((price - current_price) / current_price * 100)
+                })
 
-        # "Internal lows stacking up" creating sell-side liquidity
         for pivot in internal_lows:
             price = pivot["price"]
-            ssl_pools.append({
-                "type": "SSL",
-                "price": float(price),
-                "idx": int(pivot["idx"]),
-                "is_primary": False,
-                "is_equal": False,
-                "strength": 0.5,  # TCT: Internal = weaker than primary
-                "distance_from_price": float((current_price - price) / current_price * 100)
-            })
+            is_grabbed = any(abs(price - gp) / price < 0.001 for gp in grabbed_low_prices)
+            if not is_grabbed:
+                ssl_pools.append({
+                    "type": "SSL",
+                    "price": float(price),
+                    "idx": int(pivot["idx"]),
+                    "is_primary": False,
+                    "is_equal": False,
+                    "is_confirmed_ms": False,
+                    "strength": 0.5,
+                    "distance_from_price": float((current_price - price) / current_price * 100)
+                })
 
         # Sort by strength
         bsl_pools.sort(key=lambda x: x["strength"], reverse=True)
@@ -3826,13 +4423,19 @@ async def risk_calculator(
     risk_reward: float = 3.0,
     market: str = "crypto",
     gold_price: float = 2000,
-    leverage: float = 10.0
+    leverage: float = 10.0,
+    symbol: str = None,
+    direction: str = None
 ):
     """
     TCT Lecture 7 — Risk Management Calculator.
 
     Calculates position size, leverage requirements, margin, and projected outcomes
     using the TCT risk management methodology.
+
+    Now integrates TCT Lecture 1 market structure for bias assessment:
+    - When symbol is provided, fetches live MS data (trend, EOF, BOS)
+    - Provides confluence score based on whether trade direction aligns with MS
 
     Args:
         account_balance: Total account balance in USD
@@ -3842,6 +4445,8 @@ async def risk_calculator(
         market: Market type (crypto, forex, gold)
         gold_price: Current gold price (only used if market=gold)
         leverage: Leverage being used
+        symbol: Optional trading pair for live market structure analysis
+        direction: Optional trade direction ('long' or 'short') for bias check
 
     Returns:
         Complete risk management profile with position sizing, leverage, and projections.
@@ -3942,6 +4547,66 @@ async def risk_calculator(
                 "weekly_target": "5% per week (~1% per day)"
             }
         }
+
+        # Optional: Add market structure bias assessment if symbol provided
+        if symbol and market == "crypto":
+            try:
+                sym = resolve_symbol(symbol)
+                htf_df = await fetch_mexc_candles(sym, "4h", 100)
+                if htf_df is not None and len(htf_df) >= 6:
+                    ms = MarketStructure()
+                    htf_pivots = ms.detect_pivots(htf_df)
+                    htf_trend = htf_pivots.get("trend", "neutral")
+                    htf_eof = htf_pivots.get("eof", {})
+                    htf_bos = htf_pivots.get("bos_events", [])
+                    last_bos = htf_bos[-1] if htf_bos else None
+
+                    # Calculate confluence with trade direction
+                    ms_bias = htf_eof.get("bias", "neutral")
+                    trend_shift = htf_eof.get("trend_shift", False)
+
+                    confluence = "neutral"
+                    confluence_score = 0.5
+                    if direction:
+                        if direction == "long" and ms_bias == "bullish":
+                            confluence = "aligned"
+                            confluence_score = 1.0
+                        elif direction == "short" and ms_bias == "bearish":
+                            confluence = "aligned"
+                            confluence_score = 1.0
+                        elif direction == "long" and ms_bias == "bearish":
+                            confluence = "against_bias"
+                            confluence_score = 0.3
+                        elif direction == "short" and ms_bias == "bullish":
+                            confluence = "against_bias"
+                            confluence_score = 0.3
+                        elif ms_bias == "neutral":
+                            confluence = "neutral"
+                            confluence_score = 0.5
+
+                    profile["market_structure_context"] = {
+                        "htf_trend": htf_trend,
+                        "eof_bias": ms_bias,
+                        "eof_expectation": htf_eof.get("expectation", "undetermined"),
+                        "trend_shift_detected": trend_shift,
+                        "last_bos": {
+                            "type": last_bos["type"],
+                            "price": last_bos["bos_price"]
+                        } if last_bos else None,
+                        "trade_confluence": confluence,
+                        "confluence_score": confluence_score,
+                        "risk_note": (
+                            "Trade aligns with HTF market structure bias"
+                            if confluence == "aligned"
+                            else "Trade is AGAINST HTF market structure bias - consider reducing size"
+                            if confluence == "against_bias"
+                            else "Neutral market structure - standard risk applies"
+                        )
+                    }
+            except Exception as ms_err:
+                profile["market_structure_context"] = {
+                    "error": f"Could not fetch MS data: {str(ms_err)}"
+                }
 
         return JSONResponse(convert_numpy_types(profile))
 
@@ -5115,10 +5780,10 @@ async def dashboard():
                 </div>
             </div>
 
-            <!-- Market Structure -->
+            <!-- Market Structure (TCT Lecture 1 – 6-Candle Rule, Level 1/2/3, BOS, EOF) -->
             <div class="metric-card">
                 <h3>Market Structure <span class="badge badge-neutral" id="trendBadge">--</span></h3>
-                <div class="tct-lecture">TCT Lecture 1</div>
+                <div class="tct-lecture">TCT Lecture 1 &mdash; 6-Candle Rule &bull; Level 1/2/3 &bull; BOS &bull; EOF</div>
                 <div class="metric-row">
                     <span class="label">HTF Trend (4H)</span>
                     <span class="value" id="htfTrend">--</span>
@@ -5128,7 +5793,16 @@ async def dashboard():
                     <span class="value" id="ltfTrend">--</span>
                 </div>
                 <div class="metric-row">
-                    <span class="label">HTF Pivots</span>
+                    <span class="label">HTF EOF</span>
+                    <span class="value" id="htfEOF" style="font-size:0.65rem;">--</span>
+                </div>
+                <div class="metric-row">
+                    <span class="label">LTF EOF</span>
+                    <span class="value" id="ltfEOF" style="font-size:0.65rem;">--</span>
+                </div>
+                <div id="msLevelsContent" style="margin-top:6px;"></div>
+                <div class="metric-row">
+                    <span class="label">HTF Pivots (6CR)</span>
                     <span class="value" id="htfPivots">--</span>
                 </div>
             </div>
@@ -6013,9 +6687,11 @@ async def dashboard():
         function updateRangesUI(data, candles = []) {
             if (data.error) return;
 
-            // Market structure
-            const htfTrend = data.market_structure?.htf_trend || 'neutral';
-            const ltfTrend = data.market_structure?.ltf_trend || 'neutral';
+            const ms = data.market_structure || {};
+
+            // Market structure trends
+            const htfTrend = ms.htf_trend || 'neutral';
+            const ltfTrend = ms.ltf_trend || 'neutral';
             document.getElementById('htfTrend').textContent = htfTrend.toUpperCase();
             document.getElementById('htfTrend').className = 'value ' + (htfTrend === 'bullish' ? 'bullish' : htfTrend === 'bearish' ? 'bearish' : '');
             document.getElementById('ltfTrend').textContent = ltfTrend.toUpperCase();
@@ -6024,6 +6700,59 @@ async def dashboard():
             const trendBadge = document.getElementById('trendBadge');
             trendBadge.textContent = htfTrend.toUpperCase();
             trendBadge.className = 'badge badge-' + (htfTrend === 'bullish' ? 'bullish' : htfTrend === 'bearish' ? 'bearish' : 'neutral');
+
+            // Expectational Order Flow (EOF)
+            const htfEof = ms.htf_eof || {};
+            const ltfEof = ms.ltf_eof || {};
+            const htfEofEl = document.getElementById('htfEOF');
+            const ltfEofEl = document.getElementById('ltfEOF');
+            const eofLabels = {
+                'higher_low_for_higher_high': 'HL \u2192 HH',
+                'lower_high_for_lower_low': 'LH \u2192 LL',
+                'undetermined': '--'
+            };
+            const htfEofText = eofLabels[htfEof.expectation] || htfEof.expectation || '--';
+            const ltfEofText = eofLabels[ltfEof.expectation] || ltfEof.expectation || '--';
+            htfEofEl.textContent = htfEofText + (htfEof.trend_shift ? ' (SHIFT)' : '');
+            htfEofEl.className = 'value ' + (htfEof.bias === 'bullish' ? 'bullish' : htfEof.bias === 'bearish' ? 'bearish' : '');
+            if (htfEof.trend_shift) htfEofEl.style.color = '#ffc107';
+            else htfEofEl.style.color = '';
+            ltfEofEl.textContent = ltfEofText + (ltfEof.trend_shift ? ' (SHIFT)' : '');
+            ltfEofEl.className = 'value ' + (ltfEof.bias === 'bullish' ? 'bullish' : ltfEof.bias === 'bearish' ? 'bearish' : '');
+            if (ltfEof.trend_shift) ltfEofEl.style.color = '#ffc107';
+            else ltfEofEl.style.color = '';
+
+            // Level 1/2/3 summary
+            const htfLevels = ms.htf_levels || {};
+            const levelsEl = document.getElementById('msLevelsContent');
+            let lvlHtml = '';
+            const lvlColors = { 'level_1': '#e0e0e0', 'level_2': '#ff4444', 'level_3': '#00d4ff' };
+            const lvlLabels = { 'level_1': 'L1 (Primary)', 'level_2': 'L2 (Counter)', 'level_3': 'L3 (Refined)' };
+            ['level_1', 'level_2', 'level_3'].forEach(lvl => {
+                const ld = htfLevels[lvl] || {};
+                const lvlTrend = ld.trend || '--';
+                const bosCount = (ld.bos || []).length;
+                const hiCount = (ld.highs || []).length;
+                const loCount = (ld.lows || []).length;
+                if (lvlTrend && lvlTrend !== '--' && lvlTrend !== 'neutral' && lvlTrend !== '') {
+                    lvlHtml += '<div style="display:flex;justify-content:space-between;align-items:center;padding:2px 0;font-size:0.65rem;">';
+                    lvlHtml += '<span style="color:' + lvlColors[lvl] + ';font-weight:600;">' + lvlLabels[lvl] + '</span>';
+                    lvlHtml += '<span style="color:' + (lvlTrend === 'bullish' ? '#00ff88' : lvlTrend === 'bearish' ? '#ff4444' : '#888') + ';">';
+                    lvlHtml += lvlTrend.toUpperCase();
+                    if (bosCount > 0) lvlHtml += ' <span style="color:#ffc107;">(' + bosCount + ' BOS)</span>';
+                    lvlHtml += '</span></div>';
+                }
+            });
+            // Show BOS events on chart
+            const htfBosEvents = ms.htf_bos_events || [];
+            htfBosEvents.forEach(bos => {
+                if (bos.bos_idx >= 0 && bos.bos_idx < candles.length && candles.length > 0) {
+                    const bosColor = bos.type === 'bullish' ? '#00ff88' : '#ff4444';
+                    const bosLabel = bos.type === 'bullish' ? 'BOS \u2191' : 'BOS \u2193';
+                    lineSeries.push(addPriceLine(bos.broken_level, bosColor, bosLabel, 2, 1));
+                }
+            });
+            levelsEl.innerHTML = lvlHtml;
 
             // Active range
             const activeRange = data.htf_ranges?.active_range || data.ltf_ranges?.active_range;
@@ -8213,7 +8942,17 @@ async def detect_ranges(symbol: Optional[str] = None):
             },
             "market_structure": {
                 "htf_trend": htf_pivots.get("trend", "neutral"),
-                "ltf_trend": ltf_pivots.get("trend", "neutral")
+                "ltf_trend": ltf_pivots.get("trend", "neutral"),
+                "htf_eof": htf_pivots.get("eof", {}),
+                "ltf_eof": ltf_pivots.get("eof", {}),
+                "htf_bos_events": htf_pivots.get("bos_events", []),
+                "ltf_bos_events": ltf_pivots.get("bos_events", []),
+                "htf_ms_highs": htf_pivots.get("ms_highs", []),
+                "htf_ms_lows": htf_pivots.get("ms_lows", []),
+                "ltf_ms_highs": ltf_pivots.get("ms_highs", []),
+                "ltf_ms_lows": ltf_pivots.get("ms_lows", []),
+                "htf_levels": htf_pivots.get("levels", {}),
+                "ltf_levels": ltf_pivots.get("levels", {}),
             },
             "summary": {
                 "htf_ranges_found": htf_ranges_result.get("total_ranges_found", 0),
@@ -8225,16 +8964,24 @@ async def detect_ranges(symbol: Optional[str] = None):
                 "htf_deviations_detected": htf_deviations.get("has_deviation", False),
                 "ltf_deviations_detected": ltf_deviations.get("has_deviation", False),
                 "nested_htf_ranges": nested_ranges.get("htf_ranges_with_nesting", 0),
-                "total_nested_ltf_ranges": nested_ranges.get("total_nested_ltf_ranges", 0)
+                "total_nested_ltf_ranges": nested_ranges.get("total_nested_ltf_ranges", 0),
+                "htf_eof_bias": htf_pivots.get("eof", {}).get("bias", "neutral"),
+                "ltf_eof_bias": ltf_pivots.get("eof", {}).get("bias", "neutral"),
+                "htf_trend_shift": htf_pivots.get("eof", {}).get("trend_shift", False),
+                "ltf_trend_shift": ltf_pivots.get("eof", {}).get("trend_shift", False),
             },
             "tct_concepts": {
-                "six_candle_rule": "Range valid if 2 candles up, 2 down, 2 up (or inverse)",
+                "six_candle_rule": "2 consecutive bullish + 2 consecutive bearish candles (inside bars excluded)",
+                "market_structure_high": "Highest point between two consecutive lows, confirmed when 2nd low is touched",
+                "market_structure_low": "Lowest point between two consecutive highs, confirmed when 2nd high is touched",
+                "bos": "Break of Structure = candle CLOSE above MS high (bullish) or below MS low (bearish)",
+                "level_1": "Primary trend direction - most important structure pool",
+                "level_2": "Always opposite direction of Level 1",
+                "level_3": "Refined structure of most recent Level 2 expansion - domino effect entry",
+                "eof": "Expectational Order Flow: Bullish trend → expect HL for HH; opposite BOS = trend shift",
                 "deviation_limit": "30% of range size - threshold for deviation vs break",
                 "premium_zone": "Above equilibrium (0.5) to range high",
                 "discount_zone": "Below equilibrium (0.5) to range low",
-                "equilibrium": "0.5 fib level - range confirmation point",
-                "wick_deviation": "Easiest deviation - never broke structure",
-                "bad_bos_deviation": "Candle close deviation - closes back inside quickly"
             }
         })
         return JSONResponse(response_data)
@@ -8834,7 +9581,8 @@ async def trade_execution_endpoint(
     take_profit_price: float = 101500,
     direction: str = "long",
     leverage: float = 10,
-    tp2_price: float = None
+    tp2_price: float = None,
+    symbol: str = None
 ):
     """
     TCT Lecture 9 — Trade Execution Planner.
@@ -8842,6 +9590,11 @@ async def trade_execution_endpoint(
     Generates a complete execution plan including position sizing,
     leverage safety analysis (liquidation vs SL), partial take profits,
     and capital management — all following TCT methodology.
+
+    Now integrates TCT Lecture 1 market structure when symbol is provided:
+    - Validates trade direction against HTF trend/EOF bias
+    - Checks for BOS confirmation in trade direction
+    - Adds confluence scoring to execution plan
 
     Key Rules:
     - Always ISOLATED margin mode
@@ -8851,6 +9604,24 @@ async def trade_execution_endpoint(
     - Trail SL to breakeven, then increase leverage + reduce margin
     """
     try:
+        # Optionally fetch market structure for confluence
+        ms_context = None
+        if symbol:
+            try:
+                sym = resolve_symbol(symbol)
+                htf_df = await fetch_mexc_candles(sym, "4h", 100)
+                if htf_df is not None and len(htf_df) >= 6:
+                    ms = MarketStructure()
+                    htf_pivots = ms.detect_pivots(htf_df)
+                    ms_context = {
+                        "trend": htf_pivots.get("trend"),
+                        "eof": htf_pivots.get("eof"),
+                        "bos_events": htf_pivots.get("bos_events", []),
+                        "levels": htf_pivots.get("levels"),
+                    }
+            except Exception as ms_err:
+                logger.warning(f"[TRADE_EXEC] MS fetch failed: {ms_err}")
+
         plan = generate_execution_plan(
             account_balance=account_balance,
             risk_pct=risk_pct,
@@ -8859,7 +9630,8 @@ async def trade_execution_endpoint(
             take_profit_price=take_profit_price,
             direction=direction,
             leverage=leverage,
-            tp2_price=tp2_price
+            tp2_price=tp2_price,
+            market_structure=ms_context
         )
 
         if "error" in plan:
