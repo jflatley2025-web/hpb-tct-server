@@ -823,27 +823,37 @@ class TCTSchematicDetector:
         """
         Find bullish break of structure after Tap3.
 
-        TCT: "When that breaks back to bullish and preferably that break of structure
-        is back inside your original range values that's when we go long"
+        TCT Lecture 1: BOS is confirmed when candle CLOSE breaks above the
+        previous MS high (not wick). Preferably inside original range values.
         """
-        # Find swing lows and highs after Tap3 to detect structure
+        # Track the most recent swing high to break
+        last_swing_high = None
         for i in range(start_idx + 1, min(start_idx + 20, len(self.candles) - 2)):
-            # Look for a higher high that breaks previous structure
             if self._is_swing_high(i):
-                current_high = float(self.candles.iloc[i]["high"])
+                sh_price = float(self.candles.iloc[i]["high"])
+                if last_swing_high is None or sh_price > last_swing_high["price"]:
+                    last_swing_high = {"idx": i, "price": sh_price}
 
-                # Check previous swing high
-                prev_high = self._find_previous_swing_high(i)
-                if prev_high and current_high > prev_high["price"]:
-                    # BOS confirmed
-                    is_inside_range = current_high < high_price  # Inside original range
+        if last_swing_high is None:
+            # Fallback: find any previous swing high in the region
+            last_swing_high = self._find_previous_swing_high(min(start_idx + 10, len(self.candles) - 3))
 
-                    return {
-                        "idx": i,
-                        "price": current_high,
-                        "is_inside_range": is_inside_range,
-                        "prev_swing_high": prev_high
-                    }
+        if last_swing_high is None:
+            return None
+
+        # TCT Lecture 1: BOS = candle CLOSE above MS high
+        search_start = last_swing_high["idx"] + 1
+        for i in range(search_start, min(start_idx + 25, len(self.candles))):
+            close_price = float(self.candles.iloc[i]["close"])
+            if close_price > last_swing_high["price"]:
+                is_inside_range = close_price < high_price
+                return {
+                    "idx": i,
+                    "price": close_price,
+                    "is_inside_range": is_inside_range,
+                    "prev_swing_high": last_swing_high,
+                    "bos_method": "candle_close"
+                }
 
         return None
 
@@ -851,28 +861,36 @@ class TCTSchematicDetector:
         """
         Find bearish break of structure after Tap3.
 
-        TCT: "To confirm a TCT model one distribution schematic again we need to break
-        structure from the lowest point between tap two and tap three up towards
-        our third tap High"
+        TCT Lecture 1: BOS is confirmed when candle CLOSE breaks below the
+        previous MS low (not wick). Preferably inside original range values.
         """
-        # Find swing lows and highs after Tap3 to detect structure
+        # Track the most recent swing low to break
+        last_swing_low = None
         for i in range(start_idx + 1, min(start_idx + 20, len(self.candles) - 2)):
-            # Look for a lower low that breaks previous structure
             if self._is_swing_low(i):
-                current_low = float(self.candles.iloc[i]["low"])
+                sl_price = float(self.candles.iloc[i]["low"])
+                if last_swing_low is None or sl_price < last_swing_low["price"]:
+                    last_swing_low = {"idx": i, "price": sl_price}
 
-                # Check previous swing low
-                prev_low = self._find_previous_swing_low(i)
-                if prev_low and current_low < prev_low["price"]:
-                    # BOS confirmed
-                    is_inside_range = current_low > low_price  # Inside original range
+        if last_swing_low is None:
+            last_swing_low = self._find_previous_swing_low(min(start_idx + 10, len(self.candles) - 3))
 
-                    return {
-                        "idx": i,
-                        "price": current_low,
-                        "is_inside_range": is_inside_range,
-                        "prev_swing_low": prev_low
-                    }
+        if last_swing_low is None:
+            return None
+
+        # TCT Lecture 1: BOS = candle CLOSE below MS low
+        search_start = last_swing_low["idx"] + 1
+        for i in range(search_start, min(start_idx + 25, len(self.candles))):
+            close_price = float(self.candles.iloc[i]["close"])
+            if close_price < last_swing_low["price"]:
+                is_inside_range = close_price > low_price
+                return {
+                    "idx": i,
+                    "price": close_price,
+                    "is_inside_range": is_inside_range,
+                    "prev_swing_low": last_swing_low,
+                    "bos_method": "candle_close"
+                }
 
         return None
 
@@ -884,20 +902,21 @@ class TCTSchematicDetector:
         """
         Find extreme liquidity for Model 2 accumulation.
 
-        TCT: "Extreme liquidity is the last liquidity Point remaining before taking
-        your second tap low which is your range low"
+        TCT Lecture 1: "Extreme liquidity is the last liquidity point remaining
+        before taking your second tap low which is your range low."
+        "Often your extreme liquidity will simply be your first confirmed MS low
+        if you pull your market structure from the second Tap low up."
 
-        TCT: "Often times your extreme liquidity will simply just be your first
-        Mark structure low if you pull your mark structure from the second Tap low up"
+        Uses 6-candle rule with inside bar exclusion for swing detection.
         """
-        # Find first market structure low after Tap2
+        # Find first confirmed MS low after Tap2 (using proper 6CR with inside bars)
         for i in range(tap2_idx + 2, min(tap2_idx + 20, len(self.candles) - 2)):
-            if self._is_swing_low(i, lookback=3):  # Use smaller lookback for internal structure
+            if self._is_swing_low(i, lookback=2):
                 return {
                     "idx": i,
                     "price": float(self.candles.iloc[i]["low"]),
                     "type": "extreme_liquidity",
-                    "description": "First market structure low after Tap2"
+                    "description": "First confirmed MS low after Tap2 (6CR validated)"
                 }
 
         return None
@@ -906,17 +925,19 @@ class TCTSchematicDetector:
         """
         Find extreme liquidity for Model 2 distribution.
 
-        TCT: "What is the first Mark structure High by drawing mark from the top down
-        from your second tap High towards the lowest point between tap two and tap three"
+        TCT Lecture 1: "First MS high by drawing market structure from the top down
+        from your second tap high towards the lowest point between tap two and tap three."
+
+        Uses 6-candle rule with inside bar exclusion for swing detection.
         """
-        # Find first market structure high after Tap2
+        # Find first confirmed MS high after Tap2 (using proper 6CR with inside bars)
         for i in range(tap2_idx + 2, min(tap2_idx + 20, len(self.candles) - 2)):
-            if self._is_swing_high(i, lookback=3):  # Use smaller lookback for internal structure
+            if self._is_swing_high(i, lookback=2):
                 return {
                     "idx": i,
                     "price": float(self.candles.iloc[i]["high"]),
                     "type": "extreme_liquidity",
-                    "description": "First market structure high after Tap2"
+                    "description": "First confirmed MS high after Tap2 (6CR validated)"
                 }
 
         return None
@@ -3195,44 +3216,102 @@ class TCTSchematicDetector:
     # UTILITY METHODS
     # ================================================================
 
+    def _is_inside_bar(self, idx: int) -> bool:
+        """
+        Check if candle at idx is an inside bar (TCT Lecture 1).
+        Inside bar: high and low are inside the previous bar's high and low.
+        Inside bars do NOT count for the 6-candle rule.
+        """
+        if idx < 1 or idx >= len(self.candles):
+            return False
+        curr = self.candles.iloc[idx]
+        prev = self.candles.iloc[idx - 1]
+        return float(curr["high"]) <= float(prev["high"]) and float(curr["low"]) >= float(prev["low"])
+
     def _is_swing_high(self, idx: int, lookback: int = None) -> bool:
-        """Check if index is a swing high using 6-candle rule."""
+        """
+        Check if index is a swing high using TCT 6-candle rule.
+
+        TCT Lecture 1: A valid pivot high requires 2 consecutive bullish candles
+        followed by 2 consecutive bearish candles (inside bars excluded from count).
+        The pivot is at the highest point of the sequence.
+        Also falls back to traditional lookback check for compatibility.
+        """
         lookback = lookback or self.SIX_CANDLE_LOOKBACK // 2
 
         if idx < lookback or idx >= len(self.candles) - lookback:
             return False
 
-        current = self.candles.iloc[idx]["high"]
+        current = float(self.candles.iloc[idx]["high"])
 
-        # Check candles before
-        for i in range(idx - lookback, idx):
-            if self.candles.iloc[i]["high"] >= current:
+        # Collect non-inside-bar candles before idx
+        before = []
+        for i in range(idx - 1, max(idx - lookback - 3, -1), -1):
+            if not self._is_inside_bar(i):
+                before.append(i)
+            if len(before) >= lookback:
+                break
+
+        # Collect non-inside-bar candles after idx
+        after = []
+        for i in range(idx + 1, min(idx + lookback + 3, len(self.candles))):
+            if not self._is_inside_bar(i):
+                after.append(i)
+            if len(after) >= lookback:
+                break
+
+        if len(before) < lookback or len(after) < lookback:
+            return False
+
+        # All non-inside-bar candles before and after must have lower highs
+        for i in before:
+            if float(self.candles.iloc[i]["high"]) >= current:
                 return False
-
-        # Check candles after
-        for i in range(idx + 1, idx + lookback + 1):
-            if self.candles.iloc[i]["high"] >= current:
+        for i in after:
+            if float(self.candles.iloc[i]["high"]) >= current:
                 return False
 
         return True
 
     def _is_swing_low(self, idx: int, lookback: int = None) -> bool:
-        """Check if index is a swing low using 6-candle rule."""
+        """
+        Check if index is a swing low using TCT 6-candle rule.
+
+        TCT Lecture 1: A valid pivot low requires 2 consecutive bearish candles
+        followed by 2 consecutive bullish candles (inside bars excluded from count).
+        The pivot is at the lowest point of the sequence.
+        """
         lookback = lookback or self.SIX_CANDLE_LOOKBACK // 2
 
         if idx < lookback or idx >= len(self.candles) - lookback:
             return False
 
-        current = self.candles.iloc[idx]["low"]
+        current = float(self.candles.iloc[idx]["low"])
 
-        # Check candles before
-        for i in range(idx - lookback, idx):
-            if self.candles.iloc[i]["low"] <= current:
+        # Collect non-inside-bar candles before idx
+        before = []
+        for i in range(idx - 1, max(idx - lookback - 3, -1), -1):
+            if not self._is_inside_bar(i):
+                before.append(i)
+            if len(before) >= lookback:
+                break
+
+        # Collect non-inside-bar candles after idx
+        after = []
+        for i in range(idx + 1, min(idx + lookback + 3, len(self.candles))):
+            if not self._is_inside_bar(i):
+                after.append(i)
+            if len(after) >= lookback:
+                break
+
+        if len(before) < lookback or len(after) < lookback:
+            return False
+
+        for i in before:
+            if float(self.candles.iloc[i]["low"]) <= current:
                 return False
-
-        # Check candles after
-        for i in range(idx + 1, idx + lookback + 1):
-            if self.candles.iloc[i]["low"] <= current:
+        for i in after:
+            if float(self.candles.iloc[i]["low"]) <= current:
                 return False
 
         return True

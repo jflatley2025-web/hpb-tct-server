@@ -332,13 +332,26 @@ def generate_execution_plan(
     take_profit_price: float,
     direction: str,
     leverage: float = 10,
-    tp2_price: float = None
+    tp2_price: float = None,
+    market_structure: Dict = None
 ) -> Dict:
     """
     Generate a complete trade execution plan following TCT Lecture 9.
 
     Combines position sizing, leverage analysis, liquidation safety,
     partial TPs, and capital management into one comprehensive plan.
+
+    Now integrates TCT Lecture 1 market structure context:
+    - Validates trade direction against HTF trend/EOF bias
+    - Checks for BOS confirmation in trade direction
+    - Adds confluence scoring to execution plan
+
+    Args:
+        market_structure: Optional dict with keys:
+            - trend: "bullish"/"bearish"/"ranging"/"neutral"
+            - eof: Dict with "bias", "trend_shift", "expectation"
+            - bos_events: List of BOS events
+            - levels: Dict with level_1, level_2, level_3
     """
     try:
         # Step 1: Calculate risk
@@ -412,7 +425,7 @@ def generate_execution_plan(
         # Step 10: Capital allocation
         capital = calculate_capital_allocation(account_balance)
 
-        return {
+        plan = {
             "execution_plan": {
                 "direction": direction.upper(),
                 "order_type": "MARKET (95% — enter on BOS candle close)",
@@ -458,6 +471,74 @@ def generate_execution_plan(
             ],
             "timestamp": datetime.utcnow().isoformat()
         }
+
+        # Add market structure confluence if provided
+        if market_structure:
+            ms_trend = market_structure.get("trend", "neutral")
+            ms_eof = market_structure.get("eof", {})
+            ms_bias = ms_eof.get("bias", "neutral")
+            ms_bos = market_structure.get("bos_events", [])
+            ms_shift = ms_eof.get("trend_shift", False)
+            last_bos = ms_bos[-1] if ms_bos else None
+
+            # Determine confluence
+            is_aligned = (
+                (direction == "long" and ms_bias == "bullish") or
+                (direction == "short" and ms_bias == "bearish")
+            )
+            is_counter = (
+                (direction == "long" and ms_bias == "bearish") or
+                (direction == "short" and ms_bias == "bullish")
+            )
+
+            # BOS confirmation in trade direction
+            has_bos_confirm = (
+                last_bos and
+                ((direction == "long" and last_bos.get("type") == "bullish") or
+                 (direction == "short" and last_bos.get("type") == "bearish"))
+            )
+
+            confluence_score = 0.5  # neutral baseline
+            if is_aligned:
+                confluence_score = 0.8
+            if is_aligned and has_bos_confirm:
+                confluence_score = 1.0
+            if is_counter:
+                confluence_score = 0.3
+            if is_counter and ms_shift:
+                confluence_score = 0.5  # trend shift reduces counter concern
+
+            plan["market_structure_confluence"] = {
+                "htf_trend": ms_trend,
+                "eof_bias": ms_bias,
+                "eof_expectation": ms_eof.get("expectation", "undetermined"),
+                "trend_shift": ms_shift,
+                "last_bos_type": last_bos.get("type") if last_bos else None,
+                "trade_aligned_with_ms": is_aligned,
+                "has_bos_confirmation": has_bos_confirm,
+                "confluence_score": round(confluence_score, 2),
+                "assessment": (
+                    "Strong — Trade aligns with HTF MS + BOS confirmed"
+                    if confluence_score >= 0.9
+                    else "Good — Trade aligns with HTF market structure"
+                    if confluence_score >= 0.7
+                    else "Neutral — No strong MS alignment"
+                    if confluence_score >= 0.4
+                    else "Weak — Trade is AGAINST HTF market structure, use caution"
+                )
+            }
+
+            # Add MS-aware checklist items
+            if is_counter:
+                plan["execution_checklist"].insert(0,
+                    f"WARNING: Trade direction ({direction}) is AGAINST HTF bias ({ms_bias}) — consider smaller size"
+                )
+            elif is_aligned:
+                plan["execution_checklist"].insert(0,
+                    f"CONFIRMED: Trade direction ({direction}) aligns with HTF {ms_bias} bias"
+                )
+
+        return plan
 
     except Exception as e:
         logger.error(f"Execution plan error: {e}")
