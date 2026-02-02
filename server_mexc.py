@@ -88,8 +88,8 @@ app = FastAPI(title="HPB–TCT v21.2 MEXC Server", version="21.2")
 latest_ranges = {"LTF": [], "HTF": []}
 scan_interval_sec = 120
 
-# ===== TOP 5 SETUP SCANNER STATE =====
-top_5_setups = []           # Precompiled top 5 highest probability setups
+# ===== TOP 5 SETUP SCANNER STATE (pairsrange_scanner approach) =====
+top_5_setups = []           # Top 5 pairs with highest RPS (Range Probability Score)
 forming_setups = []         # Forming (unconfirmed) TCT models from top 5 pairs
 scanner_status = {
     "last_scan": None,
@@ -100,7 +100,11 @@ scanner_status = {
     "scan_duration_sec": 0,
 }
 SCANNER_INTERVAL_SEC = 4 * 60 * 60  # 4 hours
-SCANNER_TIMEFRAMES = ["15m", "1h", "4h", "1d"]  # Key timeframes to scan
+# Range scanner config (from pairsrange_scanner.py)
+RANGE_MIN_HOURS = 24
+RANGE_V_SHAPE_THRESHOLD = 0.65       # % retrace too fast = V-shape
+RANGE_MAX_INTERNAL_VOL = 0.35        # too much internal volatility = bad range
+RANGE_MIN_RPS = 9.6                  # minimum RPS to qualify
 
 logging.basicConfig(level=logging.INFO)
 logger.info(f"[INIT] HPB–TCT v21.2 Ready — Symbol={SYMBOL}, Port={PORT}")
@@ -3139,142 +3143,120 @@ async def detect_best_range(candles: List) -> Optional[Dict]:
     }
 
 # ================================================================
-# TOP 5 SETUP SCANNER (Background task - runs every 4 hours)
+# TOP 5 RANGE SCANNER (pairsrange_scanner.py approach)
+# Mechanically reproduces the range-finding + filtering process
+# to identify pairs with high probability ranges (RPS >= 9.6)
 # ================================================================
 
-async def scan_pair_for_setups(symbol: str, timeframe: str) -> Optional[Dict]:
+def detect_range_from_df(df: pd.DataFrame) -> Optional[Dict]:
     """
-    Scan a single pair on a single timeframe for TCT schematics.
-    Returns the best setup found, or None.
+    Detect if data forms a valid range. Ported from pairsrange_scanner.py.
+    Filters out V-shapes and high internal volatility.
+    Returns dict with range info or None.
+    """
+    if df is None or len(df) < 10:
+        return None
+
+    high = float(df["high"].max())
+    low = float(df["low"].min())
+    range_size = high - low
+
+    if range_size <= 0:
+        return None
+
+    # Duration filter
+    duration_hours = (df["open_time"].iloc[-1] - df["open_time"].iloc[0]).total_seconds() / 3600
+    if duration_hours < RANGE_MIN_HOURS:
+        return None
+
+    # V-shape detection: if price retraces too fast in second half, skip
+    mid_idx = len(df) // 2
+    first_leg = abs(float(df["close"].iloc[mid_idx]) - float(df["close"].iloc[0]))
+    second_leg = abs(float(df["close"].iloc[-1]) - float(df["close"].iloc[mid_idx]))
+
+    if first_leg > 0 and (second_leg / first_leg) > RANGE_V_SHAPE_THRESHOLD:
+        return None
+
+    # Internal volatility (chop detector)
+    internal_vol = float(df["close"].std()) / range_size
+    if internal_vol > RANGE_MAX_INTERNAL_VOL:
+        return None
+
+    return {
+        "range_high": high,
+        "range_low": low,
+        "range_eq": (high + low) / 2,
+        "duration_hours": duration_hours,
+        "internal_vol": internal_vol,
+    }
+
+
+def score_range_rps(range_info: Dict) -> float:
+    """
+    Mechanical RPS scoring (0–10). Ported from pairsrange_scanner.py.
+    """
+    score = 10.0
+
+    # Duration penalty
+    if range_info["duration_hours"] < 48:
+        score -= 1.0
+    elif range_info["duration_hours"] < 72:
+        score -= 0.5
+
+    # Internal volatility penalty
+    score -= range_info["internal_vol"] * 5
+
+    return round(max(score, 0), 2)
+
+
+async def scan_pair_range(symbol: str) -> Optional[Dict]:
+    """
+    Scan a single pair on the 1D timeframe for a valid high-probability range.
+    Uses the mechanical range detection + RPS scoring from pairsrange_scanner.py.
+    Returns a setup dict if RPS >= threshold, or None.
     """
     try:
-        df = await fetch_mexc_candles(symbol, timeframe, 200)
+        df = await fetch_mexc_candles(symbol, "1d", 200)
         if df is None or len(df) < 30:
             return None
 
         current_price = float(df.iloc[-1]["close"])
 
-        # Convert to candle list for range detection
-        candles_list = []
-        for _, row in df.iterrows():
-            candles_list.append({
-                'open_time': str(row['open_time']),
-                'open': float(row['open']),
-                'high': float(row['high']),
-                'low': float(row['low']),
-                'close': float(row['close']),
-                'volume': float(row['volume'])
-            })
-
-        # Detect ranges
-        detected_range = await detect_best_range(candles_list)
-        range_list = [detected_range] if detected_range and not isinstance(detected_range, list) else (detected_range or [])
-
-        # Detect TCT schematics
-        schematics_result = detect_tct_schematics(df, range_list)
-
-        all_schematics = (
-            schematics_result.get("accumulation_schematics", []) +
-            schematics_result.get("distribution_schematics", [])
-        )
-
-        if not all_schematics:
+        range_info = detect_range_from_df(df)
+        if not range_info:
             return None
 
-        # Filter for active (not invalidated) schematics
-        best = None
-        best_score = -1
+        rps = score_range_rps(range_info)
+        if rps < RANGE_MIN_RPS:
+            return None
 
-        for s in all_schematics:
-            if not isinstance(s, dict):
-                continue
-
-            entry = s.get('entry', {}).get('price')
-            target = s.get('target', {}).get('price')
-            stop = s.get('stop_loss', {}).get('price')
-            quality = s.get('quality_score', 0)
-            rr = s.get('risk_reward', 0)
-            is_confirmed = s.get('is_confirmed', False)
-
-            if not entry or not target or not stop:
-                continue
-
-            # Check setup is still valid
-            if s.get('direction') == 'bullish':
-                if current_price >= target or current_price <= stop:
-                    continue
-            elif s.get('direction') == 'bearish':
-                if current_price <= target or current_price >= stop:
-                    continue
-
-            # Score: quality (40%) + R:R (25%) + confirmed (20%) + lecture enhancements (15%)
-            has6cr = 1 if s.get('lecture_5b_enhancements', {}).get('htf_validation', {}).get('all_taps_valid_6cr') else 0
-            has_tl = 1 if s.get('lecture_5b_enhancements', {}).get('has_trendline_confluence') else 0
-            l6 = s.get('lecture_6_enhancements', {})
-            l6_score = (0.1 if l6.get('has_conversion') else 0) + \
-                       (0.1 if l6.get('has_dual_deviation') else 0) + \
-                       (0.05 if l6.get('has_wov_opportunity') else 0) + \
-                       (0.05 if l6.get('has_m1_to_m2_opportunity') else 0)
-
-            score = (quality * 40) + (min(rr, 5) * 5) + (15 if is_confirmed else 0) + \
-                    (has6cr * 8) + (has_tl * 5) + (l6_score * 100)
-
-            if score > best_score:
-                best_score = score
-                schematic_type = s.get('schematic_type', '').replace('_', ' ')
-                # Parse model and direction
-                model = s.get('model', '')
-                if 'Model_2' in (model or '') or 'Model 2' in schematic_type or 'model_2' in schematic_type.lower():
-                    model_label = 'M2'
-                elif 'Model_1' in (model or '') or 'Model 1' in schematic_type or 'model_1' in schematic_type.lower():
-                    model_label = 'M1'
-                else:
-                    model_label = 'M1'
-
-                direction = s.get('direction', 'unknown')
-                if direction == 'bullish':
-                    setup_type = f"{model_label} Accumulation"
-                elif direction == 'bearish':
-                    setup_type = f"{model_label} Distribution"
-                else:
-                    setup_type = schematic_type
-
-                best = {
-                    "symbol": symbol,
-                    "timeframe": timeframe,
-                    "setup_type": setup_type,
-                    "model": model_label,
-                    "direction": direction,
-                    "entry": round(entry, 6),
-                    "stop_loss": round(stop, 6),
-                    "target": round(target, 6),
-                    "risk_reward": round(rr, 2),
-                    "quality_score": round(quality, 3),
-                    "confidence_score": round(best_score, 1),
-                    "is_confirmed": is_confirmed,
-                    "has_6cr": bool(has6cr),
-                    "has_trendline": bool(has_tl),
-                    "has_conversion": bool(l6.get('has_conversion')),
-                    "has_dual_deviation": bool(l6.get('has_dual_deviation')),
-                    "current_price": round(current_price, 6),
-                }
-
-        return best
+        return {
+            "symbol": symbol,
+            "timeframe": "1d",
+            "RPS": rps,
+            "range_high": round(range_info["range_high"], 6),
+            "range_low": round(range_info["range_low"], 6),
+            "range_eq": round(range_info["range_eq"], 6),
+            "duration_hours": round(range_info["duration_hours"], 1),
+            "internal_vol": round(range_info["internal_vol"], 4),
+            "current_price": round(current_price, 6),
+        }
 
     except Exception as e:
-        logger.debug(f"[SCANNER] Error scanning {symbol}/{timeframe}: {e}")
+        logger.debug(f"[RANGE_SCANNER] Error scanning {symbol}: {e}")
         return None
 
 
 async def run_full_scan():
     """
-    Scan all pairs across key timeframes and compile the top 5 highest probability setups.
+    Scan all pairs for high-probability ranges using the pairsrange_scanner.py method.
+    Fetches 1D candles, detects ranges, scores with RPS, returns top 5.
     Runs as a background task every 4 hours.
     """
     global top_5_setups
 
     if scanner_status["is_scanning"]:
-        logger.info("[SCANNER] Scan already in progress, skipping")
+        logger.info("[RANGE_SCANNER] Scan already in progress, skipping")
         return
 
     scanner_status["is_scanning"] = True
@@ -3282,9 +3264,9 @@ async def run_full_scan():
     scanner_status["pairs_scanned"] = 0
     start_time = datetime.utcnow()
 
-    logger.info(f"[SCANNER] Starting full scan of {len(COIN_LIST)} pairs across {len(SCANNER_TIMEFRAMES)} timeframes")
+    logger.info(f"[RANGE_SCANNER] Starting range scan of {len(COIN_LIST)} pairs (1D timeframe, RPS >= {RANGE_MIN_RPS})")
 
-    all_setups = []
+    all_qualified = []
 
     global _scanner_consecutive_errors
     _scanner_consecutive_errors = 0  # Reset at scan start
@@ -3292,34 +3274,32 @@ async def run_full_scan():
     for i, symbol in enumerate(COIN_LIST):
         scanner_status["pairs_scanned"] = i + 1
 
-        for tf in SCANNER_TIMEFRAMES:
-            try:
-                setup = await scan_pair_for_setups(symbol, tf)
-                if setup:
-                    all_setups.append(setup)
-            except Exception as e:
-                logger.debug(f"[SCANNER] Exception for {symbol}/{tf}: {e}")
+        try:
+            result = await scan_pair_range(symbol)
+            if result:
+                all_qualified.append(result)
+        except Exception as e:
+            logger.debug(f"[RANGE_SCANNER] Exception for {symbol}: {e}")
 
-            # Adaptive rate limiting: slow down when errors accumulate
-            base_delay = 0.35
-            if _scanner_consecutive_errors > 10:
-                delay = min(base_delay + (_scanner_consecutive_errors * 0.5), 10.0)
-                logger.info(f"[SCANNER] Throttling: {delay:.1f}s delay (errors={_scanner_consecutive_errors})")
-            elif _scanner_consecutive_errors > 3:
-                delay = base_delay + (_scanner_consecutive_errors * 0.2)
-            else:
-                delay = base_delay
-            await asyncio.sleep(delay)
+        # Adaptive rate limiting
+        base_delay = 0.35
+        if _scanner_consecutive_errors > 10:
+            delay = min(base_delay + (_scanner_consecutive_errors * 0.5), 10.0)
+            logger.info(f"[RANGE_SCANNER] Throttling: {delay:.1f}s delay (errors={_scanner_consecutive_errors})")
+        elif _scanner_consecutive_errors > 3:
+            delay = base_delay + (_scanner_consecutive_errors * 0.2)
+        else:
+            delay = base_delay
+        await asyncio.sleep(delay)
 
         # Log progress every 50 pairs
         if (i + 1) % 50 == 0:
-            logger.info(f"[SCANNER] Progress: {i + 1}/{len(COIN_LIST)} pairs scanned, {len(all_setups)} setups found")
+            logger.info(f"[RANGE_SCANNER] Progress: {i + 1}/{len(COIN_LIST)} pairs, {len(all_qualified)} qualified")
 
-    # Sort all setups by confidence score (highest first) and take top 5
-    all_setups.sort(key=lambda x: x["confidence_score"], reverse=True)
-    # Only replace top 5 if this scan found results; otherwise keep previous results visible
-    if all_setups:
-        top_5_setups = all_setups[:5]
+    # Sort by RPS (highest first) and take top 5
+    all_qualified.sort(key=lambda x: x["RPS"], reverse=True)
+    if all_qualified:
+        top_5_setups = all_qualified[:5]
 
     end_time = datetime.utcnow()
     duration = (end_time - start_time).total_seconds()
@@ -3329,11 +3309,11 @@ async def run_full_scan():
     scanner_status["scan_duration_sec"] = round(duration)
     scanner_status["next_scan"] = (end_time + pd.Timedelta(seconds=SCANNER_INTERVAL_SEC)).isoformat()
 
-    kept = " (kept previous)" if not all_setups and top_5_setups else ""
+    kept = " (kept previous)" if not all_qualified and top_5_setups else ""
     logger.info(
-        f"[SCANNER] Scan complete in {duration:.0f}s — "
-        f"{len(COIN_LIST)} pairs, {len(all_setups)} setups found{kept}, "
-        f"Top 5: {[s['symbol'] + '/' + s['timeframe'] for s in top_5_setups]}"
+        f"[RANGE_SCANNER] Scan complete in {duration:.0f}s — "
+        f"{len(COIN_LIST)} pairs, {len(all_qualified)} qualified (RPS >= {RANGE_MIN_RPS}){kept}, "
+        f"Top 5: {[s['symbol'] + ' RPS=' + str(s['RPS']) for s in top_5_setups]}"
     )
 
     # After main scan, scan top 5 pairs for forming (unconfirmed) models
@@ -3579,13 +3559,15 @@ async def get_coin_list():
 @app.get("/api/top-setups")
 async def get_top_setups():
     """
-    Return the precompiled top 5 highest probability trade setups.
-    These are scanned every 4 hours across all pairs and key timeframes.
+    Return the top 5 pairs with the highest Range Probability Score (RPS).
+    Uses the pairsrange_scanner.py mechanical range detection approach.
+    Scanned every 4 hours across all pairs on 1D timeframe.
     """
     return {
         "top_setups": top_5_setups,
         "scanner_status": scanner_status,
-        "scan_timeframes": SCANNER_TIMEFRAMES,
+        "scan_method": "pairsrange_scanner (RPS)",
+        "rps_threshold": RANGE_MIN_RPS,
         "total_pairs_in_list": len(COIN_LIST),
     }
 
@@ -4590,11 +4572,11 @@ async def po3_chart_page(symbol: str = "BTCUSDT", timeframe: str = "4h"):
 
 @app.get("/api/scan-now")
 async def trigger_scan():
-    """Manually trigger a full scan (if not already running)."""
+    """Manually trigger a range scan (if not already running)."""
     if scanner_status["is_scanning"]:
         return {"status": "already_scanning", "progress": f"{scanner_status['pairs_scanned']}/{scanner_status['total_pairs']}"}
     asyncio.create_task(run_full_scan())
-    return {"status": "scan_started", "total_pairs": len(COIN_LIST), "timeframes": SCANNER_TIMEFRAMES}
+    return {"status": "scan_started", "total_pairs": len(COIN_LIST), "scan_method": "pairsrange_scanner (RPS)", "rps_threshold": RANGE_MIN_RPS}
 
 @app.get("/api/candles")
 async def get_candles(interval: str = "4h", limit: int = 100, symbol: Optional[str] = None):
@@ -5388,8 +5370,7 @@ async def dashboard():
             transition: background 0.2s;
         }
         .top5-item:hover { background: rgba(255,255,255,0.06); }
-        .top5-item.long { border-left-color: #00ff88; }
-        .top5-item.short { border-left-color: #ff4444; }
+        .top5-item.qualified { border-left-color: #e040fb; }
         .top5-header {
             display: flex;
             justify-content: space-between;
@@ -5408,22 +5389,23 @@ async def dashboard():
             padding: 1px 5px;
             border-radius: 3px;
         }
-        .top5-type {
-            font-size: 0.65rem;
-            font-weight: 600;
+        .top5-rps {
+            font-size: 0.75rem;
+            font-weight: 700;
+            color: #e040fb;
             margin-bottom: 3px;
         }
-        .top5-type.accum { color: #00ff88; }
-        .top5-type.dist { color: #ff4444; }
+        .top5-rps .rps-value { color: #00d4ff; }
         .top5-levels {
             display: flex;
             gap: 8px;
             font-size: 0.6rem;
             color: #888;
+            flex-wrap: wrap;
         }
         .top5-levels span { white-space: nowrap; }
-        .top5-levels .rr { color: #ffc107; font-weight: 600; }
-        .top5-levels .conf { color: #e040fb; }
+        .top5-levels .rps-highlight { color: #e040fb; font-weight: 600; }
+        .top5-levels .eq-highlight { color: #ffc107; font-weight: 600; }
         .top5-tags {
             display: flex;
             gap: 4px;
@@ -5437,7 +5419,8 @@ async def dashboard():
             background: rgba(0,255,136,0.1);
             color: #00ff88;
         }
-        .top5-tag.warn { background: rgba(255,193,7,0.1); color: #ffc107; }
+        .top5-tag.duration { background: rgba(0,212,255,0.1); color: #00d4ff; }
+        .top5-tag.vol { background: rgba(255,193,7,0.1); color: #ffc107; }
         .top5-empty {
             text-align: center;
             padding: 20px 10px;
@@ -5994,11 +5977,11 @@ async def dashboard():
                 </div>
             </div>
 
-            <!-- Top 5 Setups Scanner -->
+            <!-- Top 5 Setups (Range Probability Scanner) -->
             <div class="top5-panel" id="top5Panel">
                 <h3>Top 5 Setups <span class="top5-scanner-status" id="scannerStatus">Initializing...</span></h3>
                 <div id="top5Content">
-                    <div class="top5-empty">Scanner starting — first scan runs on server boot</div>
+                    <div class="top5-empty">Range scanner starting — scanning pairs for high RPS ranges...</div>
                 </div>
             </div>
 
@@ -8668,18 +8651,15 @@ async def dashboard():
 
             if (!setups || setups.length === 0) {
                 if (status.is_scanning) {
-                    contentEl.innerHTML = '<div class="top5-empty">Scanning ' + (status.total_pairs || 0) + ' pairs across 4 timeframes...</div>';
+                    contentEl.innerHTML = '<div class="top5-empty">Scanning ' + (status.total_pairs || 0) + ' pairs for high-probability ranges (RPS)...</div>';
                 } else {
-                    contentEl.innerHTML = '<div class="top5-empty">Waiting for first scan to complete...</div>';
+                    contentEl.innerHTML = '<div class="top5-empty">Waiting for first range scan to complete...</div>';
                 }
                 return;
             }
 
             let html = '';
             setups.forEach((s, i) => {
-                const isLong = s.direction === 'bullish';
-                const dirClass = isLong ? 'long' : 'short';
-                const typeClass = isLong ? 'accum' : 'dist';
                 const basePair = s.symbol.replace('USDT', '');
 
                 // Format prices compactly
@@ -8689,27 +8669,27 @@ async def dashboard():
                     return '$' + p.toPrecision(4);
                 };
 
-                html += '<div class="top5-item ' + dirClass + '" data-symbol="' + s.symbol + '" data-tf="' + s.timeframe + '">';
+                // Duration display
+                const durDays = (s.duration_hours / 24).toFixed(1);
+
+                html += '<div class="top5-item qualified" data-symbol="' + s.symbol + '" data-tf="1d">';
                 html += '<div class="top5-header">';
                 html += '<span><span class="top5-rank">#' + (i + 1) + '</span><span class="top5-pair">' + basePair + '</span></span>';
-                html += '<span class="top5-tf">' + s.timeframe.toUpperCase() + '</span>';
+                html += '<span class="top5-tf">' + (s.timeframe || '1d').toUpperCase() + '</span>';
                 html += '</div>';
-                html += '<div class="top5-type ' + typeClass + '">' + s.setup_type + '</div>';
+                html += '<div class="top5-rps">RPS: <span class="rps-value">' + s.RPS + '</span> / 10</div>';
                 html += '<div class="top5-levels">';
-                html += '<span>E: ' + fmt(s.entry) + '</span>';
-                html += '<span>SL: ' + fmt(s.stop_loss) + '</span>';
-                html += '<span>TP: ' + fmt(s.target) + '</span>';
-                html += '<span class="rr">R:R ' + s.risk_reward + '</span>';
+                html += '<span>High: ' + fmt(s.range_high) + '</span>';
+                html += '<span class="eq-highlight">EQ: ' + fmt(s.range_eq) + '</span>';
+                html += '<span>Low: ' + fmt(s.range_low) + '</span>';
+                html += '<span>Price: ' + fmt(s.current_price) + '</span>';
                 html += '</div>';
 
                 // Tags
                 html += '<div class="top5-tags">';
-                if (s.is_confirmed) html += '<span class="top5-tag">Confirmed</span>';
-                if (s.has_6cr) html += '<span class="top5-tag">6CR</span>';
-                if (s.has_trendline) html += '<span class="top5-tag">TL</span>';
-                if (s.has_conversion) html += '<span class="top5-tag">Converted</span>';
-                if (s.has_dual_deviation) html += '<span class="top5-tag warn">Dual Dev</span>';
-                html += '<span class="top5-tag" style="color:#e040fb;background:rgba(224,64,251,0.1);">' + Math.round(s.confidence_score) + ' pts</span>';
+                html += '<span class="top5-tag duration">' + durDays + 'd range</span>';
+                html += '<span class="top5-tag vol">Vol: ' + (s.internal_vol * 100).toFixed(1) + '%</span>';
+                html += '<span class="top5-tag" style="color:#e040fb;background:rgba(224,64,251,0.1);">RPS ' + s.RPS + '</span>';
                 html += '</div>';
 
                 html += '</div>';
