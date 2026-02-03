@@ -9486,8 +9486,10 @@ async def get_tct_schematics(symbol: Optional[str] = None):
         if not dfs:
             return JSONResponse({"error": "Failed to fetch candle data"}, status_code=500)
 
-        # Use finest available timeframe for current price
-        price_df = dfs.get("ltf") or dfs.get("mtf") or dfs.get("htf")
+        # Use finest available timeframe for current price (can't use `or` on DataFrames)
+        price_df = next((dfs[k] for k in ("ltf", "mtf", "htf") if k in dfs and not dfs[k].empty), None)
+        if price_df is None or price_df.empty:
+            return JSONResponse({"error": "No valid candle data available"}, status_code=500)
         current_price = float(price_df.iloc[-1]["close"])
 
         # Detect ranges for each timeframe (convert to list for range detection)
@@ -9627,7 +9629,9 @@ async def get_po3_schematics(symbol: Optional[str] = None):
         if not dfs:
             return JSONResponse({"error": "Failed to fetch candle data"}, status_code=500)
 
-        price_df = dfs.get("ltf") or dfs.get("mtf") or dfs.get("htf")
+        price_df = next((dfs[k] for k in ("ltf", "mtf", "htf") if k in dfs and not dfs[k].empty), None)
+        if price_df is None or price_df.empty:
+            return JSONResponse({"error": "No valid candle data available"}, status_code=500)
         current_price = float(price_df.iloc[-1]["close"])
 
         def df_to_candles(df):
