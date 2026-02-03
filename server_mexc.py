@@ -5958,25 +5958,6 @@ async def dashboard():
         </div>
 
         <div class="metrics-panel">
-            <!-- Highest Probability Setup -->
-            <div class="setup-panel" id="setupPanel">
-                <h3>Highest Probability Setup <span class="setup-direction none" id="setupDirection">--</span></h3>
-                <div id="setupContent">
-                    <div class="metric-row"><span class="label">Analyzing timeframe...</span></div>
-                </div>
-                <div class="setup-confidence">
-                    <div class="setup-confidence-fill" id="setupConfidence" style="width: 0%; background: #ffc107;"></div>
-                </div>
-            </div>
-
-            <!-- Forming TCT Models -->
-            <div class="forming-panel" id="formingPanel">
-                <h3>Forming Models <span class="forming-count" id="formingCount">--</span></h3>
-                <div id="formingContent">
-                    <div class="forming-empty">Scanning for forming schematics...</div>
-                </div>
-            </div>
-
             <!-- Top 5 Setups (Range Probability Scanner) -->
             <div class="top5-panel" id="top5Panel">
                 <h3>Top 5 Setups <span class="top5-scanner-status" id="scannerStatus">Initializing...</span></h3>
@@ -6156,6 +6137,25 @@ async def dashboard():
                     <div class="metric-row">
                         <span class="label">Loading...</span>
                     </div>
+                </div>
+            </div>
+
+            <!-- Forming TCT Models (derived from current pair analysis) -->
+            <div class="forming-panel" id="formingPanel">
+                <h3>Forming Models <span class="forming-count" id="formingCount">--</span></h3>
+                <div id="formingContent">
+                    <div class="forming-empty">Select a pair to analyze forming schematics...</div>
+                </div>
+            </div>
+
+            <!-- Highest Probability Setup (derived from all sections above) -->
+            <div class="setup-panel" id="setupPanel">
+                <h3>Highest Probability Setup <span class="setup-direction none" id="setupDirection">--</span></h3>
+                <div id="setupContent">
+                    <div class="metric-row"><span class="label">Select a pair to analyze...</span></div>
+                </div>
+                <div class="setup-confidence">
+                    <div class="setup-confidence-fill" id="setupConfidence" style="width: 0%; background: #ffc107;"></div>
                 </div>
             </div>
 
@@ -6580,6 +6580,17 @@ async def dashboard():
         let isLoading = false;
         let lastCandles = []; // Store candles for index-to-time mapping
 
+        // HTF context cache: stores fetched HTF data per symbol so timeframe changes reuse it
+        let htfCache = {
+            symbol: null,
+            rangesData: null,
+            zonesData: null,
+            liqData: null,
+            valData: null,
+            schematicsData: null,
+            po3Data: null,
+        };
+
         // Fetch with retry and timeout
         async function fetchWithRetry(url, options = {}, retries = 3, timeout = 20000) {
             for (let i = 0; i < retries; i++) {
@@ -6796,7 +6807,10 @@ async def dashboard():
             if (isLoading) return;
             isLoading = true;
 
-            // Show loading states
+            // Determine if this is a new pair (full fetch) or just a timeframe change (reuse HTF cache)
+            const isNewPair = (htfCache.symbol !== currentSymbol);
+
+            // Show loading states for all sections
             setLoading('trendBadge', true);
             setLoading('zoneBadge', true);
             setLoading('zoneCount', true);
@@ -6804,89 +6818,204 @@ async def dashboard():
             setLoading('actionBadge', true);
             setLoading('schematicsBadge', true);
             setLoading('po3Badge', true);
+            document.getElementById('setupDirection').textContent = '...';
+            document.getElementById('setupDirection').className = 'setup-direction none';
+            document.getElementById('setupContent').innerHTML = '<div class="metric-row"><span class="label">Running analysis pipeline...</span></div>';
+            document.getElementById('setupConfidence').style.width = '0%';
+            document.getElementById('formingCount').textContent = '...';
+            document.getElementById('formingContent').innerHTML = '<div class="forming-empty">Analyzing pair...</div>';
 
-            // Fetch candles and update chart
+            // ─── STEP 1: Fetch candles and update chart ───
             lastCandles = await fetchCandles(currentTimeframe, getCandleLimit(currentTimeframe));
             if (lastCandles.length > 0) {
                 candleSeries.setData(lastCandles);
                 const lastPrice = lastCandles[lastCandles.length - 1].close;
                 document.getElementById('currentPrice').textContent = '$' + lastPrice.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
             }
-
             clearPriceLines();
 
-            // Fetch all API data in parallel with individual error handling
-            const [rangesResult, zonesResult, liqResult, valResult, schematicsResult, po3Result] = await Promise.allSettled([
-                fetchWithRetry(`/api/ranges?symbol=${currentSymbol}`, {}, 3, 25000),
-                fetchWithRetry(`/api/zones?symbol=${currentSymbol}`, {}, 3, 25000),
-                fetchWithRetry(`/api/liquidity?symbol=${currentSymbol}`, {}, 3, 25000),
-                fetchWithRetry(`/api/validate?symbol=${currentSymbol}`, {}, 3, 25000),
-                fetchWithRetry(`/api/schematics?symbol=${currentSymbol}`, {}, 3, 30000),
-                fetchWithRetry(`/api/po3?symbol=${currentSymbol}`, {}, 3, 30000)
-            ]);
+            // For HTF data: fetch fresh if new pair, reuse cache if just timeframe change
+            let rangesData = null, zonesData = null, liqData = null, valData = null, schematicsData = null, po3Data = null;
 
-            // Process ranges (pass candles for range band)
-            if (rangesResult.status === 'fulfilled' && !rangesResult.value.error) {
-                updateRangesUI(rangesResult.value, lastCandles);
+            if (isNewPair) {
+                // ─── STEP 2: Market Structure + Active Range + Deviations ───
+                try {
+                    rangesData = await fetchWithRetry(`/api/ranges?symbol=${currentSymbol}`, {}, 3, 25000);
+                    if (rangesData && !rangesData.error) {
+                        updateRangesUI(rangesData, lastCandles);
+                    } else { setError('trendBadge'); setError('zoneBadge'); }
+                } catch (e) { console.error('Ranges error:', e); setError('trendBadge'); setError('zoneBadge'); }
+
+                // ─── STEP 3: S&D Zones ───
+                try {
+                    zonesData = await fetchWithRetry(`/api/zones?symbol=${currentSymbol}`, {}, 3, 25000);
+                    if (zonesData && !zonesData.error) {
+                        updateZonesUI(zonesData);
+                    } else { setError('zoneCount'); }
+                } catch (e) { console.error('Zones error:', e); setError('zoneCount'); }
+
+                // ─── STEP 4: Liquidity Pools ───
+                try {
+                    liqData = await fetchWithRetry(`/api/liquidity?symbol=${currentSymbol}`, {}, 3, 25000);
+                    if (liqData && !liqData.error) {
+                        updateLiquidityUI(liqData, lastCandles);
+                    } else { setError('liqCount'); }
+                } catch (e) { console.error('Liquidity error:', e); setError('liqCount'); }
+
+                // ─── STEP 5: TCT Schematics ───
+                try {
+                    schematicsData = await fetchWithRetry(`/api/schematics?symbol=${currentSymbol}`, {}, 3, 30000);
+                    if (schematicsData && !schematicsData.error) {
+                        updateSchematicsUI(schematicsData);
+                    } else { setError('schematicsBadge'); }
+                } catch (e) { console.error('Schematics error:', e); setError('schematicsBadge'); }
+
+                // ─── STEP 6: PO3 Schematics ───
+                try {
+                    po3Data = await fetchWithRetry(`/api/po3?symbol=${currentSymbol}`, {}, 3, 30000);
+                    if (po3Data && !po3Data.error) {
+                        updatePO3UI(po3Data);
+                    } else { setError('po3Badge'); }
+                } catch (e) { console.error('PO3 error:', e); setError('po3Badge'); }
+
+                // ─── STEP 7: 7-Gate Validation ───
+                try {
+                    valData = await fetchWithRetry(`/api/validate?symbol=${currentSymbol}`, {}, 3, 25000);
+                    if (valData) {
+                        updateValidationUI(valData);
+                    } else { setError('actionBadge'); }
+                } catch (e) { console.error('Validation error:', e); setError('actionBadge'); }
+
+                // Cache all HTF data for this symbol
+                htfCache = {
+                    symbol: currentSymbol,
+                    rangesData, zonesData, liqData, valData, schematicsData, po3Data,
+                };
+
             } else {
-                console.error('Ranges error:', rangesResult.reason || rangesResult.value?.error);
-                setError('trendBadge');
-                setError('zoneBadge');
+                // ─── TIMEFRAME CHANGE: Reuse cached HTF data, update chart overlays ───
+                rangesData = htfCache.rangesData;
+                zonesData = htfCache.zonesData;
+                liqData = htfCache.liqData;
+                valData = htfCache.valData;
+                schematicsData = htfCache.schematicsData;
+                po3Data = htfCache.po3Data;
+
+                // Re-render UI with cached data (updates chart overlays for new timeframe candles)
+                if (rangesData && !rangesData.error) updateRangesUI(rangesData, lastCandles);
+                else { setError('trendBadge'); setError('zoneBadge'); }
+                if (zonesData && !zonesData.error) updateZonesUI(zonesData);
+                else setError('zoneCount');
+                if (liqData && !liqData.error) updateLiquidityUI(liqData, lastCandles);
+                else setError('liqCount');
+                if (schematicsData && !schematicsData.error) updateSchematicsUI(schematicsData);
+                else setError('schematicsBadge');
+                if (po3Data && !po3Data.error) updatePO3UI(po3Data);
+                else setError('po3Badge');
+                if (valData) updateValidationUI(valData);
+                else setError('actionBadge');
             }
 
-            // Process zones
-            if (zonesResult.status === 'fulfilled' && !zonesResult.value.error) {
-                updateZonesUI(zonesResult.value);
-            } else {
-                console.error('Zones error:', zonesResult.reason || zonesResult.value?.error);
-                setError('zoneCount');
-            }
+            // ─── STEP 8: Forming Models (derived from current pair's schematic data) ───
+            deriveFormingModels(schematicsData, po3Data);
 
-            // Process liquidity (pass candles for curve drawing)
-            if (liqResult.status === 'fulfilled' && !liqResult.value.error) {
-                updateLiquidityUI(liqResult.value, lastCandles);
-            } else {
-                console.error('Liquidity error:', liqResult.reason || liqResult.value?.error);
-                setError('liqCount');
-            }
-
-            // Process validation
-            if (valResult.status === 'fulfilled') {
-                updateValidationUI(valResult.value);
-            } else {
-                console.error('Validation error:', valResult.reason);
-                setError('actionBadge');
-            }
-
-            // Process schematics
-            if (schematicsResult.status === 'fulfilled' && !schematicsResult.value.error) {
-                updateSchematicsUI(schematicsResult.value);
-            } else {
-                console.error('Schematics error:', schematicsResult.reason || schematicsResult.value?.error);
-                setError('schematicsBadge');
-            }
-
-            // Process PO3 schematics
-            if (po3Result.status === 'fulfilled' && !po3Result.value.error) {
-                updatePO3UI(po3Result.value);
-            } else {
-                console.error('PO3 error:', po3Result.reason || po3Result.value?.error);
-                setError('po3Badge');
-            }
-
-            // ===== HIGHEST PROBABILITY SETUP ANALYSIS & TCT CHART OVERLAYS =====
-            const rangesData = rangesResult.status === 'fulfilled' ? rangesResult.value : null;
-            const zonesData = zonesResult.status === 'fulfilled' ? zonesResult.value : null;
-            const liqData = liqResult.status === 'fulfilled' ? liqResult.value : null;
-            const schematicsData = schematicsResult.status === 'fulfilled' ? schematicsResult.value : null;
-            const po3Data = po3Result.status === 'fulfilled' ? po3Result.value : null;
-            const valData = valResult.status === 'fulfilled' ? valResult.value : null;
-
+            // ─── STEP 9: Highest Probability Setup (uses all data from pipeline) ───
             const bestSetup = analyzeHighestProbabilitySetup(rangesData, zonesData, liqData, schematicsData, po3Data, valData, lastCandles);
             renderSetupPanel(bestSetup);
             drawTCTModelOverlays(bestSetup, lastCandles);
 
             isLoading = false;
+        }
+
+        // Derive Forming Models from current pair's HTF+LTF schematic data
+        function deriveFormingModels(schematicsData, po3Data) {
+            const countEl = document.getElementById('formingCount');
+            const contentEl = document.getElementById('formingContent');
+
+            const models = [];
+
+            // Collect TCT schematics across all timeframes
+            if (schematicsData) {
+                const tfGroups = [
+                    { key: 'htf_schematics', label: 'HTF' },
+                    { key: 'mtf_schematics', label: 'MTF' },
+                    { key: 'ltf_schematics', label: 'LTF' },
+                ];
+                tfGroups.forEach(({ key, label }) => {
+                    const group = schematicsData[key];
+                    if (!group || !group.schematics) return;
+                    group.schematics.forEach(s => {
+                        models.push({
+                            source: 'TCT',
+                            tf_label: label,
+                            timeframe: group.timeframe || label,
+                            type: (s.schematic_type || 'unknown').replace(/_/g, ' '),
+                            direction: s.direction || 'unknown',
+                            is_confirmed: !!s.is_confirmed,
+                            quality: s.quality_score || 0,
+                            rr: s.risk_reward || 0,
+                            has_entry: !!(s.entry && s.entry.price),
+                        });
+                    });
+                });
+            }
+
+            // Collect PO3 schematics across all timeframes
+            if (po3Data) {
+                const tfGroups = [
+                    { key: 'htf_po3', label: 'HTF' },
+                    { key: 'mtf_po3', label: 'MTF' },
+                    { key: 'ltf_po3', label: 'LTF' },
+                ];
+                tfGroups.forEach(({ key, label }) => {
+                    const group = po3Data[key];
+                    if (!group || !group.schematics) return;
+                    group.schematics.forEach(p => {
+                        models.push({
+                            source: 'PO3',
+                            tf_label: label,
+                            timeframe: group.timeframe || label,
+                            type: 'PO3 ' + (p.phase || 'range'),
+                            direction: p.direction || 'unknown',
+                            is_confirmed: !!p.has_expansion,
+                            quality: p.quality_score || 0,
+                            rr: p.risk_reward || 0,
+                            has_entry: !!(p.entry && p.entry.price),
+                        });
+                    });
+                });
+            }
+
+            const formingOnly = models.filter(m => !m.is_confirmed);
+            const confirmedOnly = models.filter(m => m.is_confirmed);
+            countEl.textContent = formingOnly.length + ' forming / ' + confirmedOnly.length + ' confirmed';
+
+            if (models.length === 0) {
+                contentEl.innerHTML = '<div class="forming-empty">No forming models detected on this pair</div>';
+                return;
+            }
+
+            // Sort: forming first, then by quality descending
+            models.sort((a, b) => {
+                if (a.is_confirmed !== b.is_confirmed) return a.is_confirmed ? 1 : -1;
+                return b.quality - a.quality;
+            });
+
+            let html = '';
+            models.forEach(m => {
+                const dirCls = m.direction === 'bullish' ? 'bullish' : m.direction === 'bearish' ? 'bearish' : '';
+                const statusCls = m.is_confirmed ? 'confirmed' : 'forming';
+                const typeCls = m.direction === 'bullish' ? 'accum' : 'dist';
+
+                html += '<div class="forming-link ' + dirCls + '">';
+                html += '<span class="pair-name">' + m.source + '</span>';
+                html += '<span class="model-type ' + typeCls + '">' + m.type + '</span>';
+                html += '<span class="tf-badge">' + m.timeframe.toUpperCase() + '</span>';
+                html += '<span class="status-dot ' + statusCls + '" title="' + (m.is_confirmed ? 'Confirmed' : 'Forming') + '"></span>';
+                html += '</div>';
+            });
+
+            contentEl.innerHTML = html;
         }
 
         function updateRangesUI(data, candles = []) {
@@ -8720,75 +8849,18 @@ async def dashboard():
             });
         }
 
-        // ===== FORMING MODELS PANEL =====
-
-        async function fetchFormingSetups() {
-            try {
-                const data = await fetchWithRetry('/api/forming-setups', {}, 2, 15000);
-                if (data) {
-                    renderFormingPanel(data.forming_setups || []);
-                }
-            } catch (e) {
-                console.error('Failed to fetch forming setups:', e);
-            }
-        }
-
-        function renderFormingPanel(setups) {
-            const countEl = document.getElementById('formingCount');
-            const contentEl = document.getElementById('formingContent');
-
-            const formingOnly = setups.filter(s => !s.is_confirmed);
-            const confirmedOnly = setups.filter(s => s.is_confirmed);
-
-            countEl.textContent = formingOnly.length + ' forming / ' + confirmedOnly.length + ' confirmed';
-
-            if (setups.length === 0) {
-                contentEl.innerHTML = '<div class="forming-empty">No forming models from top 5 pairs yet</div>';
-                return;
-            }
-
-            // Deduplicate by symbol+timeframe+type, prefer forming over confirmed
-            const seen = new Map();
-            setups.forEach(s => {
-                const key = s.symbol + '/' + s.timeframe + '/' + s.setup_type;
-                if (!seen.has(key) || (!s.is_confirmed && seen.get(key).is_confirmed)) {
-                    seen.set(key, s);
-                }
-            });
-
-            let html = '';
-            seen.forEach(s => {
-                const basePair = s.symbol.replace('USDT', '');
-                const dirCls = s.direction === 'bullish' ? 'bullish' : 'bearish';
-                const typeCls = s.direction === 'bullish' ? 'accum' : 'dist';
-                const statusCls = s.is_confirmed ? 'confirmed' : 'forming';
-                const chartUrl = '/schematic-chart?symbol=' + encodeURIComponent(s.symbol) + '&timeframe=' + encodeURIComponent(s.timeframe);
-
-                html += '<a href="' + chartUrl + '" target="_blank" class="forming-link ' + dirCls + '">';
-                html += '<span class="pair-name">' + basePair + '</span>';
-                html += '<span class="model-type ' + typeCls + '">' + s.setup_type + '</span>';
-                html += '<span class="tf-badge">' + s.timeframe.toUpperCase() + '</span>';
-                html += '<span class="status-dot ' + statusCls + '" title="' + (s.is_confirmed ? 'Confirmed' : 'Forming — watch for 3rd tap') + '"></span>';
-                html += '</a>';
-            });
-
-            contentEl.innerHTML = html;
-        }
+        // (Forming models are now derived from current pair's schematic data in deriveFormingModels())
 
         // Initialize
         initChart();
         refreshData();
         fetchTop5Setups();
-        fetchFormingSetups();
 
-        // Auto-refresh every 30 seconds
+        // Auto-refresh every 30 seconds (forming models derived within refreshData)
         setInterval(refreshData, 30000);
 
         // Refresh top 5 every 60 seconds (lightweight — reads cached results)
         setInterval(fetchTop5Setups, 60000);
-
-        // Refresh forming models every 90 seconds
-        setInterval(fetchFormingSetups, 90000);
     </script>
 </body>
 </html>
@@ -9486,8 +9558,10 @@ async def get_tct_schematics(symbol: Optional[str] = None):
         if not dfs:
             return JSONResponse({"error": "Failed to fetch candle data"}, status_code=500)
 
-        # Use finest available timeframe for current price
-        price_df = dfs.get("ltf") or dfs.get("mtf") or dfs.get("htf")
+        # Use finest available timeframe for current price (can't use `or` on DataFrames)
+        price_df = next((dfs[k] for k in ("ltf", "mtf", "htf") if k in dfs and not dfs[k].empty), None)
+        if price_df is None or price_df.empty:
+            return JSONResponse({"error": "No valid candle data available"}, status_code=500)
         current_price = float(price_df.iloc[-1]["close"])
 
         # Detect ranges for each timeframe (convert to list for range detection)
@@ -9627,7 +9701,9 @@ async def get_po3_schematics(symbol: Optional[str] = None):
         if not dfs:
             return JSONResponse({"error": "Failed to fetch candle data"}, status_code=500)
 
-        price_df = dfs.get("ltf") or dfs.get("mtf") or dfs.get("htf")
+        price_df = next((dfs[k] for k in ("ltf", "mtf", "htf") if k in dfs and not dfs[k].empty), None)
+        if price_df is None or price_df.empty:
+            return JSONResponse({"error": "No valid candle data available"}, status_code=500)
         current_price = float(price_df.iloc[-1]["close"])
 
         def df_to_candles(df):
