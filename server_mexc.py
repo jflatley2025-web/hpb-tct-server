@@ -18,6 +18,7 @@ from loguru import logger
 from tct_schematics import detect_tct_schematics
 from po3_schematics import detect_po3_schematics
 from trade_execution import generate_execution_plan, calculate_leverage_comparison, calculate_capital_allocation
+from market_structure import MarketStructure, evaluate_rtz
 
 
 # ================================================================
@@ -112,558 +113,20 @@ logger.info(f"[INIT] HPB–TCT v21.2 Ready — Symbol={SYMBOL}, Port={PORT}")
 # ================================================================
 # MARKET STRUCTURE  (TCT Mentorship – Lecture 1)
 # ================================================================
-# Rules implemented from PDF:
-#   1. 6-candle rule for pivots: 2 consecutive bullish + 2 consecutive
-#      bearish (or vice-versa) stacked = 6 candles.  Inside-bar candles
-#      do NOT count.
-#   2. Market structure HIGH confirmed when price revisits the MS low.
-#      MS HIGH = highest point between low creation and low re-touch.
-#   3. Market structure LOW confirmed when price revisits the MS high.
-#      MS LOW = lowest point between high creation and high re-touch.
-#   4. BOS = closing price above MS high (bullish) or below MS low
-#      (bearish).  Must be a candle CLOSE, not just a wick.
-#   5. Valid bullish structure: L → H → HL → HH.
-#      Valid bearish structure: H → L → LH → LL.
-#   6. Three levels of structure:
-#        Level 1 – primary trend direction (most important).
-#        Level 2 – always opposite direction of Level 1.
-#        Level 3 – refined structure of most recent Level 2 expansion.
-#      Domino effect: break L3 → confirms rotation to L2,
-#                     break L2 → confirms rotation to L1.
-#   7. Level 3 can ONLY be used when no S/D zone protects price from
-#      reaching Level 1.
-#   8. Expectational Order Flow (EOF):
-#        Bullish trend → expect HL for HH.
-#        Bearish trend → expect LH for LL.
-#        BOS in opposite direction = trend shift.
+# Rebuilt implementation now lives in market_structure.py
+# MarketStructure class imported at top of file.
+# See market_structure.py for full documentation of:
+#   - 6-candle rule pivots (inside bar exclusion)
+#   - MSH/MSL confirmation (revisit rule)
+#   - BOS with Good/Bad quality classification
+#   - Wick/SFP detection (3 post-wick scenarios)
+#   - CHoCH via domino effect
+#   - Level 1/2/3 hierarchy (direction-based)
+#   - Domino Effect confirmation chain (L3 → L2 → L1)
+#   - RTZ quality scoring
+#   - Trend classification + trend shift detection
+#   - Expectational Order Flow (EOF)
 # ================================================================
-
-class MarketStructure:
-    """
-    TCT Lecture 1 – Market Structure detection engine.
-
-    Detects valid pivot points using the 6-candle rule, classifies
-    market structure into Level 1 / Level 2 / Level 3 hierarchies,
-    identifies BOS (Break of Structure) events, and derives
-    Expectational Order Flow for all downstream TCT steps.
-    """
-
-    # ---- helpers ------------------------------------------------
-
-    @staticmethod
-    def _is_inside_bar(candle, prev_candle) -> bool:
-        """Inside bar: high and low are inside the previous bar's high and low."""
-        return (float(candle["high"]) <= float(prev_candle["high"]) and
-                float(candle["low"]) >= float(prev_candle["low"]))
-
-    @staticmethod
-    def _is_bullish_candle(candle) -> bool:
-        if "open" in candle.index:
-            return float(candle["close"]) > float(candle["open"])
-        # Fallback: treat as bullish if close > low midpoint (no open available)
-        return float(candle["close"]) > (float(candle["high"]) + float(candle["low"])) / 2
-
-    @staticmethod
-    def _is_bearish_candle(candle) -> bool:
-        if "open" in candle.index:
-            return float(candle["close"]) < float(candle["open"])
-        # Fallback: treat as bearish if close < high/low midpoint
-        return float(candle["close"]) < (float(candle["high"]) + float(candle["low"])) / 2
-
-    # ---- 6-candle rule pivot detection --------------------------
-
-    @staticmethod
-    def _find_6cr_pivots(candles: pd.DataFrame) -> Dict:
-        """
-        Find valid pivot highs and lows using the TCT 6-candle rule.
-
-        A valid pivot HIGH requires:
-          - At least 2 consecutive non-inside-bar bullish candles leading up
-          - Followed by at least 2 consecutive non-inside-bar bearish candles
-          - The pivot is the candle with the highest HIGH in the transition zone
-
-        A valid pivot LOW requires:
-          - At least 2 consecutive non-inside-bar bearish candles leading down
-          - Followed by at least 2 consecutive non-inside-bar bullish candles
-          - The pivot is the candle with the lowest LOW in the transition zone
-
-        Inside bar candles are skipped (they don't count toward the 2-2 rule).
-        """
-        n = len(candles)
-        if n < 6:
-            return {"highs": [], "lows": []}
-
-        # Pre-compute candle direction (skip inside bars)
-        directions = []  # list of (original_idx, 'bull' | 'bear' | 'inside')
-        for i in range(n):
-            c = candles.iloc[i]
-            if i > 0 and MarketStructure._is_inside_bar(c, candles.iloc[i - 1]):
-                directions.append((i, "inside"))
-            elif MarketStructure._is_bullish_candle(c):
-                directions.append((i, "bull"))
-            elif MarketStructure._is_bearish_candle(c):
-                directions.append((i, "bear"))
-            else:
-                # doji – treat as inside
-                directions.append((i, "inside"))
-
-        # Filter out inside bars for sequence detection
-        non_inside = [(idx, d) for idx, d in directions if d != "inside"]
-
-        pivot_highs = []
-        pivot_lows = []
-
-        # Slide through non-inside candles looking for 2-bull then 2-bear (pivot high)
-        # and 2-bear then 2-bull (pivot low)
-        for k in range(len(non_inside) - 3):
-            i0, d0 = non_inside[k]
-            i1, d1 = non_inside[k + 1]
-            i2, d2 = non_inside[k + 2]
-            i3, d3 = non_inside[k + 3]
-
-            # Pivot HIGH: 2 bull → 2 bear
-            if d0 == "bull" and d1 == "bull" and d2 == "bear" and d3 == "bear":
-                # The pivot HIGH is the candle with the highest high in the
-                # range from i0..i3 (inclusive of any inside bars between them)
-                search_start = i0
-                search_end = i3
-                best_idx = search_start
-                best_high = float(candles.iloc[search_start]["high"])
-                for j in range(search_start, min(search_end + 1, n)):
-                    h = float(candles.iloc[j]["high"])
-                    if h > best_high:
-                        best_high = h
-                        best_idx = j
-                # Avoid duplicates at same index
-                if not pivot_highs or pivot_highs[-1]["idx"] != best_idx:
-                    pivot_highs.append({"idx": int(best_idx), "price": best_high})
-
-            # Pivot LOW: 2 bear → 2 bull
-            if d0 == "bear" and d1 == "bear" and d2 == "bull" and d3 == "bull":
-                search_start = i0
-                search_end = i3
-                best_idx = search_start
-                best_low = float(candles.iloc[search_start]["low"])
-                for j in range(search_start, min(search_end + 1, n)):
-                    lo = float(candles.iloc[j]["low"])
-                    if lo < best_low:
-                        best_low = lo
-                        best_idx = j
-                if not pivot_lows or pivot_lows[-1]["idx"] != best_idx:
-                    pivot_lows.append({"idx": int(best_idx), "price": best_low})
-
-        return {"highs": pivot_highs, "lows": pivot_lows}
-
-    # ---- Confirmed MS highs / lows (Lecture 1 rule) -------------
-
-    @staticmethod
-    def _confirm_structure_points(candles: pd.DataFrame, pivot_highs: list, pivot_lows: list) -> Dict:
-        """
-        Confirm market structure highs and lows per Lecture 1:
-
-        MS HIGH = highest point between two consecutive lows, confirmed
-                  when the second low is created (price revisits the low).
-        MS LOW  = lowest point between two consecutive highs, confirmed
-                  when the second high is created (price revisits the high).
-
-        Returns confirmed MS highs and MS lows with confirmation indices.
-        """
-        ms_highs = []
-        ms_lows = []
-
-        # Confirmed MS Highs: between consecutive pivot lows, the highest high
-        for i in range(len(pivot_lows) - 1):
-            low1 = pivot_lows[i]
-            low2 = pivot_lows[i + 1]
-            start_idx = low1["idx"]
-            end_idx = low2["idx"]
-            if start_idx >= end_idx:
-                continue
-            # Find highest high in the range between the two lows
-            best_high = -float('inf')
-            best_idx = start_idx
-            for j in range(start_idx, min(end_idx + 1, len(candles))):
-                h = float(candles.iloc[j]["high"])
-                if h > best_high:
-                    best_high = h
-                    best_idx = j
-            ms_highs.append({
-                "idx": int(best_idx),
-                "price": best_high,
-                "confirmed_at_idx": int(end_idx),
-                "confirmed_by_low_idx": int(low2["idx"]),
-            })
-
-        # Confirmed MS Lows: between consecutive pivot highs, the lowest low
-        for i in range(len(pivot_highs) - 1):
-            high1 = pivot_highs[i]
-            high2 = pivot_highs[i + 1]
-            start_idx = high1["idx"]
-            end_idx = high2["idx"]
-            if start_idx >= end_idx:
-                continue
-            best_low = float('inf')
-            best_idx = start_idx
-            for j in range(start_idx, min(end_idx + 1, len(candles))):
-                lo = float(candles.iloc[j]["low"])
-                if lo < best_low:
-                    best_low = lo
-                    best_idx = j
-            ms_lows.append({
-                "idx": int(best_idx),
-                "price": best_low,
-                "confirmed_at_idx": int(end_idx),
-                "confirmed_by_high_idx": int(high2["idx"]),
-            })
-
-        return {"ms_highs": ms_highs, "ms_lows": ms_lows}
-
-    # ---- BOS detection ------------------------------------------
-
-    @staticmethod
-    def _detect_bos_events(candles: pd.DataFrame, ms_highs: list, ms_lows: list) -> list:
-        """
-        Detect all Break of Structure events.
-
-        Bullish BOS: candle CLOSE above a confirmed MS high.
-        Bearish BOS: candle CLOSE below a confirmed MS low.
-
-        Returns list of BOS events with type, price, index, and which
-        MS level was broken.
-        """
-        bos_events = []
-        n = len(candles)
-
-        for ms_h in ms_highs:
-            # Search candles after the MS high was confirmed
-            search_start = ms_h["confirmed_at_idx"] + 1
-            for j in range(search_start, n):
-                close_price = float(candles.iloc[j]["close"])
-                if close_price > ms_h["price"]:
-                    bos_events.append({
-                        "type": "bullish",
-                        "bos_idx": int(j),
-                        "bos_price": close_price,
-                        "broken_level": ms_h["price"],
-                        "broken_level_idx": ms_h["idx"],
-                    })
-                    break  # Only first BOS per MS high
-
-        for ms_l in ms_lows:
-            search_start = ms_l["confirmed_at_idx"] + 1
-            for j in range(search_start, n):
-                close_price = float(candles.iloc[j]["close"])
-                if close_price < ms_l["price"]:
-                    bos_events.append({
-                        "type": "bearish",
-                        "bos_idx": int(j),
-                        "bos_price": close_price,
-                        "broken_level": ms_l["price"],
-                        "broken_level_idx": ms_l["idx"],
-                    })
-                    break
-
-        # Sort by index
-        bos_events.sort(key=lambda x: x["bos_idx"])
-        return bos_events
-
-    # ---- Trend classification -----------------------------------
-
-    @staticmethod
-    def _classify_trend(ms_highs: list, ms_lows: list) -> str:
-        """
-        Classify trend from confirmed MS points.
-
-        Bullish: HH + HL (higher highs AND higher lows)
-        Bearish: LH + LL (lower highs AND lower lows)
-        Ranging: mixed
-        Neutral: insufficient data
-        """
-        if len(ms_highs) < 2 or len(ms_lows) < 2:
-            if len(ms_highs) >= 2:
-                h1, h2 = ms_highs[-2]["price"], ms_highs[-1]["price"]
-                return "bullish" if h2 > h1 else "bearish"
-            if len(ms_lows) >= 2:
-                l1, l2 = ms_lows[-2]["price"], ms_lows[-1]["price"]
-                return "bullish" if l2 > l1 else "bearish"
-            return "neutral"
-
-        h1, h2 = ms_highs[-2]["price"], ms_highs[-1]["price"]
-        l1, l2 = ms_lows[-2]["price"], ms_lows[-1]["price"]
-
-        higher_highs = h2 > h1
-        higher_lows = l2 > l1
-        lower_highs = h2 < h1
-        lower_lows = l2 < l1
-
-        if higher_highs and higher_lows:
-            return "bullish"
-        elif lower_highs and lower_lows:
-            return "bearish"
-        else:
-            return "ranging"
-
-    # ---- Expectational Order Flow (EOF) -------------------------
-
-    @staticmethod
-    def _get_eof(trend: str, bos_events: list) -> Dict:
-        """
-        Determine Expectational Order Flow.
-
-        Bullish trend + bullish BOS → expect HL for HH (continuation)
-        Bearish trend + bearish BOS → expect LH for LL (continuation)
-        Bullish trend + bearish BOS → trend shift, expect LH for LL
-        Bearish trend + bullish BOS → trend shift, expect HL for HH
-        """
-        last_bos = bos_events[-1] if bos_events else None
-
-        if not last_bos:
-            if trend == "bullish":
-                return {"expectation": "higher_low_for_higher_high", "trend_shift": False, "bias": "bullish"}
-            elif trend == "bearish":
-                return {"expectation": "lower_high_for_lower_low", "trend_shift": False, "bias": "bearish"}
-            return {"expectation": "undetermined", "trend_shift": False, "bias": "neutral"}
-
-        if trend == "bullish" and last_bos["type"] == "bullish":
-            return {"expectation": "higher_low_for_higher_high", "trend_shift": False, "bias": "bullish"}
-        elif trend == "bearish" and last_bos["type"] == "bearish":
-            return {"expectation": "lower_high_for_lower_low", "trend_shift": False, "bias": "bearish"}
-        elif trend == "bullish" and last_bos["type"] == "bearish":
-            return {"expectation": "lower_high_for_lower_low", "trend_shift": True, "bias": "bearish"}
-        elif trend == "bearish" and last_bos["type"] == "bullish":
-            return {"expectation": "higher_low_for_higher_high", "trend_shift": True, "bias": "bullish"}
-        else:
-            return {"expectation": "undetermined", "trend_shift": False, "bias": "neutral"}
-
-    # ---- Level 1 / 2 / 3 structure hierarchy --------------------
-
-    @staticmethod
-    def _classify_levels(candles: pd.DataFrame, ms_highs: list, ms_lows: list,
-                         bos_events: list, trend: str) -> Dict:
-        """
-        Classify market structure into Level 1, 2, and 3.
-
-        Level 1: Primary trend – drawn bottom-to-top (bullish) or
-                 top-to-bottom (bearish). Most important structure pool.
-        Level 2: Always opposite direction of Level 1.
-                 If L1 up → L2 drawn top-to-bottom (trending down).
-        Level 3: Refined structure of most recent Level 2 expansion.
-                 Used via domino effect for early entries.
-        """
-        result = {
-            "level_1": {"trend": trend, "highs": [], "lows": [], "bos": []},
-            "level_2": {"trend": "", "highs": [], "lows": [], "bos": []},
-            "level_3": {"trend": "", "highs": [], "lows": [], "bos": []},
-        }
-
-        if not ms_highs and not ms_lows:
-            return result
-
-        # Level 1 = the main trend's confirmed points
-        result["level_1"]["highs"] = ms_highs
-        result["level_1"]["lows"] = ms_lows
-        result["level_1"]["bos"] = bos_events
-
-        # Level 2 = opposite direction
-        # If Level 1 bullish (bottom-to-top), Level 2 is drawn top-to-bottom
-        # Level 2 looks at the LAST expansion leg and finds counter-trend structure
-        l2_trend = "bearish" if trend == "bullish" else "bullish" if trend == "bearish" else "neutral"
-        result["level_2"]["trend"] = l2_trend
-
-        if len(ms_highs) >= 1 and len(ms_lows) >= 1:
-            # Level 2 focuses on the pullback from the most recent MS high
-            # (bullish L1) or from the most recent MS low (bearish L1).
-            if trend == "bullish" and ms_highs:
-                # L2 = counter-trend within the last expansion up
-                last_high = ms_highs[-1]
-                # Find structure within the pullback from last high
-                l2_start = last_high["idx"]
-                l2_end = len(candles) - 1
-                if l2_end - l2_start > 5:
-                    l2_subset = candles.iloc[l2_start:l2_end + 1].reset_index(drop=True)
-                    l2_pivots = MarketStructure._find_6cr_pivots(l2_subset)
-                    l2_confirmed = MarketStructure._confirm_structure_points(
-                        l2_subset, l2_pivots["highs"], l2_pivots["lows"]
-                    )
-                    # Adjust indices back to original
-                    for h in l2_confirmed["ms_highs"]:
-                        h["idx"] += l2_start
-                        h["confirmed_at_idx"] += l2_start
-                    for lo in l2_confirmed["ms_lows"]:
-                        lo["idx"] += l2_start
-                        lo["confirmed_at_idx"] += l2_start
-                    result["level_2"]["highs"] = l2_confirmed["ms_highs"]
-                    result["level_2"]["lows"] = l2_confirmed["ms_lows"]
-                    # L2 BOS
-                    l2_bos = MarketStructure._detect_bos_events(
-                        candles, l2_confirmed["ms_highs"], l2_confirmed["ms_lows"]
-                    )
-                    result["level_2"]["bos"] = l2_bos
-
-            elif trend == "bearish" and ms_lows:
-                last_low = ms_lows[-1]
-                l2_start = last_low["idx"]
-                l2_end = len(candles) - 1
-                if l2_end - l2_start > 5:
-                    l2_subset = candles.iloc[l2_start:l2_end + 1].reset_index(drop=True)
-                    l2_pivots = MarketStructure._find_6cr_pivots(l2_subset)
-                    l2_confirmed = MarketStructure._confirm_structure_points(
-                        l2_subset, l2_pivots["highs"], l2_pivots["lows"]
-                    )
-                    for h in l2_confirmed["ms_highs"]:
-                        h["idx"] += l2_start
-                        h["confirmed_at_idx"] += l2_start
-                    for lo in l2_confirmed["ms_lows"]:
-                        lo["idx"] += l2_start
-                        lo["confirmed_at_idx"] += l2_start
-                    result["level_2"]["highs"] = l2_confirmed["ms_highs"]
-                    result["level_2"]["lows"] = l2_confirmed["ms_lows"]
-                    l2_bos = MarketStructure._detect_bos_events(
-                        candles, l2_confirmed["ms_highs"], l2_confirmed["ms_lows"]
-                    )
-                    result["level_2"]["bos"] = l2_bos
-
-        # Level 3 = refined structure of most recent Level 2 expansion
-        l2_highs = result["level_2"]["highs"]
-        l2_lows = result["level_2"]["lows"]
-        l3_trend = trend  # L3 refines L2's last expansion, same dir as L1
-
-        if l2_trend == "bearish" and l2_lows:
-            # Most recent L2 expansion is the last downward leg
-            last_l2_low = l2_lows[-1]
-            # Refine structure from the high before this low down to the low
-            l3_start = max(0, last_l2_low["idx"] - 20)
-            l3_end = min(len(candles) - 1, last_l2_low["idx"] + 10)
-            if l3_end - l3_start > 5:
-                l3_subset = candles.iloc[l3_start:l3_end + 1].reset_index(drop=True)
-                l3_pivots = MarketStructure._find_6cr_pivots(l3_subset)
-                l3_confirmed = MarketStructure._confirm_structure_points(
-                    l3_subset, l3_pivots["highs"], l3_pivots["lows"]
-                )
-                for h in l3_confirmed["ms_highs"]:
-                    h["idx"] += l3_start
-                    h["confirmed_at_idx"] += l3_start
-                for lo in l3_confirmed["ms_lows"]:
-                    lo["idx"] += l3_start
-                    lo["confirmed_at_idx"] += l3_start
-                result["level_3"]["highs"] = l3_confirmed["ms_highs"]
-                result["level_3"]["lows"] = l3_confirmed["ms_lows"]
-                result["level_3"]["trend"] = l3_trend
-                l3_bos = MarketStructure._detect_bos_events(
-                    candles, l3_confirmed["ms_highs"], l3_confirmed["ms_lows"]
-                )
-                result["level_3"]["bos"] = l3_bos
-
-        elif l2_trend == "bullish" and l2_highs:
-            last_l2_high = l2_highs[-1]
-            l3_start = max(0, last_l2_high["idx"] - 20)
-            l3_end = min(len(candles) - 1, last_l2_high["idx"] + 10)
-            if l3_end - l3_start > 5:
-                l3_subset = candles.iloc[l3_start:l3_end + 1].reset_index(drop=True)
-                l3_pivots = MarketStructure._find_6cr_pivots(l3_subset)
-                l3_confirmed = MarketStructure._confirm_structure_points(
-                    l3_subset, l3_pivots["highs"], l3_pivots["lows"]
-                )
-                for h in l3_confirmed["ms_highs"]:
-                    h["idx"] += l3_start
-                    h["confirmed_at_idx"] += l3_start
-                for lo in l3_confirmed["ms_lows"]:
-                    lo["idx"] += l3_start
-                    lo["confirmed_at_idx"] += l3_start
-                result["level_3"]["highs"] = l3_confirmed["ms_highs"]
-                result["level_3"]["lows"] = l3_confirmed["ms_lows"]
-                result["level_3"]["trend"] = l3_trend
-                l3_bos = MarketStructure._detect_bos_events(
-                    candles, l3_confirmed["ms_highs"], l3_confirmed["ms_lows"]
-                )
-                result["level_3"]["bos"] = l3_bos
-
-        return result
-
-    # ---- Main public API ----------------------------------------
-
-    @staticmethod
-    def detect_pivots(candles: pd.DataFrame) -> Dict:
-        """
-        Full TCT Lecture 1 market structure analysis.
-
-        Returns a dict compatible with the old API (has 'highs', 'lows',
-        'trend') PLUS new fields: 'ms_highs', 'ms_lows', 'bos_events',
-        'eof', 'levels', 'pivot_highs_6cr', 'pivot_lows_6cr'.
-        """
-        if len(candles) < 6:
-            return {
-                "highs": [], "lows": [], "trend": "neutral",
-                "ms_highs": [], "ms_lows": [], "bos_events": [],
-                "eof": {"expectation": "undetermined", "trend_shift": False, "bias": "neutral"},
-                "levels": {
-                    "level_1": {"trend": "neutral", "highs": [], "lows": [], "bos": []},
-                    "level_2": {"trend": "neutral", "highs": [], "lows": [], "bos": []},
-                    "level_3": {"trend": "neutral", "highs": [], "lows": [], "bos": []},
-                },
-                "pivot_highs_6cr": [], "pivot_lows_6cr": [],
-            }
-
-        # Step 1: Find 6-candle-rule validated pivots
-        raw_pivots = MarketStructure._find_6cr_pivots(candles)
-        pivot_highs = raw_pivots["highs"]
-        pivot_lows = raw_pivots["lows"]
-
-        # Step 2: Confirm MS highs and MS lows (Lecture 1 confirmation rule)
-        confirmed = MarketStructure._confirm_structure_points(candles, pivot_highs, pivot_lows)
-        ms_highs = confirmed["ms_highs"]
-        ms_lows = confirmed["ms_lows"]
-
-        # Step 3: Classify trend
-        trend = MarketStructure._classify_trend(ms_highs, ms_lows)
-
-        # Step 4: Detect BOS events
-        bos_events = MarketStructure._detect_bos_events(candles, ms_highs, ms_lows)
-
-        # Step 5: Determine Expectational Order Flow
-        eof = MarketStructure._get_eof(trend, bos_events)
-
-        # Step 6: Classify Level 1 / 2 / 3
-        levels = MarketStructure._classify_levels(candles, ms_highs, ms_lows, bos_events, trend)
-
-        return {
-            # Backward-compatible fields (old API)
-            "highs": pivot_highs,
-            "lows": pivot_lows,
-            "trend": trend,
-            # New detailed fields
-            "ms_highs": ms_highs,
-            "ms_lows": ms_lows,
-            "bos_events": bos_events,
-            "eof": eof,
-            "levels": levels,
-            "pivot_highs_6cr": pivot_highs,
-            "pivot_lows_6cr": pivot_lows,
-        }
-
-    @staticmethod
-    def detect_bos(candles: pd.DataFrame, pivots: Dict) -> Optional[Dict]:
-        """
-        Backward-compatible BOS detection.
-        Now uses confirmed MS highs/lows and checks candle CLOSE (not wick).
-        """
-        bos_events = pivots.get("bos_events", [])
-        if bos_events:
-            last_bos = bos_events[-1]
-            return {"type": last_bos["type"], "price": last_bos["bos_price"]}
-
-        # Fallback: check current close against last MS levels
-        ms_highs = pivots.get("ms_highs", pivots.get("highs", []))
-        ms_lows = pivots.get("ms_lows", pivots.get("lows", []))
-        if not ms_highs and not ms_lows:
-            return None
-
-        price = float(candles.iloc[-1]["close"])
-        if ms_highs and price > ms_highs[-1]["price"]:
-            return {"type": "bullish", "price": price}
-        if ms_lows and price < ms_lows[-1]["price"]:
-            return {"type": "bearish", "price": price}
-        return None
 
 # ================================================================
 # FAIR VALUE GAP (FVG) DETECTION
@@ -5958,25 +5421,6 @@ async def dashboard():
         </div>
 
         <div class="metrics-panel">
-            <!-- Highest Probability Setup -->
-            <div class="setup-panel" id="setupPanel">
-                <h3>Highest Probability Setup <span class="setup-direction none" id="setupDirection">--</span></h3>
-                <div id="setupContent">
-                    <div class="metric-row"><span class="label">Analyzing timeframe...</span></div>
-                </div>
-                <div class="setup-confidence">
-                    <div class="setup-confidence-fill" id="setupConfidence" style="width: 0%; background: #ffc107;"></div>
-                </div>
-            </div>
-
-            <!-- Forming TCT Models -->
-            <div class="forming-panel" id="formingPanel">
-                <h3>Forming Models <span class="forming-count" id="formingCount">--</span></h3>
-                <div id="formingContent">
-                    <div class="forming-empty">Scanning for forming schematics...</div>
-                </div>
-            </div>
-
             <!-- Top 5 Setups (Range Probability Scanner) -->
             <div class="top5-panel" id="top5Panel">
                 <h3>Top 5 Setups <span class="top5-scanner-status" id="scannerStatus">Initializing...</span></h3>
@@ -6156,6 +5600,25 @@ async def dashboard():
                     <div class="metric-row">
                         <span class="label">Loading...</span>
                     </div>
+                </div>
+            </div>
+
+            <!-- Forming TCT Models (derived from current pair analysis) -->
+            <div class="forming-panel" id="formingPanel">
+                <h3>Forming Models <span class="forming-count" id="formingCount">--</span></h3>
+                <div id="formingContent">
+                    <div class="forming-empty">Select a pair to analyze forming schematics...</div>
+                </div>
+            </div>
+
+            <!-- Highest Probability Setup (derived from all sections above) -->
+            <div class="setup-panel" id="setupPanel">
+                <h3>Highest Probability Setup <span class="setup-direction none" id="setupDirection">--</span></h3>
+                <div id="setupContent">
+                    <div class="metric-row"><span class="label">Select a pair to analyze...</span></div>
+                </div>
+                <div class="setup-confidence">
+                    <div class="setup-confidence-fill" id="setupConfidence" style="width: 0%; background: #ffc107;"></div>
                 </div>
             </div>
 
@@ -6580,6 +6043,17 @@ async def dashboard():
         let isLoading = false;
         let lastCandles = []; // Store candles for index-to-time mapping
 
+        // HTF context cache: stores fetched HTF data per symbol so timeframe changes reuse it
+        let htfCache = {
+            symbol: null,
+            rangesData: null,
+            zonesData: null,
+            liqData: null,
+            valData: null,
+            schematicsData: null,
+            po3Data: null,
+        };
+
         // Fetch with retry and timeout
         async function fetchWithRetry(url, options = {}, retries = 3, timeout = 20000) {
             for (let i = 0; i < retries; i++) {
@@ -6796,7 +6270,10 @@ async def dashboard():
             if (isLoading) return;
             isLoading = true;
 
-            // Show loading states
+            // Determine if this is a new pair (full fetch) or just a timeframe change (reuse HTF cache)
+            const isNewPair = (htfCache.symbol !== currentSymbol);
+
+            // Show loading states for all sections
             setLoading('trendBadge', true);
             setLoading('zoneBadge', true);
             setLoading('zoneCount', true);
@@ -6804,89 +6281,204 @@ async def dashboard():
             setLoading('actionBadge', true);
             setLoading('schematicsBadge', true);
             setLoading('po3Badge', true);
+            document.getElementById('setupDirection').textContent = '...';
+            document.getElementById('setupDirection').className = 'setup-direction none';
+            document.getElementById('setupContent').innerHTML = '<div class="metric-row"><span class="label">Running analysis pipeline...</span></div>';
+            document.getElementById('setupConfidence').style.width = '0%';
+            document.getElementById('formingCount').textContent = '...';
+            document.getElementById('formingContent').innerHTML = '<div class="forming-empty">Analyzing pair...</div>';
 
-            // Fetch candles and update chart
+            // ─── STEP 1: Fetch candles and update chart ───
             lastCandles = await fetchCandles(currentTimeframe, getCandleLimit(currentTimeframe));
             if (lastCandles.length > 0) {
                 candleSeries.setData(lastCandles);
                 const lastPrice = lastCandles[lastCandles.length - 1].close;
                 document.getElementById('currentPrice').textContent = '$' + lastPrice.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
             }
-
             clearPriceLines();
 
-            // Fetch all API data in parallel with individual error handling
-            const [rangesResult, zonesResult, liqResult, valResult, schematicsResult, po3Result] = await Promise.allSettled([
-                fetchWithRetry(`/api/ranges?symbol=${currentSymbol}`, {}, 3, 25000),
-                fetchWithRetry(`/api/zones?symbol=${currentSymbol}`, {}, 3, 25000),
-                fetchWithRetry(`/api/liquidity?symbol=${currentSymbol}`, {}, 3, 25000),
-                fetchWithRetry(`/api/validate?symbol=${currentSymbol}`, {}, 3, 25000),
-                fetchWithRetry(`/api/schematics?symbol=${currentSymbol}`, {}, 3, 30000),
-                fetchWithRetry(`/api/po3?symbol=${currentSymbol}`, {}, 3, 30000)
-            ]);
+            // For HTF data: fetch fresh if new pair, reuse cache if just timeframe change
+            let rangesData = null, zonesData = null, liqData = null, valData = null, schematicsData = null, po3Data = null;
 
-            // Process ranges (pass candles for range band)
-            if (rangesResult.status === 'fulfilled' && !rangesResult.value.error) {
-                updateRangesUI(rangesResult.value, lastCandles);
+            if (isNewPair) {
+                // ─── STEP 2: Market Structure + Active Range + Deviations ───
+                try {
+                    rangesData = await fetchWithRetry(`/api/ranges?symbol=${currentSymbol}`, {}, 3, 25000);
+                    if (rangesData && !rangesData.error) {
+                        updateRangesUI(rangesData, lastCandles);
+                    } else { setError('trendBadge'); setError('zoneBadge'); }
+                } catch (e) { console.error('Ranges error:', e); setError('trendBadge'); setError('zoneBadge'); }
+
+                // ─── STEP 3: S&D Zones ───
+                try {
+                    zonesData = await fetchWithRetry(`/api/zones?symbol=${currentSymbol}`, {}, 3, 25000);
+                    if (zonesData && !zonesData.error) {
+                        updateZonesUI(zonesData);
+                    } else { setError('zoneCount'); }
+                } catch (e) { console.error('Zones error:', e); setError('zoneCount'); }
+
+                // ─── STEP 4: Liquidity Pools ───
+                try {
+                    liqData = await fetchWithRetry(`/api/liquidity?symbol=${currentSymbol}`, {}, 3, 25000);
+                    if (liqData && !liqData.error) {
+                        updateLiquidityUI(liqData, lastCandles);
+                    } else { setError('liqCount'); }
+                } catch (e) { console.error('Liquidity error:', e); setError('liqCount'); }
+
+                // ─── STEP 5: TCT Schematics ───
+                try {
+                    schematicsData = await fetchWithRetry(`/api/schematics?symbol=${currentSymbol}`, {}, 3, 30000);
+                    if (schematicsData && !schematicsData.error) {
+                        updateSchematicsUI(schematicsData);
+                    } else { setError('schematicsBadge'); }
+                } catch (e) { console.error('Schematics error:', e); setError('schematicsBadge'); }
+
+                // ─── STEP 6: PO3 Schematics ───
+                try {
+                    po3Data = await fetchWithRetry(`/api/po3?symbol=${currentSymbol}`, {}, 3, 30000);
+                    if (po3Data && !po3Data.error) {
+                        updatePO3UI(po3Data);
+                    } else { setError('po3Badge'); }
+                } catch (e) { console.error('PO3 error:', e); setError('po3Badge'); }
+
+                // ─── STEP 7: 7-Gate Validation ───
+                try {
+                    valData = await fetchWithRetry(`/api/validate?symbol=${currentSymbol}`, {}, 3, 25000);
+                    if (valData) {
+                        updateValidationUI(valData);
+                    } else { setError('actionBadge'); }
+                } catch (e) { console.error('Validation error:', e); setError('actionBadge'); }
+
+                // Cache all HTF data for this symbol
+                htfCache = {
+                    symbol: currentSymbol,
+                    rangesData, zonesData, liqData, valData, schematicsData, po3Data,
+                };
+
             } else {
-                console.error('Ranges error:', rangesResult.reason || rangesResult.value?.error);
-                setError('trendBadge');
-                setError('zoneBadge');
+                // ─── TIMEFRAME CHANGE: Reuse cached HTF data, update chart overlays ───
+                rangesData = htfCache.rangesData;
+                zonesData = htfCache.zonesData;
+                liqData = htfCache.liqData;
+                valData = htfCache.valData;
+                schematicsData = htfCache.schematicsData;
+                po3Data = htfCache.po3Data;
+
+                // Re-render UI with cached data (updates chart overlays for new timeframe candles)
+                if (rangesData && !rangesData.error) updateRangesUI(rangesData, lastCandles);
+                else { setError('trendBadge'); setError('zoneBadge'); }
+                if (zonesData && !zonesData.error) updateZonesUI(zonesData);
+                else setError('zoneCount');
+                if (liqData && !liqData.error) updateLiquidityUI(liqData, lastCandles);
+                else setError('liqCount');
+                if (schematicsData && !schematicsData.error) updateSchematicsUI(schematicsData);
+                else setError('schematicsBadge');
+                if (po3Data && !po3Data.error) updatePO3UI(po3Data);
+                else setError('po3Badge');
+                if (valData) updateValidationUI(valData);
+                else setError('actionBadge');
             }
 
-            // Process zones
-            if (zonesResult.status === 'fulfilled' && !zonesResult.value.error) {
-                updateZonesUI(zonesResult.value);
-            } else {
-                console.error('Zones error:', zonesResult.reason || zonesResult.value?.error);
-                setError('zoneCount');
-            }
+            // ─── STEP 8: Forming Models (derived from current pair's schematic data) ───
+            deriveFormingModels(schematicsData, po3Data);
 
-            // Process liquidity (pass candles for curve drawing)
-            if (liqResult.status === 'fulfilled' && !liqResult.value.error) {
-                updateLiquidityUI(liqResult.value, lastCandles);
-            } else {
-                console.error('Liquidity error:', liqResult.reason || liqResult.value?.error);
-                setError('liqCount');
-            }
-
-            // Process validation
-            if (valResult.status === 'fulfilled') {
-                updateValidationUI(valResult.value);
-            } else {
-                console.error('Validation error:', valResult.reason);
-                setError('actionBadge');
-            }
-
-            // Process schematics
-            if (schematicsResult.status === 'fulfilled' && !schematicsResult.value.error) {
-                updateSchematicsUI(schematicsResult.value);
-            } else {
-                console.error('Schematics error:', schematicsResult.reason || schematicsResult.value?.error);
-                setError('schematicsBadge');
-            }
-
-            // Process PO3 schematics
-            if (po3Result.status === 'fulfilled' && !po3Result.value.error) {
-                updatePO3UI(po3Result.value);
-            } else {
-                console.error('PO3 error:', po3Result.reason || po3Result.value?.error);
-                setError('po3Badge');
-            }
-
-            // ===== HIGHEST PROBABILITY SETUP ANALYSIS & TCT CHART OVERLAYS =====
-            const rangesData = rangesResult.status === 'fulfilled' ? rangesResult.value : null;
-            const zonesData = zonesResult.status === 'fulfilled' ? zonesResult.value : null;
-            const liqData = liqResult.status === 'fulfilled' ? liqResult.value : null;
-            const schematicsData = schematicsResult.status === 'fulfilled' ? schematicsResult.value : null;
-            const po3Data = po3Result.status === 'fulfilled' ? po3Result.value : null;
-            const valData = valResult.status === 'fulfilled' ? valResult.value : null;
-
+            // ─── STEP 9: Highest Probability Setup (uses all data from pipeline) ───
             const bestSetup = analyzeHighestProbabilitySetup(rangesData, zonesData, liqData, schematicsData, po3Data, valData, lastCandles);
             renderSetupPanel(bestSetup);
             drawTCTModelOverlays(bestSetup, lastCandles);
 
             isLoading = false;
+        }
+
+        // Derive Forming Models from current pair's HTF+LTF schematic data
+        function deriveFormingModels(schematicsData, po3Data) {
+            const countEl = document.getElementById('formingCount');
+            const contentEl = document.getElementById('formingContent');
+
+            const models = [];
+
+            // Collect TCT schematics across all timeframes
+            if (schematicsData) {
+                const tfGroups = [
+                    { key: 'htf_schematics', label: 'HTF' },
+                    { key: 'mtf_schematics', label: 'MTF' },
+                    { key: 'ltf_schematics', label: 'LTF' },
+                ];
+                tfGroups.forEach(({ key, label }) => {
+                    const group = schematicsData[key];
+                    if (!group || !group.schematics) return;
+                    group.schematics.forEach(s => {
+                        models.push({
+                            source: 'TCT',
+                            tf_label: label,
+                            timeframe: group.timeframe || label,
+                            type: (s.schematic_type || 'unknown').replace(/_/g, ' '),
+                            direction: s.direction || 'unknown',
+                            is_confirmed: !!s.is_confirmed,
+                            quality: s.quality_score || 0,
+                            rr: s.risk_reward || 0,
+                            has_entry: !!(s.entry && s.entry.price),
+                        });
+                    });
+                });
+            }
+
+            // Collect PO3 schematics across all timeframes
+            if (po3Data) {
+                const tfGroups = [
+                    { key: 'htf_po3', label: 'HTF' },
+                    { key: 'mtf_po3', label: 'MTF' },
+                    { key: 'ltf_po3', label: 'LTF' },
+                ];
+                tfGroups.forEach(({ key, label }) => {
+                    const group = po3Data[key];
+                    if (!group || !group.schematics) return;
+                    group.schematics.forEach(p => {
+                        models.push({
+                            source: 'PO3',
+                            tf_label: label,
+                            timeframe: group.timeframe || label,
+                            type: 'PO3 ' + (p.phase || 'range'),
+                            direction: p.direction || 'unknown',
+                            is_confirmed: !!p.has_expansion,
+                            quality: p.quality_score || 0,
+                            rr: p.risk_reward || 0,
+                            has_entry: !!(p.entry && p.entry.price),
+                        });
+                    });
+                });
+            }
+
+            const formingOnly = models.filter(m => !m.is_confirmed);
+            const confirmedOnly = models.filter(m => m.is_confirmed);
+            countEl.textContent = formingOnly.length + ' forming / ' + confirmedOnly.length + ' confirmed';
+
+            if (models.length === 0) {
+                contentEl.innerHTML = '<div class="forming-empty">No forming models detected on this pair</div>';
+                return;
+            }
+
+            // Sort: forming first, then by quality descending
+            models.sort((a, b) => {
+                if (a.is_confirmed !== b.is_confirmed) return a.is_confirmed ? 1 : -1;
+                return b.quality - a.quality;
+            });
+
+            let html = '';
+            models.forEach(m => {
+                const dirCls = m.direction === 'bullish' ? 'bullish' : m.direction === 'bearish' ? 'bearish' : '';
+                const statusCls = m.is_confirmed ? 'confirmed' : 'forming';
+                const typeCls = m.direction === 'bullish' ? 'accum' : 'dist';
+
+                html += '<div class="forming-link ' + dirCls + '">';
+                html += '<span class="pair-name">' + m.source + '</span>';
+                html += '<span class="model-type ' + typeCls + '">' + m.type + '</span>';
+                html += '<span class="tf-badge">' + m.timeframe.toUpperCase() + '</span>';
+                html += '<span class="status-dot ' + statusCls + '" title="' + (m.is_confirmed ? 'Confirmed' : 'Forming') + '"></span>';
+                html += '</div>';
+            });
+
+            contentEl.innerHTML = html;
         }
 
         function updateRangesUI(data, candles = []) {
@@ -8720,75 +8312,18 @@ async def dashboard():
             });
         }
 
-        // ===== FORMING MODELS PANEL =====
-
-        async function fetchFormingSetups() {
-            try {
-                const data = await fetchWithRetry('/api/forming-setups', {}, 2, 15000);
-                if (data) {
-                    renderFormingPanel(data.forming_setups || []);
-                }
-            } catch (e) {
-                console.error('Failed to fetch forming setups:', e);
-            }
-        }
-
-        function renderFormingPanel(setups) {
-            const countEl = document.getElementById('formingCount');
-            const contentEl = document.getElementById('formingContent');
-
-            const formingOnly = setups.filter(s => !s.is_confirmed);
-            const confirmedOnly = setups.filter(s => s.is_confirmed);
-
-            countEl.textContent = formingOnly.length + ' forming / ' + confirmedOnly.length + ' confirmed';
-
-            if (setups.length === 0) {
-                contentEl.innerHTML = '<div class="forming-empty">No forming models from top 5 pairs yet</div>';
-                return;
-            }
-
-            // Deduplicate by symbol+timeframe+type, prefer forming over confirmed
-            const seen = new Map();
-            setups.forEach(s => {
-                const key = s.symbol + '/' + s.timeframe + '/' + s.setup_type;
-                if (!seen.has(key) || (!s.is_confirmed && seen.get(key).is_confirmed)) {
-                    seen.set(key, s);
-                }
-            });
-
-            let html = '';
-            seen.forEach(s => {
-                const basePair = s.symbol.replace('USDT', '');
-                const dirCls = s.direction === 'bullish' ? 'bullish' : 'bearish';
-                const typeCls = s.direction === 'bullish' ? 'accum' : 'dist';
-                const statusCls = s.is_confirmed ? 'confirmed' : 'forming';
-                const chartUrl = '/schematic-chart?symbol=' + encodeURIComponent(s.symbol) + '&timeframe=' + encodeURIComponent(s.timeframe);
-
-                html += '<a href="' + chartUrl + '" target="_blank" class="forming-link ' + dirCls + '">';
-                html += '<span class="pair-name">' + basePair + '</span>';
-                html += '<span class="model-type ' + typeCls + '">' + s.setup_type + '</span>';
-                html += '<span class="tf-badge">' + s.timeframe.toUpperCase() + '</span>';
-                html += '<span class="status-dot ' + statusCls + '" title="' + (s.is_confirmed ? 'Confirmed' : 'Forming — watch for 3rd tap') + '"></span>';
-                html += '</a>';
-            });
-
-            contentEl.innerHTML = html;
-        }
+        // (Forming models are now derived from current pair's schematic data in deriveFormingModels())
 
         // Initialize
         initChart();
         refreshData();
         fetchTop5Setups();
-        fetchFormingSetups();
 
-        // Auto-refresh every 30 seconds
+        // Auto-refresh every 30 seconds (forming models derived within refreshData)
         setInterval(refreshData, 30000);
 
         // Refresh top 5 every 60 seconds (lightweight — reads cached results)
         setInterval(fetchTop5Setups, 60000);
-
-        // Refresh forming models every 90 seconds
-        setInterval(fetchFormingSetups, 90000);
     </script>
 </body>
 </html>
@@ -9486,8 +9021,10 @@ async def get_tct_schematics(symbol: Optional[str] = None):
         if not dfs:
             return JSONResponse({"error": "Failed to fetch candle data"}, status_code=500)
 
-        # Use finest available timeframe for current price
-        price_df = dfs.get("ltf") or dfs.get("mtf") or dfs.get("htf")
+        # Use finest available timeframe for current price (can't use `or` on DataFrames)
+        price_df = next((dfs[k] for k in ("ltf", "mtf", "htf") if k in dfs and not dfs[k].empty), None)
+        if price_df is None or price_df.empty:
+            return JSONResponse({"error": "No valid candle data available"}, status_code=500)
         current_price = float(price_df.iloc[-1]["close"])
 
         # Detect ranges for each timeframe (convert to list for range detection)
@@ -9627,7 +9164,9 @@ async def get_po3_schematics(symbol: Optional[str] = None):
         if not dfs:
             return JSONResponse({"error": "Failed to fetch candle data"}, status_code=500)
 
-        price_df = dfs.get("ltf") or dfs.get("mtf") or dfs.get("htf")
+        price_df = next((dfs[k] for k in ("ltf", "mtf", "htf") if k in dfs and not dfs[k].empty), None)
+        if price_df is None or price_df.empty:
+            return JSONResponse({"error": "No valid candle data available"}, status_code=500)
         current_price = float(price_df.iloc[-1]["close"])
 
         def df_to_candles(df):
