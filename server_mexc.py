@@ -9527,11 +9527,11 @@ async def get_market_structure_data(symbol: str = "BTCUSDT", timeframe: str = "4
 
 @app.get("/api/ms-pairs")
 async def get_ms_pairs():
-    """Return pairs from pairs.txt for the market structure page dropdown."""
-    pairs_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pairs.txt")
+    """Return pairs from mexc_all_pairs.txt for the market structure page dropdown."""
+    pairs_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mexc_all_pairs.txt")
     try:
         with open(pairs_path, "r") as f:
-            pairs = sorted(set(line.strip() for line in f if line.strip()))
+            pairs = [line.strip() for line in f if line.strip()]
         return {"pairs": pairs}
     except FileNotFoundError:
         return {"pairs": COIN_LIST}
@@ -9685,7 +9685,7 @@ async function loadPairs() {
         (d.pairs || []).forEach(p => {
             const o = document.createElement('option');
             o.value = p; o.textContent = p;
-            if (p === 'BTCUSDT') o.selected = true;
+            if (p === 'BTC_USDT_PERP') o.selected = true;
             sel.appendChild(o);
         });
     } catch(e) { console.error('Failed to load pairs', e); }
