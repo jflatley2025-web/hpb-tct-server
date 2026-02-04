@@ -9376,6 +9376,9 @@ async def get_market_structure_data(symbol: str = "BTCUSDT", timeframe: str = "4
 
     try:
         sym = resolve_symbol(symbol)
+        # Convert PERP pair format (e.g. BRETT_USDT_PERP) to MEXC spot symbol (BRETTUSDT)
+        if "_PERP" in sym:
+            sym = sym.replace("_PERP", "").replace("_", "")
         tf_map = _MS_TF_MAP.get(timeframe, {"ltf": timeframe, "mtf": timeframe, "htf": timeframe})
 
         # Fetch candles for selected TF (primary) + HTF + LTF in parallel
