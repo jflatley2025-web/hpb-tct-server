@@ -9343,6 +9343,737 @@ async def trade_execution_endpoint(
 
 
 # ================================================================
+# MARKET STRUCTURE DEBUG PAGE
+# ================================================================
+# Standalone page for debugging and verifying the market structure
+# algorithm.  Shows candlestick chart with 6CR pivot points,
+# MSH/MSL, BOS events, wick/SFP, Level 1/2/3 hierarchy,
+# and multi-timeframe (LTF/MTF/HTF) market structure overlays.
+# ================================================================
+
+# Multi-timeframe mapping: for any selected TF, define its LTF and HTF
+_MS_TF_MAP = {
+    "1m":  {"ltf": "1m",  "mtf": "5m",  "htf": "15m"},
+    "5m":  {"ltf": "1m",  "mtf": "5m",  "htf": "15m"},
+    "15m": {"ltf": "5m",  "mtf": "15m", "htf": "1h"},
+    "30m": {"ltf": "15m", "mtf": "30m", "htf": "4h"},
+    "1h":  {"ltf": "15m", "mtf": "1h",  "htf": "4h"},
+    "4h":  {"ltf": "1h",  "mtf": "4h",  "htf": "1d"},
+    "1d":  {"ltf": "4h",  "mtf": "1d",  "htf": "1d"},
+    "1W":  {"ltf": "1d",  "mtf": "1W",  "htf": "1W"},
+    "1M":  {"ltf": "1W",  "mtf": "1M",  "htf": "1M"},
+}
+
+
+@app.get("/api/market-structure")
+async def get_market_structure_data(symbol: str = "BTCUSDT", timeframe: str = "4h", limit: int = 300):
+    """
+    Market structure analysis endpoint.
+    Returns candles + pivot/BOS/wick/level data for selected TF,
+    plus MTF and HTF structure overlays.
+    """
+    from market_structure import MarketStructure as MS
+
+    try:
+        sym = resolve_symbol(symbol)
+        tf_map = _MS_TF_MAP.get(timeframe, {"ltf": timeframe, "mtf": timeframe, "htf": timeframe})
+
+        # Fetch candles for selected TF (primary) + HTF + LTF in parallel
+        primary_task = fetch_mexc_candles(sym, timeframe, min(limit, 500))
+        htf_task = fetch_mexc_candles(sym, tf_map["htf"], min(limit, 500)) if tf_map["htf"] != timeframe else None
+        ltf_task = fetch_mexc_candles(sym, tf_map["ltf"], min(limit, 500)) if tf_map["ltf"] != timeframe else None
+
+        tasks = [primary_task]
+        if htf_task:
+            tasks.append(htf_task)
+        if ltf_task:
+            tasks.append(ltf_task)
+
+        results = await asyncio.gather(*tasks)
+
+        df_primary = results[0]
+        df_htf = results[1] if htf_task else df_primary
+        df_ltf = results[2 if htf_task else 1] if ltf_task else df_primary
+
+        if df_primary is None:
+            return JSONResponse({"error": "Failed to fetch candles from MEXC"}, status_code=500)
+
+        # Run market structure analysis on each TF
+        ms_primary = MS.detect_pivots(df_primary)
+        ms_htf = MS.detect_pivots(df_htf) if df_htf is not None and df_htf is not df_primary else None
+        ms_ltf = MS.detect_pivots(df_ltf) if df_ltf is not None and df_ltf is not df_primary else None
+
+        # Format candles for chart
+        candles = []
+        for _, row in df_primary.iterrows():
+            candles.append({
+                "time": int(row["open_time"].timestamp()),
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+            })
+
+        def _format_ms(ms_data, tf_label, df):
+            """Format MS data for JSON output."""
+            if not ms_data:
+                return None
+            # Convert candle times for pivot points
+            def _time_at(idx):
+                if df is not None and 0 <= idx < len(df):
+                    return int(df.iloc[idx]["open_time"].timestamp())
+                return None
+
+            pivots = []
+            for h in ms_data.get("ms_highs", []):
+                pivots.append({
+                    "type": "high",
+                    "price": h["price"],
+                    "idx": h["idx"],
+                    "time": _time_at(h["idx"]),
+                    "confirmed_at": _time_at(h.get("confirmed_at_idx", h["idx"])),
+                })
+            for l in ms_data.get("ms_lows", []):
+                pivots.append({
+                    "type": "low",
+                    "price": l["price"],
+                    "idx": l["idx"],
+                    "time": _time_at(l["idx"]),
+                    "confirmed_at": _time_at(l.get("confirmed_at_idx", l["idx"])),
+                })
+            pivots.sort(key=lambda x: x["idx"])
+
+            bos = []
+            for b in ms_data.get("bos_events", []):
+                bos.append({
+                    "type": b["type"],
+                    "price": b["bos_price"],
+                    "idx": b["bos_idx"],
+                    "time": _time_at(b["bos_idx"]),
+                    "broken_level": b["broken_level"],
+                    "broken_level_idx": b.get("broken_level_idx"),
+                    "broken_level_time": _time_at(b.get("broken_level_idx", 0)),
+                    "quality": b.get("quality", "moderate"),
+                })
+
+            wicks = []
+            for w in ms_data.get("wicks", []):
+                wicks.append({
+                    "type": w["type"],
+                    "wick_price": w["wick_price"],
+                    "level_price": w["level_price"],
+                    "idx": w["wick_idx"],
+                    "time": _time_at(w["wick_idx"]),
+                    "scenario": w.get("scenario", "undetermined"),
+                    "weakens": w.get("weakens", ""),
+                })
+
+            raw_highs = []
+            for h in ms_data.get("pivot_highs_6cr", ms_data.get("highs", [])):
+                raw_highs.append({
+                    "price": h["price"],
+                    "idx": h["idx"],
+                    "time": _time_at(h["idx"]),
+                })
+
+            raw_lows = []
+            for l in ms_data.get("pivot_lows_6cr", ms_data.get("lows", [])):
+                raw_lows.append({
+                    "price": l["price"],
+                    "idx": l["idx"],
+                    "time": _time_at(l["idx"]),
+                })
+
+            return {
+                "timeframe": tf_label,
+                "trend": ms_data.get("trend", "neutral"),
+                "eof": ms_data.get("eof", {}),
+                "pivots": pivots,
+                "raw_highs": raw_highs,
+                "raw_lows": raw_lows,
+                "bos_events": bos,
+                "wicks": wicks,
+                "domino_effect": ms_data.get("domino_effect", {}),
+                "trend_shifts": ms_data.get("trend_shifts", []),
+                "choch_events": ms_data.get("choch_events", []),
+                "rtz": ms_data.get("rtz", {}),
+                "levels": ms_data.get("levels", {}),
+            }
+
+        primary_result = _format_ms(ms_primary, timeframe, df_primary)
+        htf_result = _format_ms(ms_htf, tf_map["htf"], df_htf) if ms_htf else None
+        ltf_result = _format_ms(ms_ltf, tf_map["ltf"], df_ltf) if ms_ltf else None
+
+        response = {
+            "symbol": sym,
+            "timeframe": timeframe,
+            "tf_map": tf_map,
+            "candles": candles,
+            "structure": primary_result,
+            "htf_structure": htf_result,
+            "ltf_structure": ltf_result,
+        }
+
+        return JSONResponse(convert_numpy_types(response))
+
+    except Exception as e:
+        logger.error(f"[MS_API_ERROR] {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# ---------- Pairs list endpoint for dropdown ----------
+
+@app.get("/api/ms-pairs")
+async def get_ms_pairs():
+    """Return pairs from pairs.txt for the market structure page dropdown."""
+    pairs_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pairs.txt")
+    try:
+        with open(pairs_path, "r") as f:
+            pairs = sorted(set(line.strip() for line in f if line.strip()))
+        return {"pairs": pairs}
+    except FileNotFoundError:
+        return {"pairs": COIN_LIST}
+
+
+@app.get("/market-structure", response_class=HTMLResponse)
+async def market_structure_page():
+    """
+    Standalone market structure debug page.
+    Candlestick chart with 6CR pivots, MSH/MSL, BOS labels,
+    wick/SFP markers, Level 1/2/3 hierarchy lines,
+    and multi-TF (LTF/MTF/HTF) structure overlays.
+    """
+    html = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Market Structure Debug — HPB-TCT</title>
+<script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0a0a12;color:#e0e0e0;font-family:'Segoe UI',sans-serif;overflow:hidden}
+.header{display:flex;align-items:center;gap:14px;padding:8px 16px;background:#12121a;border-bottom:1px solid #1e1e2d;flex-wrap:wrap}
+.header h1{font-size:1rem;color:#e040fb;white-space:nowrap}
+.header h1 .sub{color:#888;font-weight:400;font-size:.8rem;margin-left:6px}
+.ctrl{display:flex;align-items:center;gap:6px}
+.ctrl label{font-size:.7rem;color:#888}
+.ctrl select{background:#1a1a28;color:#e0e0e0;border:1px solid #2d2d44;border-radius:4px;padding:4px 8px;font-size:.75rem;min-width:110px}
+.ctrl select:focus{outline:none;border-color:#e040fb}
+.ctrl button{background:#e040fb;color:#fff;border:none;border-radius:4px;padding:5px 14px;font-size:.75rem;cursor:pointer;font-weight:600}
+.ctrl button:hover{background:#c030d8}
+.ctrl button:disabled{opacity:.4;cursor:not-allowed}
+.back-link{color:#888;text-decoration:none;font-size:.75rem;padding:3px 10px;border:1px solid #333;border-radius:4px;margin-left:auto}
+.back-link:hover{color:#e0e0e0;border-color:#555}
+.main-area{display:flex;height:calc(100vh - 88px)}
+.chart-wrap{flex:1;position:relative}
+.chart-container{width:100%;height:100%}
+.info-panel{width:280px;background:#12121a;border-left:1px solid #1e1e2d;overflow-y:auto;padding:10px;font-size:.7rem}
+.info-panel h3{color:#e040fb;font-size:.8rem;margin:10px 0 6px;border-bottom:1px solid #1e1e2d;padding-bottom:4px}
+.info-panel h3:first-child{margin-top:0}
+.info-row{display:flex;justify-content:space-between;padding:2px 0;color:#aaa}
+.info-row .val{color:#e0e0e0;font-weight:600}
+.info-row .val.bullish{color:#00ff88}
+.info-row .val.bearish{color:#ff4444}
+.info-row .val.ranging{color:#ffc107}
+.tag{display:inline-block;font-size:.6rem;padding:1px 5px;border-radius:3px;margin-left:4px}
+.tag.good{background:rgba(0,255,136,.15);color:#00ff88}
+.tag.bad{background:rgba(255,68,68,.15);color:#ff4444}
+.tag.moderate{background:rgba(255,193,7,.15);color:#ffc107}
+.bos-list,.wick-list{margin:4px 0}
+.bos-item,.wick-item{padding:3px 6px;margin:2px 0;border-radius:3px;background:rgba(255,255,255,.03);font-size:.65rem}
+.legend{display:flex;gap:12px;padding:5px 16px;background:#12121a;border-top:1px solid #1e1e2d;font-size:.65rem;color:#888;flex-wrap:wrap}
+.legend-item{display:flex;align-items:center;gap:4px}
+.legend-dot{width:9px;height:9px;border-radius:50%}
+.legend-line{width:14px;height:2px}
+.loading-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(10,10,18,.85);z-index:100;font-size:.9rem;color:#888}
+.loading-overlay.hidden{display:none}
+.spinner{width:20px;height:20px;border:2px solid #333;border-top-color:#e040fb;border-radius:50%;animation:spin .6s linear infinite;margin-right:10px}
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+
+<div class="header">
+    <h1>Market Structure <span class="sub">Debug / Algo Viewer</span></h1>
+    <div class="ctrl">
+        <label>Pair</label>
+        <select id="pairSelect"><option>Loading...</option></select>
+    </div>
+    <div class="ctrl">
+        <label>Timeframe</label>
+        <select id="tfSelect">
+            <option value="1m">1m</option>
+            <option value="5m">5m</option>
+            <option value="15m">15m</option>
+            <option value="30m">30m</option>
+            <option value="1h">1h</option>
+            <option value="4h" selected>4h</option>
+            <option value="1d">1D</option>
+            <option value="1W">1W</option>
+            <option value="1M">1M</option>
+        </select>
+    </div>
+    <div class="ctrl">
+        <button id="loadBtn" onclick="loadData()">Load</button>
+    </div>
+    <a class="back-link" href="/dashboard">← Dashboard</a>
+</div>
+
+<div class="main-area">
+    <div class="chart-wrap">
+        <div id="chart" class="chart-container"></div>
+        <div id="loadingOverlay" class="loading-overlay hidden">
+            <div class="spinner"></div> Loading market structure…
+        </div>
+    </div>
+    <div id="infoPanel" class="info-panel">
+        <h3>Select a pair &amp; timeframe</h3>
+        <div class="info-row"><span>Then click <b>Load</b></span></div>
+    </div>
+</div>
+
+<div class="legend">
+    <div class="legend-item"><div class="legend-dot" style="background:#ff4444"></div> Pivot High</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#00ff88"></div> Pivot Low</div>
+    <div class="legend-item"><div class="legend-line" style="background:#e040fb"></div> MS Zigzag (MTF)</div>
+    <div class="legend-item"><div class="legend-line" style="background:rgba(255,255,255,.25)"></div> MSH/MSL Level</div>
+    <div class="legend-item"><div class="legend-dot" style="background:rgba(180,180,180,.7)"></div> HTF Pivot</div>
+    <div class="legend-item"><div class="legend-dot" style="background:rgba(120,160,255,.7)"></div> LTF Pivot</div>
+    <div class="legend-item"><div class="legend-line" style="background:#ffc107;height:1px;border-top:1px dashed #ffc107"></div> BOS</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#ff8800;border:1px solid #ff4444"></div> Wick/SFP</div>
+</div>
+
+<script>
+// ── globals ──
+let chart, candleSeries;
+let msLineSeries = [];     // structure zigzag lines
+let markerSeries = [];     // marker series references
+const BASE = '';           // relative
+
+// ── init chart ──
+function initChart() {
+    const el = document.getElementById('chart');
+    chart = LightweightCharts.createChart(el, {
+        width: el.clientWidth,
+        height: el.clientHeight,
+        layout: { background: { type: 'solid', color: '#0a0a12' }, textColor: '#888', fontSize: 11 },
+        grid: { vertLines: { color: '#1a1a28' }, horzLines: { color: '#1a1a28' } },
+        crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+        rightPriceScale: { borderColor: '#1e1e2d' },
+        timeScale: { borderColor: '#1e1e2d', timeVisible: true, secondsVisible: false },
+    });
+    candleSeries = chart.addCandlestickSeries({
+        upColor: '#26a69a', downColor: '#ef5350',
+        borderUpColor: '#26a69a', borderDownColor: '#ef5350',
+        wickUpColor: '#26a69a', wickDownColor: '#ef5350',
+    });
+    window.addEventListener('resize', () => {
+        chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
+    });
+}
+
+// ── load pair list ──
+async function loadPairs() {
+    try {
+        const r = await fetch(BASE + '/api/ms-pairs');
+        const d = await r.json();
+        const sel = document.getElementById('pairSelect');
+        sel.innerHTML = '';
+        (d.pairs || []).forEach(p => {
+            const o = document.createElement('option');
+            o.value = p; o.textContent = p;
+            if (p === 'BTCUSDT') o.selected = true;
+            sel.appendChild(o);
+        });
+    } catch(e) { console.error('Failed to load pairs', e); }
+}
+
+// ── clear overlays ──
+function clearOverlays() {
+    msLineSeries.forEach(s => { try { chart.removeSeries(s); } catch(e){} });
+    msLineSeries = [];
+}
+
+// ── main loader ──
+async function loadData() {
+    const sym = document.getElementById('pairSelect').value;
+    const tf = document.getElementById('tfSelect').value;
+    const btn = document.getElementById('loadBtn');
+    const overlay = document.getElementById('loadingOverlay');
+
+    btn.disabled = true;
+    overlay.classList.remove('hidden');
+    clearOverlays();
+
+    try {
+        const r = await fetch(BASE + `/api/market-structure?symbol=${sym}&timeframe=${tf}&limit=300`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const data = await r.json();
+
+        // set candles
+        candleSeries.setData(data.candles || []);
+
+        // draw primary structure
+        if (data.structure) {
+            drawStructure(data.structure, data.candles, 'primary');
+        }
+        // draw HTF structure
+        if (data.htf_structure) {
+            drawMultiTfDots(data.htf_structure, data.candles, 'htf');
+        }
+        // draw LTF structure
+        if (data.ltf_structure) {
+            drawMultiTfDots(data.ltf_structure, data.candles, 'ltf');
+        }
+
+        // update info panel
+        updateInfoPanel(data);
+
+        chart.timeScale().fitContent();
+
+    } catch(e) {
+        console.error('Load error:', e);
+        document.getElementById('infoPanel').innerHTML = `<h3 style="color:#ff4444">Error</h3><div class="info-row">${e.message}</div>`;
+    } finally {
+        btn.disabled = false;
+        overlay.classList.add('hidden');
+    }
+}
+
+// ── draw primary structure (zigzag lines, BOS, wicks, levels) ──
+function drawStructure(st, candles, label) {
+    if (!st) return;
+    const markers = [];
+
+    // 1. Collect confirmed pivots sorted by idx for zigzag
+    const pivots = (st.pivots || []).slice().sort((a,b) => a.idx - b.idx);
+
+    // 2. Draw zigzag line through confirmed pivot points
+    if (pivots.length >= 2) {
+        const zigzagData = pivots
+            .filter(p => p.time)
+            .map(p => ({ time: p.time, value: p.price }));
+
+        if (zigzagData.length >= 2) {
+            const zz = chart.addLineSeries({
+                color: '#e040fb', lineWidth: 2, lineStyle: 0,
+                crosshairMarkerVisible: false, lastValueVisible: false,
+                priceLineVisible: false,
+            });
+            zz.setData(zigzagData);
+            msLineSeries.push(zz);
+        }
+    }
+
+    // 3. Pivot markers (red circle-high, green circle-low)
+    pivots.forEach(p => {
+        if (!p.time) return;
+        markers.push({
+            time: p.time,
+            position: p.type === 'high' ? 'aboveBar' : 'belowBar',
+            color: p.type === 'high' ? '#ff4444' : '#00ff88',
+            shape: 'circle',
+            size: 1.5,
+        });
+    });
+
+    // 4. MSH/MSL horizontal levels as price lines
+    const msHighPrices = new Set();
+    const msLowPrices = new Set();
+    pivots.forEach(p => {
+        if (p.type === 'high') msHighPrices.add(p.price);
+        else msLowPrices.add(p.price);
+    });
+
+    msHighPrices.forEach(price => {
+        candleSeries.createPriceLine({
+            price: price,
+            color: 'rgba(255,68,68,.2)',
+            lineWidth: 1,
+            lineStyle: LightweightCharts.LineStyle.Dashed,
+            axisLabelVisible: false,
+        });
+    });
+    msLowPrices.forEach(price => {
+        candleSeries.createPriceLine({
+            price: price,
+            color: 'rgba(0,255,136,.2)',
+            lineWidth: 1,
+            lineStyle: LightweightCharts.LineStyle.Dashed,
+            axisLabelVisible: false,
+        });
+    });
+
+    // 5. BOS markers + horizontal BOS line
+    (st.bos_events || []).forEach(b => {
+        if (!b.time) return;
+        const isBull = b.type === 'bullish';
+        markers.push({
+            time: b.time,
+            position: isBull ? 'aboveBar' : 'belowBar',
+            color: '#ffc107',
+            shape: 'arrowDown',
+            size: 2,
+            text: 'BOS',
+        });
+
+        // Horizontal line from broken level to BOS candle
+        if (b.broken_level_time && b.broken_level) {
+            const bosLine = chart.addLineSeries({
+                color: 'rgba(255,193,7,.45)', lineWidth: 1,
+                lineStyle: LightweightCharts.LineStyle.Dashed,
+                crosshairMarkerVisible: false, lastValueVisible: false,
+                priceLineVisible: false,
+            });
+            bosLine.setData([
+                { time: b.broken_level_time, value: b.broken_level },
+                { time: b.time, value: b.broken_level },
+            ]);
+            msLineSeries.push(bosLine);
+        }
+    });
+
+    // 6. Wick / SFP markers
+    (st.wicks || []).forEach(w => {
+        if (!w.time) return;
+        markers.push({
+            time: w.time,
+            position: w.type === 'high_wick' ? 'aboveBar' : 'belowBar',
+            color: '#ff8800',
+            shape: 'circle',
+            size: 2,
+            text: 'SFP',
+        });
+    });
+
+    // apply markers
+    if (markers.length > 0) {
+        // sort markers by time (required by lightweight-charts)
+        markers.sort((a,b) => a.time - b.time);
+        candleSeries.setMarkers(markers);
+    }
+}
+
+// ── draw multi-TF pivot dots (HTF=gray, LTF=blue) ──
+function drawMultiTfDots(st, primaryCandles, tfType) {
+    if (!st || !st.pivots || st.pivots.length === 0) return;
+    if (!primaryCandles || primaryCandles.length === 0) return;
+
+    const primaryStart = primaryCandles[0].time;
+    const primaryEnd = primaryCandles[primaryCandles.length - 1].time;
+
+    // Colors per TF type
+    const highColor = tfType === 'htf' ? 'rgba(180,180,180,.8)' : 'rgba(120,160,255,.6)';
+    const lowColor  = tfType === 'htf' ? 'rgba(180,180,180,.8)' : 'rgba(120,160,255,.6)';
+    const lineColor = tfType === 'htf' ? 'rgba(180,180,180,.25)' : 'rgba(120,160,255,.2)';
+    const dotSize   = tfType === 'htf' ? 3 : 1;
+
+    // Filter pivots within primary candle time range
+    const inRange = st.pivots.filter(p => p.time && p.time >= primaryStart && p.time <= primaryEnd);
+    if (inRange.length === 0) return;
+
+    // Draw horizontal level lines for each pivot
+    inRange.forEach(p => {
+        candleSeries.createPriceLine({
+            price: p.price,
+            color: lineColor,
+            lineWidth: 1,
+            lineStyle: LightweightCharts.LineStyle.Dotted,
+            axisLabelVisible: false,
+        });
+    });
+
+    // Draw circles at pivot points using a line series with crosshair markers
+    // We use separate series for highs and lows to show dots on the chart
+    const highPivots = inRange.filter(p => p.type === 'high').map(p => ({ time: p.time, value: p.price }));
+    const lowPivots = inRange.filter(p => p.type === 'low').map(p => ({ time: p.time, value: p.price }));
+
+    if (highPivots.length > 0) {
+        const hs = chart.addLineSeries({
+            color: 'transparent', lineWidth: 0,
+            crosshairMarkerVisible: true,
+            crosshairMarkerRadius: dotSize + 2,
+            crosshairMarkerBackgroundColor: highColor,
+            lastValueVisible: false, priceLineVisible: false,
+            pointMarkersVisible: true,
+            pointMarkersRadius: dotSize + 1,
+        });
+        // lightweight-charts requires sorted time data with at least 2 points for line
+        // Use markers approach instead if only 1 point
+        hs.setData(highPivots);
+        msLineSeries.push(hs);
+    }
+    if (lowPivots.length > 0) {
+        const ls = chart.addLineSeries({
+            color: 'transparent', lineWidth: 0,
+            crosshairMarkerVisible: true,
+            crosshairMarkerRadius: dotSize + 2,
+            crosshairMarkerBackgroundColor: lowColor,
+            lastValueVisible: false, priceLineVisible: false,
+            pointMarkersVisible: true,
+            pointMarkersRadius: dotSize + 1,
+        });
+        ls.setData(lowPivots);
+        msLineSeries.push(ls);
+    }
+
+    // Draw zigzag through the multi-TF pivots
+    if (inRange.length >= 2) {
+        const zigData = inRange.map(p => ({ time: p.time, value: p.price }));
+        const zzColor = tfType === 'htf' ? 'rgba(180,180,180,.35)' : 'rgba(120,160,255,.30)';
+        const zz = chart.addLineSeries({
+            color: zzColor, lineWidth: tfType === 'htf' ? 2 : 1,
+            lineStyle: 0,
+            crosshairMarkerVisible: false, lastValueVisible: false,
+            priceLineVisible: false,
+        });
+        zz.setData(zigData);
+        msLineSeries.push(zz);
+    }
+}
+
+// ── update info panel ──
+function updateInfoPanel(data) {
+    const panel = document.getElementById('infoPanel');
+    const st = data.structure || {};
+    const sym = data.symbol || '—';
+    const tf = data.timeframe || '—';
+
+    let html = `<h3>${sym} · ${tf.toUpperCase()}</h3>`;
+
+    // Trend
+    const trend = st.trend || 'neutral';
+    const tc = trend === 'bullish' ? 'bullish' : trend === 'bearish' ? 'bearish' : 'ranging';
+    html += `<div class="info-row"><span>Trend</span><span class="val ${tc}">${trend.toUpperCase()}</span></div>`;
+
+    // EOF
+    const eof = st.eof || {};
+    if (eof.expectation) {
+        html += `<div class="info-row"><span>EOF</span><span class="val">${eof.expectation.replace(/_/g,' ')}</span></div>`;
+        if (eof.trend_shift) html += `<div class="info-row"><span>Trend Shift</span><span class="val bearish">YES</span></div>`;
+        if (eof.bos_quality) html += `<div class="info-row"><span>Last BOS Quality</span><span class="val"><span class="tag ${eof.bos_quality}">${eof.bos_quality}</span></span></div>`;
+    }
+
+    // Pivots
+    const highs = (st.pivots || []).filter(p => p.type === 'high');
+    const lows = (st.pivots || []).filter(p => p.type === 'low');
+    html += `<div class="info-row"><span>MS Highs</span><span class="val">${highs.length}</span></div>`;
+    html += `<div class="info-row"><span>MS Lows</span><span class="val">${lows.length}</span></div>`;
+
+    // BOS events
+    const bos = st.bos_events || [];
+    if (bos.length > 0) {
+        html += `<h3>BOS Events (${bos.length})</h3>`;
+        html += `<div class="bos-list">`;
+        bos.slice(-5).forEach(b => {
+            const dir = b.type === 'bullish' ? '▲' : '▼';
+            const clr = b.type === 'bullish' ? '#00ff88' : '#ff4444';
+            html += `<div class="bos-item">
+                <span style="color:${clr}">${dir} ${b.type}</span>
+                @ ${b.price ? b.price.toFixed(4) : '—'}
+                <span class="tag ${b.quality || 'moderate'}">${b.quality || '—'}</span>
+            </div>`;
+        });
+        html += `</div>`;
+    }
+
+    // Wicks / SFP
+    const wicks = st.wicks || [];
+    if (wicks.length > 0) {
+        html += `<h3>Wicks / SFP (${wicks.length})</h3>`;
+        html += `<div class="wick-list">`;
+        wicks.slice(-5).forEach(w => {
+            html += `<div class="wick-item">
+                ${w.type === 'high_wick' ? '⬆ High' : '⬇ Low'} wick
+                @ ${w.wick_price ? w.wick_price.toFixed(4) : '—'}
+                → weakens ${w.weakens.toUpperCase()}
+                <br><small>Scenario: ${w.scenario}</small>
+            </div>`;
+        });
+        html += `</div>`;
+    }
+
+    // Domino effect
+    const domino = st.domino_effect || {};
+    if (domino.stage) {
+        html += `<h3>Domino Effect</h3>`;
+        html += `<div class="info-row"><span>Stage</span><span class="val">${domino.stage.replace(/_/g,' ')}</span></div>`;
+        html += `<div class="info-row"><span>Confidence</span><span class="val"><span class="tag ${domino.confidence === 'high' ? 'good' : domino.confidence === 'low' ? 'bad' : 'moderate'}">${domino.confidence}</span></span></div>`;
+        html += `<div class="info-row"><span>L3 Confirmed</span><span class="val">${domino.l3_confirmed ? '✓' : '—'}</span></div>`;
+        html += `<div class="info-row"><span>L2 Confirmed</span><span class="val">${domino.l2_confirmed ? '✓' : '—'}</span></div>`;
+    }
+
+    // Trend shifts
+    const shifts = st.trend_shifts || [];
+    if (shifts.length > 0) {
+        html += `<h3>Trend Shifts</h3>`;
+        shifts.forEach(s => {
+            const bev = s.bos_event || {};
+            html += `<div class="bos-item">
+                ${s.from_trend} → ${s.to_trend}
+                ${s.confirmed ? '<span class="tag good">CONFIRMED</span>' : '<span class="tag moderate">potential</span>'}
+                ${s.warning ? '<span class="tag bad">⚠ bad BOS</span>' : ''}
+            </div>`;
+        });
+    }
+
+    // CHoCH
+    const choch = st.choch_events || [];
+    if (choch.length > 0) {
+        html += `<h3>CHoCH Events</h3>`;
+        choch.forEach(c => {
+            html += `<div class="bos-item">${c.type}: ${c.direction} <span class="tag ${c.quality}">${c.quality}</span></div>`;
+        });
+    }
+
+    // RTZ
+    const rtz = st.rtz || {};
+    if (rtz.valid) {
+        html += `<h3>RTZ Quality</h3>`;
+        html += `<div class="info-row"><span>Quality</span><span class="val">${(rtz.quality * 100).toFixed(0)}%</span></div>`;
+        html += `<div class="info-row"><span>Can Use L3</span><span class="val">${rtz.can_use_l3 ? '<span class="tag good">YES</span>' : '<span class="tag bad">NO</span>'}</span></div>`;
+        html += `<div class="info-row"><span>Blocking Zones</span><span class="val">${rtz.blocking_zones}</span></div>`;
+    }
+
+    // Multi-TF summary
+    const tfMap = data.tf_map || {};
+    html += `<h3>Multi-Timeframe</h3>`;
+    html += `<div class="info-row"><span>LTF</span><span class="val">${tfMap.ltf || '—'}</span></div>`;
+    html += `<div class="info-row"><span>MTF</span><span class="val">${tfMap.mtf || '—'}</span></div>`;
+    html += `<div class="info-row"><span>HTF</span><span class="val">${tfMap.htf || '—'}</span></div>`;
+
+    if (data.htf_structure) {
+        const ht = data.htf_structure.trend || 'neutral';
+        const htc = ht === 'bullish' ? 'bullish' : ht === 'bearish' ? 'bearish' : 'ranging';
+        html += `<div class="info-row"><span>HTF Trend</span><span class="val ${htc}">${ht.toUpperCase()}</span></div>`;
+    }
+    if (data.ltf_structure) {
+        const lt = data.ltf_structure.trend || 'neutral';
+        const ltc = lt === 'bullish' ? 'bullish' : lt === 'bearish' ? 'bearish' : 'ranging';
+        html += `<div class="info-row"><span>LTF Trend</span><span class="val ${ltc}">${lt.toUpperCase()}</span></div>`;
+    }
+
+    panel.innerHTML = html;
+}
+
+// ── boot ──
+initChart();
+loadPairs();
+
+// auto-load if user changes pair or tf
+document.getElementById('pairSelect').addEventListener('change', loadData);
+document.getElementById('tfSelect').addEventListener('change', loadData);
+</script>
+</body>
+</html>"""
+
+    return HTMLResponse(content=html)
+
+
+# ================================================================
 # ENTRY POINT
 # ================================================================
 
