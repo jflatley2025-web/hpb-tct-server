@@ -9958,14 +9958,11 @@ def detect_ranges(df: pd.DataFrame, lookback: int = 50):
     highs = df['high'].values
     lows = df['low'].values
     closes = df['close'].values
-    times = df['open_time'].values if 'open_time' in df.columns else df.index.values
 
-    # Convert times to list for JSON serialization
+    # Convert times to Unix timestamps for JSON serialization
+    # Use the same approach as market-structure endpoint
     try:
-        if len(times) > 0 and hasattr(times[0], 'timestamp'):
-            times = [int(t.timestamp()) for t in times]
-        else:
-            times = [int(t) for t in times]
+        times = [int(row["open_time"].timestamp()) for _, row in df.iterrows()]
     except Exception:
         times = list(range(len(df)))
 
@@ -10082,18 +10079,12 @@ async def get_ranges_data(symbol: str = "BTC_USDT_PERP", timeframe: str = "4h", 
     Returns candle data with detected TCT ranges.
     """
     try:
-        # Convert symbol format: BTC_USDT_PERP -> BTCUSDT
-        sym = symbol.replace("_PERP", "").replace("_", "")
+        # Convert symbol format like market-structure does
+        sym = resolve_symbol(symbol)
+        if "_PERP" in sym:
+            sym = sym.replace("_PERP", "").replace("_", "")
 
-        # MEXC spot API uses simple interval format: "1m", "5m", "15m", "30m", "1h", "4h", "8h", "1d", "1W", "1M"
-        # Normalize timeframe input
-        tf_normalized = timeframe.lower()
-        if tf_normalized == "1w":
-            tf_normalized = "1W"
-        elif tf_normalized == "1m" and timeframe == "1M":
-            tf_normalized = "1M"
-
-        # Determine HTF and LTF based on selected timeframe
+        # HTF/LTF mapping
         htf_ltf_map = {
             "1m": {"htf": "15m", "ltf": "1m"},
             "5m": {"htf": "1h", "ltf": "1m"},
@@ -10103,30 +10094,25 @@ async def get_ranges_data(symbol: str = "BTC_USDT_PERP", timeframe: str = "4h", 
             "4h": {"htf": "1d", "ltf": "1h"},
             "8h": {"htf": "1d", "ltf": "4h"},
             "1d": {"htf": "1W", "ltf": "4h"},
-            "1w": {"htf": "1M", "ltf": "1d"},
+            "1D": {"htf": "1W", "ltf": "4h"},
             "1W": {"htf": "1M", "ltf": "1d"},
         }
-        tf_config = htf_ltf_map.get(tf_normalized, {"htf": "1d", "ltf": "1h"})
+        tf_config = htf_ltf_map.get(timeframe, {"htf": "1d", "ltf": "1h"})
 
         # Fetch candle data for primary timeframe
-        df_primary = await fetch_mexc_candles(sym, tf_normalized, limit)
+        df_primary = await fetch_mexc_candles(sym, timeframe, limit)
         if df_primary is None or df_primary.empty:
-            return JSONResponse({"error": f"No data for {symbol} {timeframe}"}, status_code=404)
+            return JSONResponse({"error": f"No data for {symbol} {timeframe}. Symbol resolved to: {sym}"}, status_code=404)
 
-        # Format candles for chart
+        # Format candles for chart (same pattern as market-structure)
         candles = []
         for _, row in df_primary.iterrows():
-            ts = row.get('open_time')
-            if hasattr(ts, 'timestamp'):
-                t = int(ts.timestamp())
-            else:
-                t = int(ts) if ts is not None else 0
             candles.append({
-                "time": t,
-                "open": float(row['open']),
-                "high": float(row['high']),
-                "low": float(row['low']),
-                "close": float(row['close']),
+                "time": int(row["open_time"].timestamp()),
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
             })
 
         # Detect ranges on primary timeframe
@@ -10139,8 +10125,8 @@ async def get_ranges_data(symbol: str = "BTC_USDT_PERP", timeframe: str = "4h", 
 
         # Fetch and detect ranges on LTF
         ltf_tf = tf_config["ltf"]
-        df_ltf = await fetch_mexc_candles(sym, ltf_tf, limit * 4)  # More data for LTF
-        ltf_ranges = detect_ranges(df_ltf, lookback=limit * 4) if df_ltf is not None and not df_ltf.empty else []
+        df_ltf = await fetch_mexc_candles(sym, ltf_tf, limit * 2)
+        ltf_ranges = detect_ranges(df_ltf, lookback=limit * 2) if df_ltf is not None and not df_ltf.empty else []
 
         response = {
             "symbol": symbol,
