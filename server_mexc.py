@@ -9947,15 +9947,10 @@ def detect_ranges(df: pd.DataFrame, lookback: int = 50):
 
     TCT Range Rules from PDFs:
     - Range = price moving sideways (consolidation)
-    - When trending UP: pull range from TOP to BOTTOM
-    - When trending DOWN: pull range from BOTTOM to TOP
     - Range confirmed when price touches equilibrium (0.5 fib)
-    - 6-candle rule: validates range on timeframe
     - Deviation limit (DL) = 30% of range size
-    - Good ranges: slow sideways action, liquidity building
-    - Bad ranges: V-shaped, aggressive moves
     """
-    if df.empty or len(df) < 10:
+    if df is None or df.empty or len(df) < 10:
         return []
 
     ranges = []
@@ -9966,106 +9961,116 @@ def detect_ranges(df: pd.DataFrame, lookback: int = 50):
     times = df['open_time'].values if 'open_time' in df.columns else df.index.values
 
     # Convert times to list for JSON serialization
-    if hasattr(times[0], 'timestamp'):
-        times = [int(t.timestamp()) for t in times]
-    else:
-        times = [int(t) for t in times]
-
-    # Find swing highs and swing lows using 6-candle rule (2-2-2 pattern)
-    swing_highs = []
-    swing_lows = []
-
-    for i in range(3, len(df) - 3):
-        # Swing high: higher than 3 candles before and after
-        if highs[i] >= max(highs[i-3:i]) and highs[i] >= max(highs[i+1:i+4]):
-            swing_highs.append({'idx': i, 'price': float(highs[i]), 'time': times[i]})
-        # Swing low: lower than 3 candles before and after
-        if lows[i] <= min(lows[i-3:i]) and lows[i] <= min(lows[i+1:i+4]):
-            swing_lows.append({'idx': i, 'price': float(lows[i]), 'time': times[i]})
-
-    # Identify ranges: look for consolidation between swing high and swing low
-    # A range is formed when price oscillates between a high and low
-    i = 0
-    while i < len(swing_highs) - 1 and len(swing_lows) > 0:
-        sh = swing_highs[i]
-
-        # Find swing low that comes after this swing high
-        matching_lows = [sl for sl in swing_lows if sl['idx'] > sh['idx']]
-        if not matching_lows:
-            i += 1
-            continue
-
-        sl = matching_lows[0]
-
-        # Check if there's another swing high after the low (completing the range structure)
-        later_highs = [h for h in swing_highs if h['idx'] > sl['idx']]
-        if not later_highs:
-            i += 1
-            continue
-
-        sh2 = later_highs[0]
-
-        # Calculate range boundaries
-        range_high = max(sh['price'], sh2['price'])
-        range_low = sl['price']
-        range_size = range_high - range_low
-
-        # Skip if range is too small (less than 0.1% of price)
-        if range_size < range_low * 0.001:
-            i += 1
-            continue
-
-        # Calculate equilibrium (0.5 fib) and deviation limits
-        equilibrium = range_low + (range_size * 0.5)
-        deviation_limit = range_size * 0.30  # 30% deviation limit
-
-        # Check if price touched equilibrium (validates the range)
-        start_idx = sh['idx']
-        end_idx = sh2['idx']
-
-        eq_touched = False
-        for j in range(start_idx, min(end_idx + 1, len(df))):
-            if lows[j] <= equilibrium <= highs[j]:
-                eq_touched = True
-                break
-
-        # Assess range quality
-        # Good: slow sideways action with multiple touches
-        # Bad: V-shaped, aggressive moves
-        candles_in_range = end_idx - start_idx
-        touches_high = sum(1 for j in range(start_idx, end_idx + 1) if highs[j] >= range_high * 0.995)
-        touches_low = sum(1 for j in range(start_idx, end_idx + 1) if lows[j] <= range_low * 1.005)
-
-        quality = "good" if (touches_high >= 2 and touches_low >= 2 and candles_in_range >= 6) else \
-                  "moderate" if (touches_high >= 1 and touches_low >= 1) else "bad"
-
-        # Determine trend direction before range
-        if start_idx >= 10:
-            pre_range_close = closes[start_idx - 10]
-            range_start_close = closes[start_idx]
-            trend_before = "up" if range_start_close > pre_range_close else "down"
+    try:
+        if len(times) > 0 and hasattr(times[0], 'timestamp'):
+            times = [int(t.timestamp()) for t in times]
         else:
-            trend_before = "neutral"
+            times = [int(t) for t in times]
+    except Exception:
+        times = list(range(len(df)))
 
-        ranges.append({
-            'start_time': times[start_idx],
-            'end_time': times[end_idx],
-            'start_idx': int(start_idx),
-            'end_idx': int(end_idx),
-            'high': float(range_high),
-            'low': float(range_low),
-            'equilibrium': float(equilibrium),
-            'deviation_limit': float(deviation_limit),
-            'upper_dl': float(range_high + deviation_limit),
-            'lower_dl': float(range_low - deviation_limit),
-            'range_size': float(range_size),
-            'eq_touched': eq_touched,
-            'quality': quality,
-            'candles': int(candles_in_range),
-            'trend_before': trend_before,
-        })
+    n = len(df)
 
-        i += 1
+    # Use sliding window approach to find consolidation ranges
+    # A range is where price moves sideways within a bounded area
+    window_sizes = [20, 40, 60]  # Look for ranges of different sizes
+
+    for window_size in window_sizes:
+        if n < window_size:
+            continue
+
+        for start in range(0, n - window_size, window_size // 2):
+            end = min(start + window_size, n - 1)
+
+            window_highs = highs[start:end + 1]
+            window_lows = lows[start:end + 1]
+
+            range_high = float(max(window_highs))
+            range_low = float(min(window_lows))
+            range_size = range_high - range_low
+
+            # Skip if range is too small (less than 0.5% of price)
+            if range_size < range_low * 0.005:
+                continue
+
+            # Calculate the average true range to check if it's consolidating
+            avg_candle_size = sum(window_highs - window_lows) / len(window_highs)
+
+            # A good range has small candles relative to the range size
+            # (price is consolidating, not trending aggressively)
+            consolidation_ratio = avg_candle_size / range_size if range_size > 0 else 1
+
+            # Skip if candles are too large (trending, not ranging)
+            if consolidation_ratio > 0.4:
+                continue
+
+            # Check how many times price touched the boundaries
+            touch_threshold_high = range_high - (range_size * 0.1)
+            touch_threshold_low = range_low + (range_size * 0.1)
+
+            touches_high = sum(1 for h in window_highs if h >= touch_threshold_high)
+            touches_low = sum(1 for l in window_lows if l <= touch_threshold_low)
+
+            # Need at least some touches on both sides for a valid range
+            if touches_high < 2 or touches_low < 2:
+                continue
+
+            # Calculate equilibrium (0.5 fib) and deviation limits
+            equilibrium = range_low + (range_size * 0.5)
+            deviation_limit = range_size * 0.30
+
+            # Check if price touched equilibrium
+            eq_touched = any(window_lows[i] <= equilibrium <= window_highs[i]
+                           for i in range(len(window_highs)))
+
+            # Assess quality
+            quality = "good" if (touches_high >= 3 and touches_low >= 3 and consolidation_ratio < 0.25) else \
+                      "moderate" if (touches_high >= 2 and touches_low >= 2) else "bad"
+
+            # Determine trend before range
+            if start >= 10:
+                pre_close = closes[start - 10]
+                start_close = closes[start]
+                trend_before = "up" if start_close > pre_close else "down"
+            else:
+                trend_before = "neutral"
+
+            ranges.append({
+                'start_time': times[start],
+                'end_time': times[end],
+                'start_idx': int(start),
+                'end_idx': int(end),
+                'high': range_high,
+                'low': range_low,
+                'equilibrium': float(equilibrium),
+                'deviation_limit': float(deviation_limit),
+                'upper_dl': float(range_high + deviation_limit),
+                'lower_dl': float(range_low - deviation_limit),
+                'range_size': float(range_size),
+                'eq_touched': eq_touched,
+                'quality': quality,
+                'candles': int(end - start),
+                'trend_before': trend_before,
+            })
+
+    # Remove overlapping ranges, keeping the better quality ones
+    if ranges:
+        ranges.sort(key=lambda r: (r['quality'] == 'good', r['quality'] == 'moderate', r['candles']), reverse=True)
+        filtered = []
+        for r in ranges:
+            # Check if this range overlaps significantly with any already selected range
+            dominated = False
+            for f in filtered:
+                overlap_start = max(r['start_idx'], f['start_idx'])
+                overlap_end = min(r['end_idx'], f['end_idx'])
+                if overlap_end > overlap_start:
+                    overlap_pct = (overlap_end - overlap_start) / (r['end_idx'] - r['start_idx'])
+                    if overlap_pct > 0.5:
+                        dominated = True
+                        break
+            if not dominated:
+                filtered.append(r)
+        ranges = filtered[:10]  # Keep top 10 ranges
 
     return ranges
 
