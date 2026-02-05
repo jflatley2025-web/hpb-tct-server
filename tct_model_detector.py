@@ -25,21 +25,21 @@ class LiquidityCurveDetector:
     def detect_accumulation_curve(candles: pd.DataFrame, tap1_idx: int, tap2_idx: int) -> Dict:
         """Detects buy-side liquidity curve (higher lows stacking up)"""
         if tap1_idx >= tap2_idx or tap2_idx >= len(candles):
-            return {"valid": False, "quality": 0.0}
-        
+            return {"valid": False, "quality": 0.0, "smoothness": 0.0}
+
         curve_candles = candles.iloc[tap1_idx:tap2_idx+1].copy()
         if len(curve_candles) < 3:
-            return {"valid": False, "quality": 0.0}
-        
+            return {"valid": False, "quality": 0.0, "smoothness": 0.0}
+
         # Find pivot lows
         lows = []
         for i in range(1, len(curve_candles) - 1):
             if (curve_candles.iloc[i]['low'] < curve_candles.iloc[i-1]['low'] and
                 curve_candles.iloc[i]['low'] < curve_candles.iloc[i+1]['low']):
                 lows.append({"idx": i, "price": float(curve_candles.iloc[i]['low'])})
-        
+
         if len(lows) < 2:
-            return {"valid": False, "quality": 0.0}
+            return {"valid": False, "quality": 0.0, "smoothness": 0.0}
         
         # Check for higher lows
         higher_lows_count = sum(1 for i in range(1, len(lows)) if lows[i]["price"] > lows[i-1]["price"])
@@ -64,21 +64,21 @@ class LiquidityCurveDetector:
     def detect_distribution_curve(candles: pd.DataFrame, tap1_idx: int, tap2_idx: int) -> Dict:
         """Detects sell-side liquidity curve (lower highs stacking down)"""
         if tap1_idx >= tap2_idx or tap2_idx >= len(candles):
-            return {"valid": False, "quality": 0.0}
-        
+            return {"valid": False, "quality": 0.0, "smoothness": 0.0}
+
         curve_candles = candles.iloc[tap1_idx:tap2_idx+1].copy()
         if len(curve_candles) < 3:
-            return {"valid": False, "quality": 0.0}
-        
+            return {"valid": False, "quality": 0.0, "smoothness": 0.0}
+
         # Find pivot highs
         highs = []
         for i in range(1, len(curve_candles) - 1):
             if (curve_candles.iloc[i]['high'] > curve_candles.iloc[i-1]['high'] and
                 curve_candles.iloc[i]['high'] > curve_candles.iloc[i+1]['high']):
                 highs.append({"idx": i, "price": float(curve_candles.iloc[i]['high'])})
-        
+
         if len(highs) < 2:
-            return {"valid": False, "quality": 0.0}
+            return {"valid": False, "quality": 0.0, "smoothness": 0.0}
         
         # Check for lower highs
         lower_highs_count = sum(1 for i in range(1, len(highs)) if highs[i]["price"] < highs[i-1]["price"])
