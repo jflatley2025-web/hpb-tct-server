@@ -9926,6 +9926,656 @@ document.getElementById('tfSelect').addEventListener('change', loadData);
 
 
 # ================================================================
+# RANGES DEBUG PAGE
+# ================================================================
+
+@app.get("/api/ranges-pairs")
+async def get_ranges_pairs():
+    """Return pairs from mexc_all_pairs.txt for the ranges page dropdown."""
+    pairs_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mexc_all_pairs.txt")
+    try:
+        with open(pairs_path, "r") as f:
+            pairs = [line.strip() for line in f if line.strip()]
+        return {"pairs": pairs}
+    except FileNotFoundError:
+        return {"pairs": COIN_LIST}
+
+
+def detect_ranges(df: pd.DataFrame, lookback: int = 50):
+    """
+    Detect TCT-style ranges (consolidation zones) in price data.
+
+    TCT Range Rules from PDFs:
+    - Range = price moving sideways (consolidation)
+    - When trending UP: pull range from TOP to BOTTOM
+    - When trending DOWN: pull range from BOTTOM to TOP
+    - Range confirmed when price touches equilibrium (0.5 fib)
+    - 6-candle rule: validates range on timeframe
+    - Deviation limit (DL) = 30% of range size
+    - Good ranges: slow sideways action, liquidity building
+    - Bad ranges: V-shaped, aggressive moves
+    """
+    if df.empty or len(df) < 10:
+        return []
+
+    ranges = []
+    df = df.copy()
+    highs = df['high'].values
+    lows = df['low'].values
+    closes = df['close'].values
+    times = df['timestamp'].values if 'timestamp' in df.columns else df.index.values
+
+    # Convert times to list for JSON serialization
+    if hasattr(times[0], 'timestamp'):
+        times = [int(t.timestamp()) for t in times]
+    else:
+        times = [int(t) for t in times]
+
+    # Find swing highs and swing lows using 6-candle rule (2-2-2 pattern)
+    swing_highs = []
+    swing_lows = []
+
+    for i in range(3, len(df) - 3):
+        # Swing high: higher than 3 candles before and after
+        if highs[i] >= max(highs[i-3:i]) and highs[i] >= max(highs[i+1:i+4]):
+            swing_highs.append({'idx': i, 'price': float(highs[i]), 'time': times[i]})
+        # Swing low: lower than 3 candles before and after
+        if lows[i] <= min(lows[i-3:i]) and lows[i] <= min(lows[i+1:i+4]):
+            swing_lows.append({'idx': i, 'price': float(lows[i]), 'time': times[i]})
+
+    # Identify ranges: look for consolidation between swing high and swing low
+    # A range is formed when price oscillates between a high and low
+    i = 0
+    while i < len(swing_highs) - 1 and len(swing_lows) > 0:
+        sh = swing_highs[i]
+
+        # Find swing low that comes after this swing high
+        matching_lows = [sl for sl in swing_lows if sl['idx'] > sh['idx']]
+        if not matching_lows:
+            i += 1
+            continue
+
+        sl = matching_lows[0]
+
+        # Check if there's another swing high after the low (completing the range structure)
+        later_highs = [h for h in swing_highs if h['idx'] > sl['idx']]
+        if not later_highs:
+            i += 1
+            continue
+
+        sh2 = later_highs[0]
+
+        # Calculate range boundaries
+        range_high = max(sh['price'], sh2['price'])
+        range_low = sl['price']
+        range_size = range_high - range_low
+
+        # Skip if range is too small (less than 0.1% of price)
+        if range_size < range_low * 0.001:
+            i += 1
+            continue
+
+        # Calculate equilibrium (0.5 fib) and deviation limits
+        equilibrium = range_low + (range_size * 0.5)
+        deviation_limit = range_size * 0.30  # 30% deviation limit
+
+        # Check if price touched equilibrium (validates the range)
+        start_idx = sh['idx']
+        end_idx = sh2['idx']
+
+        eq_touched = False
+        for j in range(start_idx, min(end_idx + 1, len(df))):
+            if lows[j] <= equilibrium <= highs[j]:
+                eq_touched = True
+                break
+
+        # Assess range quality
+        # Good: slow sideways action with multiple touches
+        # Bad: V-shaped, aggressive moves
+        candles_in_range = end_idx - start_idx
+        touches_high = sum(1 for j in range(start_idx, end_idx + 1) if highs[j] >= range_high * 0.995)
+        touches_low = sum(1 for j in range(start_idx, end_idx + 1) if lows[j] <= range_low * 1.005)
+
+        quality = "good" if (touches_high >= 2 and touches_low >= 2 and candles_in_range >= 6) else \
+                  "moderate" if (touches_high >= 1 and touches_low >= 1) else "bad"
+
+        # Determine trend direction before range
+        if start_idx >= 10:
+            pre_range_close = closes[start_idx - 10]
+            range_start_close = closes[start_idx]
+            trend_before = "up" if range_start_close > pre_range_close else "down"
+        else:
+            trend_before = "neutral"
+
+        ranges.append({
+            'start_time': times[start_idx],
+            'end_time': times[end_idx],
+            'start_idx': int(start_idx),
+            'end_idx': int(end_idx),
+            'high': float(range_high),
+            'low': float(range_low),
+            'equilibrium': float(equilibrium),
+            'deviation_limit': float(deviation_limit),
+            'upper_dl': float(range_high + deviation_limit),
+            'lower_dl': float(range_low - deviation_limit),
+            'range_size': float(range_size),
+            'eq_touched': eq_touched,
+            'quality': quality,
+            'candles': int(candles_in_range),
+            'trend_before': trend_before,
+        })
+
+        i += 1
+
+    return ranges
+
+
+@app.get("/api/ranges")
+async def get_ranges_data(symbol: str = "BTC_USDT_PERP", timeframe: str = "4h", limit: int = 300):
+    """
+    API endpoint for ranges debug page.
+    Returns candle data with detected TCT ranges.
+    """
+    try:
+        # Convert symbol format: BTC_USDT_PERP -> BTCUSDT
+        sym = symbol.replace("_PERP", "").replace("_", "")
+
+        # Map timeframe to MEXC format
+        tf_map = {
+            "1m": "Min1", "5m": "Min5", "15m": "Min15", "30m": "Min30",
+            "1h": "Min60", "4h": "Hour4", "8h": "Hour8",
+            "1d": "Day1", "1D": "Day1", "1w": "Week1", "1W": "Week1", "1M": "Month1"
+        }
+        mexc_tf = tf_map.get(timeframe, "Hour4")
+
+        # Determine HTF and LTF based on selected timeframe
+        htf_ltf_map = {
+            "1m": {"htf": "15m", "ltf": "1m"},
+            "5m": {"htf": "1h", "ltf": "1m"},
+            "15m": {"htf": "4h", "ltf": "5m"},
+            "30m": {"htf": "4h", "ltf": "15m"},
+            "1h": {"htf": "4h", "ltf": "15m"},
+            "4h": {"htf": "1d", "ltf": "1h"},
+            "8h": {"htf": "1d", "ltf": "4h"},
+            "1d": {"htf": "1W", "ltf": "4h"},
+            "1D": {"htf": "1W", "ltf": "4h"},
+            "1w": {"htf": "1M", "ltf": "1d"},
+            "1W": {"htf": "1M", "ltf": "1d"},
+        }
+        tf_config = htf_ltf_map.get(timeframe, {"htf": "1d", "ltf": "1h"})
+
+        # Fetch candle data for primary timeframe
+        df_primary = await fetch_mexc_klines(sym, mexc_tf, limit)
+        if df_primary.empty:
+            return JSONResponse({"error": f"No data for {symbol} {timeframe}"}, status_code=404)
+
+        # Format candles for chart
+        candles = []
+        for _, row in df_primary.iterrows():
+            ts = row.get('timestamp')
+            if hasattr(ts, 'timestamp'):
+                t = int(ts.timestamp())
+            else:
+                t = int(ts)
+            candles.append({
+                "time": t,
+                "open": float(row['open']),
+                "high": float(row['high']),
+                "low": float(row['low']),
+                "close": float(row['close']),
+            })
+
+        # Detect ranges on primary timeframe
+        primary_ranges = detect_ranges(df_primary, lookback=limit)
+
+        # Fetch and detect ranges on HTF
+        htf_tf = tf_config["htf"]
+        htf_mexc = tf_map.get(htf_tf, "Day1")
+        df_htf = await fetch_mexc_klines(sym, htf_mexc, limit)
+        htf_ranges = detect_ranges(df_htf, lookback=limit) if not df_htf.empty else []
+
+        # Fetch and detect ranges on LTF
+        ltf_tf = tf_config["ltf"]
+        ltf_mexc = tf_map.get(ltf_tf, "Min60")
+        df_ltf = await fetch_mexc_klines(sym, ltf_mexc, limit * 4)  # More data for LTF
+        ltf_ranges = detect_ranges(df_ltf, lookback=limit * 4) if not df_ltf.empty else []
+
+        response = {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "tf_config": {
+                "htf": htf_tf,
+                "mtf": timeframe,
+                "ltf": ltf_tf,
+            },
+            "candles": candles,
+            "ranges": primary_ranges,
+            "htf_ranges": htf_ranges,
+            "ltf_ranges": ltf_ranges,
+        }
+
+        return JSONResponse(convert_numpy_types(response))
+
+    except Exception as e:
+        logger.error(f"[RANGES_API_ERROR] {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/ranges", response_class=HTMLResponse)
+async def ranges_page():
+    """
+    Standalone ranges debug page for testing TCT range detection algorithm.
+    Displays candlestick chart with detected ranges following TCT model rules.
+    """
+    html = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Ranges — HPB-TCT</title>
+<script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#fff;color:#333;font-family:'Segoe UI',sans-serif;overflow:hidden}
+.header{display:flex;align-items:center;gap:10px;padding:6px 12px;background:#f8f9fa;border-bottom:1px solid #dee2e6;flex-wrap:wrap}
+.header h1{font-size:.95rem;color:#333;white-space:nowrap;font-weight:600}
+.header h1 .sub{color:#888;font-weight:400;font-size:.75rem;margin-left:5px}
+.ctrl{display:flex;align-items:center;gap:5px}
+.ctrl label{font-size:.7rem;color:#666}
+.ctrl select{background:#fff;color:#333;border:1px solid #ced4da;border-radius:4px;padding:4px 8px;font-size:.75rem;min-width:100px}
+.ctrl select:focus{outline:none;border-color:#007bff}
+.ctrl button{background:#007bff;color:#fff;border:none;border-radius:4px;padding:5px 12px;font-size:.75rem;cursor:pointer;font-weight:500}
+.ctrl button:hover{background:#0056b3}
+.ctrl button:disabled{opacity:.5;cursor:not-allowed}
+.chart-btns{display:flex;gap:4px;margin-left:8px}
+.chart-btns button{background:#6c757d;padding:4px 8px;font-size:.65rem}
+.chart-btns button:hover{background:#545b62}
+.back-link{color:#666;text-decoration:none;font-size:.7rem;padding:3px 8px;border:1px solid #ced4da;border-radius:4px;margin-left:auto}
+.back-link:hover{color:#333;border-color:#adb5bd}
+.main-area{display:flex;height:calc(100vh - 80px)}
+.chart-wrap{flex:1;position:relative;background:#fff}
+.chart-container{width:100%;height:100%}
+.info-panel{width:280px;background:#f8f9fa;border-left:1px solid #dee2e6;overflow-y:auto;padding:10px;font-size:.7rem}
+.info-panel h3{color:#333;font-size:.8rem;margin:10px 0 6px;border-bottom:1px solid #dee2e6;padding-bottom:4px;font-weight:600}
+.info-panel h3:first-child{margin-top:0}
+.info-row{display:flex;justify-content:space-between;padding:2px 0;color:#666}
+.info-row .val{color:#333;font-weight:600}
+.info-row .val.bullish{color:#28a745}
+.info-row .val.bearish{color:#dc3545}
+.info-row .val.ranging{color:#ffc107}
+.tag{display:inline-block;font-size:.6rem;padding:1px 5px;border-radius:3px;margin-left:4px}
+.tag.good{background:rgba(40,167,69,.15);color:#28a745}
+.tag.bad{background:rgba(220,53,69,.15);color:#dc3545}
+.tag.moderate{background:rgba(255,193,7,.15);color:#856404}
+.range-list{margin:4px 0}
+.range-item{padding:4px 6px;margin:3px 0;border-radius:3px;background:rgba(0,0,0,.03);font-size:.65rem;border-left:3px solid #007bff}
+.range-item.htf{border-left-color:#000}
+.range-item.ltf{border-left-color:#dc3545}
+.legend{display:flex;gap:14px;padding:5px 12px;background:#f8f9fa;border-top:1px solid #dee2e6;font-size:.65rem;color:#666;flex-wrap:wrap}
+.legend-item{display:flex;align-items:center;gap:4px}
+.legend-box{width:12px;height:12px;border:2px solid;background:transparent}
+.loading-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.9);z-index:100;font-size:.85rem;color:#666}
+.loading-overlay.hidden{display:none}
+.spinner{width:18px;height:18px;border:2px solid #dee2e6;border-top-color:#007bff;border-radius:50%;animation:spin .6s linear infinite;margin-right:8px}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media(max-width:768px){
+    .info-panel{display:none}
+    .header{padding:4px 8px}
+    .ctrl select{min-width:80px;font-size:.7rem;padding:3px 5px}
+    .ctrl button{padding:4px 8px;font-size:.7rem}
+    .chart-btns button{padding:3px 6px}
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+    <h1>Ranges <span class="sub">Debug</span></h1>
+    <div class="ctrl">
+        <label>Pair</label>
+        <select id="pairSelect"><option>Loading...</option></select>
+    </div>
+    <div class="ctrl">
+        <label>TF</label>
+        <select id="tfSelect">
+            <option value="1m">1m</option>
+            <option value="5m">5m</option>
+            <option value="15m">15m</option>
+            <option value="30m">30m</option>
+            <option value="1h">1h</option>
+            <option value="4h" selected>4h</option>
+            <option value="8h">8h</option>
+            <option value="1d">1D</option>
+            <option value="1W">1W</option>
+        </select>
+    </div>
+    <div class="ctrl">
+        <button id="loadBtn" onclick="loadData()">Load</button>
+    </div>
+    <div class="chart-btns">
+        <button onclick="resetChart()">Reset</button>
+        <button onclick="fitChart()">Fit</button>
+        <button onclick="zoomIn()">+</button>
+        <button onclick="zoomOut()">−</button>
+    </div>
+    <a class="back-link" href="/dashboard">← Back</a>
+</div>
+
+<div class="main-area">
+    <div class="chart-wrap">
+        <div id="chart" class="chart-container"></div>
+        <div id="loadingOverlay" class="loading-overlay hidden">
+            <div class="spinner"></div> Loading...
+        </div>
+    </div>
+    <div id="infoPanel" class="info-panel">
+        <h3>Select pair &amp; timeframe</h3>
+        <div class="info-row"><span>Then click <b>Load</b></span></div>
+    </div>
+</div>
+
+<div class="legend">
+    <div class="legend-item"><div class="legend-box" style="border-color:#000"></div> HTF Range (black)</div>
+    <div class="legend-item"><div class="legend-box" style="border-color:#dc3545"></div> LTF Range (red)</div>
+    <div class="legend-item"><div style="width:16px;height:1px;border-top:1px dashed #ffc107"></div> Equilibrium (0.5)</div>
+    <div class="legend-item"><div style="width:16px;height:1px;border-top:1px dotted #6c757d"></div> Deviation Limit</div>
+</div>
+
+<script>
+let chart, candleSeries;
+let rangeSeries = [];
+const BASE = '';
+
+function initChart() {
+    const el = document.getElementById('chart');
+    chart = LightweightCharts.createChart(el, {
+        width: el.clientWidth,
+        height: el.clientHeight,
+        layout: { background: { type: 'solid', color: '#ffffff' }, textColor: '#333', fontSize: 11 },
+        grid: { vertLines: { color: '#f0f0f0' }, horzLines: { color: '#f0f0f0' } },
+        crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+        rightPriceScale: { borderColor: '#dee2e6' },
+        timeScale: { borderColor: '#dee2e6', timeVisible: true, secondsVisible: false },
+        handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: true },
+        handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
+    });
+    candleSeries = chart.addCandlestickSeries({
+        upColor: '#26a69a', downColor: '#ef5350',
+        borderUpColor: '#26a69a', borderDownColor: '#ef5350',
+        wickUpColor: '#26a69a', wickDownColor: '#ef5350',
+    });
+    window.addEventListener('resize', () => {
+        chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
+    });
+}
+
+function resetChart() {
+    chart.timeScale().resetTimeScale();
+    chart.priceScale('right').applyOptions({ autoScale: true });
+}
+function fitChart() {
+    chart.timeScale().fitContent();
+}
+function zoomIn() {
+    const visibleRange = chart.timeScale().getVisibleLogicalRange();
+    if (visibleRange) {
+        const center = (visibleRange.from + visibleRange.to) / 2;
+        const halfRange = (visibleRange.to - visibleRange.from) / 4;
+        chart.timeScale().setVisibleLogicalRange({ from: center - halfRange, to: center + halfRange });
+    }
+}
+function zoomOut() {
+    const visibleRange = chart.timeScale().getVisibleLogicalRange();
+    if (visibleRange) {
+        const center = (visibleRange.from + visibleRange.to) / 2;
+        const halfRange = (visibleRange.to - visibleRange.from);
+        chart.timeScale().setVisibleLogicalRange({ from: center - halfRange, to: center + halfRange });
+    }
+}
+
+async function loadPairs() {
+    try {
+        const r = await fetch(BASE + '/api/ranges-pairs');
+        const d = await r.json();
+        const sel = document.getElementById('pairSelect');
+        sel.innerHTML = '';
+        (d.pairs || []).forEach(p => {
+            const o = document.createElement('option');
+            o.value = p; o.textContent = p;
+            if (p === 'BTC_USDT_PERP') o.selected = true;
+            sel.appendChild(o);
+        });
+    } catch(e) { console.error('Failed to load pairs', e); }
+}
+
+function clearOverlays() {
+    rangeSeries.forEach(s => { try { chart.removeSeries(s); } catch(e){} });
+    rangeSeries = [];
+    candleSeries.setMarkers([]);
+}
+
+// Draw a range box using line series
+function drawRange(range, type, candles) {
+    // Color scheme: HTF=black, LTF=red
+    const colors = {
+        htf: { border: '#000000', fill: 'rgba(0,0,0,0.05)', eq: '#000000', dl: '#666666', lineWidth: 2 },
+        ltf: { border: '#dc3545', fill: 'rgba(220,53,69,0.05)', eq: '#dc3545', dl: '#dc3545', lineWidth: 1.5 },
+        mtf: { border: '#007bff', fill: 'rgba(0,123,255,0.05)', eq: '#007bff', dl: '#007bff', lineWidth: 1.5 },
+    };
+    const c = colors[type] || colors.mtf;
+
+    // Find the time range within visible candles
+    const startTime = range.start_time;
+    const endTime = range.end_time;
+
+    // Filter to candles we have
+    const firstCandle = candles[0]?.time || 0;
+    const lastCandle = candles[candles.length - 1]?.time || Infinity;
+
+    // Only draw if range overlaps with our candle data
+    if (endTime < firstCandle || startTime > lastCandle) return;
+
+    const effectiveStart = Math.max(startTime, firstCandle);
+    const effectiveEnd = Math.min(endTime, lastCandle);
+
+    // Top line of range
+    const topLine = chart.addLineSeries({
+        color: c.border,
+        lineWidth: c.lineWidth,
+        lineStyle: 0,
+        crosshairMarkerVisible: false,
+        lastValueVisible: false,
+        priceLineVisible: false,
+    });
+    topLine.setData([
+        { time: effectiveStart, value: range.high },
+        { time: effectiveEnd, value: range.high },
+    ]);
+    rangeSeries.push(topLine);
+
+    // Bottom line of range
+    const bottomLine = chart.addLineSeries({
+        color: c.border,
+        lineWidth: c.lineWidth,
+        lineStyle: 0,
+        crosshairMarkerVisible: false,
+        lastValueVisible: false,
+        priceLineVisible: false,
+    });
+    bottomLine.setData([
+        { time: effectiveStart, value: range.low },
+        { time: effectiveEnd, value: range.low },
+    ]);
+    rangeSeries.push(bottomLine);
+
+    // Equilibrium line (0.5 fib) - dashed
+    const eqLine = chart.addLineSeries({
+        color: 'rgba(255,193,7,0.8)',
+        lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dashed,
+        crosshairMarkerVisible: false,
+        lastValueVisible: false,
+        priceLineVisible: false,
+    });
+    eqLine.setData([
+        { time: effectiveStart, value: range.equilibrium },
+        { time: effectiveEnd, value: range.equilibrium },
+    ]);
+    rangeSeries.push(eqLine);
+
+    // Deviation limit lines - dotted (optional, only for good/moderate ranges)
+    if (range.quality !== 'bad') {
+        // Upper deviation limit
+        const upperDL = chart.addLineSeries({
+            color: 'rgba(108,117,125,0.5)',
+            lineWidth: 1,
+            lineStyle: LightweightCharts.LineStyle.Dotted,
+            crosshairMarkerVisible: false,
+            lastValueVisible: false,
+            priceLineVisible: false,
+        });
+        upperDL.setData([
+            { time: effectiveStart, value: range.upper_dl },
+            { time: effectiveEnd, value: range.upper_dl },
+        ]);
+        rangeSeries.push(upperDL);
+
+        // Lower deviation limit
+        const lowerDL = chart.addLineSeries({
+            color: 'rgba(108,117,125,0.5)',
+            lineWidth: 1,
+            lineStyle: LightweightCharts.LineStyle.Dotted,
+            crosshairMarkerVisible: false,
+            lastValueVisible: false,
+            priceLineVisible: false,
+        });
+        lowerDL.setData([
+            { time: effectiveStart, value: range.lower_dl },
+            { time: effectiveEnd, value: range.lower_dl },
+        ]);
+        rangeSeries.push(lowerDL);
+    }
+}
+
+async function loadData() {
+    const sym = document.getElementById('pairSelect').value;
+    const tf = document.getElementById('tfSelect').value;
+    const btn = document.getElementById('loadBtn');
+    const overlay = document.getElementById('loadingOverlay');
+
+    btn.disabled = true;
+    overlay.classList.remove('hidden');
+    clearOverlays();
+
+    try {
+        const r = await fetch(BASE + `/api/ranges?symbol=${sym}&timeframe=${tf}&limit=300`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const data = await r.json();
+
+        candleSeries.setData(data.candles || []);
+
+        // Draw ranges in order: HTF first (back), then LTF (front)
+        // HTF ranges in black
+        (data.htf_ranges || []).forEach(range => {
+            drawRange(range, 'htf', data.candles);
+        });
+
+        // LTF ranges in red
+        (data.ltf_ranges || []).forEach(range => {
+            drawRange(range, 'ltf', data.candles);
+        });
+
+        updateInfoPanel(data);
+        chart.timeScale().fitContent();
+
+    } catch(e) {
+        console.error('Load error:', e);
+        document.getElementById('infoPanel').innerHTML = `<h3 style="color:#dc3545">Error</h3><div class="info-row">${e.message}</div>`;
+    } finally {
+        btn.disabled = false;
+        overlay.classList.add('hidden');
+    }
+}
+
+function updateInfoPanel(data) {
+    const panel = document.getElementById('infoPanel');
+    const sym = data.symbol || '—';
+    const tf = data.timeframe || '—';
+    const tfConfig = data.tf_config || {};
+
+    let html = `<h3>${sym} · ${tf.toUpperCase()}</h3>`;
+
+    // Timeframe configuration
+    html += `<div class="info-row"><span>HTF</span><span class="val">${tfConfig.htf || '—'} (black)</span></div>`;
+    html += `<div class="info-row"><span>MTF</span><span class="val">${tfConfig.mtf || '—'}</span></div>`;
+    html += `<div class="info-row"><span>LTF</span><span class="val">${tfConfig.ltf || '—'} (red)</span></div>`;
+
+    // HTF Ranges
+    const htfRanges = data.htf_ranges || [];
+    html += `<h3>HTF Ranges (${htfRanges.length})</h3>`;
+    if (htfRanges.length > 0) {
+        html += `<div class="range-list">`;
+        htfRanges.slice(-5).forEach((r, i) => {
+            html += `<div class="range-item htf">
+                <div><b>Range ${i+1}</b> <span class="tag ${r.quality}">${r.quality}</span></div>
+                <div>High: ${r.high.toFixed(4)}</div>
+                <div>Low: ${r.low.toFixed(4)}</div>
+                <div>EQ: ${r.equilibrium.toFixed(4)} ${r.eq_touched ? '✓' : ''}</div>
+                <div>Size: ${(r.range_size).toFixed(4)} (${r.candles} candles)</div>
+                <div>DL: ±${r.deviation_limit.toFixed(4)}</div>
+            </div>`;
+        });
+        html += `</div>`;
+    } else {
+        html += `<div class="info-row"><span>No HTF ranges detected</span></div>`;
+    }
+
+    // LTF Ranges
+    const ltfRanges = data.ltf_ranges || [];
+    html += `<h3>LTF Ranges (${ltfRanges.length})</h3>`;
+    if (ltfRanges.length > 0) {
+        html += `<div class="range-list">`;
+        ltfRanges.slice(-5).forEach((r, i) => {
+            html += `<div class="range-item ltf">
+                <div><b>Range ${i+1}</b> <span class="tag ${r.quality}">${r.quality}</span></div>
+                <div>High: ${r.high.toFixed(4)}</div>
+                <div>Low: ${r.low.toFixed(4)}</div>
+                <div>EQ: ${r.equilibrium.toFixed(4)} ${r.eq_touched ? '✓' : ''}</div>
+                <div>Size: ${(r.range_size).toFixed(4)} (${r.candles} candles)</div>
+            </div>`;
+        });
+        html += `</div>`;
+    } else {
+        html += `<div class="info-row"><span>No LTF ranges detected</span></div>`;
+    }
+
+    // TCT Range Rules reference
+    html += `<h3>TCT Range Rules</h3>`;
+    html += `<div class="info-row" style="flex-direction:column;gap:2px">
+        <div>• Range = sideways consolidation</div>
+        <div>• EQ = 0.5 fib (equilibrium)</div>
+        <div>• DL = 30% deviation limit</div>
+        <div>• Good: slow action, liquidity</div>
+        <div>• Bad: V-shaped, aggressive</div>
+    </div>`;
+
+    panel.innerHTML = html;
+}
+
+initChart();
+loadPairs();
+document.getElementById('pairSelect').addEventListener('change', loadData);
+document.getElementById('tfSelect').addEventListener('change', loadData);
+</script>
+</body>
+</html>"""
+
+    return HTMLResponse(content=html)
+
+
+# ================================================================
 # ENTRY POINT
 # ================================================================
 
