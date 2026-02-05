@@ -10140,6 +10140,12 @@ async def get_ranges_data(symbol: str = "BTC_USDT_PERP", timeframe: str = "4h", 
             "ranges": primary_ranges,
             "htf_ranges": htf_ranges,
             "ltf_ranges": ltf_ranges,
+            "debug": {
+                "sym_resolved": sym,
+                "primary_candles": len(candles),
+                "htf_candles": len(df_htf) if df_htf is not None else 0,
+                "ltf_candles": len(df_ltf) if df_ltf is not None else 0,
+            }
         }
 
         return JSONResponse(convert_numpy_types(response))
@@ -10147,8 +10153,9 @@ async def get_ranges_data(symbol: str = "BTC_USDT_PERP", timeframe: str = "4h", 
     except Exception as e:
         logger.error(f"[RANGES_API_ERROR] {e}")
         import traceback
-        logger.error(traceback.format_exc())
-        return JSONResponse({"error": str(e)}, status_code=500)
+        tb = traceback.format_exc()
+        logger.error(tb)
+        return JSONResponse({"error": str(e), "traceback": tb}, status_code=500)
 
 
 @app.get("/ranges", response_class=HTMLResponse)
