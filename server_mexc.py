@@ -10105,7 +10105,7 @@ async def get_ranges_data(symbol: str = "BTC_USDT_PERP", timeframe: str = "4h", 
         tf_config = htf_ltf_map.get(timeframe, {"htf": "1d", "ltf": "1h"})
 
         # Fetch candle data for primary timeframe
-        df_primary = await fetch_mexc_klines(sym, mexc_tf, limit)
+        df_primary = await fetch_mexc_candles(sym, mexc_tf, limit)
         if df_primary.empty:
             return JSONResponse({"error": f"No data for {symbol} {timeframe}"}, status_code=404)
 
@@ -10131,13 +10131,13 @@ async def get_ranges_data(symbol: str = "BTC_USDT_PERP", timeframe: str = "4h", 
         # Fetch and detect ranges on HTF
         htf_tf = tf_config["htf"]
         htf_mexc = tf_map.get(htf_tf, "Day1")
-        df_htf = await fetch_mexc_klines(sym, htf_mexc, limit)
+        df_htf = await fetch_mexc_candles(sym, htf_mexc, limit)
         htf_ranges = detect_ranges(df_htf, lookback=limit) if not df_htf.empty else []
 
         # Fetch and detect ranges on LTF
         ltf_tf = tf_config["ltf"]
         ltf_mexc = tf_map.get(ltf_tf, "Min60")
-        df_ltf = await fetch_mexc_klines(sym, ltf_mexc, limit * 4)  # More data for LTF
+        df_ltf = await fetch_mexc_candles(sym, ltf_mexc, limit * 4)  # More data for LTF
         ltf_ranges = detect_ranges(df_ltf, lookback=limit * 4) if not df_ltf.empty else []
 
         response = {
