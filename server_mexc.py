@@ -10072,8 +10072,8 @@ def detect_ranges(df: pd.DataFrame, lookback: int = 50):
     return ranges
 
 
-@app.get("/api/ranges")
-async def get_ranges_data(symbol: str = "BTC_USDT_PERP", timeframe: str = "4h", limit: int = 300):
+@app.get("/api/ranges-debug")
+async def get_ranges_debug_data(symbol: str = "BTC_USDT_PERP", timeframe: str = "4h", limit: int = 300):
     """
     API endpoint for ranges debug page.
     Returns candle data with detected TCT ranges.
@@ -10465,7 +10465,7 @@ async function loadData() {
     clearOverlays();
 
     try {
-        const r = await fetch(BASE + `/api/ranges?symbol=${sym}&timeframe=${tf}&limit=300`);
+        const r = await fetch(BASE + `/api/ranges-debug?symbol=${sym}&timeframe=${tf}&limit=300`);
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const data = await r.json();
 
