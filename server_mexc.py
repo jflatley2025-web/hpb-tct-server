@@ -4350,7 +4350,26 @@ async def dashboard():
             overflow: hidden;
             border: 1px solid #2d2d44;
         }
-        #chart { width: 100%; height: 100%; }
+        #chart { width: 100%; height: calc(100% - 36px); }
+        .chart-controls {
+            display: flex;
+            gap: 6px;
+            padding: 4px 8px;
+            background: #12121a;
+            border-bottom: 1px solid #2d2d44;
+        }
+        .chart-ctrl-btn {
+            background: #1a1a2e;
+            color: #aaa;
+            border: 1px solid #2d2d44;
+            padding: 3px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.7rem;
+            font-weight: 600;
+            transition: all 0.2s;
+        }
+        .chart-ctrl-btn:hover { background: #2d2d44; color: #e0e0e0; border-color: #00d4ff80; }
         .metrics-panel {
             display: flex;
             flex-direction: column;
@@ -5430,13 +5449,19 @@ async def dashboard():
 
     <div class="main-container">
         <div class="chart-section">
+            <div class="chart-controls">
+                <button class="chart-ctrl-btn" onclick="chartFit()" title="Fit all candles in view">Fit</button>
+                <button class="chart-ctrl-btn" onclick="chartZoomIn()" title="Zoom in">Zoom In</button>
+                <button class="chart-ctrl-btn" onclick="chartZoomOut()" title="Zoom out">Zoom Out</button>
+                <button class="chart-ctrl-btn" onclick="chartReset()" title="Reset chart to default view">Reset</button>
+            </div>
             <div id="chart"></div>
         </div>
 
         <div class="metrics-panel">
-            <!-- Top 5 Setups (Range Probability Scanner) -->
+            <!-- Top 5 Ranges (Range Probability Scanner) -->
             <div class="top5-panel" id="top5Panel">
-                <h3>Top 5 Setups <span class="top5-scanner-status" id="scannerStatus">Initializing...</span></h3>
+                <h3>Top 5 Ranges <span class="top5-scanner-status" id="scannerStatus">Initializing...</span></h3>
                 <div id="top5Content">
                     <div class="top5-empty">Range scanner starting — scanning pairs using detect_ranges logic...</div>
                 </div>
@@ -6154,6 +6179,38 @@ async def dashboard():
             });
         }
 
+        // Chart control functions
+        function chartFit() {
+            if (chart) chart.timeScale().fitContent();
+        }
+        function chartZoomIn() {
+            if (!chart) return;
+            const ts = chart.timeScale();
+            const range = ts.getVisibleLogicalRange();
+            if (range) {
+                const mid = (range.from + range.to) / 2;
+                const half = (range.to - range.from) / 4;
+                ts.setVisibleLogicalRange({ from: mid - half, to: mid + half });
+            }
+        }
+        function chartZoomOut() {
+            if (!chart) return;
+            const ts = chart.timeScale();
+            const range = ts.getVisibleLogicalRange();
+            if (range) {
+                const mid = (range.from + range.to) / 2;
+                const half = (range.to - range.from);
+                ts.setVisibleLogicalRange({ from: mid - half, to: mid + half });
+            }
+        }
+        function chartReset() {
+            if (!chart || !lastCandles || lastCandles.length === 0) return;
+            chart.timeScale().fitContent();
+            // Re-scale price axis to auto
+            candleSeries.applyOptions({ autoscaleInfoProvider: undefined });
+            chart.priceScale('right').applyOptions({ autoScale: true });
+        }
+
         // Fetch candle data from server (avoids CORS issues)
         async function fetchCandles(interval = '4h', limit = 100) {
             try {
@@ -6301,10 +6358,37 @@ async def dashboard():
             document.getElementById('formingCount').textContent = '...';
             document.getElementById('formingContent').innerHTML = '<div class="forming-empty">Analyzing pair...</div>';
 
+            // Reset Active Range sidebar to clear stale data from previous pair
+            if (isNewPair) {
+                document.getElementById('rangeHigh').textContent = '--';
+                document.getElementById('rangeEq').textContent = '--';
+                document.getElementById('rangeLow').textContent = '--';
+                document.getElementById('tradingBias').textContent = '--';
+                document.getElementById('tradingBias').className = 'value';
+                document.getElementById('biasStrength').textContent = '--';
+                document.getElementById('rangeViz').style.display = 'none';
+                document.getElementById('rangeHighLabel').textContent = '--';
+                document.getElementById('rangeLowLabel').textContent = '--';
+                document.getElementById('htfTrend').textContent = '--';
+                document.getElementById('ltfTrend').textContent = '--';
+                document.getElementById('htfEOF').textContent = '--';
+                document.getElementById('ltfEOF').textContent = '--';
+                document.getElementById('htfPivots').textContent = '--';
+                document.getElementById('wickDevs').textContent = '0';
+                document.getElementById('candleDevs').textContent = '0';
+                document.getElementById('dlDevs').textContent = '0';
+                document.getElementById('devBadge').textContent = '0';
+                document.getElementById('schematicsContent').innerHTML = '<div class="metric-row"><span class="label">Loading...</span></div>';
+                document.getElementById('po3Content').innerHTML = '<div class="metric-row"><span class="label">Loading...</span></div>';
+            }
+
             // ─── STEP 1: Fetch candles and update chart ───
             lastCandles = await fetchCandles(currentTimeframe, getCandleLimit(currentTimeframe));
             if (lastCandles.length > 0) {
                 candleSeries.setData(lastCandles);
+                // Auto-fit chart to bring new pair's candles into view
+                chart.timeScale().fitContent();
+                chart.priceScale('right').applyOptions({ autoScale: true });
                 const lastPrice = lastCandles[lastCandles.length - 1].close;
                 document.getElementById('currentPrice').textContent = '$' + lastPrice.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
             }
@@ -6340,7 +6424,7 @@ async def dashboard():
 
                 // ─── STEP 5: TCT Schematics ───
                 try {
-                    schematicsData = await fetchWithRetry(`/api/schematics?symbol=${currentSymbol}`, {}, 3, 30000);
+                    schematicsData = await fetchWithRetry(`/api/schematics?symbol=${currentSymbol}&timeframe=${currentTimeframe}`, {}, 3, 30000);
                     if (schematicsData && !schematicsData.error) {
                         updateSchematicsUI(schematicsData);
                     } else { setError('schematicsBadge'); }
@@ -6348,7 +6432,7 @@ async def dashboard():
 
                 // ─── STEP 6: PO3 Schematics ───
                 try {
-                    po3Data = await fetchWithRetry(`/api/po3?symbol=${currentSymbol}`, {}, 3, 30000);
+                    po3Data = await fetchWithRetry(`/api/po3?symbol=${currentSymbol}&timeframe=${currentTimeframe}`, {}, 3, 30000);
                     if (po3Data && !po3Data.error) {
                         updatePO3UI(po3Data);
                     } else { setError('po3Badge'); }
@@ -6369,27 +6453,38 @@ async def dashboard():
                 };
 
             } else {
-                // ─── TIMEFRAME CHANGE: Reuse cached HTF data, update chart overlays ───
+                // ─── TIMEFRAME CHANGE: Reuse cached ranges/zones/liq/val, re-fetch schematics/PO3 ───
                 rangesData = htfCache.rangesData;
                 zonesData = htfCache.zonesData;
                 liqData = htfCache.liqData;
                 valData = htfCache.valData;
-                schematicsData = htfCache.schematicsData;
-                po3Data = htfCache.po3Data;
 
-                // Re-render UI with cached data (updates chart overlays for new timeframe candles)
+                // Re-render cached data with new timeframe candles
                 if (rangesData && !rangesData.error) updateRangesUI(rangesData, lastCandles);
                 else { setError('trendBadge'); setError('zoneBadge'); }
                 if (zonesData && !zonesData.error) updateZonesUI(zonesData);
                 else setError('zoneCount');
                 if (liqData && !liqData.error) updateLiquidityUI(liqData, lastCandles);
                 else setError('liqCount');
-                if (schematicsData && !schematicsData.error) updateSchematicsUI(schematicsData);
-                else setError('schematicsBadge');
-                if (po3Data && !po3Data.error) updatePO3UI(po3Data);
-                else setError('po3Badge');
                 if (valData) updateValidationUI(valData);
                 else setError('actionBadge');
+
+                // Re-fetch schematics and PO3 with new timeframe context
+                try {
+                    schematicsData = await fetchWithRetry(`/api/schematics?symbol=${currentSymbol}&timeframe=${currentTimeframe}`, {}, 3, 30000);
+                    if (schematicsData && !schematicsData.error) updateSchematicsUI(schematicsData);
+                    else setError('schematicsBadge');
+                } catch (e) { console.error('Schematics error:', e); setError('schematicsBadge'); }
+
+                try {
+                    po3Data = await fetchWithRetry(`/api/po3?symbol=${currentSymbol}&timeframe=${currentTimeframe}`, {}, 3, 30000);
+                    if (po3Data && !po3Data.error) updatePO3UI(po3Data);
+                    else setError('po3Badge');
+                } catch (e) { console.error('PO3 error:', e); setError('po3Badge'); }
+
+                // Update cache with new schematics/PO3 data
+                htfCache.schematicsData = schematicsData;
+                htfCache.po3Data = po3Data;
             }
 
             // ─── STEP 8: Forming Models (derived from current pair's schematic data) ───
@@ -6917,7 +7012,10 @@ async def dashboard():
                 return;
             }
 
-            // Get schematics for all 3 timeframes
+            // Get schematics for all 3 timeframes (use timeframes from response)
+            const htfTF = data.htf_schematics?.timeframe || 'HTF';
+            const mtfTF = data.mtf_schematics?.timeframe || 'MTF';
+            const ltfTF = data.ltf_schematics?.timeframe || 'LTF';
             const htfSchematics = data.htf_schematics?.schematics || [];
             const mtfSchematics = data.mtf_schematics?.schematics || [];
             const ltfSchematics = data.ltf_schematics?.schematics || [];
@@ -6925,7 +7023,7 @@ async def dashboard():
 
             if (allSchematics.length === 0) {
                 contentEl.innerHTML = '<div class="metric-row"><span class="label">No active schematics detected</span></div>' +
-                    '<div class="metric-row" style="margin-top:4px;"><span class="label" style="font-size:0.6rem;color:#666;">Scanned HTF (4h), MTF (1h), LTF (15m)</span></div>';
+                    '<div class="metric-row" style="margin-top:4px;"><span class="label" style="font-size:0.6rem;color:#666;">Scanned HTF (' + htfTF + '), MTF (' + mtfTF + '), LTF (' + ltfTF + ')</span></div>';
                 badgeEl.textContent = '0';
                 badgeEl.className = 'badge badge-neutral';
                 return;
@@ -6938,11 +7036,11 @@ async def dashboard():
             badgeEl.textContent = totalCount;
             badgeEl.className = 'badge badge-' + (hasAccum && !hasDist ? 'bullish' : hasDist && !hasAccum ? 'bearish' : 'neutral');
 
-            // Build grouped HTML
+            // Build grouped HTML using actual timeframes from response
             let html = '';
-            html += buildTFGroupHTML('HTF', '4h', htfSchematics, buildSchematicCardHTML);
-            html += buildTFGroupHTML('MTF', '1h', mtfSchematics, buildSchematicCardHTML);
-            html += buildTFGroupHTML('LTF', '15m', ltfSchematics, buildSchematicCardHTML);
+            html += buildTFGroupHTML('HTF', htfTF, htfSchematics, buildSchematicCardHTML);
+            html += buildTFGroupHTML('MTF', mtfTF, mtfSchematics, buildSchematicCardHTML);
+            html += buildTFGroupHTML('LTF', ltfTF, ltfSchematics, buildSchematicCardHTML);
 
             contentEl.innerHTML = html;
         }
@@ -6956,10 +7054,10 @@ async def dashboard():
             icon.textContent = '\\u23F3';
 
             const contentEl = document.getElementById('schematicsContent');
-            contentEl.innerHTML = '<div class="metric-row"><span class="label" style="color:#ffc107;">Scanning HTF (4h), MTF (1h), LTF (15m)...</span></div>';
+            contentEl.innerHTML = '<div class="metric-row"><span class="label" style="color:#ffc107;">Scanning schematics for ' + currentSymbol + ' (' + currentTimeframe + ')...</span></div>';
 
             try {
-                const data = await fetchWithRetry('/api/schematics?symbol=' + currentSymbol, {}, 3, 30000);
+                const data = await fetchWithRetry('/api/schematics?symbol=' + currentSymbol + '&timeframe=' + currentTimeframe, {}, 3, 30000);
                 updateSchematicsUI(data);
             } catch (e) {
                 contentEl.innerHTML = '<div class="metric-row"><span class="label" style="color:#ff4444;">Scan failed: ' + e.message + '</span></div>';
@@ -7786,7 +7884,10 @@ async def dashboard():
                 return;
             }
 
-            // Get PO3 for all 3 timeframes
+            // Get PO3 for all 3 timeframes (use timeframes from response)
+            const htfPO3TF = data.htf_po3?.timeframe || 'HTF';
+            const mtfPO3TF = data.mtf_po3?.timeframe || 'MTF';
+            const ltfPO3TF = data.ltf_po3?.timeframe || 'LTF';
             const htfPO3 = data.htf_po3?.schematics || [];
             const mtfPO3 = data.mtf_po3?.schematics || [];
             const ltfPO3 = data.ltf_po3?.schematics || [];
@@ -7795,7 +7896,7 @@ async def dashboard():
             if (allPO3.length === 0) {
                 contentEl.innerHTML = '<div class="metric-row"><span class="label">No active PO3 schematics detected</span></div>' +
                     '<div class="metric-row" style="margin-top:4px;"><span class="label" style="font-size:0.6rem;color:#666;">PO3 = Range &rarr; Manipulation &rarr; Expansion</span></div>' +
-                    '<div class="metric-row"><span class="label" style="font-size:0.6rem;color:#666;">Scanned HTF (4h), MTF (1h), LTF (15m)</span></div>';
+                    '<div class="metric-row"><span class="label" style="font-size:0.6rem;color:#666;">Scanned HTF (' + htfPO3TF + '), MTF (' + mtfPO3TF + '), LTF (' + ltfPO3TF + ')</span></div>';
                 badgeEl.textContent = '0';
                 badgeEl.className = 'badge badge-neutral';
                 return;
@@ -7808,11 +7909,11 @@ async def dashboard():
             badgeEl.textContent = totalCount;
             badgeEl.className = 'badge badge-' + (hasBull && !hasBear ? 'bullish' : hasBear && !hasBull ? 'bearish' : 'neutral');
 
-            // Build grouped HTML
+            // Build grouped HTML using actual timeframes from response
             let html = '';
-            html += buildTFGroupHTML('HTF', '4h', htfPO3, buildPO3CardHTML);
-            html += buildTFGroupHTML('MTF', '1h', mtfPO3, buildPO3CardHTML);
-            html += buildTFGroupHTML('LTF', '15m', ltfPO3, buildPO3CardHTML);
+            html += buildTFGroupHTML('HTF', htfPO3TF, htfPO3, buildPO3CardHTML);
+            html += buildTFGroupHTML('MTF', mtfPO3TF, mtfPO3, buildPO3CardHTML);
+            html += buildTFGroupHTML('LTF', ltfPO3TF, ltfPO3, buildPO3CardHTML);
 
             contentEl.innerHTML = html;
         }
@@ -7826,10 +7927,10 @@ async def dashboard():
             icon.textContent = '\\u23F3';
 
             const contentEl = document.getElementById('po3Content');
-            contentEl.innerHTML = '<div class="metric-row"><span class="label" style="color:#ffc107;">Scanning HTF (4h), MTF (1h), LTF (15m) for PO3...</span></div>';
+            contentEl.innerHTML = '<div class="metric-row"><span class="label" style="color:#ffc107;">Scanning PO3 for ' + currentSymbol + ' (' + currentTimeframe + ')...</span></div>';
 
             try {
-                const data = await fetchWithRetry('/api/po3?symbol=' + currentSymbol, {}, 3, 30000);
+                const data = await fetchWithRetry('/api/po3?symbol=' + currentSymbol + '&timeframe=' + currentTimeframe, {}, 3, 30000);
                 updatePO3UI(data);
             } catch (e) {
                 contentEl.innerHTML = '<div class="metric-row"><span class="label" style="color:#ff4444;">Scan failed: ' + e.message + '</span></div>';
@@ -9032,7 +9133,7 @@ async def validate_current_setup(symbol: Optional[str] = None):
         return JSONResponse({"error": str(e), "Action": "NO_TRADE"}, status_code=500)
 
 @app.get("/api/schematics")
-async def get_tct_schematics(symbol: Optional[str] = None):
+async def get_tct_schematics(symbol: Optional[str] = None, timeframe: Optional[str] = None):
     """
     TCT Schematics endpoint - Lecture 5A + 5B + 6 Advanced methodology
 
@@ -9050,12 +9151,29 @@ async def get_tct_schematics(symbol: Optional[str] = None):
     - Context-based follow-through prediction (premium/discount zones)
 
     Returns schematics with entry, stop loss, target levels, and advanced enhancements.
+    Accepts optional timeframe parameter to scan relative HTF/MTF/LTF windows.
     """
     try:
         sym = resolve_symbol(symbol)
 
-        # Multi-timeframe scanning: HTF (4h), MTF (1h), LTF (15m)
-        timeframes = {"htf": "4h", "mtf": "1h", "ltf": "15m"}
+        # Map selected timeframe to appropriate HTF/MTF/LTF scanning windows
+        tf_map = {
+            "1m":  {"htf": "15m", "mtf": "5m",  "ltf": "1m"},
+            "5m":  {"htf": "1h",  "mtf": "15m", "ltf": "5m"},
+            "15m": {"htf": "4h",  "mtf": "1h",  "ltf": "15m"},
+            "30m": {"htf": "4h",  "mtf": "1h",  "ltf": "30m"},
+            "1h":  {"htf": "4h",  "mtf": "1h",  "ltf": "15m"},
+            "2h":  {"htf": "1d",  "mtf": "4h",  "ltf": "1h"},
+            "4h":  {"htf": "1d",  "mtf": "4h",  "ltf": "1h"},
+            "8h":  {"htf": "1d",  "mtf": "8h",  "ltf": "4h"},
+            "1d":  {"htf": "1W",  "mtf": "1d",  "ltf": "4h"},
+            "1W":  {"htf": "1M",  "mtf": "1W",  "ltf": "1d"},
+            "1M":  {"htf": "1M",  "mtf": "1W",  "ltf": "1d"},
+        }
+        tf_windows = tf_map.get(timeframe, {"htf": "4h", "mtf": "1h", "ltf": "15m"})
+
+        # Multi-timeframe scanning based on selected timeframe context
+        timeframes = {"htf": tf_windows["htf"], "mtf": tf_windows["mtf"], "ltf": tf_windows["ltf"]}
         dfs = {}
         for tf_key, tf_val in timeframes.items():
             df = await fetch_mexc_candles(sym, tf_val, 200)
@@ -9153,9 +9271,9 @@ async def get_tct_schematics(symbol: Optional[str] = None):
             "symbol": sym,
             "current_price": current_price,
             "methodology": "TCT Mentorship Lecture 5A + 5B + 6 - Advanced TCT Schematics",
-            "htf_schematics": tf_results.get("htf", {"timeframe": "4h", "schematics": [], "summary": summarize_schematics([])}),
-            "mtf_schematics": tf_results.get("mtf", {"timeframe": "1h", "schematics": [], "summary": summarize_schematics([])}),
-            "ltf_schematics": tf_results.get("ltf", {"timeframe": "15m", "schematics": [], "summary": summarize_schematics([])}),
+            "htf_schematics": tf_results.get("htf", {"timeframe": tf_windows["htf"], "schematics": [], "summary": summarize_schematics([])}),
+            "mtf_schematics": tf_results.get("mtf", {"timeframe": tf_windows["mtf"], "schematics": [], "summary": summarize_schematics([])}),
+            "ltf_schematics": tf_results.get("ltf", {"timeframe": tf_windows["ltf"], "schematics": [], "summary": summarize_schematics([])}),
             "trading_rules": {
                 "model_1": "Two successive deviations - Tap2 below Tap1, Tap3 below Tap2 (accumulation) or above (distribution)",
                 "model_2": "One deviation then higher low/lower high - must grab extreme liquidity OR mitigate extreme demand/supply",
@@ -9179,7 +9297,7 @@ async def get_tct_schematics(symbol: Optional[str] = None):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.get("/api/po3")
-async def get_po3_schematics(symbol: Optional[str] = None):
+async def get_po3_schematics(symbol: Optional[str] = None, timeframe: Optional[str] = None):
     """
     PO3 (Power of Three) Schematics endpoint — TCT Lecture 8
 
@@ -9193,12 +9311,29 @@ async def get_po3_schematics(symbol: Optional[str] = None):
     - Good RTZ quality in the range
 
     Also detects Exception 1 (2-tap) and Exception 2 (Internal TCT).
+    Accepts optional timeframe parameter to scan relative HTF/MTF/LTF windows.
     """
     try:
         sym = resolve_symbol(symbol)
 
-        # Multi-timeframe scanning: HTF (4h), MTF (1h), LTF (15m)
-        timeframes = {"htf": "4h", "mtf": "1h", "ltf": "15m"}
+        # Map selected timeframe to appropriate HTF/MTF/LTF scanning windows
+        tf_map = {
+            "1m":  {"htf": "15m", "mtf": "5m",  "ltf": "1m"},
+            "5m":  {"htf": "1h",  "mtf": "15m", "ltf": "5m"},
+            "15m": {"htf": "4h",  "mtf": "1h",  "ltf": "15m"},
+            "30m": {"htf": "4h",  "mtf": "1h",  "ltf": "30m"},
+            "1h":  {"htf": "4h",  "mtf": "1h",  "ltf": "15m"},
+            "2h":  {"htf": "1d",  "mtf": "4h",  "ltf": "1h"},
+            "4h":  {"htf": "1d",  "mtf": "4h",  "ltf": "1h"},
+            "8h":  {"htf": "1d",  "mtf": "8h",  "ltf": "4h"},
+            "1d":  {"htf": "1W",  "mtf": "1d",  "ltf": "4h"},
+            "1W":  {"htf": "1M",  "mtf": "1W",  "ltf": "1d"},
+            "1M":  {"htf": "1M",  "mtf": "1W",  "ltf": "1d"},
+        }
+        tf_windows = tf_map.get(timeframe, {"htf": "4h", "mtf": "1h", "ltf": "15m"})
+
+        # Multi-timeframe scanning based on selected timeframe context
+        timeframes = {"htf": tf_windows["htf"], "mtf": tf_windows["mtf"], "ltf": tf_windows["ltf"]}
         dfs = {}
         for tf_key, tf_val in timeframes.items():
             df = await fetch_mexc_candles(sym, tf_val, 200)
@@ -9285,9 +9420,9 @@ async def get_po3_schematics(symbol: Optional[str] = None):
             "symbol": sym,
             "current_price": current_price,
             "methodology": "TCT Mentorship Lecture 8 - PO3 Schematics (Power of Three)",
-            "htf_po3": tf_results.get("htf", {"timeframe": "4h", "schematics": [], "summary": summarize_po3([])}),
-            "mtf_po3": tf_results.get("mtf", {"timeframe": "1h", "schematics": [], "summary": summarize_po3([])}),
-            "ltf_po3": tf_results.get("ltf", {"timeframe": "15m", "schematics": [], "summary": summarize_po3([])}),
+            "htf_po3": tf_results.get("htf", {"timeframe": tf_windows["htf"], "schematics": [], "summary": summarize_po3([])}),
+            "mtf_po3": tf_results.get("mtf", {"timeframe": tf_windows["mtf"], "schematics": [], "summary": summarize_po3([])}),
+            "ltf_po3": tf_results.get("ltf", {"timeframe": tf_windows["ltf"], "schematics": [], "summary": summarize_po3([])}),
             "po3_rules": {
                 "range": "4H+ range with good RTZ quality and compression",
                 "manipulation": "Breakout/breakdown must stay inside DL2 (30% of range)",
