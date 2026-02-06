@@ -67,13 +67,17 @@ try:
     with open(COIN_LIST_PATH, "r") as f:
         for line in f:
             pair = line.strip()
-            # Filter out non-pair lines and dated futures contracts
+            # Filter out non-pair lines, dated futures contracts, and BNB (exchange-tied)
             if pair and pair.endswith("USDT") and "-" not in pair and not pair.endswith(".txt"):
+                # Exclude BNB and any Binance-exchange-tied pairs
+                base = pair.replace("USDT", "")
+                if base.upper() in ("BNB", "BIFI", "CAKE", "XVS", "ALPACA", "BURGER", "SFP", "LINA", "TWT"):
+                    continue
                 COIN_LIST.append(pair)
     COIN_LIST = sorted(set(COIN_LIST))
     logger.info(f"[INIT] Loaded {len(COIN_LIST)} trading pairs from coin list")
 except FileNotFoundError:
-    COIN_LIST = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"]
+    COIN_LIST = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"]
     logger.warning(f"[INIT] Coin list file not found, using defaults")
 
 def resolve_symbol(symbol_param: Optional[str] = None) -> str:
@@ -101,11 +105,8 @@ scanner_status = {
     "scan_duration_sec": 0,
 }
 SCANNER_INTERVAL_SEC = 4 * 60 * 60  # 4 hours
-# Range scanner config (from pairsrange_scanner.py)
-RANGE_MIN_HOURS = 24
-RANGE_V_SHAPE_THRESHOLD = 0.65       # % retrace too fast = V-shape
-RANGE_MAX_INTERNAL_VOL = 0.35        # too much internal volatility = bad range
-RANGE_MIN_RPS = 9.6                  # minimum RPS to qualify
+# Range scanner config (rebuilt using /ranges page detect_ranges logic)
+RANGE_MIN_RPS = 6.5                  # minimum quality score to qualify (0-10)
 
 logging.basicConfig(level=logging.INFO)
 logger.info(f"[INIT] HPB–TCT v21.2 Ready — Symbol={SYMBOL}, Port={PORT}")
@@ -2606,103 +2607,113 @@ async def detect_best_range(candles: List) -> Optional[Dict]:
     }
 
 # ================================================================
-# TOP 5 RANGE SCANNER (pairsrange_scanner.py approach)
-# Mechanically reproduces the range-finding + filtering process
-# to identify pairs with high probability ranges (RPS >= 9.6)
+# TOP 5 RANGE SCANNER (rebuilt using /ranges page detect_ranges logic)
+# Uses the same sliding-window consolidation detection, quality scoring,
+# touch counting, and EQ-touched checks as the /ranges debug page.
+# Excludes BNB-exchange pairs and pairs listed less than 1 year.
 # ================================================================
 
-def detect_range_from_df(df: pd.DataFrame) -> Optional[Dict]:
+PAIR_MIN_AGE_DAYS = 365  # Minimum pair listing age to qualify
+
+
+def score_range_quality(range_info: Dict) -> float:
     """
-    Detect if data forms a valid range. Ported from pairsrange_scanner.py.
-    Filters out V-shapes and high internal volatility.
-    Returns dict with range info or None.
+    Score a detected range (0–10) using the /ranges page quality metrics.
+    Considers: quality rating, touch counts, consolidation ratio, EQ touched,
+    candle count (duration), and range size relative to price.
     """
-    if df is None or len(df) < 10:
-        return None
+    score = 0.0
 
-    high = float(df["high"].max())
-    low = float(df["low"].min())
-    range_size = high - low
+    # Quality base score (from detect_ranges quality assessment)
+    quality = range_info.get("quality", "bad")
+    if quality == "good":
+        score += 5.0
+    elif quality == "moderate":
+        score += 3.0
+    else:
+        score += 1.0
 
-    if range_size <= 0:
-        return None
+    # EQ touched bonus — confirmed range per TCT rules
+    if range_info.get("eq_touched", False):
+        score += 1.5
 
-    # Duration filter
-    duration_hours = (df["open_time"].iloc[-1] - df["open_time"].iloc[0]).total_seconds() / 3600
-    if duration_hours < RANGE_MIN_HOURS:
-        return None
+    # Consolidation ratio bonus (lower = tighter range = better)
+    # consolidation_ratio is avg_candle_size / range_size
+    # We don't store it directly, but candles and range_size tell us the duration
+    candles = range_info.get("candles", 0)
+    if candles >= 40:
+        score += 1.5  # Long duration range
+    elif candles >= 20:
+        score += 1.0
 
-    # V-shape detection: if price retraces too fast in second half, skip
-    mid_idx = len(df) // 2
-    first_leg = abs(float(df["close"].iloc[mid_idx]) - float(df["close"].iloc[0]))
-    second_leg = abs(float(df["close"].iloc[-1]) - float(df["close"].iloc[mid_idx]))
+    # Range size as % of price — meaningful ranges get bonus
+    range_size = range_info.get("range_size", 0)
+    range_high = range_info.get("high", 1)
+    if range_high > 0:
+        range_pct = (range_size / range_high) * 100
+        if 2.0 <= range_pct <= 15.0:
+            score += 1.0  # Sweet spot — not too tight, not too wide
 
-    if first_leg > 0 and (second_leg / first_leg) > RANGE_V_SHAPE_THRESHOLD:
-        return None
-
-    # Internal volatility (chop detector)
-    internal_vol = float(df["close"].std()) / range_size
-    if internal_vol > RANGE_MAX_INTERNAL_VOL:
-        return None
-
-    return {
-        "range_high": high,
-        "range_low": low,
-        "range_eq": (high + low) / 2,
-        "duration_hours": duration_hours,
-        "internal_vol": internal_vol,
-    }
-
-
-def score_range_rps(range_info: Dict) -> float:
-    """
-    Mechanical RPS scoring (0–10). Ported from pairsrange_scanner.py.
-    """
-    score = 10.0
-
-    # Duration penalty
-    if range_info["duration_hours"] < 48:
-        score -= 1.0
-    elif range_info["duration_hours"] < 72:
-        score -= 0.5
-
-    # Internal volatility penalty
-    score -= range_info["internal_vol"] * 5
-
-    return round(max(score, 0), 2)
+    return round(min(score, 10.0), 2)
 
 
 async def scan_pair_range(symbol: str) -> Optional[Dict]:
     """
-    Scan a single pair on the 1D timeframe for a valid high-probability range.
-    Uses the mechanical range detection + RPS scoring from pairsrange_scanner.py.
-    Returns a setup dict if RPS >= threshold, or None.
+    Scan a single pair using the same detect_ranges() logic as the /ranges page.
+    Fetches 1D candles, runs sliding-window range detection, scores the best range.
+    Also enforces minimum pair age (1 year) by checking candle history.
+    Returns a setup dict if score qualifies, or None.
     """
     try:
-        df = await fetch_mexc_candles(symbol, "1d", 200)
+        # Fetch 1D candles — request 400 to check pair age (365+ days)
+        df = await fetch_mexc_candles(symbol, "1d", 400)
         if df is None or len(df) < 30:
+            return None
+
+        # Pair age filter: earliest candle must be >= 365 days ago
+        earliest_candle = df["open_time"].iloc[0]
+        latest_candle = df["open_time"].iloc[-1]
+        pair_age_days = (latest_candle - earliest_candle).total_seconds() / 86400
+        if pair_age_days < PAIR_MIN_AGE_DAYS:
             return None
 
         current_price = float(df.iloc[-1]["close"])
 
-        range_info = detect_range_from_df(df)
-        if not range_info:
+        # Use the same detect_ranges() function as the /ranges page
+        all_ranges = detect_ranges(df, lookback=len(df))
+        if not all_ranges:
             return None
 
-        rps = score_range_rps(range_info)
-        if rps < RANGE_MIN_RPS:
+        # Score each detected range and pick the best
+        best_range = None
+        best_score = 0.0
+
+        for r in all_ranges:
+            rps = score_range_quality(r)
+            if rps > best_score:
+                best_score = rps
+                best_range = r
+
+        if not best_range or best_score < RANGE_MIN_RPS:
             return None
 
         return {
             "symbol": symbol,
             "timeframe": "1d",
-            "RPS": rps,
-            "range_high": round(range_info["range_high"], 6),
-            "range_low": round(range_info["range_low"], 6),
-            "range_eq": round(range_info["range_eq"], 6),
-            "duration_hours": round(range_info["duration_hours"], 1),
-            "internal_vol": round(range_info["internal_vol"], 4),
+            "RPS": best_score,
+            "range_high": round(best_range["high"], 6),
+            "range_low": round(best_range["low"], 6),
+            "range_eq": round(best_range["equilibrium"], 6),
+            "range_size": round(best_range["range_size"], 6),
+            "deviation_limit": round(best_range["deviation_limit"], 6),
+            "upper_dl": round(best_range["upper_dl"], 6),
+            "lower_dl": round(best_range["lower_dl"], 6),
+            "quality": best_range["quality"],
+            "eq_touched": best_range["eq_touched"],
+            "candles": best_range["candles"],
+            "trend_before": best_range.get("trend_before", "neutral"),
             "current_price": round(current_price, 6),
+            "pair_age_days": round(pair_age_days),
         }
 
     except Exception as e:
@@ -2712,8 +2723,9 @@ async def scan_pair_range(symbol: str) -> Optional[Dict]:
 
 async def run_full_scan():
     """
-    Scan all pairs for high-probability ranges using the pairsrange_scanner.py method.
-    Fetches 1D candles, detects ranges, scores with RPS, returns top 5.
+    Scan all pairs for high-probability ranges using the /ranges page detect_ranges logic.
+    Fetches 1D candles, runs sliding-window range detection, scores best range per pair.
+    Excludes BNB-exchange pairs and pairs under 1 year old.
     Runs as a background task every 4 hours.
     """
     global top_5_setups
@@ -2727,7 +2739,7 @@ async def run_full_scan():
     scanner_status["pairs_scanned"] = 0
     start_time = datetime.utcnow()
 
-    logger.info(f"[RANGE_SCANNER] Starting range scan of {len(COIN_LIST)} pairs (1D timeframe, RPS >= {RANGE_MIN_RPS})")
+    logger.info(f"[RANGE_SCANNER] Starting range scan of {len(COIN_LIST)} pairs (1D timeframe, detect_ranges logic, score >= {RANGE_MIN_RPS})")
 
     all_qualified = []
 
@@ -2992,7 +3004,7 @@ async def live_price(symbol: Optional[str] = None):
 async def get_coin_list():
     """Return the full list of available trading pairs, categorized."""
     # Major pairs for quick access
-    majors = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT",
+    majors = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT",
               "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT", "LTCUSDT", "MATICUSDT"]
     # DeFi
     defi = ["AAVEUSDT", "UNIUSDT", "MKRUSDT", "COMPUSDT", "CRVUSDT", "SNXUSDT",
@@ -3022,15 +3034,16 @@ async def get_coin_list():
 @app.get("/api/top-setups")
 async def get_top_setups():
     """
-    Return the top 5 pairs with the highest Range Probability Score (RPS).
-    Uses the pairsrange_scanner.py mechanical range detection approach.
+    Return the top 5 pairs with the highest range quality score.
+    Uses the same detect_ranges() sliding-window logic as the /ranges page.
+    Excludes BNB-exchange pairs and pairs listed less than 1 year.
     Scanned every 4 hours across all pairs on 1D timeframe.
     """
     return {
         "top_setups": top_5_setups,
         "scanner_status": scanner_status,
-        "scan_method": "pairsrange_scanner (RPS)",
-        "rps_threshold": RANGE_MIN_RPS,
+        "scan_method": "detect_ranges (ranges-page logic)",
+        "score_threshold": RANGE_MIN_RPS,
         "total_pairs_in_list": len(COIN_LIST),
     }
 
@@ -5425,7 +5438,7 @@ async def dashboard():
             <div class="top5-panel" id="top5Panel">
                 <h3>Top 5 Setups <span class="top5-scanner-status" id="scannerStatus">Initializing...</span></h3>
                 <div id="top5Content">
-                    <div class="top5-empty">Range scanner starting — scanning pairs for high RPS ranges...</div>
+                    <div class="top5-empty">Range scanner starting — scanning pairs using detect_ranges logic...</div>
                 </div>
             </div>
 
@@ -8243,7 +8256,7 @@ async def dashboard():
 
             if (!setups || setups.length === 0) {
                 if (status.is_scanning) {
-                    contentEl.innerHTML = '<div class="top5-empty">Scanning ' + (status.total_pairs || 0) + ' pairs for high-probability ranges (RPS)...</div>';
+                    contentEl.innerHTML = '<div class="top5-empty">Scanning ' + (status.total_pairs || 0) + ' pairs for ranges (detect_ranges)...</div>';
                 } else {
                     contentEl.innerHTML = '<div class="top5-empty">Waiting for first range scan to complete...</div>';
                 }
@@ -8261,27 +8274,58 @@ async def dashboard():
                     return '$' + p.toPrecision(4);
                 };
 
-                // Duration display
-                const durDays = (s.duration_hours / 24).toFixed(1);
+                // Quality color mapping (matches /ranges page)
+                const qualityColor = s.quality === 'good' ? '#00ff88' : s.quality === 'moderate' ? '#ffc107' : '#dc3545';
+                const qualityBg = s.quality === 'good' ? 'rgba(0,255,136,0.15)' : s.quality === 'moderate' ? 'rgba(255,193,7,0.15)' : 'rgba(220,53,69,0.15)';
+
+                // Price position relative to range
+                const priceInRange = s.current_price >= s.range_low && s.current_price <= s.range_high;
+                const priceZone = s.current_price > s.range_eq ? 'Premium' : 'Discount';
+                const priceZoneColor = s.current_price > s.range_eq ? '#dc3545' : '#00ff88';
 
                 html += '<div class="top5-item qualified" data-symbol="' + s.symbol + '" data-tf="1d">';
                 html += '<div class="top5-header">';
                 html += '<span><span class="top5-rank">#' + (i + 1) + '</span><span class="top5-pair">' + basePair + '</span></span>';
+                html += '<span style="display:flex;gap:4px;align-items:center;">';
+                html += '<span class="top5-tf" style="color:' + qualityColor + ';background:' + qualityBg + ';">' + (s.quality || 'good') + '</span>';
                 html += '<span class="top5-tf">' + (s.timeframe || '1d').toUpperCase() + '</span>';
+                html += '</span>';
                 html += '</div>';
-                html += '<div class="top5-rps">RPS: <span class="rps-value">' + s.RPS + '</span> / 10</div>';
+
+                // Score line with EQ touched indicator
+                html += '<div class="top5-rps">Score: <span class="rps-value">' + s.RPS + '</span> / 10';
+                if (s.eq_touched) {
+                    html += ' <span style="color:#ffc107;font-size:0.6rem;" title="Equilibrium touched — range confirmed per TCT rules">EQ &#10003;</span>';
+                }
+                html += '</div>';
+
+                // Range levels (High / EQ / Low)
                 html += '<div class="top5-levels">';
                 html += '<span>High: ' + fmt(s.range_high) + '</span>';
                 html += '<span class="eq-highlight">EQ: ' + fmt(s.range_eq) + '</span>';
                 html += '<span>Low: ' + fmt(s.range_low) + '</span>';
-                html += '<span>Price: ' + fmt(s.current_price) + '</span>';
+                html += '</div>';
+
+                // DL levels + current price
+                html += '<div class="top5-levels" style="margin-top:2px;">';
+                html += '<span style="color:#6c757d;">DL+: ' + fmt(s.upper_dl) + '</span>';
+                html += '<span style="color:' + priceZoneColor + ';">Price: ' + fmt(s.current_price) + '</span>';
+                html += '<span style="color:#6c757d;">DL-: ' + fmt(s.lower_dl) + '</span>';
                 html += '</div>';
 
                 // Tags
                 html += '<div class="top5-tags">';
-                html += '<span class="top5-tag duration">' + durDays + 'd range</span>';
-                html += '<span class="top5-tag vol">Vol: ' + (s.internal_vol * 100).toFixed(1) + '%</span>';
-                html += '<span class="top5-tag" style="color:#e040fb;background:rgba(224,64,251,0.1);">RPS ' + s.RPS + '</span>';
+                html += '<span class="top5-tag duration">' + (s.candles || 0) + ' candles</span>';
+                if (s.trend_before && s.trend_before !== 'neutral') {
+                    const trendColor = s.trend_before === 'up' ? '#00ff88' : '#dc3545';
+                    html += '<span class="top5-tag" style="color:' + trendColor + ';background:rgba(255,255,255,0.05);">Pre: ' + s.trend_before + '</span>';
+                }
+                if (priceInRange) {
+                    html += '<span class="top5-tag" style="color:' + priceZoneColor + ';background:rgba(255,255,255,0.05);">' + priceZone + '</span>';
+                } else {
+                    html += '<span class="top5-tag" style="color:#dc3545;background:rgba(220,53,69,0.1);">Outside</span>';
+                }
+                html += '<span class="top5-tag" style="color:#e040fb;background:rgba(224,64,251,0.1);">' + s.RPS + '/10</span>';
                 html += '</div>';
 
                 html += '</div>';
