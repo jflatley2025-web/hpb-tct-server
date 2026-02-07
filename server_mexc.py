@@ -5451,6 +5451,7 @@ async def dashboard():
         <div class="chart-section">
             <div class="chart-controls">
                 <button class="chart-ctrl-btn" onclick="chartFit()" title="Fit all candles in view">Fit</button>
+                <button class="chart-ctrl-btn" onclick="chartScalePrice()" title="Scale price axis to visible candles only">Scale Price</button>
                 <button class="chart-ctrl-btn" onclick="chartZoomIn()" title="Zoom in">Zoom In</button>
                 <button class="chart-ctrl-btn" onclick="chartZoomOut()" title="Zoom out">Zoom Out</button>
                 <button class="chart-ctrl-btn" onclick="chartReset()" title="Reset chart to default view">Reset</button>
@@ -6203,10 +6204,41 @@ async def dashboard():
                 ts.setVisibleLogicalRange({ from: mid - half, to: mid + half });
             }
         }
+        function chartScalePrice() {
+            if (!chart || !lastCandles || lastCandles.length === 0) return;
+            // Override autoscale to only use candle OHLC data, ignoring price lines/overlays
+            candleSeries.applyOptions({
+                autoscaleInfoProvider: () => {
+                    // Get the visible time range
+                    const visRange = chart.timeScale().getVisibleLogicalRange();
+                    if (!visRange) return null;
+                    const fromIdx = Math.max(0, Math.floor(visRange.from));
+                    const toIdx = Math.min(lastCandles.length - 1, Math.ceil(visRange.to));
+                    let minPrice = Infinity, maxPrice = -Infinity;
+                    for (let i = fromIdx; i <= toIdx; i++) {
+                        const c = lastCandles[i];
+                        if (c) {
+                            if (c.low < minPrice) minPrice = c.low;
+                            if (c.high > maxPrice) maxPrice = c.high;
+                        }
+                    }
+                    if (minPrice === Infinity) return null;
+                    const pad = (maxPrice - minPrice) * 0.05;
+                    return {
+                        priceRange: {
+                            minValue: minPrice - pad,
+                            maxValue: maxPrice + pad,
+                        },
+                    };
+                }
+            });
+            // Trigger re-scale
+            chart.priceScale('right').applyOptions({ autoScale: true });
+        }
         function chartReset() {
             if (!chart || !lastCandles || lastCandles.length === 0) return;
             chart.timeScale().fitContent();
-            // Re-scale price axis to auto
+            // Remove custom autoscale override and restore default behavior
             candleSeries.applyOptions({ autoscaleInfoProvider: undefined });
             chart.priceScale('right').applyOptions({ autoScale: true });
         }
