@@ -2555,6 +2555,9 @@ async def _get_shared_client() -> httpx.AsyncClient:
 
 async def fetch_mexc_candles(symbol: str, interval: str, limit: int = 200) -> Optional[pd.DataFrame]:
     global _scanner_consecutive_errors
+    # Normalize intervals to MEXC-supported values (MEXC spot uses 60m not 1h, etc.)
+    _MEXC_INTERVAL_MAP = {"1h": "60m", "2h": "4h"}
+    interval = _MEXC_INTERVAL_MAP.get(interval, interval)
     url = f"{MEXC_URL_BASE}/api/v3/klines"
     params = {"symbol": symbol, "interval": interval, "limit": limit}
 
@@ -9844,6 +9847,7 @@ body{background:#fff;color:#333;font-family:'Segoe UI',sans-serif;overflow:hidde
     <div class="chart-btns">
         <button onclick="resetChart()">Reset</button>
         <button onclick="fitChart()">Fit</button>
+        <button onclick="scalePrice()">Scale Price</button>
         <button onclick="zoomIn()">+</button>
         <button onclick="zoomOut()">−</button>
     </div>
@@ -9900,6 +9904,7 @@ function initChart() {
 
 // Chart control functions
 function resetChart() {
+    candleSeries.applyOptions({ autoscaleInfoProvider: undefined });
     chart.timeScale().resetTimeScale();
     chart.priceScale('right').applyOptions({ autoScale: true });
 }
@@ -9921,6 +9926,35 @@ function zoomOut() {
         const halfRange = (visibleRange.to - visibleRange.from);
         chart.timeScale().setVisibleLogicalRange({ from: center - halfRange, to: center + halfRange });
     }
+}
+let lastLoadedCandles = [];
+function scalePrice() {
+    if (!lastLoadedCandles || lastLoadedCandles.length === 0) return;
+    candleSeries.applyOptions({
+        autoscaleInfoProvider: () => {
+            const visRange = chart.timeScale().getVisibleLogicalRange();
+            if (!visRange) return null;
+            const fromIdx = Math.max(0, Math.floor(visRange.from));
+            const toIdx = Math.min(lastLoadedCandles.length - 1, Math.ceil(visRange.to));
+            let minP = Infinity, maxP = -Infinity;
+            for (let i = fromIdx; i <= toIdx; i++) {
+                const c = lastLoadedCandles[i];
+                if (c) { if (c.low < minP) minP = c.low; if (c.high > maxP) maxP = c.high; }
+            }
+            if (minP === Infinity) return null;
+            const pad = (maxP - minP) * 0.05;
+            return { priceRange: { minValue: minP - pad, maxValue: maxP + pad } };
+        }
+    });
+    chart.priceScale('right').applyOptions({ autoScale: true });
+}
+function fmtPrice(v) {
+    if (v == null || isNaN(v)) return '—';
+    const a = Math.abs(v);
+    if (a === 0) return '0';
+    if (a >= 1) return v.toFixed(Math.min(4, Math.max(2, 4 - Math.floor(Math.log10(a)))));
+    const decimals = Math.max(4, -Math.floor(Math.log10(a)) + 3);
+    return v.toFixed(Math.min(decimals, 12));
 }
 
 async function loadPairs() {
@@ -9959,7 +9993,19 @@ async function loadData() {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const data = await r.json();
 
-        candleSeries.setData(data.candles || []);
+        lastLoadedCandles = data.candles || [];
+        // Detect price precision for small-priced coins (e.g. PEPE)
+        if (lastLoadedCandles.length > 0) {
+            const samplePrice = Math.abs(lastLoadedCandles[lastLoadedCandles.length - 1].close);
+            let prec = 2;
+            if (samplePrice > 0 && samplePrice < 1) prec = Math.max(4, -Math.floor(Math.log10(samplePrice)) + 3);
+            else if (samplePrice >= 1 && samplePrice < 10) prec = 4;
+            else if (samplePrice >= 10 && samplePrice < 1000) prec = 2;
+            prec = Math.min(prec, 12);
+            candleSeries.applyOptions({ priceFormat: { type: 'price', precision: prec, minMove: Math.pow(10, -prec) } });
+        }
+        candleSeries.applyOptions({ autoscaleInfoProvider: undefined });
+        candleSeries.setData(lastLoadedCandles);
 
         // Draw structure in order: HTF first (back), then MTF, then LTF (front)
         if (data.htf_structure) {
@@ -9974,6 +10020,7 @@ async function loadData() {
 
         updateInfoPanel(data);
         chart.timeScale().fitContent();
+        scalePrice();
 
     } catch(e) {
         console.error('Load error:', e);
@@ -10091,7 +10138,7 @@ function updateInfoPanel(data) {
             const clr = b.type === 'bullish' ? '#28a745' : '#dc3545';
             html += `<div class="bos-item">
                 <span style="color:${clr}">${dir} ${b.type}</span>
-                @ ${b.price ? b.price.toFixed(4) : '—'}
+                @ ${b.price ? fmtPrice(b.price) : '—'}
                 <span class="tag ${b.quality || 'moderate'}">${b.quality || '—'}</span>
             </div>`;
         });
@@ -10313,7 +10360,7 @@ async def get_ranges_debug_data(symbol: str = "BTC_USDT_PERP", timeframe: str = 
         # Fetch candle data for primary timeframe
         df_primary = await fetch_mexc_candles(sym, timeframe, limit)
         if df_primary is None or df_primary.empty:
-            return JSONResponse({"error": f"No data for {symbol} {timeframe}. Symbol resolved to: {sym}"}, status_code=404)
+            return JSONResponse({"error": f"No data for {symbol} ({timeframe}). '{sym}' may not exist on MEXC spot. Try a different pair."}, status_code=404)
 
         # Format candles for chart (same pattern as market-structure)
         candles = []
@@ -10463,6 +10510,7 @@ body{background:#fff;color:#333;font-family:'Segoe UI',sans-serif;overflow:hidde
     <div class="chart-btns">
         <button onclick="resetChart()">Reset</button>
         <button onclick="fitChart()">Fit</button>
+        <button onclick="scalePrice()">Scale Price</button>
         <button onclick="zoomIn()">+</button>
         <button onclick="zoomOut()">−</button>
     </div>
@@ -10518,6 +10566,7 @@ function initChart() {
 }
 
 function resetChart() {
+    candleSeries.applyOptions({ autoscaleInfoProvider: undefined });
     chart.timeScale().resetTimeScale();
     chart.priceScale('right').applyOptions({ autoScale: true });
 }
@@ -10539,6 +10588,36 @@ function zoomOut() {
         const halfRange = (visibleRange.to - visibleRange.from);
         chart.timeScale().setVisibleLogicalRange({ from: center - halfRange, to: center + halfRange });
     }
+}
+let lastLoadedCandles = [];
+function scalePrice() {
+    if (!lastLoadedCandles || lastLoadedCandles.length === 0) return;
+    candleSeries.applyOptions({
+        autoscaleInfoProvider: () => {
+            const visRange = chart.timeScale().getVisibleLogicalRange();
+            if (!visRange) return null;
+            const fromIdx = Math.max(0, Math.floor(visRange.from));
+            const toIdx = Math.min(lastLoadedCandles.length - 1, Math.ceil(visRange.to));
+            let minP = Infinity, maxP = -Infinity;
+            for (let i = fromIdx; i <= toIdx; i++) {
+                const c = lastLoadedCandles[i];
+                if (c) { if (c.low < minP) minP = c.low; if (c.high > maxP) maxP = c.high; }
+            }
+            if (minP === Infinity) return null;
+            const pad = (maxP - minP) * 0.05;
+            return { priceRange: { minValue: minP - pad, maxValue: maxP + pad } };
+        }
+    });
+    chart.priceScale('right').applyOptions({ autoScale: true });
+}
+function fmtPrice(v) {
+    if (v == null || isNaN(v)) return '—';
+    const a = Math.abs(v);
+    if (a === 0) return '0';
+    if (a >= 1) return v.toFixed(Math.min(4, Math.max(2, 4 - Math.floor(Math.log10(a)))));
+    // For values < 1, show enough decimals to get significant digits
+    const decimals = Math.max(4, -Math.floor(Math.log10(a)) + 3);
+    return v.toFixed(Math.min(decimals, 12));
 }
 
 async function loadPairs() {
@@ -10680,7 +10759,19 @@ async function loadData() {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const data = await r.json();
 
-        candleSeries.setData(data.candles || []);
+        lastLoadedCandles = data.candles || [];
+        // Detect price precision for small-priced coins (e.g. PEPE)
+        if (lastLoadedCandles.length > 0) {
+            const samplePrice = Math.abs(lastLoadedCandles[lastLoadedCandles.length - 1].close);
+            let prec = 2;
+            if (samplePrice > 0 && samplePrice < 1) prec = Math.max(4, -Math.floor(Math.log10(samplePrice)) + 3);
+            else if (samplePrice >= 1 && samplePrice < 10) prec = 4;
+            else if (samplePrice >= 10 && samplePrice < 1000) prec = 2;
+            prec = Math.min(prec, 12);
+            candleSeries.applyOptions({ priceFormat: { type: 'price', precision: prec, minMove: Math.pow(10, -prec) } });
+        }
+        candleSeries.applyOptions({ autoscaleInfoProvider: undefined });
+        candleSeries.setData(lastLoadedCandles);
 
         // Draw ranges in order: HTF first (back), then LTF (front)
         // HTF ranges in black
@@ -10695,6 +10786,8 @@ async function loadData() {
 
         updateInfoPanel(data);
         chart.timeScale().fitContent();
+        // Auto-scale price to candle data
+        scalePrice();
 
     } catch(e) {
         console.error('Load error:', e);
@@ -10726,11 +10819,11 @@ function updateInfoPanel(data) {
         htfRanges.slice(-5).forEach((r, i) => {
             html += `<div class="range-item htf">
                 <div><b>Range ${i+1}</b> <span class="tag ${r.quality}">${r.quality}</span></div>
-                <div>High: ${r.high.toFixed(4)}</div>
-                <div>Low: ${r.low.toFixed(4)}</div>
-                <div>EQ: ${r.equilibrium.toFixed(4)} ${r.eq_touched ? '✓' : ''}</div>
-                <div>Size: ${(r.range_size).toFixed(4)} (${r.candles} candles)</div>
-                <div>DL: ±${r.deviation_limit.toFixed(4)}</div>
+                <div>High: ${fmtPrice(r.high)}</div>
+                <div>Low: ${fmtPrice(r.low)}</div>
+                <div>EQ: ${fmtPrice(r.equilibrium)} ${r.eq_touched ? '✓' : ''}</div>
+                <div>Size: ${fmtPrice(r.range_size)} (${r.candles} candles)</div>
+                <div>DL: ±${fmtPrice(r.deviation_limit)}</div>
             </div>`;
         });
         html += `</div>`;
@@ -10746,10 +10839,10 @@ function updateInfoPanel(data) {
         ltfRanges.slice(-5).forEach((r, i) => {
             html += `<div class="range-item ltf">
                 <div><b>Range ${i+1}</b> <span class="tag ${r.quality}">${r.quality}</span></div>
-                <div>High: ${r.high.toFixed(4)}</div>
-                <div>Low: ${r.low.toFixed(4)}</div>
-                <div>EQ: ${r.equilibrium.toFixed(4)} ${r.eq_touched ? '✓' : ''}</div>
-                <div>Size: ${(r.range_size).toFixed(4)} (${r.candles} candles)</div>
+                <div>High: ${fmtPrice(r.high)}</div>
+                <div>Low: ${fmtPrice(r.low)}</div>
+                <div>EQ: ${fmtPrice(r.equilibrium)} ${r.eq_touched ? '✓' : ''}</div>
+                <div>Size: ${fmtPrice(r.range_size)} (${r.candles} candles)</div>
             </div>`;
         });
         html += `</div>`;
