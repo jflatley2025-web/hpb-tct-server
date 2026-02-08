@@ -10875,6 +10875,983 @@ document.getElementById('tfSelect').addEventListener('change', loadData);
 
 
 # ================================================================
+# SUPPLY & DEMAND DEBUG PAGE  (TCT Mentorship – Lecture 3)
+# ================================================================
+# Two types of zones:
+#   1. Order Blocks (OB/OBIF) – single candle S/D with FVG requirement
+#   2. Structure Supply/Demand (SS SD) – multi-candle S/D with FVG
+# Both require Fair Value Gap (inefficiency) to be valid.
+# ================================================================
+
+@app.get("/api/sd-pairs")
+async def get_sd_pairs():
+    """Return pairs from mexc_all_pairs.txt for the supply-demand page dropdown."""
+    pairs_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mexc_all_pairs.txt")
+    try:
+        with open(pairs_path, "r") as f:
+            pairs = [line.strip() for line in f if line.strip()]
+        return {"pairs": pairs}
+    except FileNotFoundError:
+        return {"pairs": COIN_LIST}
+
+
+def _detect_supply_demand_zones(df: pd.DataFrame) -> Dict:
+    """
+    Full supply/demand detection pipeline for a single timeframe.
+
+    Steps (per TCT Lecture 3):
+      1. Run market structure (6CR pivots, MSH/MSL, BOS, trend)
+      2. Detect FVGs (inefficiencies)
+      3. Detect Order Blocks (OBIF – single candle with FVG)
+      4. Detect Structure S/D (SS SD – multi-candle with FVG)
+      5. Check mitigation status for each zone
+      6. Score zones by location (pivot, range, deviation)
+
+    Returns dict with all zone data + market structure context.
+    """
+    from market_structure import MarketStructure as MS
+
+    if df is None or df.empty or len(df) < 10:
+        return {
+            "order_blocks": [], "structure_zones": [],
+            "fvgs": {"bullish_fvgs": [], "bearish_fvgs": []},
+            "pivots": {}, "trend": "neutral",
+        }
+
+    # Step 1: Market structure
+    ms_data = MS.detect_pivots(df)
+    trend = ms_data.get("trend", "neutral")
+
+    # Step 2: Detect FVGs
+    fvgs = FairValueGap.detect_fvgs(df)
+
+    # Step 3: Detect Order Blocks (OBIF)
+    obs = OrderBlock.detect_order_blocks(df, fvgs)
+
+    # Step 4: Detect Structure S/D zones
+    ss_sd = StructureSupplyDemand.detect_structure_zones(df, fvgs, ms_data)
+
+    # Step 5: Check mitigation on all zones
+    all_order_blocks = []
+    for ob in obs.get("bullish_obs", []):
+        ob_refined = ZoneRefinement.refine_zone_after_mitigation(ob, df)
+        idx = ob.get("idx", 0)
+        # Mark as mitigated if price returned to zone after formation
+        if idx + 3 < len(df):
+            post_candles = df.iloc[idx + 3:]
+            entered = post_candles[
+                (post_candles["low"] <= ob["top"]) &
+                (post_candles["high"] >= ob["bottom"])
+            ]
+            if len(entered) > 0:
+                ob_refined["mitigated"] = True
+                ob_refined["mitigation_idx"] = int(entered.index[0])
+        all_order_blocks.append(ob_refined)
+
+    for ob in obs.get("bearish_obs", []):
+        ob_refined = ZoneRefinement.refine_zone_after_mitigation(ob, df)
+        idx = ob.get("idx", 0)
+        if idx + 3 < len(df):
+            post_candles = df.iloc[idx + 3:]
+            entered = post_candles[
+                (post_candles["low"] <= ob["top"]) &
+                (post_candles["high"] >= ob["bottom"])
+            ]
+            if len(entered) > 0:
+                ob_refined["mitigated"] = True
+                ob_refined["mitigation_idx"] = int(entered.index[0])
+        all_order_blocks.append(ob_refined)
+
+    all_structure_zones = []
+    for zone in ss_sd.get("demand_zones", []):
+        zone_refined = ZoneRefinement.refine_zone_after_mitigation(zone, df)
+        end_idx = zone.get("end_idx", 0)
+        if end_idx + 3 < len(df):
+            post_candles = df.iloc[end_idx + 3:]
+            entered = post_candles[
+                (post_candles["low"] <= zone["top"]) &
+                (post_candles["high"] >= zone["bottom"])
+            ]
+            if len(entered) > 0:
+                zone_refined["mitigated"] = True
+                zone_refined["mitigation_idx"] = int(entered.index[0])
+        all_structure_zones.append(zone_refined)
+
+    for zone in ss_sd.get("supply_zones", []):
+        zone_refined = ZoneRefinement.refine_zone_after_mitigation(zone, df)
+        end_idx = zone.get("end_idx", 0)
+        if end_idx + 3 < len(df):
+            post_candles = df.iloc[end_idx + 3:]
+            entered = post_candles[
+                (post_candles["low"] <= zone["top"]) &
+                (post_candles["high"] >= zone["bottom"])
+            ]
+            if len(entered) > 0:
+                zone_refined["mitigated"] = True
+                zone_refined["mitigation_idx"] = int(entered.index[0])
+        all_structure_zones.append(zone_refined)
+
+    # Step 6: Score zones by location
+    # Find best range for scoring context
+    ranges = detect_ranges(df, lookback=len(df))
+    best_range = ranges[0] if ranges else None
+    current_price = float(df.iloc[-1]["close"])
+
+    combined_zones = {
+        "bullish_obs": [z for z in all_order_blocks if z.get("type") == "bullish"],
+        "bearish_obs": [z for z in all_order_blocks if z.get("type") == "bearish"],
+        "demand_zones": [z for z in all_structure_zones if z.get("type") == "demand"],
+        "supply_zones": [z for z in all_structure_zones if z.get("type") == "supply"],
+    }
+
+    scored_zones = ZoneScoring.score_zones(combined_zones, ms_data, best_range, current_price)
+
+    # Enhance each scored zone with pivot quality
+    for zone in scored_zones:
+        pq = PivotQualityScorer.score_pivot_quality(zone, ms_data, df)
+        zone["pivot_quality"] = pq
+
+    return {
+        "order_blocks": all_order_blocks,
+        "structure_zones": all_structure_zones,
+        "scored_zones": scored_zones,
+        "fvgs": fvgs,
+        "ms_data": ms_data,
+        "trend": trend,
+        "ranges": ranges,
+    }
+
+
+@app.get("/api/supply-demand")
+async def get_supply_demand_data(symbol: str = "BTC_USDT_PERP", timeframe: str = "4h", limit: int = 300):
+    """
+    API endpoint for Supply & Demand debug page.
+    Returns candles + OBIFs + Structure S/D + FVGs + scoring for MTF/HTF/LTF.
+    """
+    try:
+        sym = resolve_symbol(symbol)
+        if "_PERP" in sym:
+            sym = sym.replace("_PERP", "").replace("_", "")
+
+        # Use same TF hierarchy as market-structure page
+        tf_map = _MS_TF_MAP.get(timeframe, {"ltf": timeframe, "mtf": timeframe, "htf": timeframe})
+
+        # Fetch candles for primary + HTF + LTF in parallel
+        primary_task = fetch_mexc_candles(sym, timeframe, min(limit, 500))
+        htf_task = fetch_mexc_candles(sym, tf_map["htf"], min(limit, 500)) if tf_map["htf"] != timeframe else None
+        ltf_task = fetch_mexc_candles(sym, tf_map["ltf"], min(limit * 2, 800)) if tf_map["ltf"] != timeframe else None
+
+        tasks = [primary_task]
+        if htf_task:
+            tasks.append(htf_task)
+        if ltf_task:
+            tasks.append(ltf_task)
+
+        results = await asyncio.gather(*tasks)
+
+        df_primary = results[0]
+        idx = 1
+        df_htf = results[idx] if htf_task else None
+        if htf_task:
+            idx += 1
+        df_ltf = results[idx] if ltf_task else None
+
+        if df_primary is None or df_primary.empty:
+            return JSONResponse(
+                {"error": f"No data for {symbol} ({timeframe}). '{sym}' may not exist on MEXC spot."},
+                status_code=404,
+            )
+
+        # Format candles for chart
+        candles = []
+        for _, row in df_primary.iterrows():
+            candles.append({
+                "time": int(row["open_time"].timestamp()),
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+            })
+
+        # Helper: convert zone times using a dataframe
+        def _add_times(zones, df_ref):
+            """Attach Unix timestamps to zone idx fields."""
+            for z in zones:
+                for key in ("idx", "start_idx", "end_idx", "mitigation_idx"):
+                    val = z.get(key)
+                    if val is not None and 0 <= val < len(df_ref):
+                        z[key + "_time"] = int(df_ref.iloc[val]["open_time"].timestamp())
+                # Also convert FVG idx
+                fvg = z.get("fvg")
+                if fvg and "idx" in fvg:
+                    fidx = fvg["idx"]
+                    if 0 <= fidx < len(df_ref):
+                        fvg["time"] = int(df_ref.iloc[fidx]["open_time"].timestamp())
+
+        # Run detection on primary TF
+        primary_sd = _detect_supply_demand_zones(df_primary)
+        _add_times(primary_sd["order_blocks"], df_primary)
+        _add_times(primary_sd["structure_zones"], df_primary)
+        _add_times(primary_sd.get("scored_zones", []), df_primary)
+
+        # Add times to FVGs
+        for fvg in primary_sd["fvgs"].get("bullish_fvgs", []):
+            fidx = fvg.get("idx", 0)
+            if 0 <= fidx < len(df_primary):
+                fvg["time"] = int(df_primary.iloc[fidx]["open_time"].timestamp())
+        for fvg in primary_sd["fvgs"].get("bearish_fvgs", []):
+            fidx = fvg.get("idx", 0)
+            if 0 <= fidx < len(df_primary):
+                fvg["time"] = int(df_primary.iloc[fidx]["open_time"].timestamp())
+
+        # Run detection on HTF
+        htf_sd = None
+        if df_htf is not None and not df_htf.empty:
+            htf_sd = _detect_supply_demand_zones(df_htf)
+            _add_times(htf_sd["order_blocks"], df_htf)
+            _add_times(htf_sd["structure_zones"], df_htf)
+
+        # Run detection on LTF
+        ltf_sd = None
+        if df_ltf is not None and not df_ltf.empty:
+            ltf_sd = _detect_supply_demand_zones(df_ltf)
+            _add_times(ltf_sd["order_blocks"], df_ltf)
+            _add_times(ltf_sd["structure_zones"], df_ltf)
+
+        # Format market structure pivots for chart overlay
+        ms_data = primary_sd.get("ms_data", {})
+        ms_pivots = []
+        for h in ms_data.get("ms_highs", []):
+            idx_val = h["idx"]
+            if 0 <= idx_val < len(df_primary):
+                ms_pivots.append({
+                    "type": "high", "price": h["price"], "idx": idx_val,
+                    "time": int(df_primary.iloc[idx_val]["open_time"].timestamp()),
+                })
+        for l in ms_data.get("ms_lows", []):
+            idx_val = l["idx"]
+            if 0 <= idx_val < len(df_primary):
+                ms_pivots.append({
+                    "type": "low", "price": l["price"], "idx": idx_val,
+                    "time": int(df_primary.iloc[idx_val]["open_time"].timestamp()),
+                })
+        ms_pivots.sort(key=lambda x: x["idx"])
+
+        bos_events = []
+        for b in ms_data.get("bos_events", []):
+            bidx = b.get("bos_idx", 0)
+            if 0 <= bidx < len(df_primary):
+                bos_events.append({
+                    "type": b["type"],
+                    "price": b["bos_price"],
+                    "idx": bidx,
+                    "time": int(df_primary.iloc[bidx]["open_time"].timestamp()),
+                    "broken_level": b["broken_level"],
+                    "quality": b.get("quality", "moderate"),
+                })
+
+        response = {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "tf_map": tf_map,
+            "candles": candles,
+            "trend": primary_sd["trend"],
+            "ms_pivots": ms_pivots,
+            "bos_events": bos_events,
+            "order_blocks": primary_sd["order_blocks"],
+            "structure_zones": primary_sd["structure_zones"],
+            "scored_zones": primary_sd.get("scored_zones", []),
+            "fvgs": primary_sd["fvgs"],
+            "ranges": primary_sd.get("ranges", []),
+            "htf_zones": {
+                "order_blocks": htf_sd["order_blocks"] if htf_sd else [],
+                "structure_zones": htf_sd["structure_zones"] if htf_sd else [],
+                "trend": htf_sd["trend"] if htf_sd else "neutral",
+            },
+            "ltf_zones": {
+                "order_blocks": ltf_sd["order_blocks"] if ltf_sd else [],
+                "structure_zones": ltf_sd["structure_zones"] if ltf_sd else [],
+                "trend": ltf_sd["trend"] if ltf_sd else "neutral",
+            },
+            "debug": {
+                "sym_resolved": sym,
+                "primary_candles": len(candles),
+                "htf_candles": len(df_htf) if df_htf is not None else 0,
+                "ltf_candles": len(df_ltf) if df_ltf is not None else 0,
+                "bullish_fvgs": len(primary_sd["fvgs"].get("bullish_fvgs", [])),
+                "bearish_fvgs": len(primary_sd["fvgs"].get("bearish_fvgs", [])),
+                "bullish_obs": len([z for z in primary_sd["order_blocks"] if z.get("type") == "bullish"]),
+                "bearish_obs": len([z for z in primary_sd["order_blocks"] if z.get("type") == "bearish"]),
+                "demand_ss": len([z for z in primary_sd["structure_zones"] if z.get("type") == "demand"]),
+                "supply_ss": len([z for z in primary_sd["structure_zones"] if z.get("type") == "supply"]),
+            },
+        }
+
+        return JSONResponse(convert_numpy_types(response))
+
+    except Exception as e:
+        logger.error(f"[SD_API_ERROR] {e}")
+        import traceback
+        tb = traceback.format_exc()
+        logger.error(tb)
+        return JSONResponse({"error": str(e), "traceback": tb}, status_code=500)
+
+
+@app.get("/supply-demand", response_class=HTMLResponse)
+async def supply_demand_page():
+    """
+    Standalone Supply & Demand debug page (TCT Lecture 3).
+    Shows OBIFs and Structure S/D zones on candlestick chart
+    with FVG markers, mitigation status, and zone scoring.
+    """
+    html = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Supply & Demand — HPB-TCT</title>
+<script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#fff;color:#333;font-family:'Segoe UI',sans-serif;overflow:hidden}
+.header{display:flex;align-items:center;gap:10px;padding:6px 12px;background:#f8f9fa;border-bottom:1px solid #dee2e6;flex-wrap:wrap}
+.header h1{font-size:.95rem;color:#333;white-space:nowrap;font-weight:600}
+.header h1 .sub{color:#888;font-weight:400;font-size:.75rem;margin-left:5px}
+.ctrl{display:flex;align-items:center;gap:5px}
+.ctrl label{font-size:.7rem;color:#666}
+.ctrl select{background:#fff;color:#333;border:1px solid #ced4da;border-radius:4px;padding:4px 8px;font-size:.75rem;min-width:100px}
+.ctrl select:focus{outline:none;border-color:#007bff}
+.ctrl button{background:#007bff;color:#fff;border:none;border-radius:4px;padding:5px 12px;font-size:.75rem;cursor:pointer;font-weight:500}
+.ctrl button:hover{background:#0056b3}
+.ctrl button:disabled{opacity:.5;cursor:not-allowed}
+.ctrl .toggle-group{display:flex;gap:2px}
+.ctrl .toggle-btn{background:#e9ecef;color:#666;border:1px solid #ced4da;border-radius:4px;padding:4px 8px;font-size:.65rem;cursor:pointer}
+.ctrl .toggle-btn.active{background:#007bff;color:#fff;border-color:#007bff}
+.chart-btns{display:flex;gap:4px;margin-left:8px}
+.chart-btns button{background:#6c757d;padding:4px 8px;font-size:.65rem}
+.chart-btns button:hover{background:#545b62}
+.back-link{color:#666;text-decoration:none;font-size:.7rem;padding:3px 8px;border:1px solid #ced4da;border-radius:4px;margin-left:auto}
+.back-link:hover{color:#333;border-color:#adb5bd}
+.main-area{display:flex;height:calc(100vh - 80px)}
+.chart-wrap{flex:1;position:relative;background:#fff}
+.chart-container{width:100%;height:100%}
+.info-panel{width:290px;background:#f8f9fa;border-left:1px solid #dee2e6;overflow-y:auto;padding:10px;font-size:.7rem}
+.info-panel h3{color:#333;font-size:.8rem;margin:10px 0 6px;border-bottom:1px solid #dee2e6;padding-bottom:4px;font-weight:600}
+.info-panel h3:first-child{margin-top:0}
+.info-row{display:flex;justify-content:space-between;padding:2px 0;color:#666}
+.info-row .val{color:#333;font-weight:600}
+.info-row .val.bullish{color:#28a745}
+.info-row .val.bearish{color:#dc3545}
+.info-row .val.ranging{color:#ffc107}
+.tag{display:inline-block;font-size:.6rem;padding:1px 5px;border-radius:3px;margin-left:4px}
+.tag.good{background:rgba(40,167,69,.15);color:#28a745}
+.tag.bad{background:rgba(220,53,69,.15);color:#dc3545}
+.tag.moderate{background:rgba(255,193,7,.15);color:#856404}
+.tag.confirmed{background:rgba(0,123,255,.15);color:#007bff}
+.tag.mitigated{background:rgba(108,117,125,.15);color:#6c757d;text-decoration:line-through}
+.tag.demand{background:rgba(38,166,154,.15);color:#26a69a}
+.tag.supply{background:rgba(239,83,80,.15);color:#ef5350}
+.zone-list{margin:4px 0}
+.zone-item{padding:5px 6px;margin:3px 0;border-radius:3px;font-size:.65rem;border-left:3px solid #007bff}
+.zone-item.demand-ob{background:rgba(38,166,154,.06);border-left-color:#26a69a}
+.zone-item.supply-ob{background:rgba(239,83,80,.06);border-left-color:#ef5350}
+.zone-item.demand-ss{background:rgba(38,166,154,.04);border-left-color:#1a9688}
+.zone-item.supply-ss{background:rgba(239,83,80,.04);border-left-color:#d32f2f}
+.zone-item.mitigated{opacity:.5}
+.zone-item .zone-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:2px}
+.zone-item .zone-label{font-weight:600;font-size:.7rem}
+.legend{display:flex;gap:14px;padding:5px 12px;background:#f8f9fa;border-top:1px solid #dee2e6;font-size:.65rem;color:#666;flex-wrap:wrap}
+.legend-item{display:flex;align-items:center;gap:4px}
+.legend-box{width:12px;height:8px;border:2px solid}
+.legend-line{width:16px;height:2px}
+.loading-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.9);z-index:100;font-size:.85rem;color:#666}
+.loading-overlay.hidden{display:none}
+.spinner{width:18px;height:18px;border:2px solid #dee2e6;border-top-color:#007bff;border-radius:50%;animation:spin .6s linear infinite;margin-right:8px}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media(max-width:768px){
+    .info-panel{display:none}
+    .header{padding:4px 8px}
+    .ctrl select{min-width:80px;font-size:.7rem;padding:3px 5px}
+    .ctrl button{padding:4px 8px;font-size:.7rem}
+    .chart-btns button{padding:3px 6px}
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+    <h1>Supply &amp; Demand <span class="sub">Debug</span></h1>
+    <div class="ctrl">
+        <label>Pair</label>
+        <select id="pairSelect"><option>Loading...</option></select>
+    </div>
+    <div class="ctrl">
+        <label>TF</label>
+        <select id="tfSelect">
+            <option value="1m">1m</option>
+            <option value="5m">5m</option>
+            <option value="15m">15m</option>
+            <option value="30m">30m</option>
+            <option value="1h">1h</option>
+            <option value="4h" selected>4h</option>
+            <option value="1d">1D</option>
+            <option value="1W">1W</option>
+            <option value="1M">1M</option>
+        </select>
+    </div>
+    <div class="ctrl">
+        <label>Show</label>
+        <div class="toggle-group">
+            <button class="toggle-btn active" id="togOB" onclick="toggleLayer('ob')">OB</button>
+            <button class="toggle-btn active" id="togSS" onclick="toggleLayer('ss')">SS/SD</button>
+            <button class="toggle-btn active" id="togFVG" onclick="toggleLayer('fvg')">FVG</button>
+            <button class="toggle-btn" id="togHTF" onclick="toggleLayer('htf')">HTF</button>
+            <button class="toggle-btn" id="togMit" onclick="toggleLayer('mit')">Mitigated</button>
+        </div>
+    </div>
+    <div class="ctrl">
+        <button id="loadBtn" onclick="loadData()">Load</button>
+    </div>
+    <div class="chart-btns">
+        <button onclick="resetChart()">Reset</button>
+        <button onclick="fitChart()">Fit</button>
+        <button onclick="scalePrice()">Scale Price</button>
+        <button onclick="zoomIn()">+</button>
+        <button onclick="zoomOut()">&minus;</button>
+    </div>
+    <a class="back-link" href="/dashboard">&larr; Back</a>
+</div>
+
+<div class="main-area">
+    <div class="chart-wrap">
+        <div id="chart" class="chart-container"></div>
+        <div id="loadingOverlay" class="loading-overlay hidden">
+            <div class="spinner"></div> Loading...
+        </div>
+    </div>
+    <div id="infoPanel" class="info-panel">
+        <h3>Select pair &amp; timeframe</h3>
+        <div class="info-row"><span>Then click <b>Load</b></span></div>
+    </div>
+</div>
+
+<div class="legend">
+    <div class="legend-item"><div class="legend-box" style="border-color:#26a69a;background:rgba(38,166,154,.15)"></div> Demand OB</div>
+    <div class="legend-item"><div class="legend-box" style="border-color:#ef5350;background:rgba(239,83,80,.15)"></div> Supply OB</div>
+    <div class="legend-item"><div class="legend-box" style="border-color:#1a9688;background:rgba(38,166,154,.08);border-style:dashed"></div> Structure Demand</div>
+    <div class="legend-item"><div class="legend-box" style="border-color:#d32f2f;background:rgba(239,83,80,.08);border-style:dashed"></div> Structure Supply</div>
+    <div class="legend-item"><div style="width:16px;height:4px;background:rgba(33,150,243,.3)"></div> Bullish FVG</div>
+    <div class="legend-item"><div style="width:16px;height:4px;background:rgba(255,152,0,.3)"></div> Bearish FVG</div>
+    <div class="legend-item"><div class="legend-line" style="background:#000"></div> MS Zigzag</div>
+</div>
+
+<script>
+let chart, candleSeries;
+let overlays = [];
+const BASE = '';
+
+// Toggle state for layers
+let layers = { ob: true, ss: true, fvg: true, htf: false, mit: false };
+let lastData = null;
+
+function toggleLayer(key) {
+    layers[key] = !layers[key];
+    const btn = document.getElementById('tog' + key.charAt(0).toUpperCase() + key.slice(1).replace('/', ''));
+    // Map key to button ID
+    const idMap = { ob: 'togOB', ss: 'togSS', fvg: 'togFVG', htf: 'togHTF', mit: 'togMit' };
+    const el = document.getElementById(idMap[key]);
+    if (el) el.classList.toggle('active', layers[key]);
+    if (lastData) redraw(lastData);
+}
+
+function initChart() {
+    const el = document.getElementById('chart');
+    chart = LightweightCharts.createChart(el, {
+        width: el.clientWidth,
+        height: el.clientHeight,
+        layout: { background: { type: 'solid', color: '#ffffff' }, textColor: '#333', fontSize: 11 },
+        grid: { vertLines: { color: '#f0f0f0' }, horzLines: { color: '#f0f0f0' } },
+        crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+        rightPriceScale: { borderColor: '#dee2e6' },
+        timeScale: { borderColor: '#dee2e6', timeVisible: true, secondsVisible: false },
+        handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: true },
+        handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
+    });
+    candleSeries = chart.addCandlestickSeries({
+        upColor: '#26a69a', downColor: '#ef5350',
+        borderUpColor: '#26a69a', borderDownColor: '#ef5350',
+        wickUpColor: '#26a69a', wickDownColor: '#ef5350',
+    });
+    window.addEventListener('resize', () => {
+        chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
+    });
+}
+
+function resetChart() {
+    candleSeries.applyOptions({ autoscaleInfoProvider: undefined });
+    chart.timeScale().resetTimeScale();
+    chart.priceScale('right').applyOptions({ autoScale: true });
+}
+function fitChart() { chart.timeScale().fitContent(); }
+function zoomIn() {
+    const vr = chart.timeScale().getVisibleLogicalRange();
+    if (vr) {
+        const c = (vr.from + vr.to) / 2, h = (vr.to - vr.from) / 4;
+        chart.timeScale().setVisibleLogicalRange({ from: c - h, to: c + h });
+    }
+}
+function zoomOut() {
+    const vr = chart.timeScale().getVisibleLogicalRange();
+    if (vr) {
+        const c = (vr.from + vr.to) / 2, h = (vr.to - vr.from);
+        chart.timeScale().setVisibleLogicalRange({ from: c - h, to: c + h });
+    }
+}
+let lastLoadedCandles = [];
+function scalePrice() {
+    if (!lastLoadedCandles || lastLoadedCandles.length === 0) return;
+    candleSeries.applyOptions({
+        autoscaleInfoProvider: () => {
+            const vr = chart.timeScale().getVisibleLogicalRange();
+            if (!vr) return null;
+            const fi = Math.max(0, Math.floor(vr.from));
+            const ti = Math.min(lastLoadedCandles.length - 1, Math.ceil(vr.to));
+            let minP = Infinity, maxP = -Infinity;
+            for (let i = fi; i <= ti; i++) {
+                const c = lastLoadedCandles[i];
+                if (c) { if (c.low < minP) minP = c.low; if (c.high > maxP) maxP = c.high; }
+            }
+            if (minP === Infinity) return null;
+            const pad = (maxP - minP) * 0.05;
+            return { priceRange: { minValue: minP - pad, maxValue: maxP + pad } };
+        }
+    });
+    chart.priceScale('right').applyOptions({ autoScale: true });
+}
+function fmtPrice(v) {
+    if (v == null || isNaN(v)) return '\u2014';
+    const a = Math.abs(v);
+    if (a === 0) return '0';
+    if (a >= 1) return v.toFixed(Math.min(4, Math.max(2, 4 - Math.floor(Math.log10(a)))));
+    const d = Math.max(4, -Math.floor(Math.log10(a)) + 3);
+    return v.toFixed(Math.min(d, 12));
+}
+
+async function loadPairs() {
+    try {
+        const r = await fetch(BASE + '/api/sd-pairs');
+        const d = await r.json();
+        const sel = document.getElementById('pairSelect');
+        sel.innerHTML = '';
+        (d.pairs || []).forEach(p => {
+            const o = document.createElement('option');
+            o.value = p; o.textContent = p;
+            if (p === 'BTC_USDT_PERP') o.selected = true;
+            sel.appendChild(o);
+        });
+    } catch(e) { console.error('Failed to load pairs', e); }
+}
+
+function clearOverlays() {
+    overlays.forEach(s => { try { chart.removeSeries(s); } catch(e){} });
+    overlays = [];
+    candleSeries.setMarkers([]);
+}
+
+// Draw a horizontal zone box (top + bottom lines)
+function drawZoneBox(startTime, endTime, top, bottom, color, lineWidth, lineStyle, candles) {
+    const first = candles[0]?.time || 0;
+    const last = candles[candles.length - 1]?.time || Infinity;
+
+    // Extend zone to the right edge of chart for unmitigated zones
+    const effStart = Math.max(startTime || first, first);
+    const effEnd = endTime ? Math.min(endTime, last) : last;
+    if (effStart > last) return;
+
+    // Top line
+    const topLine = chart.addLineSeries({
+        color: color,
+        lineWidth: lineWidth,
+        lineStyle: lineStyle,
+        crosshairMarkerVisible: false,
+        lastValueVisible: false,
+        priceLineVisible: false,
+    });
+    topLine.setData([
+        { time: effStart, value: top },
+        { time: effEnd, value: top },
+    ]);
+    overlays.push(topLine);
+
+    // Bottom line
+    const bottomLine = chart.addLineSeries({
+        color: color,
+        lineWidth: lineWidth,
+        lineStyle: lineStyle,
+        crosshairMarkerVisible: false,
+        lastValueVisible: false,
+        priceLineVisible: false,
+    });
+    bottomLine.setData([
+        { time: effStart, value: bottom },
+        { time: effEnd, value: bottom },
+    ]);
+    overlays.push(bottomLine);
+}
+
+// Draw FVG as a thin horizontal band
+function drawFVG(fvg, type, candles) {
+    const first = candles[0]?.time || 0;
+    const last = candles[candles.length - 1]?.time || Infinity;
+    const fvgTime = fvg.time || first;
+    if (fvgTime < first || fvgTime > last) return;
+
+    const color = type === 'bullish' ? 'rgba(33,150,243,0.35)' : 'rgba(255,152,0,0.35)';
+    // Draw FVG as a filled area between top and bottom
+    const fvgLine = chart.addLineSeries({
+        color: color,
+        lineWidth: 3,
+        lineStyle: 0,
+        crosshairMarkerVisible: false,
+        lastValueVisible: false,
+        priceLineVisible: false,
+    });
+
+    // Extend FVG from formation to end of visible candles (until mitigated)
+    fvgLine.setData([
+        { time: fvgTime, value: (fvg.top + fvg.bottom) / 2 },
+        { time: last, value: (fvg.top + fvg.bottom) / 2 },
+    ]);
+    overlays.push(fvgLine);
+}
+
+function redraw(data) {
+    clearOverlays();
+    const candles = data.candles || [];
+    if (candles.length === 0) return;
+
+    const first = candles[0].time;
+    const last = candles[candles.length - 1].time;
+    const markers = [];
+
+    // Draw market structure zigzag (black, subtle)
+    const pivots = (data.ms_pivots || []).filter(p => p.time >= first && p.time <= last).sort((a,b) => a.idx - b.idx);
+    if (pivots.length >= 2) {
+        const zz = chart.addLineSeries({
+            color: 'rgba(0,0,0,0.25)',
+            lineWidth: 1,
+            lineStyle: 0,
+            crosshairMarkerVisible: false,
+            lastValueVisible: false,
+            priceLineVisible: false,
+        });
+        zz.setData(pivots.map(p => ({ time: p.time, value: p.price })));
+        overlays.push(zz);
+    }
+
+    // Draw Order Blocks (single candle zones)
+    if (layers.ob) {
+        (data.order_blocks || []).forEach(ob => {
+            const isMitigated = ob.mitigated || false;
+            if (isMitigated && !layers.mit) return;
+
+            const isDemand = ob.type === 'bullish';
+            const color = isDemand
+                ? (isMitigated ? 'rgba(38,166,154,0.25)' : 'rgba(38,166,154,0.7)')
+                : (isMitigated ? 'rgba(239,83,80,0.25)' : 'rgba(239,83,80,0.7)');
+            const lw = isMitigated ? 1 : 2;
+
+            const startTime = ob.idx_time || first;
+            const endTime = isMitigated ? (ob.mitigation_idx_time || last) : last;
+
+            drawZoneBox(startTime, endTime, ob.top, ob.bottom, color, lw, 0, candles);
+
+            // Add label marker
+            markers.push({
+                time: startTime,
+                position: isDemand ? 'belowBar' : 'aboveBar',
+                color: isDemand ? '#26a69a' : '#ef5350',
+                shape: isDemand ? 'arrowUp' : 'arrowDown',
+                size: 1,
+                text: isDemand ? 'Demand OB' : 'Supply OB',
+            });
+        });
+    }
+
+    // Draw Structure S/D zones (multi-candle zones)
+    if (layers.ss) {
+        (data.structure_zones || []).forEach(zone => {
+            const isMitigated = zone.mitigated || false;
+            if (isMitigated && !layers.mit) return;
+
+            const isDemand = zone.type === 'demand';
+            const color = isDemand
+                ? (isMitigated ? 'rgba(38,166,154,0.2)' : 'rgba(38,166,154,0.55)')
+                : (isMitigated ? 'rgba(239,83,80,0.2)' : 'rgba(239,83,80,0.55)');
+            const lw = isMitigated ? 1 : 1.5;
+
+            const startTime = zone.start_idx_time || first;
+            const endTime = isMitigated ? (zone.mitigation_idx_time || last) : last;
+
+            drawZoneBox(startTime, endTime, zone.top, zone.bottom, color, lw,
+                LightweightCharts.LineStyle.Dashed, candles);
+
+            markers.push({
+                time: startTime,
+                position: isDemand ? 'belowBar' : 'aboveBar',
+                color: isDemand ? '#1a9688' : '#d32f2f',
+                shape: isDemand ? 'arrowUp' : 'arrowDown',
+                size: 0.8,
+                text: isDemand ? 'Str Demand' : 'Str Supply',
+            });
+        });
+    }
+
+    // Draw HTF zones if toggled on
+    if (layers.htf) {
+        const htfOBs = (data.htf_zones?.order_blocks || []);
+        const htfSS = (data.htf_zones?.structure_zones || []);
+
+        htfOBs.forEach(ob => {
+            const isMitigated = ob.mitigated || false;
+            if (isMitigated && !layers.mit) return;
+            const isDemand = ob.type === 'bullish';
+            const color = isDemand ? 'rgba(38,166,154,0.3)' : 'rgba(239,83,80,0.3)';
+            const startTime = ob.idx_time || first;
+            drawZoneBox(startTime, last, ob.top, ob.bottom, color, 2.5, 0, candles);
+        });
+
+        htfSS.forEach(zone => {
+            const isMitigated = zone.mitigated || false;
+            if (isMitigated && !layers.mit) return;
+            const isDemand = zone.type === 'demand';
+            const color = isDemand ? 'rgba(38,166,154,0.2)' : 'rgba(239,83,80,0.2)';
+            const startTime = zone.start_idx_time || first;
+            drawZoneBox(startTime, last, zone.top, zone.bottom, color, 2,
+                LightweightCharts.LineStyle.Dashed, candles);
+        });
+    }
+
+    // Draw FVGs
+    if (layers.fvg) {
+        (data.fvgs?.bullish_fvgs || []).forEach(fvg => drawFVG(fvg, 'bullish', candles));
+        (data.fvgs?.bearish_fvgs || []).forEach(fvg => drawFVG(fvg, 'bearish', candles));
+    }
+
+    // BOS markers
+    (data.bos_events || []).forEach(b => {
+        if (b.time < first || b.time > last) return;
+        markers.push({
+            time: b.time,
+            position: b.type === 'bullish' ? 'aboveBar' : 'belowBar',
+            color: '#ffc107',
+            shape: 'circle',
+            size: 0.8,
+            text: 'BOS',
+        });
+    });
+
+    // Sort and set markers (avoid duplicates at same time)
+    if (markers.length > 0) {
+        // Deduplicate by time (keep first per time)
+        const seen = new Set();
+        const unique = markers.filter(m => {
+            const key = m.time + '_' + m.position + '_' + m.text;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        });
+        unique.sort((a, b) => a.time - b.time);
+        candleSeries.setMarkers(unique);
+    }
+}
+
+async function loadData() {
+    const sym = document.getElementById('pairSelect').value;
+    const tf = document.getElementById('tfSelect').value;
+    const btn = document.getElementById('loadBtn');
+    const overlay = document.getElementById('loadingOverlay');
+
+    btn.disabled = true;
+    overlay.classList.remove('hidden');
+    clearOverlays();
+
+    try {
+        const r = await fetch(BASE + `/api/supply-demand?symbol=${sym}&timeframe=${tf}&limit=300`);
+        if (!r.ok) {
+            const errData = await r.json().catch(() => ({}));
+            throw new Error(errData.error || `HTTP ${r.status}`);
+        }
+        const data = await r.json();
+        lastData = data;
+
+        lastLoadedCandles = data.candles || [];
+        // Detect price precision for small-priced coins
+        if (lastLoadedCandles.length > 0) {
+            const sp = Math.abs(lastLoadedCandles[lastLoadedCandles.length - 1].close);
+            let prec = 2;
+            if (sp > 0 && sp < 1) prec = Math.max(4, -Math.floor(Math.log10(sp)) + 3);
+            else if (sp >= 1 && sp < 10) prec = 4;
+            else if (sp >= 10 && sp < 1000) prec = 2;
+            prec = Math.min(prec, 12);
+            candleSeries.applyOptions({ priceFormat: { type: 'price', precision: prec, minMove: Math.pow(10, -prec) } });
+        }
+        candleSeries.applyOptions({ autoscaleInfoProvider: undefined });
+        candleSeries.setData(lastLoadedCandles);
+
+        // Draw all zones and overlays
+        redraw(data);
+
+        updateInfoPanel(data);
+        chart.timeScale().fitContent();
+        scalePrice();
+
+    } catch(e) {
+        console.error('Load error:', e);
+        document.getElementById('infoPanel').innerHTML =
+            `<h3 style="color:#dc3545">Error</h3><div class="info-row">${e.message}</div>`;
+    } finally {
+        btn.disabled = false;
+        overlay.classList.add('hidden');
+    }
+}
+
+function updateInfoPanel(data) {
+    const panel = document.getElementById('infoPanel');
+    const sym = data.symbol || '\u2014';
+    const tf = data.timeframe || '\u2014';
+    const tfMap = data.tf_map || {};
+    const dbg = data.debug || {};
+
+    let html = `<h3>${sym} \u00b7 ${tf.toUpperCase()}</h3>`;
+
+    // Trend
+    const trend = data.trend || 'neutral';
+    const tc = trend === 'bullish' ? 'bullish' : trend === 'bearish' ? 'bearish' : 'ranging';
+    html += `<div class="info-row"><span>Trend</span><span class="val ${tc}">${trend.toUpperCase()}</span></div>`;
+
+    // Timeframes
+    html += `<div class="info-row"><span>HTF</span><span class="val">${tfMap.htf || '\u2014'}</span></div>`;
+    html += `<div class="info-row"><span>MTF</span><span class="val">${tfMap.mtf || tf}</span></div>`;
+    html += `<div class="info-row"><span>LTF</span><span class="val">${tfMap.ltf || '\u2014'}</span></div>`;
+
+    // Detection stats
+    html += `<h3>Detection Summary</h3>`;
+    html += `<div class="info-row"><span>Bullish FVGs</span><span class="val">${dbg.bullish_fvgs || 0}</span></div>`;
+    html += `<div class="info-row"><span>Bearish FVGs</span><span class="val">${dbg.bearish_fvgs || 0}</span></div>`;
+    html += `<div class="info-row"><span>Demand OBs</span><span class="val bullish">${dbg.bullish_obs || 0}</span></div>`;
+    html += `<div class="info-row"><span>Supply OBs</span><span class="val bearish">${dbg.bearish_obs || 0}</span></div>`;
+    html += `<div class="info-row"><span>Structure Demand</span><span class="val bullish">${dbg.demand_ss || 0}</span></div>`;
+    html += `<div class="info-row"><span>Structure Supply</span><span class="val bearish">${dbg.supply_ss || 0}</span></div>`;
+
+    // Order Blocks
+    const obs = data.order_blocks || [];
+    const activeOBs = obs.filter(z => !z.mitigated);
+    const mitOBs = obs.filter(z => z.mitigated);
+    html += `<h3>Order Blocks (${activeOBs.length} active, ${mitOBs.length} mitigated)</h3>`;
+    if (activeOBs.length > 0) {
+        html += `<div class="zone-list">`;
+        activeOBs.slice(-8).forEach(ob => {
+            const isDemand = ob.type === 'bullish';
+            const cls = isDemand ? 'demand-ob' : 'supply-ob';
+            const label = isDemand ? 'Demand OBIF' : 'Supply OBIF';
+            const pq = ob.pivot_quality || {};
+            const qlabel = pq.quality_label || '';
+            html += `<div class="zone-item ${cls}">
+                <div class="zone-header">
+                    <span class="zone-label">${label}</span>
+                    <span class="tag ${isDemand ? 'demand' : 'supply'}">${isDemand ? 'BUY' : 'SELL'}</span>
+                </div>
+                <div>Top: ${fmtPrice(ob.top)} | Bottom: ${fmtPrice(ob.bottom)}</div>
+                <div>FVG gap: ${fmtPrice(ob.fvg?.gap_size || 0)}</div>
+                ${ob.location_type ? '<div>Location: ' + ob.location_type + ' <span class="tag good">score ' + (ob.strength || 0).toFixed(0) + '</span></div>' : ''}
+                ${qlabel ? '<div>Quality: ' + qlabel.replace(/_/g,' ') + '</div>' : ''}
+            </div>`;
+        });
+        html += `</div>`;
+    }
+
+    // Structure Zones
+    const szones = data.structure_zones || [];
+    const activeSZ = szones.filter(z => !z.mitigated);
+    const mitSZ = szones.filter(z => z.mitigated);
+    html += `<h3>Structure S/D (${activeSZ.length} active, ${mitSZ.length} mitigated)</h3>`;
+    if (activeSZ.length > 0) {
+        html += `<div class="zone-list">`;
+        activeSZ.slice(-8).forEach(zone => {
+            const isDemand = zone.type === 'demand';
+            const cls = isDemand ? 'demand-ss' : 'supply-ss';
+            const label = isDemand ? 'Structure Demand' : 'Structure Supply';
+            html += `<div class="zone-item ${cls}">
+                <div class="zone-header">
+                    <span class="zone-label">${label}</span>
+                    <span class="tag ${isDemand ? 'demand' : 'supply'}">${zone.candle_count || '?'} candles</span>
+                </div>
+                <div>Top: ${fmtPrice(zone.top)} | Bottom: ${fmtPrice(zone.bottom)}</div>
+                <div>MS: <span class="tag ${zone.ms_quality === 'confirmed' ? 'confirmed' : 'moderate'}">${zone.ms_quality || 'inferred'}</span>
+                ${zone.has_bos_support ? '<span class="tag good">BOS</span>' : ''}
+                ${zone.eof_aligned ? '<span class="tag good">EOF</span>' : ''}</div>
+            </div>`;
+        });
+        html += `</div>`;
+    }
+
+    // Scored Zones (top 5)
+    const scored = data.scored_zones || [];
+    if (scored.length > 0) {
+        html += `<h3>Top Scored Zones</h3>`;
+        html += `<div class="zone-list">`;
+        scored.slice(0, 5).forEach(z => {
+            const isDemand = z.type === 'bullish' || z.type === 'demand';
+            const zClass = z.zone_class || 'unknown';
+            const cls = isDemand ? 'demand-ob' : 'supply-ob';
+            html += `<div class="zone-item ${cls}">
+                <div class="zone-header">
+                    <span class="zone-label">${isDemand ? 'Demand' : 'Supply'} (${zClass})</span>
+                    <span class="tag good">${(z.strength || 0).toFixed(0)}%</span>
+                </div>
+                <div>${fmtPrice(z.top)} - ${fmtPrice(z.bottom)}</div>
+                <div>Location: ${z.location_type || 'none'}${z.pivot_quality?.has_liquidity_sweep ? ' | Liq Sweep' : ''}</div>
+            </div>`;
+        });
+        html += `</div>`;
+    }
+
+    // HTF context
+    const htfZones = data.htf_zones || {};
+    const htfOBCount = (htfZones.order_blocks || []).length;
+    const htfSSCount = (htfZones.structure_zones || []).length;
+    html += `<h3>HTF Context (${tfMap.htf || '\u2014'})</h3>`;
+    html += `<div class="info-row"><span>HTF Trend</span><span class="val ${htfZones.trend === 'bullish' ? 'bullish' : htfZones.trend === 'bearish' ? 'bearish' : 'ranging'}">${(htfZones.trend || 'neutral').toUpperCase()}</span></div>`;
+    html += `<div class="info-row"><span>HTF OBs</span><span class="val">${htfOBCount}</span></div>`;
+    html += `<div class="info-row"><span>HTF Str S/D</span><span class="val">${htfSSCount}</span></div>`;
+
+    // TCT S/D Rules reference
+    html += `<h3>TCT S/D Rules</h3>`;
+    html += `<div class="info-row" style="flex-direction:column;gap:2px">
+        <div>\u2022 OB = last opposing candle before expansion</div>
+        <div>\u2022 MUST have FVG (inefficiency) to be valid</div>
+        <div>\u2022 SS/SD = multi-candle zone with FVG</div>
+        <div>\u2022 3 locations: pivot, in-range, deviation</div>
+        <div>\u2022 Mitigated zone = no longer valid</div>
+        <div>\u2022 HTF block + LTF true inefficiency = best</div>
+    </div>`;
+
+    panel.innerHTML = html;
+}
+
+initChart();
+loadPairs();
+document.getElementById('pairSelect').addEventListener('change', loadData);
+document.getElementById('tfSelect').addEventListener('change', loadData);
+</script>
+</body>
+</html>"""
+
+    return HTMLResponse(content=html)
+
+
+# ================================================================
 # ENTRY POINT
 # ================================================================
 
