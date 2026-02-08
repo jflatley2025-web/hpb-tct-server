@@ -11225,7 +11225,7 @@ body{background:#fff;color:#333;font-family:'Segoe UI',sans-serif;overflow:hidde
 .ctrl button:hover{background:#0056b3}
 .ctrl button:disabled{opacity:.5;cursor:not-allowed}
 .ctrl .toggle-group{display:flex;gap:2px}
-.ctrl .toggle-btn{background:#e9ecef;color:#666;border:1px solid #ced4da;border-radius:4px;padding:4px 8px;font-size:.65rem;cursor:pointer}
+.ctrl .toggle-btn{background:#e9ecef;color:#666;border:1px solid #ced4da;border-radius:4px;padding:4px 8px;font-size:.65rem;cursor:pointer;transition:all .15s}
 .ctrl .toggle-btn.active{background:#007bff;color:#fff;border-color:#007bff}
 .chart-btns{display:flex;gap:4px;margin-left:8px}
 .chart-btns button{background:#6c757d;padding:4px 8px;font-size:.65rem}
@@ -11262,7 +11262,7 @@ body{background:#fff;color:#333;font-family:'Segoe UI',sans-serif;overflow:hidde
 .zone-item .zone-label{font-weight:600;font-size:.7rem}
 .legend{display:flex;gap:14px;padding:5px 12px;background:#f8f9fa;border-top:1px solid #dee2e6;font-size:.65rem;color:#666;flex-wrap:wrap}
 .legend-item{display:flex;align-items:center;gap:4px}
-.legend-box{width:12px;height:8px;border:2px solid}
+.legend-box{width:14px;height:10px}
 .legend-line{width:16px;height:2px}
 .loading-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.9);z-index:100;font-size:.85rem;color:#666}
 .loading-overlay.hidden{display:none}
@@ -11304,7 +11304,8 @@ body{background:#fff;color:#333;font-family:'Segoe UI',sans-serif;overflow:hidde
         <div class="toggle-group">
             <button class="toggle-btn active" id="togOB" onclick="toggleLayer('ob')">OB</button>
             <button class="toggle-btn active" id="togSS" onclick="toggleLayer('ss')">SS/SD</button>
-            <button class="toggle-btn active" id="togFVG" onclick="toggleLayer('fvg')">FVG</button>
+            <button class="toggle-btn" id="togFVG" onclick="toggleLayer('fvg')">FVG</button>
+            <button class="toggle-btn" id="togMS" onclick="toggleLayer('ms')">MS</button>
             <button class="toggle-btn" id="togHTF" onclick="toggleLayer('htf')">HTF</button>
             <button class="toggle-btn" id="togMit" onclick="toggleLayer('mit')">Mitigated</button>
         </div>
@@ -11336,13 +11337,12 @@ body{background:#fff;color:#333;font-family:'Segoe UI',sans-serif;overflow:hidde
 </div>
 
 <div class="legend">
-    <div class="legend-item"><div class="legend-box" style="border-color:#26a69a;background:rgba(38,166,154,.15)"></div> Demand OB</div>
-    <div class="legend-item"><div class="legend-box" style="border-color:#ef5350;background:rgba(239,83,80,.15)"></div> Supply OB</div>
-    <div class="legend-item"><div class="legend-box" style="border-color:#1a9688;background:rgba(38,166,154,.08);border-style:dashed"></div> Structure Demand</div>
-    <div class="legend-item"><div class="legend-box" style="border-color:#d32f2f;background:rgba(239,83,80,.08);border-style:dashed"></div> Structure Supply</div>
-    <div class="legend-item"><div style="width:16px;height:4px;background:rgba(33,150,243,.3)"></div> Bullish FVG</div>
-    <div class="legend-item"><div style="width:16px;height:4px;background:rgba(255,152,0,.3)"></div> Bearish FVG</div>
-    <div class="legend-item"><div class="legend-line" style="background:#000"></div> MS Zigzag</div>
+    <div class="legend-item"><div class="legend-box" style="background:rgba(38,166,154,.18);border:1.5px solid rgba(38,166,154,.6)"></div> Demand OB</div>
+    <div class="legend-item"><div class="legend-box" style="background:rgba(239,83,80,.18);border:1.5px solid rgba(239,83,80,.6)"></div> Supply OB</div>
+    <div class="legend-item"><div class="legend-box" style="background:rgba(38,166,154,.10);border:1.5px dashed rgba(38,166,154,.45)"></div> Str Demand</div>
+    <div class="legend-item"><div class="legend-box" style="background:rgba(239,83,80,.10);border:1.5px dashed rgba(239,83,80,.45)"></div> Str Supply</div>
+    <div class="legend-item"><div style="width:16px;height:4px;background:rgba(33,150,243,.25)"></div> Bullish FVG</div>
+    <div class="legend-item"><div style="width:16px;height:4px;background:rgba(255,152,0,.25)"></div> Bearish FVG</div>
 </div>
 
 <script>
@@ -11350,15 +11350,17 @@ let chart, candleSeries;
 let overlays = [];
 const BASE = '';
 
-// Toggle state for layers
-let layers = { ob: true, ss: true, fvg: true, htf: false, mit: false };
+// Toggle state — FVG + MS off by default for a clean initial view
+let layers = { ob: true, ss: true, fvg: false, ms: false, htf: false, mit: false };
 let lastData = null;
+
+// Max zones drawn per category to avoid clutter
+const MAX_OB_DRAWN = 6;
+const MAX_SS_DRAWN = 6;
 
 function toggleLayer(key) {
     layers[key] = !layers[key];
-    const btn = document.getElementById('tog' + key.charAt(0).toUpperCase() + key.slice(1).replace('/', ''));
-    // Map key to button ID
-    const idMap = { ob: 'togOB', ss: 'togSS', fvg: 'togFVG', htf: 'togHTF', mit: 'togMit' };
+    const idMap = { ob:'togOB', ss:'togSS', fvg:'togFVG', ms:'togMS', htf:'togHTF', mit:'togMit' };
     const el = document.getElementById(idMap[key]);
     if (el) el.classList.toggle('active', layers[key]);
     if (lastData) redraw(lastData);
@@ -11458,72 +11460,75 @@ function clearOverlays() {
     candleSeries.setMarkers([]);
 }
 
-// Draw a horizontal zone box (top + bottom lines)
-function drawZoneBox(startTime, endTime, top, bottom, color, lineWidth, lineStyle, candles) {
+/* --- Zone drawing helpers --- */
+
+// Draws a zone as top line + bottom line + subtle fill lines between them
+function drawZone(startTime, endTime, top, bottom, borderColor, fillColor, lineWidth, lineStyle, candles) {
     const first = candles[0]?.time || 0;
     const last = candles[candles.length - 1]?.time || Infinity;
+    const s = Math.max(startTime || first, first);
+    const e = endTime ? Math.min(endTime, last) : last;
+    if (s >= last) return;
 
-    // Extend zone to the right edge of chart for unmitigated zones
-    const effStart = Math.max(startTime || first, first);
-    const effEnd = endTime ? Math.min(endTime, last) : last;
-    if (effStart > last) return;
-
-    // Top line
-    const topLine = chart.addLineSeries({
-        color: color,
-        lineWidth: lineWidth,
-        lineStyle: lineStyle,
-        crosshairMarkerVisible: false,
-        lastValueVisible: false,
-        priceLineVisible: false,
+    // Top border
+    const topL = chart.addLineSeries({
+        color: borderColor, lineWidth: lineWidth, lineStyle: lineStyle,
+        crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
     });
-    topLine.setData([
-        { time: effStart, value: top },
-        { time: effEnd, value: top },
-    ]);
-    overlays.push(topLine);
+    topL.setData([{ time: s, value: top }, { time: e, value: top }]);
+    overlays.push(topL);
 
-    // Bottom line
-    const bottomLine = chart.addLineSeries({
-        color: color,
-        lineWidth: lineWidth,
-        lineStyle: lineStyle,
-        crosshairMarkerVisible: false,
-        lastValueVisible: false,
-        priceLineVisible: false,
+    // Bottom border
+    const botL = chart.addLineSeries({
+        color: borderColor, lineWidth: lineWidth, lineStyle: lineStyle,
+        crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
     });
-    bottomLine.setData([
-        { time: effStart, value: bottom },
-        { time: effEnd, value: bottom },
-    ]);
-    overlays.push(bottomLine);
+    botL.setData([{ time: s, value: bottom }, { time: e, value: bottom }]);
+    overlays.push(botL);
+
+    // Fill: 3 thin lines evenly spaced inside the zone to simulate shading
+    const gap = top - bottom;
+    if (gap > 0) {
+        for (let f = 0.25; f <= 0.75; f += 0.25) {
+            const fl = chart.addLineSeries({
+                color: fillColor, lineWidth: 1, lineStyle: 0,
+                crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
+            });
+            fl.setData([{ time: s, value: bottom + gap * f }, { time: e, value: bottom + gap * f }]);
+            overlays.push(fl);
+        }
+    }
 }
 
-// Draw FVG as a thin horizontal band
-function drawFVG(fvg, type, candles) {
+// Draw a thin FVG band (top + bottom edge, short extension)
+function drawFVGBand(fvg, type, candles) {
     const first = candles[0]?.time || 0;
     const last = candles[candles.length - 1]?.time || Infinity;
-    const fvgTime = fvg.time || first;
-    if (fvgTime < first || fvgTime > last) return;
+    const fTime = fvg.time || first;
+    if (fTime < first || fTime > last) return;
 
-    const color = type === 'bullish' ? 'rgba(33,150,243,0.35)' : 'rgba(255,152,0,0.35)';
-    // Draw FVG as a filled area between top and bottom
-    const fvgLine = chart.addLineSeries({
-        color: color,
-        lineWidth: 3,
-        lineStyle: 0,
-        crosshairMarkerVisible: false,
-        lastValueVisible: false,
-        priceLineVisible: false,
+    const color = type === 'bullish' ? 'rgba(33,150,243,0.3)' : 'rgba(255,152,0,0.3)';
+    // Extend FVG a limited distance (~60 candles) rather than to chart end
+    let interval = 14400;
+    if (candles.length >= 2) interval = candles[1].time - candles[0].time;
+    const fvgEnd = Math.min(fTime + interval * 60, last);
+
+    const tl = chart.addLineSeries({
+        color: color, lineWidth: 1, lineStyle: 0,
+        crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
     });
+    tl.setData([{ time: fTime, value: fvg.top }, { time: fvgEnd, value: fvg.top }]);
+    overlays.push(tl);
 
-    // Extend FVG from formation to end of visible candles (until mitigated)
-    fvgLine.setData([
-        { time: fvgTime, value: (fvg.top + fvg.bottom) / 2 },
-        { time: last, value: (fvg.top + fvg.bottom) / 2 },
-    ]);
-    overlays.push(fvgLine);
+    const bl = chart.addLineSeries({
+        color: color, lineWidth: 1, lineStyle: 0,
+        crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
+    });
+    bl.setData([{ time: fTime, value: fvg.bottom }, { time: fvgEnd, value: fvg.bottom }]);
+    overlays.push(bl);
 }
+
+/* --- Main redraw --- */
 
 function redraw(data) {
     clearOverlays();
@@ -11534,129 +11539,151 @@ function redraw(data) {
     const last = candles[candles.length - 1].time;
     const markers = [];
 
-    // Draw market structure zigzag (black, subtle)
-    const pivots = (data.ms_pivots || []).filter(p => p.time >= first && p.time <= last).sort((a,b) => a.idx - b.idx);
-    if (pivots.length >= 2) {
-        const zz = chart.addLineSeries({
-            color: 'rgba(0,0,0,0.25)',
-            lineWidth: 1,
-            lineStyle: 0,
-            crosshairMarkerVisible: false,
-            lastValueVisible: false,
-            priceLineVisible: false,
-        });
-        zz.setData(pivots.map(p => ({ time: p.time, value: p.price })));
-        overlays.push(zz);
+    // Candle interval for zone extension
+    let candleInterval = 14400;
+    if (candles.length >= 2) candleInterval = candles[1].time - candles[0].time;
+    // Unmitigated zones extend 50 candles past formation (not to chart edge)
+    const ZONE_EXTEND = candleInterval * 50;
+
+    // MS zigzag — off by default, opt-in via toggle
+    if (layers.ms) {
+        const pivots = (data.ms_pivots || []).filter(p => p.time >= first && p.time <= last).sort((a,b) => a.idx - b.idx);
+        if (pivots.length >= 2) {
+            const zz = chart.addLineSeries({
+                color: 'rgba(0,0,0,0.2)', lineWidth: 1, lineStyle: 0,
+                crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
+            });
+            zz.setData(pivots.map(p => ({ time: p.time, value: p.price })));
+            overlays.push(zz);
+        }
     }
 
-    // Draw Order Blocks (single candle zones)
+    // -- Order Blocks (single candle) --
     if (layers.ob) {
-        (data.order_blocks || []).forEach(ob => {
-            const isMitigated = ob.mitigated || false;
-            if (isMitigated && !layers.mit) return;
+        const obActive = (data.order_blocks || []).filter(z => !z.mitigated);
+        const obMit = layers.mit ? (data.order_blocks || []).filter(z => z.mitigated) : [];
+        const obDraw = obActive.slice(-MAX_OB_DRAWN);
 
+        obDraw.forEach(ob => {
             const isDemand = ob.type === 'bullish';
-            const color = isDemand
-                ? (isMitigated ? 'rgba(38,166,154,0.25)' : 'rgba(38,166,154,0.7)')
-                : (isMitigated ? 'rgba(239,83,80,0.25)' : 'rgba(239,83,80,0.7)');
-            const lw = isMitigated ? 1 : 2;
-
-            const startTime = ob.idx_time || first;
-            const endTime = isMitigated ? (ob.mitigation_idx_time || last) : last;
-
-            drawZoneBox(startTime, endTime, ob.top, ob.bottom, color, lw, 0, candles);
-
-            // Add label marker
+            const border = isDemand ? 'rgba(38,166,154,0.65)' : 'rgba(239,83,80,0.65)';
+            const fill   = isDemand ? 'rgba(38,166,154,0.08)' : 'rgba(239,83,80,0.08)';
+            const sTime = ob.idx_time || first;
+            const eTime = Math.min(sTime + ZONE_EXTEND, last);
+            drawZone(sTime, eTime, ob.top, ob.bottom, border, fill, 2, 0, candles);
             markers.push({
-                time: startTime,
+                time: sTime,
                 position: isDemand ? 'belowBar' : 'aboveBar',
                 color: isDemand ? '#26a69a' : '#ef5350',
                 shape: isDemand ? 'arrowUp' : 'arrowDown',
-                size: 1,
-                text: isDemand ? 'Demand OB' : 'Supply OB',
+                size: 1, text: isDemand ? 'Demand OB' : 'Supply OB',
             });
+        });
+
+        // Mitigated OBs: faded dotted lines, end at mitigation point, no fill
+        obMit.slice(-4).forEach(ob => {
+            const isDemand = ob.type === 'bullish';
+            const border = isDemand ? 'rgba(38,166,154,0.2)' : 'rgba(239,83,80,0.2)';
+            const sTime = ob.idx_time || first;
+            const eTime = ob.mitigation_idx_time || last;
+            const tl = chart.addLineSeries({
+                color: border, lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted,
+                crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
+            });
+            tl.setData([{ time: Math.max(sTime, first), value: ob.top }, { time: Math.min(eTime, last), value: ob.top }]);
+            overlays.push(tl);
+            const bl = chart.addLineSeries({
+                color: border, lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted,
+                crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
+            });
+            bl.setData([{ time: Math.max(sTime, first), value: ob.bottom }, { time: Math.min(eTime, last), value: ob.bottom }]);
+            overlays.push(bl);
         });
     }
 
-    // Draw Structure S/D zones (multi-candle zones)
+    // -- Structure S/D zones (multi-candle) --
     if (layers.ss) {
-        (data.structure_zones || []).forEach(zone => {
-            const isMitigated = zone.mitigated || false;
-            if (isMitigated && !layers.mit) return;
+        const ssActive = (data.structure_zones || []).filter(z => !z.mitigated);
+        const ssMit = layers.mit ? (data.structure_zones || []).filter(z => z.mitigated) : [];
+        const ssDraw = ssActive.slice(-MAX_SS_DRAWN);
 
+        ssDraw.forEach(zone => {
             const isDemand = zone.type === 'demand';
-            const color = isDemand
-                ? (isMitigated ? 'rgba(38,166,154,0.2)' : 'rgba(38,166,154,0.55)')
-                : (isMitigated ? 'rgba(239,83,80,0.2)' : 'rgba(239,83,80,0.55)');
-            const lw = isMitigated ? 1 : 1.5;
-
-            const startTime = zone.start_idx_time || first;
-            const endTime = isMitigated ? (zone.mitigation_idx_time || last) : last;
-
-            drawZoneBox(startTime, endTime, zone.top, zone.bottom, color, lw,
+            const border = isDemand ? 'rgba(38,166,154,0.45)' : 'rgba(239,83,80,0.45)';
+            const fill   = isDemand ? 'rgba(38,166,154,0.05)' : 'rgba(239,83,80,0.05)';
+            const sTime = zone.start_idx_time || first;
+            const eTime = Math.min(sTime + ZONE_EXTEND, last);
+            drawZone(sTime, eTime, zone.top, zone.bottom, border, fill, 1.5,
                 LightweightCharts.LineStyle.Dashed, candles);
-
             markers.push({
-                time: startTime,
+                time: sTime,
                 position: isDemand ? 'belowBar' : 'aboveBar',
                 color: isDemand ? '#1a9688' : '#d32f2f',
                 shape: isDemand ? 'arrowUp' : 'arrowDown',
-                size: 0.8,
-                text: isDemand ? 'Str Demand' : 'Str Supply',
+                size: 0.8, text: isDemand ? 'Str Demand' : 'Str Supply',
             });
         });
-    }
 
-    // Draw HTF zones if toggled on
-    if (layers.htf) {
-        const htfOBs = (data.htf_zones?.order_blocks || []);
-        const htfSS = (data.htf_zones?.structure_zones || []);
-
-        htfOBs.forEach(ob => {
-            const isMitigated = ob.mitigated || false;
-            if (isMitigated && !layers.mit) return;
-            const isDemand = ob.type === 'bullish';
-            const color = isDemand ? 'rgba(38,166,154,0.3)' : 'rgba(239,83,80,0.3)';
-            const startTime = ob.idx_time || first;
-            drawZoneBox(startTime, last, ob.top, ob.bottom, color, 2.5, 0, candles);
-        });
-
-        htfSS.forEach(zone => {
-            const isMitigated = zone.mitigated || false;
-            if (isMitigated && !layers.mit) return;
+        ssMit.slice(-4).forEach(zone => {
             const isDemand = zone.type === 'demand';
-            const color = isDemand ? 'rgba(38,166,154,0.2)' : 'rgba(239,83,80,0.2)';
-            const startTime = zone.start_idx_time || first;
-            drawZoneBox(startTime, last, zone.top, zone.bottom, color, 2,
-                LightweightCharts.LineStyle.Dashed, candles);
+            const border = isDemand ? 'rgba(38,166,154,0.15)' : 'rgba(239,83,80,0.15)';
+            const sTime = zone.start_idx_time || first;
+            const eTime = zone.mitigation_idx_time || last;
+            const tl = chart.addLineSeries({
+                color: border, lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted,
+                crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
+            });
+            tl.setData([{ time: Math.max(sTime, first), value: zone.top }, { time: Math.min(eTime, last), value: zone.top }]);
+            overlays.push(tl);
+            const bl = chart.addLineSeries({
+                color: border, lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted,
+                crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
+            });
+            bl.setData([{ time: Math.max(sTime, first), value: zone.bottom }, { time: Math.min(eTime, last), value: zone.bottom }]);
+            overlays.push(bl);
         });
     }
 
-    // Draw FVGs
+    // -- HTF zones (wider, transparent, behind) --
+    if (layers.htf) {
+        const htfAll = [
+            ...(data.htf_zones?.order_blocks || []).map(z => ({...z, _class: 'ob'})),
+            ...(data.htf_zones?.structure_zones || []).map(z => ({...z, _class: 'ss'})),
+        ].filter(z => !z.mitigated || layers.mit);
+
+        htfAll.slice(-6).forEach(zone => {
+            const isDemand = zone.type === 'bullish' || zone.type === 'demand';
+            const border = isDemand ? 'rgba(38,166,154,0.25)' : 'rgba(239,83,80,0.25)';
+            const fill   = isDemand ? 'rgba(38,166,154,0.04)' : 'rgba(239,83,80,0.04)';
+            const sTime = zone.idx_time || zone.start_idx_time || first;
+            const style = zone._class === 'ob' ? 0 : LightweightCharts.LineStyle.Dashed;
+            drawZone(sTime, last, zone.top, zone.bottom, border, fill, 2.5, style, candles);
+        });
+    }
+
+    // -- FVGs: only those attached to drawn zones, as short bands --
     if (layers.fvg) {
-        (data.fvgs?.bullish_fvgs || []).forEach(fvg => drawFVG(fvg, 'bullish', candles));
-        (data.fvgs?.bearish_fvgs || []).forEach(fvg => drawFVG(fvg, 'bearish', candles));
+        const drawnFvgIdx = new Set();
+        (data.order_blocks || []).filter(z => !z.mitigated).slice(-MAX_OB_DRAWN).forEach(z => {
+            if (z.fvg?.idx != null) drawnFvgIdx.add(z.fvg.idx);
+        });
+        (data.structure_zones || []).filter(z => !z.mitigated).slice(-MAX_SS_DRAWN).forEach(z => {
+            if (z.fvg?.idx != null) drawnFvgIdx.add(z.fvg.idx);
+        });
+
+        (data.fvgs?.bullish_fvgs || []).forEach(fvg => {
+            if (drawnFvgIdx.has(fvg.idx)) drawFVGBand(fvg, 'bullish', candles);
+        });
+        (data.fvgs?.bearish_fvgs || []).forEach(fvg => {
+            if (drawnFvgIdx.has(fvg.idx)) drawFVGBand(fvg, 'bearish', candles);
+        });
     }
 
-    // BOS markers
-    (data.bos_events || []).forEach(b => {
-        if (b.time < first || b.time > last) return;
-        markers.push({
-            time: b.time,
-            position: b.type === 'bullish' ? 'aboveBar' : 'belowBar',
-            color: '#ffc107',
-            shape: 'circle',
-            size: 0.8,
-            text: 'BOS',
-        });
-    });
-
-    // Sort and set markers (avoid duplicates at same time)
+    // -- Markers: deduplicate, one per time+position slot --
     if (markers.length > 0) {
-        // Deduplicate by time (keep first per time)
         const seen = new Set();
         const unique = markers.filter(m => {
-            const key = m.time + '_' + m.position + '_' + m.text;
+            const key = m.time + '_' + m.position;
             if (seen.has(key)) return false;
             seen.add(key);
             return true;
@@ -11686,7 +11713,6 @@ async function loadData() {
         lastData = data;
 
         lastLoadedCandles = data.candles || [];
-        // Detect price precision for small-priced coins
         if (lastLoadedCandles.length > 0) {
             const sp = Math.abs(lastLoadedCandles[lastLoadedCandles.length - 1].close);
             let prec = 2;
@@ -11699,9 +11725,7 @@ async function loadData() {
         candleSeries.applyOptions({ autoscaleInfoProvider: undefined });
         candleSeries.setData(lastLoadedCandles);
 
-        // Draw all zones and overlays
         redraw(data);
-
         updateInfoPanel(data);
         chart.timeScale().fitContent();
         scalePrice();
@@ -11725,17 +11749,14 @@ function updateInfoPanel(data) {
 
     let html = `<h3>${sym} \u00b7 ${tf.toUpperCase()}</h3>`;
 
-    // Trend
     const trend = data.trend || 'neutral';
     const tc = trend === 'bullish' ? 'bullish' : trend === 'bearish' ? 'bearish' : 'ranging';
     html += `<div class="info-row"><span>Trend</span><span class="val ${tc}">${trend.toUpperCase()}</span></div>`;
 
-    // Timeframes
     html += `<div class="info-row"><span>HTF</span><span class="val">${tfMap.htf || '\u2014'}</span></div>`;
     html += `<div class="info-row"><span>MTF</span><span class="val">${tfMap.mtf || tf}</span></div>`;
     html += `<div class="info-row"><span>LTF</span><span class="val">${tfMap.ltf || '\u2014'}</span></div>`;
 
-    // Detection stats
     html += `<h3>Detection Summary</h3>`;
     html += `<div class="info-row"><span>Bullish FVGs</span><span class="val">${dbg.bullish_fvgs || 0}</span></div>`;
     html += `<div class="info-row"><span>Bearish FVGs</span><span class="val">${dbg.bearish_fvgs || 0}</span></div>`;
@@ -11744,11 +11765,10 @@ function updateInfoPanel(data) {
     html += `<div class="info-row"><span>Structure Demand</span><span class="val bullish">${dbg.demand_ss || 0}</span></div>`;
     html += `<div class="info-row"><span>Structure Supply</span><span class="val bearish">${dbg.supply_ss || 0}</span></div>`;
 
-    // Order Blocks
     const obs = data.order_blocks || [];
     const activeOBs = obs.filter(z => !z.mitigated);
     const mitOBs = obs.filter(z => z.mitigated);
-    html += `<h3>Order Blocks (${activeOBs.length} active, ${mitOBs.length} mitigated)</h3>`;
+    html += `<h3>Order Blocks (${activeOBs.length} active, ${mitOBs.length} mit)</h3>`;
     if (activeOBs.length > 0) {
         html += `<div class="zone-list">`;
         activeOBs.slice(-8).forEach(ob => {
@@ -11771,11 +11791,10 @@ function updateInfoPanel(data) {
         html += `</div>`;
     }
 
-    // Structure Zones
     const szones = data.structure_zones || [];
     const activeSZ = szones.filter(z => !z.mitigated);
     const mitSZ = szones.filter(z => z.mitigated);
-    html += `<h3>Structure S/D (${activeSZ.length} active, ${mitSZ.length} mitigated)</h3>`;
+    html += `<h3>Structure S/D (${activeSZ.length} active, ${mitSZ.length} mit)</h3>`;
     if (activeSZ.length > 0) {
         html += `<div class="zone-list">`;
         activeSZ.slice(-8).forEach(zone => {
@@ -11796,7 +11815,6 @@ function updateInfoPanel(data) {
         html += `</div>`;
     }
 
-    // Scored Zones (top 5)
     const scored = data.scored_zones || [];
     if (scored.length > 0) {
         html += `<h3>Top Scored Zones</h3>`;
@@ -11817,7 +11835,6 @@ function updateInfoPanel(data) {
         html += `</div>`;
     }
 
-    // HTF context
     const htfZones = data.htf_zones || {};
     const htfOBCount = (htfZones.order_blocks || []).length;
     const htfSSCount = (htfZones.structure_zones || []).length;
@@ -11826,7 +11843,6 @@ function updateInfoPanel(data) {
     html += `<div class="info-row"><span>HTF OBs</span><span class="val">${htfOBCount}</span></div>`;
     html += `<div class="info-row"><span>HTF Str S/D</span><span class="val">${htfSSCount}</span></div>`;
 
-    // TCT S/D Rules reference
     html += `<h3>TCT S/D Rules</h3>`;
     html += `<div class="info-row" style="flex-direction:column;gap:2px">
         <div>\u2022 OB = last opposing candle before expansion</div>
