@@ -9878,12 +9878,19 @@ body{background:#fff;color:#333;font-family:'Segoe UI',sans-serif;overflow:hidde
 let chart, candleSeries;
 let msLineSeries = [];
 const BASE = '';
+let chartReady = false;
 
 function initChart() {
+    if (typeof LightweightCharts === 'undefined') {
+        throw new Error('LightweightCharts library not loaded');
+    }
     const el = document.getElementById('chart');
+    // Guard against zero-size container (can happen on slow renders)
+    const w = el.clientWidth || el.offsetWidth || 800;
+    const h = el.clientHeight || el.offsetHeight || 500;
     chart = LightweightCharts.createChart(el, {
-        width: el.clientWidth,
-        height: el.clientHeight,
+        width: w,
+        height: h,
         layout: { background: { type: 'solid', color: '#ffffff' }, textColor: '#333', fontSize: 11 },
         grid: { vertLines: { color: '#f0f0f0' }, horzLines: { color: '#f0f0f0' } },
         crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
@@ -9900,18 +9907,22 @@ function initChart() {
     window.addEventListener('resize', () => {
         chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
     });
+    chartReady = true;
 }
 
 // Chart control functions
 function resetChart() {
+    if (!chartReady) return;
     candleSeries.applyOptions({ autoscaleInfoProvider: undefined });
     chart.timeScale().resetTimeScale();
     chart.priceScale('right').applyOptions({ autoScale: true });
 }
 function fitChart() {
+    if (!chartReady) return;
     chart.timeScale().fitContent();
 }
 function zoomIn() {
+    if (!chartReady) return;
     const visibleRange = chart.timeScale().getVisibleLogicalRange();
     if (visibleRange) {
         const center = (visibleRange.from + visibleRange.to) / 2;
@@ -9920,6 +9931,7 @@ function zoomIn() {
     }
 }
 function zoomOut() {
+    if (!chartReady) return;
     const visibleRange = chart.timeScale().getVisibleLogicalRange();
     if (visibleRange) {
         const center = (visibleRange.from + visibleRange.to) / 2;
@@ -9929,7 +9941,7 @@ function zoomOut() {
 }
 let lastLoadedCandles = [];
 function scalePrice() {
-    if (!lastLoadedCandles || lastLoadedCandles.length === 0) return;
+    if (!chartReady || !lastLoadedCandles || lastLoadedCandles.length === 0) return;
     candleSeries.applyOptions({
         autoscaleInfoProvider: () => {
             const visRange = chart.timeScale().getVisibleLogicalRange();
@@ -9958,42 +9970,82 @@ function fmtPrice(v) {
 }
 
 async function loadPairs() {
-    try {
-        const r = await fetch(BASE + '/api/ms-pairs');
-        const d = await r.json();
-        const sel = document.getElementById('pairSelect');
-        sel.innerHTML = '';
-        (d.pairs || []).forEach(p => {
-            const o = document.createElement('option');
-            o.value = p; o.textContent = p;
-            if (p === 'BTC_USDT_PERP') o.selected = true;
-            sel.appendChild(o);
-        });
-    } catch(e) { console.error('Failed to load pairs', e); }
+    const MAX_RETRIES = 3;
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        try {
+            const r = await fetch(BASE + '/api/ms-pairs');
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            const d = await r.json();
+            const sel = document.getElementById('pairSelect');
+            sel.innerHTML = '';
+            (d.pairs || []).forEach(p => {
+                const o = document.createElement('option');
+                o.value = p; o.textContent = p;
+                if (p === 'BTC_USDT_PERP') o.selected = true;
+                sel.appendChild(o);
+            });
+            return; // success
+        } catch(e) {
+            console.warn(`loadPairs attempt ${attempt}/${MAX_RETRIES} failed:`, e);
+            if (attempt < MAX_RETRIES) await new Promise(r => setTimeout(r, 1000 * attempt));
+        }
+    }
+    // Fallback: at least put a usable default so Load works
+    const sel = document.getElementById('pairSelect');
+    sel.innerHTML = '<option value="BTCUSDT" selected>BTCUSDT</option><option value="ETHUSDT">ETHUSDT</option><option value="SOLUSDT">SOLUSDT</option>';
 }
 
 function clearOverlays() {
     msLineSeries.forEach(s => { try { chart.removeSeries(s); } catch(e){} });
     msLineSeries = [];
-    candleSeries.setMarkers([]);
+    try { candleSeries.setMarkers([]); } catch(e) {}
 }
 
-async function loadData() {
+// Fetch with timeout helper
+function fetchWithTimeout(url, timeoutMs) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    return fetch(url, { signal: controller.signal }).finally(() => clearTimeout(timer));
+}
+
+let loadAttempt = 0;
+
+async function loadData(retryCount) {
     const sym = document.getElementById('pairSelect').value;
     const tf = document.getElementById('tfSelect').value;
+    if (!sym || sym === 'Loading...') {
+        document.getElementById('infoPanel').innerHTML = '<h3>Pairs still loading...</h3><div class="info-row">Please wait and try again</div>';
+        return;
+    }
+    if (!chartReady) {
+        document.getElementById('infoPanel').innerHTML = '<h3 style="color:#dc3545">Chart not ready</h3><div class="info-row">Reload the page (Ctrl+Shift+R)</div>';
+        return;
+    }
+
     const btn = document.getElementById('loadBtn');
     const overlay = document.getElementById('loadingOverlay');
+    const attempt = retryCount || 0;
 
     btn.disabled = true;
     overlay.classList.remove('hidden');
-    clearOverlays();
+    if (attempt === 0) clearOverlays();
 
     try {
-        const r = await fetch(BASE + `/api/market-structure?symbol=${sym}&timeframe=${tf}&limit=300`);
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const r = await fetchWithTimeout(
+            BASE + `/api/market-structure?symbol=${sym}&timeframe=${tf}&limit=300`,
+            30000  // 30s timeout for Render cold starts
+        );
+        if (!r.ok) {
+            const errBody = await r.json().catch(() => ({}));
+            throw new Error(errBody.error || `HTTP ${r.status}`);
+        }
         const data = await r.json();
 
-        lastLoadedCandles = data.candles || [];
+        if (!data.candles || data.candles.length === 0) {
+            throw new Error(`No candle data returned for ${sym} (${tf})`);
+        }
+
+        lastLoadedCandles = data.candles;
         // Detect price precision for small-priced coins (e.g. PEPE)
         if (lastLoadedCandles.length > 0) {
             const samplePrice = Math.abs(lastLoadedCandles[lastLoadedCandles.length - 1].close);
@@ -10024,7 +10076,15 @@ async function loadData() {
 
     } catch(e) {
         console.error('Load error:', e);
-        document.getElementById('infoPanel').innerHTML = `<h3 style="color:#dc3545">Error</h3><div class="info-row">${e.message}</div>`;
+        // Auto-retry once on timeout or network error
+        if (attempt < 1 && (e.name === 'AbortError' || e.message.includes('fetch'))) {
+            console.log('Retrying after transient error...');
+            overlay.querySelector('.spinner').insertAdjacentHTML('afterend', '<span> Retrying...</span>');
+            await new Promise(r => setTimeout(r, 2000));
+            return loadData(attempt + 1);
+        }
+        const msg = e.name === 'AbortError' ? 'Request timed out — server may be starting up. Try again in a few seconds.' : e.message;
+        document.getElementById('infoPanel').innerHTML = `<h3 style="color:#dc3545">Error</h3><div class="info-row" style="flex-direction:column"><div>${msg}</div><div style="margin-top:6px"><button onclick="loadData()" style="background:#007bff;color:#fff;border:none;border-radius:4px;padding:4px 12px;font-size:.75rem;cursor:pointer">Retry</button></div></div>`;
     } finally {
         btn.disabled = false;
         overlay.classList.add('hidden');
@@ -10172,10 +10232,27 @@ function updateInfoPanel(data) {
     panel.innerHTML = html;
 }
 
-initChart();
-loadPairs();
+// --- Initialization ---
+try {
+    initChart();
+} catch(e) {
+    console.error('Chart init failed:', e);
+    document.getElementById('infoPanel').innerHTML =
+        '<h3 style="color:#dc3545">Chart Failed to Load</h3>' +
+        '<div class="info-row" style="flex-direction:column">' +
+        '<div>The charting library did not load. This usually means the CDN was slow or blocked.</div>' +
+        '<div style="margin-top:8px"><button onclick="location.reload()" style="background:#007bff;color:#fff;border:none;border-radius:4px;padding:6px 16px;font-size:.8rem;cursor:pointer">Reload Page</button></div></div>';
+}
+
 document.getElementById('pairSelect').addEventListener('change', loadData);
 document.getElementById('tfSelect').addEventListener('change', loadData);
+
+// Auto-load: fetch pairs then immediately load chart data
+loadPairs().then(() => {
+    if (chartReady) loadData();
+}).catch(() => {
+    if (chartReady) loadData();  // fallback pairs were set, still try
+});
 </script>
 </body>
 </html>"""
