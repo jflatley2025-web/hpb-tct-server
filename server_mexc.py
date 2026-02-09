@@ -9913,7 +9913,6 @@ function initChart() {
 // Chart control functions
 function resetChart() {
     if (!chartReady) return;
-    candleSeries.applyOptions({ autoscaleInfoProvider: undefined });
     chart.timeScale().resetTimeScale();
     chart.priceScale('right').applyOptions({ autoScale: true });
 }
@@ -9942,22 +9941,7 @@ function zoomOut() {
 let lastLoadedCandles = [];
 function scalePrice() {
     if (!chartReady || !lastLoadedCandles || lastLoadedCandles.length === 0) return;
-    candleSeries.applyOptions({
-        autoscaleInfoProvider: () => {
-            const visRange = chart.timeScale().getVisibleLogicalRange();
-            if (!visRange) return null;
-            const fromIdx = Math.max(0, Math.floor(visRange.from));
-            const toIdx = Math.min(lastLoadedCandles.length - 1, Math.ceil(visRange.to));
-            let minP = Infinity, maxP = -Infinity;
-            for (let i = fromIdx; i <= toIdx; i++) {
-                const c = lastLoadedCandles[i];
-                if (c) { if (c.low < minP) minP = c.low; if (c.high > maxP) maxP = c.high; }
-            }
-            if (minP === Infinity) return null;
-            const pad = (maxP - minP) * 0.05;
-            return { priceRange: { minValue: minP - pad, maxValue: maxP + pad } };
-        }
-    });
+    // Use default auto-scaling — it handles multiple series correctly
     chart.priceScale('right').applyOptions({ autoScale: true });
 }
 function fmtPrice(v) {
@@ -10011,6 +9995,9 @@ function fetchWithTimeout(url, timeoutMs) {
 let loadAttempt = 0;
 
 async function loadData(retryCount) {
+    // Guard: if called from event listener, retryCount is an Event object — treat as 0
+    const attempt = (typeof retryCount === 'number') ? retryCount : 0;
+
     const sym = document.getElementById('pairSelect').value;
     const tf = document.getElementById('tfSelect').value;
     if (!sym || sym === 'Loading...') {
@@ -10024,7 +10011,6 @@ async function loadData(retryCount) {
 
     const btn = document.getElementById('loadBtn');
     const overlay = document.getElementById('loadingOverlay');
-    const attempt = retryCount || 0;
 
     btn.disabled = true;
     overlay.classList.remove('hidden');
@@ -10056,7 +10042,6 @@ async function loadData(retryCount) {
             prec = Math.min(prec, 12);
             candleSeries.applyOptions({ priceFormat: { type: 'price', precision: prec, minMove: Math.pow(10, -prec) } });
         }
-        candleSeries.applyOptions({ autoscaleInfoProvider: undefined });
         candleSeries.setData(lastLoadedCandles);
 
         // Draw structure in order: HTF first (back), then MTF, then LTF (front)
@@ -10071,8 +10056,11 @@ async function loadData(retryCount) {
         }
 
         updateInfoPanel(data);
-        chart.timeScale().fitContent();
-        scalePrice();
+        // Let the chart render before fitting — ensures series data is committed
+        requestAnimationFrame(() => {
+            chart.timeScale().fitContent();
+            scalePrice();
+        });
 
     } catch(e) {
         console.error('Load error:', e);
@@ -10106,9 +10094,9 @@ function drawStructure(st, candles, tfType) {
     const primaryStart = candles[0]?.time || 0;
     const primaryEnd = candles[candles.length - 1]?.time || Infinity;
 
-    // Filter pivots to primary candle range
+    // Filter pivots to primary candle range, skip null/NaN values
     const pivots = (st.pivots || [])
-        .filter(p => p.time && p.time >= primaryStart && p.time <= primaryEnd)
+        .filter(p => p.time && p.price != null && isFinite(p.price) && p.time >= primaryStart && p.time <= primaryEnd)
         .sort((a,b) => a.idx - b.idx);
 
     // Draw zigzag line through pivot points
@@ -10142,7 +10130,7 @@ function drawStructure(st, candles, tfType) {
             });
 
             // Horizontal BOS line
-            if (b.broken_level_time && b.broken_level) {
+            if (b.broken_level_time && b.broken_level && isFinite(b.broken_level)) {
                 const bosLine = chart.addLineSeries({
                     color: 'rgba(255,193,7,.6)',
                     lineWidth: 1,
@@ -10244,8 +10232,8 @@ try {
         '<div style="margin-top:8px"><button onclick="location.reload()" style="background:#007bff;color:#fff;border:none;border-radius:4px;padding:6px 16px;font-size:.8rem;cursor:pointer">Reload Page</button></div></div>';
 }
 
-document.getElementById('pairSelect').addEventListener('change', loadData);
-document.getElementById('tfSelect').addEventListener('change', loadData);
+document.getElementById('pairSelect').addEventListener('change', () => loadData());
+document.getElementById('tfSelect').addEventListener('change', () => loadData());
 
 // Auto-load: fetch pairs then immediately load chart data
 loadPairs().then(() => {
