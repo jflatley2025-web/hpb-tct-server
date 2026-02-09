@@ -9850,6 +9850,7 @@ body{background:#fff;color:#333;font-family:'Segoe UI',sans-serif;overflow:hidde
         <button onclick="scalePrice()">Scale Price</button>
         <button onclick="zoomIn()">+</button>
         <button onclick="zoomOut()">−</button>
+        <button onclick="testChart()" style="background:#6c757d;color:#fff;border:none;border-radius:4px;padding:4px 10px;font-size:.72rem;cursor:pointer;margin-left:10px" title="Draw 5 hardcoded candles to verify chart renders">Test</button>
     </div>
     <a class="back-link" href="/dashboard">← Back</a>
 </div>
@@ -9953,6 +9954,24 @@ function fmtPrice(v) {
     return v.toFixed(Math.min(decimals, 12));
 }
 
+// Test function: draws hardcoded candles to verify chart renders
+function testChart() {
+    if (!chartReady) { alert('Chart not ready'); return; }
+    clearOverlays();
+    const now = Math.floor(Date.now() / 1000);
+    const day = 86400;
+    const testData = [];
+    for (let i = 0; i < 30; i++) {
+        const o = 50000 + Math.random() * 5000;
+        const c = o + (Math.random() - 0.5) * 2000;
+        testData.push({ time: now - (30 - i) * day, open: o, high: Math.max(o, c) + Math.random() * 500, low: Math.min(o, c) - Math.random() * 500, close: c });
+    }
+    candleSeries.setData(testData);
+    chart.timeScale().fitContent();
+    chart.priceScale('right').applyOptions({ autoScale: true });
+    document.getElementById('infoPanel').innerHTML = '<h3>Test Chart</h3><div class="info-row">30 random candles drawn. If you see them, the chart works.</div>';
+}
+
 async function loadPairs() {
     const MAX_RETRIES = 3;
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
@@ -10032,6 +10051,8 @@ async function loadData(retryCount) {
         }
 
         lastLoadedCandles = data.candles;
+        console.log('[MS] Candles loaded:', lastLoadedCandles.length, 'first:', JSON.stringify(lastLoadedCandles[0]), 'last:', JSON.stringify(lastLoadedCandles[lastLoadedCandles.length-1]));
+
         // Detect price precision for small-priced coins (e.g. PEPE)
         if (lastLoadedCandles.length > 0) {
             const samplePrice = Math.abs(lastLoadedCandles[lastLoadedCandles.length - 1].close);
@@ -10043,6 +10064,7 @@ async function loadData(retryCount) {
             candleSeries.applyOptions({ priceFormat: { type: 'price', precision: prec, minMove: Math.pow(10, -prec) } });
         }
         candleSeries.setData(lastLoadedCandles);
+        console.log('[MS] setData done');
 
         // Draw structure in order: HTF first (back), then MTF, then LTF (front)
         if (data.htf_structure) {
@@ -10054,13 +10076,23 @@ async function loadData(retryCount) {
         if (data.ltf_structure) {
             drawStructure(data.ltf_structure, data.candles, 'ltf');
         }
+        console.log('[MS] Structure drawn, line series count:', msLineSeries.length);
 
         updateInfoPanel(data);
-        // Let the chart render before fitting — ensures series data is committed
-        requestAnimationFrame(() => {
-            chart.timeScale().fitContent();
-            scalePrice();
-        });
+
+        // Fit chart to show all candle data
+        chart.timeScale().fitContent();
+        scalePrice();
+        console.log('[MS] fitContent done, visible range:', JSON.stringify(chart.timeScale().getVisibleLogicalRange()));
+
+        // Fallback: re-fit after a short delay to handle any rendering lag
+        setTimeout(() => {
+            try {
+                chart.timeScale().fitContent();
+                chart.priceScale('right').applyOptions({ autoScale: true });
+                console.log('[MS] Fallback fitContent, range:', JSON.stringify(chart.timeScale().getVisibleLogicalRange()));
+            } catch(e2) { console.error('[MS] Fallback fitContent error:', e2); }
+        }, 200);
 
     } catch(e) {
         console.error('Load error:', e);
@@ -10245,7 +10277,7 @@ loadPairs().then(() => {
 </body>
 </html>"""
 
-    return HTMLResponse(content=html)
+    return HTMLResponse(content=html, headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"})
 
 
 # ================================================================
