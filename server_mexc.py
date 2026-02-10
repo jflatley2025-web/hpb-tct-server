@@ -11992,6 +11992,944 @@ document.getElementById('tfSelect').addEventListener('change', loadData);
 
 
 # ================================================================
+# LIQUIDITY DEBUG PAGE (TCT Lecture 4)
+# ================================================================
+
+@app.get("/api/liq-pairs")
+async def get_liq_pairs():
+    """Return pairs for the liquidity page dropdown."""
+    pairs_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mexc_all_pairs.txt")
+    try:
+        with open(pairs_path, "r") as f:
+            pairs = [line.strip() for line in f if line.strip()]
+        return {"pairs": pairs}
+    except FileNotFoundError:
+        return {"pairs": COIN_LIST}
+
+
+@app.get("/api/liquidity-chart")
+async def get_liquidity_chart_data(symbol: str = "BTC_USDT_PERP", timeframe: str = "4h", limit: int = 300):
+    """
+    API endpoint for Liquidity debug page (TCT Lecture 4).
+    Returns candles + BSL/SSL pools + liquidity curves + extreme targets + voids
+    with Unix timestamps for chart rendering.
+    """
+    try:
+        sym = resolve_symbol(symbol)
+        if "_PERP" in sym:
+            sym = sym.replace("_PERP", "").replace("_", "")
+
+        tf_map = _MS_TF_MAP.get(timeframe, {"ltf": timeframe, "mtf": timeframe, "htf": timeframe})
+
+        df_primary = await fetch_mexc_candles(sym, timeframe, min(limit, 500))
+
+        if df_primary is None or df_primary.empty:
+            return JSONResponse(
+                {"error": f"No data for {symbol} ({timeframe}). '{sym}' may not exist on MEXC spot."},
+                status_code=404,
+            )
+
+        # Format candles for chart
+        candles = []
+        for _, row in df_primary.iterrows():
+            candles.append({
+                "time": int(row["open_time"].timestamp()),
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+            })
+
+        current_price = float(df_primary.iloc[-1]["close"])
+
+        # Market structure detection
+        from market_structure import MarketStructure as MS
+        ms_data = MS.detect_pivots(df_primary)
+        trend = ms_data.get("trend", "neutral")
+
+        # Detect FVGs
+        fvgs = FairValueGap.detect_fvgs(df_primary)
+
+        # Detect Order Blocks and Structure S/D (needed for void detection)
+        obs = OrderBlock.detect_order_blocks(df_primary, fvgs)
+        ss_sd = StructureSupplyDemand.detect_structure_zones(df_primary, fvgs, ms_data)
+
+        all_zones = (
+            obs.get("bullish_obs", []) +
+            obs.get("bearish_obs", []) +
+            ss_sd.get("demand_zones", []) +
+            ss_sd.get("supply_zones", [])
+        )
+
+        # Liquidity detection
+        liq_detector = LiquidityDetector()
+        liq_pools = liq_detector.detect_liquidity_pools(df_primary, ms_data, current_price)
+
+        # Liquidity curves
+        curve_gen = LiquidityCurveGenerator()
+        liq_curves = curve_gen.generate_curves(liq_pools, df_primary)
+
+        # Extreme liquidity targets
+        target_det = ExtremeLiquidityTarget()
+        liq_targets = target_det.identify_extreme_targets(liq_curves, df_primary)
+
+        # Check if targets are swept
+        for target in liq_targets.get("sell_side_targets", []) + liq_targets.get("buy_side_targets", []):
+            tp = target["target_price"]
+            if target["type"] == "distribution":
+                target["is_swept"] = current_price < tp
+            else:
+                target["is_swept"] = current_price > tp
+
+        # Liquidity voids
+        void_det = LiquidityVoidDetector()
+        liq_voids = void_det.detect_voids(all_zones, df_primary, current_price)
+
+        # Helper: convert idx to Unix timestamps
+        def _pool_with_time(pool):
+            idx = pool.get("idx", 0)
+            if 0 <= idx < len(df_primary):
+                pool["time"] = int(df_primary.iloc[idx]["open_time"].timestamp())
+            return pool
+
+        bsl_pools = [_pool_with_time(p) for p in liq_pools.get("bsl_pools", [])]
+        ssl_pools = [_pool_with_time(p) for p in liq_pools.get("ssl_pools", [])]
+
+        # Convert curve tap indices to timestamps
+        def _curves_with_times(curves):
+            for curve in curves:
+                for tap in curve.get("taps", []):
+                    idx = tap.get("idx", 0)
+                    if 0 <= idx < len(df_primary):
+                        tap["time"] = int(df_primary.iloc[idx]["open_time"].timestamp())
+            return curves
+
+        sell_curves = _curves_with_times(liq_curves.get("sell_side_curves", []))
+        buy_curves = _curves_with_times(liq_curves.get("buy_side_curves", []))
+
+        # Convert extreme target indices to timestamps
+        def _targets_with_times(targets):
+            for t in targets:
+                idx = t.get("target_idx", 0)
+                if 0 <= idx < len(df_primary):
+                    t["time"] = int(df_primary.iloc[idx]["open_time"].timestamp())
+            return targets
+
+        sell_targets = _targets_with_times(liq_targets.get("sell_side_targets", []))
+        buy_targets = _targets_with_times(liq_targets.get("buy_side_targets", []))
+
+        # Format MS pivots for chart
+        ms_pivots = []
+        for h in ms_data.get("ms_highs", []):
+            idx_val = h["idx"]
+            if 0 <= idx_val < len(df_primary):
+                ms_pivots.append({
+                    "type": "high", "price": h["price"], "idx": idx_val,
+                    "time": int(df_primary.iloc[idx_val]["open_time"].timestamp()),
+                })
+        for l in ms_data.get("ms_lows", []):
+            idx_val = l["idx"]
+            if 0 <= idx_val < len(df_primary):
+                ms_pivots.append({
+                    "type": "low", "price": l["price"], "idx": idx_val,
+                    "time": int(df_primary.iloc[idx_val]["open_time"].timestamp()),
+                })
+        ms_pivots.sort(key=lambda x: x["idx"])
+
+        # Equal highs/lows
+        equal_highs = liq_pools.get("equal_highs", [])
+        equal_lows = liq_pools.get("equal_lows", [])
+
+        response = {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "tf_map": tf_map,
+            "candles": candles,
+            "current_price": current_price,
+            "trend": trend,
+            "ms_pivots": ms_pivots,
+            "bsl_pools": bsl_pools,
+            "ssl_pools": ssl_pools,
+            "equal_highs": equal_highs,
+            "equal_lows": equal_lows,
+            "sell_side_curves": sell_curves,
+            "buy_side_curves": buy_curves,
+            "sell_side_targets": sell_targets,
+            "buy_side_targets": buy_targets,
+            "voids": liq_voids.get("voids", []),
+            "summary": {
+                "total_bsl": len(bsl_pools),
+                "total_ssl": len(ssl_pools),
+                "primary_highs": liq_pools.get("primary_highs_count", 0),
+                "primary_lows": liq_pools.get("primary_lows_count", 0),
+                "internal_highs": liq_pools.get("internal_highs_count", 0),
+                "internal_lows": liq_pools.get("internal_lows_count", 0),
+                "equal_highs": len(equal_highs),
+                "equal_lows": len(equal_lows),
+                "sell_curves": len(sell_curves),
+                "buy_curves": len(buy_curves),
+                "sell_targets": len(sell_targets),
+                "buy_targets": len(buy_targets),
+                "voids": liq_voids.get("total_voids", 0),
+            },
+        }
+
+        return JSONResponse(convert_numpy_types(response))
+
+    except Exception as e:
+        logger.error(f"[LIQ_CHART_ERROR] {e}")
+        import traceback
+        tb = traceback.format_exc()
+        logger.error(tb)
+        return JSONResponse({"error": str(e), "traceback": tb}, status_code=500)
+
+
+@app.get("/liquidity", response_class=HTMLResponse)
+async def liquidity_page():
+    """
+    Standalone Liquidity debug page (TCT Lecture 4).
+    Shows BSL/SSL pools, liquidity curves, extreme targets, and voids
+    on a candlestick chart for debugging the liquidity detection algo.
+    """
+    html = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Liquidity — HPB-TCT</title>
+<script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#fff;color:#333;font-family:'Segoe UI',sans-serif;overflow:hidden}
+.header{display:flex;align-items:center;gap:10px;padding:6px 12px;background:#f8f9fa;border-bottom:1px solid #dee2e6;flex-wrap:wrap}
+.header h1{font-size:.95rem;color:#333;white-space:nowrap;font-weight:600}
+.header h1 .sub{color:#888;font-weight:400;font-size:.75rem;margin-left:5px}
+.ctrl{display:flex;align-items:center;gap:5px}
+.ctrl label{font-size:.7rem;color:#666}
+.ctrl select{background:#fff;color:#333;border:1px solid #ced4da;border-radius:4px;padding:4px 8px;font-size:.75rem;min-width:100px}
+.ctrl select:focus{outline:none;border-color:#007bff}
+.ctrl button{background:#007bff;color:#fff;border:none;border-radius:4px;padding:5px 12px;font-size:.75rem;cursor:pointer;font-weight:500}
+.ctrl button:hover{background:#0056b3}
+.ctrl button:disabled{opacity:.5;cursor:not-allowed}
+.ctrl .toggle-group{display:flex;gap:2px}
+.ctrl .toggle-btn{background:#e9ecef;color:#666;border:1px solid #ced4da;border-radius:4px;padding:4px 8px;font-size:.65rem;cursor:pointer;transition:all .15s}
+.ctrl .toggle-btn.active{background:#007bff;color:#fff;border-color:#007bff}
+.chart-btns{display:flex;gap:4px;margin-left:8px}
+.chart-btns button{background:#6c757d;padding:4px 8px;font-size:.65rem}
+.chart-btns button:hover{background:#545b62}
+.back-link{color:#666;text-decoration:none;font-size:.7rem;padding:3px 8px;border:1px solid #ced4da;border-radius:4px;margin-left:auto}
+.back-link:hover{color:#333;border-color:#adb5bd}
+.main-area{display:flex;height:calc(100vh - 80px)}
+.chart-wrap{flex:1;position:relative;background:#fff}
+.chart-container{width:100%;height:100%}
+.info-panel{width:290px;background:#f8f9fa;border-left:1px solid #dee2e6;overflow-y:auto;padding:10px;font-size:.7rem}
+.info-panel h3{color:#333;font-size:.8rem;margin:10px 0 6px;border-bottom:1px solid #dee2e6;padding-bottom:4px;font-weight:600}
+.info-panel h3:first-child{margin-top:0}
+.info-row{display:flex;justify-content:space-between;padding:2px 0;color:#666}
+.info-row .val{color:#333;font-weight:600}
+.info-row .val.bullish{color:#28a745}
+.info-row .val.bearish{color:#dc3545}
+.info-row .val.ranging{color:#ffc107}
+.tag{display:inline-block;font-size:.6rem;padding:1px 5px;border-radius:3px;margin-left:4px}
+.tag.good{background:rgba(40,167,69,.15);color:#28a745}
+.tag.bad{background:rgba(220,53,69,.15);color:#dc3545}
+.tag.moderate{background:rgba(255,193,7,.15);color:#856404}
+.tag.primary{background:rgba(0,123,255,.15);color:#007bff}
+.tag.internal{background:rgba(108,117,125,.15);color:#6c757d}
+.tag.equal{background:rgba(156,39,176,.15);color:#9c27b0}
+.tag.swept{background:rgba(220,53,69,.15);color:#dc3545;text-decoration:line-through}
+.pool-list{margin:4px 0}
+.pool-item{padding:5px 6px;margin:3px 0;border-radius:3px;font-size:.65rem;border-left:3px solid #007bff}
+.pool-item.bsl{background:rgba(33,150,243,.06);border-left-color:#2196f3}
+.pool-item.ssl{background:rgba(255,152,0,.06);border-left-color:#ff9800}
+.pool-item.curve{background:rgba(156,39,176,.06);border-left-color:#9c27b0}
+.pool-item.target{background:rgba(76,175,80,.06);border-left-color:#4caf50}
+.pool-item.void{background:rgba(158,158,158,.06);border-left-color:#9e9e9e}
+.pool-item .pool-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:2px}
+.pool-item .pool-label{font-weight:600;font-size:.7rem}
+.legend{display:flex;gap:14px;padding:5px 12px;background:#f8f9fa;border-top:1px solid #dee2e6;font-size:.65rem;color:#666;flex-wrap:wrap}
+.legend-item{display:flex;align-items:center;gap:4px}
+.legend-box{width:14px;height:10px}
+.legend-line{width:16px;height:2px}
+.loading-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.9);z-index:100;font-size:.85rem;color:#666}
+.loading-overlay.hidden{display:none}
+.spinner{width:18px;height:18px;border:2px solid #dee2e6;border-top-color:#007bff;border-radius:50%;animation:spin .6s linear infinite;margin-right:8px}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media(max-width:768px){
+    .info-panel{display:none}
+    .header{padding:4px 8px}
+    .ctrl select{min-width:80px;font-size:.7rem;padding:3px 5px}
+    .ctrl button{padding:4px 8px;font-size:.7rem}
+    .chart-btns button{padding:3px 6px}
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+    <h1>Liquidity <span class="sub">Debug &middot; TCT Lecture 4</span></h1>
+    <div class="ctrl">
+        <label>Pair</label>
+        <select id="pairSelect"><option>Loading...</option></select>
+    </div>
+    <div class="ctrl">
+        <label>TF</label>
+        <select id="tfSelect">
+            <option value="1m">1m</option>
+            <option value="5m">5m</option>
+            <option value="15m">15m</option>
+            <option value="30m">30m</option>
+            <option value="1h">1h</option>
+            <option value="4h" selected>4h</option>
+            <option value="1d">1D</option>
+            <option value="1W">1W</option>
+            <option value="1M">1M</option>
+        </select>
+    </div>
+    <div class="ctrl">
+        <label>Show</label>
+        <div class="toggle-group">
+            <button class="toggle-btn active" id="togBSL" onclick="toggleLayer('bsl')">BSL</button>
+            <button class="toggle-btn active" id="togSSL" onclick="toggleLayer('ssl')">SSL</button>
+            <button class="toggle-btn active" id="togCurves" onclick="toggleLayer('curves')">Curves</button>
+            <button class="toggle-btn active" id="togTargets" onclick="toggleLayer('targets')">Targets</button>
+            <button class="toggle-btn" id="togVoids" onclick="toggleLayer('voids')">Voids</button>
+            <button class="toggle-btn" id="togMS" onclick="toggleLayer('ms')">MS</button>
+            <button class="toggle-btn" id="togEQ" onclick="toggleLayer('eq')">EQ H/L</button>
+        </div>
+    </div>
+    <div class="ctrl">
+        <button id="loadBtn" onclick="loadData()">Load</button>
+    </div>
+    <div class="chart-btns">
+        <button onclick="resetChart()">Reset</button>
+        <button onclick="fitChart()">Fit</button>
+        <button onclick="scalePrice()">Scale Price</button>
+        <button onclick="zoomIn()">+</button>
+        <button onclick="zoomOut()">&minus;</button>
+    </div>
+    <a class="back-link" href="/dashboard">&larr; Back</a>
+</div>
+
+<div class="main-area">
+    <div class="chart-wrap">
+        <div id="chart" class="chart-container"></div>
+        <div id="loadingOverlay" class="loading-overlay hidden">
+            <div class="spinner"></div> Loading...
+        </div>
+    </div>
+    <div id="infoPanel" class="info-panel">
+        <h3>Select pair &amp; timeframe</h3>
+        <div class="info-row"><span>Then click <b>Load</b></span></div>
+    </div>
+</div>
+
+<div class="legend">
+    <div class="legend-item"><div class="legend-line" style="background:#2196f3"></div> BSL Primary</div>
+    <div class="legend-item"><div class="legend-line" style="background:rgba(33,150,243,.4)"></div> BSL Internal</div>
+    <div class="legend-item"><div class="legend-line" style="background:#ff9800"></div> SSL Primary</div>
+    <div class="legend-item"><div class="legend-line" style="background:rgba(255,152,0,.4)"></div> SSL Internal</div>
+    <div class="legend-item"><div class="legend-line" style="background:#9c27b0;height:3px"></div> Liquidity Curve</div>
+    <div class="legend-item"><div class="legend-box" style="background:rgba(76,175,80,.3);border:1px solid #4caf50"></div> Extreme Target</div>
+    <div class="legend-item"><div class="legend-box" style="background:rgba(158,158,158,.15);border:1px dashed #9e9e9e"></div> Void</div>
+    <div class="legend-item"><div class="legend-line" style="background:#9c27b0;height:3px;border-top:1px dashed #9c27b0"></div> Equal H/L</div>
+</div>
+
+<script>
+let chart, candleSeries;
+let overlays = [];
+const BASE = '';
+
+let layers = { bsl: true, ssl: true, curves: true, targets: true, voids: false, ms: false, eq: false };
+let lastData = null;
+
+function toggleLayer(key) {
+    layers[key] = !layers[key];
+    const idMap = { bsl:'togBSL', ssl:'togSSL', curves:'togCurves', targets:'togTargets', voids:'togVoids', ms:'togMS', eq:'togEQ' };
+    const el = document.getElementById(idMap[key]);
+    if (el) el.classList.toggle('active', layers[key]);
+    if (lastData) redraw(lastData);
+}
+
+function initChart() {
+    const el = document.getElementById('chart');
+    chart = LightweightCharts.createChart(el, {
+        width: el.clientWidth,
+        height: el.clientHeight,
+        layout: { background: { type: 'solid', color: '#ffffff' }, textColor: '#333', fontSize: 11 },
+        grid: { vertLines: { color: '#f0f0f0' }, horzLines: { color: '#f0f0f0' } },
+        crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+        rightPriceScale: { borderColor: '#dee2e6' },
+        timeScale: { borderColor: '#dee2e6', timeVisible: true, secondsVisible: false },
+        handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: true },
+        handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
+    });
+    candleSeries = chart.addCandlestickSeries({
+        upColor: '#26a69a', downColor: '#ef5350',
+        borderUpColor: '#26a69a', borderDownColor: '#ef5350',
+        wickUpColor: '#26a69a', wickDownColor: '#ef5350',
+    });
+    window.addEventListener('resize', () => {
+        chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
+    });
+}
+
+function resetChart() {
+    candleSeries.applyOptions({ autoscaleInfoProvider: undefined });
+    chart.timeScale().resetTimeScale();
+    chart.priceScale('right').applyOptions({ autoScale: true });
+}
+function fitChart() { chart.timeScale().fitContent(); }
+function zoomIn() {
+    const vr = chart.timeScale().getVisibleLogicalRange();
+    if (vr) {
+        const c = (vr.from + vr.to) / 2, h = (vr.to - vr.from) / 4;
+        chart.timeScale().setVisibleLogicalRange({ from: c - h, to: c + h });
+    }
+}
+function zoomOut() {
+    const vr = chart.timeScale().getVisibleLogicalRange();
+    if (vr) {
+        const c = (vr.from + vr.to) / 2, h = (vr.to - vr.from);
+        chart.timeScale().setVisibleLogicalRange({ from: c - h, to: c + h });
+    }
+}
+let lastLoadedCandles = [];
+function scalePrice() {
+    if (!lastLoadedCandles || lastLoadedCandles.length === 0) return;
+    candleSeries.applyOptions({
+        autoscaleInfoProvider: () => {
+            const vr = chart.timeScale().getVisibleLogicalRange();
+            if (!vr) return null;
+            const fi = Math.max(0, Math.floor(vr.from));
+            const ti = Math.min(lastLoadedCandles.length - 1, Math.ceil(vr.to));
+            let minP = Infinity, maxP = -Infinity;
+            for (let i = fi; i <= ti; i++) {
+                const c = lastLoadedCandles[i];
+                if (c) { if (c.low < minP) minP = c.low; if (c.high > maxP) maxP = c.high; }
+            }
+            if (minP === Infinity) return null;
+            const pad = (maxP - minP) * 0.05;
+            return { priceRange: { minValue: minP - pad, maxValue: maxP + pad } };
+        }
+    });
+    chart.priceScale('right').applyOptions({ autoScale: true });
+}
+function fmtPrice(v) {
+    if (v == null || isNaN(v)) return '\u2014';
+    const a = Math.abs(v);
+    if (a === 0) return '0';
+    if (a >= 1) return v.toFixed(Math.min(4, Math.max(2, 4 - Math.floor(Math.log10(a)))));
+    const d = Math.max(4, -Math.floor(Math.log10(a)) + 3);
+    return v.toFixed(Math.min(d, 12));
+}
+
+async function loadPairs() {
+    try {
+        const r = await fetch(BASE + '/api/liq-pairs');
+        const d = await r.json();
+        const sel = document.getElementById('pairSelect');
+        sel.innerHTML = '';
+        (d.pairs || []).forEach(p => {
+            const o = document.createElement('option');
+            o.value = p; o.textContent = p;
+            if (p === 'BTC_USDT_PERP') o.selected = true;
+            sel.appendChild(o);
+        });
+    } catch(e) { console.error('Failed to load pairs', e); }
+}
+
+function clearOverlays() {
+    overlays.forEach(s => { try { chart.removeSeries(s); } catch(e){} });
+    overlays = [];
+    candleSeries.setMarkers([]);
+}
+
+/* --- Draw a horizontal liquidity pool line with $$$ label --- */
+function drawPoolLine(pool, candles, isBSL) {
+    const first = candles[0]?.time || 0;
+    const last = candles[candles.length - 1]?.time || Infinity;
+    const poolTime = pool.time || first;
+    if (poolTime > last) return;
+
+    const isPrimary = pool.is_primary;
+    const isEqual = pool.is_equal;
+
+    let color, lineWidth, lineStyle;
+    if (isBSL) {
+        color = isPrimary ? 'rgba(33,150,243,0.7)' : 'rgba(33,150,243,0.35)';
+        lineWidth = isPrimary ? 2 : 1;
+    } else {
+        color = isPrimary ? 'rgba(255,152,0,0.7)' : 'rgba(255,152,0,0.35)';
+        lineWidth = isPrimary ? 2 : 1;
+    }
+    lineStyle = isPrimary ? 0 : LightweightCharts.LineStyle.Dashed;
+
+    // Extend pool line from its time to chart end
+    const pl = chart.addLineSeries({
+        color: color, lineWidth: lineWidth, lineStyle: lineStyle,
+        crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
+    });
+    pl.setData([{ time: poolTime, value: pool.price }, { time: last, value: pool.price }]);
+    overlays.push(pl);
+}
+
+/* --- Draw a liquidity curve connecting taps --- */
+function drawCurve(curve, candles, isSellSide) {
+    const first = candles[0]?.time || 0;
+    const last = candles[candles.length - 1]?.time || Infinity;
+    const taps = (curve.taps || []).filter(t => t.time && t.time >= first && t.time <= last);
+    if (taps.length < 2) return;
+
+    const color = isSellSide ? 'rgba(156,39,176,0.7)' : 'rgba(156,39,176,0.7)';
+
+    const cl = chart.addLineSeries({
+        color: color, lineWidth: 2, lineStyle: 0,
+        crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
+    });
+    cl.setData(taps.map(t => ({ time: t.time, value: t.price })));
+    overlays.push(cl);
+}
+
+/* --- Draw extreme liquidity target as a highlighted zone --- */
+function drawTarget(target, candles) {
+    const first = candles[0]?.time || 0;
+    const last = candles[candles.length - 1]?.time || Infinity;
+    const tTime = target.time || first;
+    if (tTime > last) return;
+
+    const color = target.is_swept ? 'rgba(220,53,69,0.5)' : 'rgba(76,175,80,0.6)';
+    const lineStyle = target.is_swept ? LightweightCharts.LineStyle.Dotted : LightweightCharts.LineStyle.Solid;
+
+    // Draw target price as a highlighted line
+    const tl = chart.addLineSeries({
+        color: color, lineWidth: 2, lineStyle: lineStyle,
+        crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
+    });
+    tl.setData([{ time: tTime, value: target.target_price }, { time: last, value: target.target_price }]);
+    overlays.push(tl);
+}
+
+/* --- Draw a liquidity void region --- */
+function drawVoid(liqVoid, candles) {
+    const first = candles[0]?.time || 0;
+    const last = candles[candles.length - 1]?.time || Infinity;
+
+    const borderColor = 'rgba(158,158,158,0.3)';
+    const fillColor = 'rgba(158,158,158,0.08)';
+
+    // Top border
+    const tl = chart.addLineSeries({
+        color: borderColor, lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed,
+        crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
+    });
+    tl.setData([{ time: first, value: liqVoid.high }, { time: last, value: liqVoid.high }]);
+    overlays.push(tl);
+
+    // Bottom border
+    const bl = chart.addLineSeries({
+        color: borderColor, lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed,
+        crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
+    });
+    bl.setData([{ time: first, value: liqVoid.low }, { time: last, value: liqVoid.low }]);
+    overlays.push(bl);
+
+    // Fill lines
+    const gap = liqVoid.high - liqVoid.low;
+    if (gap > 0) {
+        for (let f = 0.25; f <= 0.75; f += 0.25) {
+            const fl = chart.addLineSeries({
+                color: fillColor, lineWidth: 1, lineStyle: 0,
+                crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
+            });
+            fl.setData([{ time: first, value: liqVoid.low + gap * f }, { time: last, value: liqVoid.low + gap * f }]);
+            overlays.push(fl);
+        }
+    }
+}
+
+/* --- Draw equal high/low level --- */
+function drawEqualLevel(price, candles, isHigh) {
+    const first = candles[0]?.time || 0;
+    const last = candles[candles.length - 1]?.time || Infinity;
+
+    const color = 'rgba(156,39,176,0.6)';
+    const el = chart.addLineSeries({
+        color: color, lineWidth: 2, lineStyle: LightweightCharts.LineStyle.SparseDotted,
+        crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
+    });
+    el.setData([{ time: first, value: price }, { time: last, value: price }]);
+    overlays.push(el);
+}
+
+/* --- Main redraw --- */
+function redraw(data) {
+    clearOverlays();
+    const candles = data.candles || [];
+    if (candles.length === 0) return;
+
+    const first = candles[0].time;
+    const last = candles[candles.length - 1].time;
+    const markers = [];
+
+    // Candle interval
+    let candleInterval = 14400;
+    if (candles.length >= 2) candleInterval = candles[1].time - candles[0].time;
+
+    // MS zigzag (off by default)
+    if (layers.ms) {
+        const pivots = (data.ms_pivots || []).filter(p => p.time >= first && p.time <= last).sort((a,b) => a.idx - b.idx);
+        if (pivots.length >= 2) {
+            const zz = chart.addLineSeries({
+                color: 'rgba(0,0,0,0.2)', lineWidth: 1, lineStyle: 0,
+                crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
+            });
+            zz.setData(pivots.map(p => ({ time: p.time, value: p.price })));
+            overlays.push(zz);
+        }
+    }
+
+    // BSL pools (Buy-Side Liquidity above price)
+    if (layers.bsl) {
+        (data.bsl_pools || []).forEach(pool => {
+            drawPoolLine(pool, candles, true);
+            // $$$ marker at pool location
+            if (pool.time && pool.time >= first && pool.time <= last) {
+                markers.push({
+                    time: pool.time,
+                    position: 'aboveBar',
+                    color: pool.is_primary ? '#2196f3' : 'rgba(33,150,243,0.5)',
+                    shape: 'circle',
+                    size: pool.is_primary ? 1 : 0.5,
+                    text: pool.is_equal ? '$$$\u2261' : '$$$',
+                });
+            }
+        });
+    }
+
+    // SSL pools (Sell-Side Liquidity below price)
+    if (layers.ssl) {
+        (data.ssl_pools || []).forEach(pool => {
+            drawPoolLine(pool, candles, false);
+            // $$$ marker at pool location
+            if (pool.time && pool.time >= first && pool.time <= last) {
+                markers.push({
+                    time: pool.time,
+                    position: 'belowBar',
+                    color: pool.is_primary ? '#ff9800' : 'rgba(255,152,0,0.5)',
+                    shape: 'circle',
+                    size: pool.is_primary ? 1 : 0.5,
+                    text: pool.is_equal ? '$$$\u2261' : '$$$',
+                });
+            }
+        });
+    }
+
+    // Liquidity curves
+    if (layers.curves) {
+        (data.sell_side_curves || []).forEach(curve => {
+            drawCurve(curve, candles, true);
+            // Mark taps
+            (curve.taps || []).forEach((tap, i) => {
+                if (tap.time && tap.time >= first && tap.time <= last) {
+                    markers.push({
+                        time: tap.time,
+                        position: 'aboveBar',
+                        color: '#9c27b0',
+                        shape: 'arrowDown',
+                        size: 0.8,
+                        text: (i === 0 ? '1st' : i === 1 ? '2nd' : (i+1)+'th') + ' tap',
+                    });
+                }
+            });
+        });
+        (data.buy_side_curves || []).forEach(curve => {
+            drawCurve(curve, candles, false);
+            (curve.taps || []).forEach((tap, i) => {
+                if (tap.time && tap.time >= first && tap.time <= last) {
+                    markers.push({
+                        time: tap.time,
+                        position: 'belowBar',
+                        color: '#9c27b0',
+                        shape: 'arrowUp',
+                        size: 0.8,
+                        text: (i === 0 ? '1st' : i === 1 ? '2nd' : (i+1)+'th') + ' tap',
+                    });
+                }
+            });
+        });
+    }
+
+    // Extreme liquidity targets
+    if (layers.targets) {
+        (data.sell_side_targets || []).forEach(t => {
+            drawTarget(t, candles);
+            if (t.time && t.time >= first && t.time <= last) {
+                markers.push({
+                    time: t.time,
+                    position: 'aboveBar',
+                    color: t.is_swept ? '#dc3545' : '#4caf50',
+                    shape: 'square',
+                    size: 1,
+                    text: t.is_swept ? 'ELT swept' : 'ELT',
+                });
+            }
+        });
+        (data.buy_side_targets || []).forEach(t => {
+            drawTarget(t, candles);
+            if (t.time && t.time >= first && t.time <= last) {
+                markers.push({
+                    time: t.time,
+                    position: 'belowBar',
+                    color: t.is_swept ? '#dc3545' : '#4caf50',
+                    shape: 'square',
+                    size: 1,
+                    text: t.is_swept ? 'ELT swept' : 'ELT',
+                });
+            }
+        });
+    }
+
+    // Liquidity voids
+    if (layers.voids) {
+        (data.voids || []).forEach(v => drawVoid(v, candles));
+    }
+
+    // Equal highs/lows
+    if (layers.eq) {
+        (data.equal_highs || []).forEach(price => drawEqualLevel(price, candles, true));
+        (data.equal_lows || []).forEach(price => drawEqualLevel(price, candles, false));
+    }
+
+    // Deduplicate markers (one per time+position slot)
+    if (markers.length > 0) {
+        const seen = new Set();
+        const unique = markers.filter(m => {
+            const key = m.time + '_' + m.position;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        });
+        unique.sort((a, b) => a.time - b.time);
+        candleSeries.setMarkers(unique);
+    }
+}
+
+async function loadData() {
+    const sym = document.getElementById('pairSelect').value;
+    const tf = document.getElementById('tfSelect').value;
+    const btn = document.getElementById('loadBtn');
+    const overlay = document.getElementById('loadingOverlay');
+
+    btn.disabled = true;
+    overlay.classList.remove('hidden');
+    clearOverlays();
+
+    try {
+        const r = await fetch(BASE + `/api/liquidity-chart?symbol=${sym}&timeframe=${tf}&limit=300`);
+        if (!r.ok) {
+            const errData = await r.json().catch(() => ({}));
+            throw new Error(errData.error || `HTTP ${r.status}`);
+        }
+        const data = await r.json();
+        lastData = data;
+
+        lastLoadedCandles = data.candles || [];
+        if (lastLoadedCandles.length > 0) {
+            const sp = Math.abs(lastLoadedCandles[lastLoadedCandles.length - 1].close);
+            let prec = 2;
+            if (sp > 0 && sp < 1) prec = Math.max(4, -Math.floor(Math.log10(sp)) + 3);
+            else if (sp >= 1 && sp < 10) prec = 4;
+            else if (sp >= 10 && sp < 1000) prec = 2;
+            prec = Math.min(prec, 12);
+            candleSeries.applyOptions({ priceFormat: { type: 'price', precision: prec, minMove: Math.pow(10, -prec) } });
+        }
+        candleSeries.applyOptions({ autoscaleInfoProvider: undefined });
+        candleSeries.setData(lastLoadedCandles);
+
+        redraw(data);
+        updateInfoPanel(data);
+        chart.timeScale().fitContent();
+        scalePrice();
+
+    } catch(e) {
+        console.error('Load error:', e);
+        document.getElementById('infoPanel').innerHTML =
+            `<h3 style="color:#dc3545">Error</h3><div class="info-row">${e.message}</div>`;
+    } finally {
+        btn.disabled = false;
+        overlay.classList.add('hidden');
+    }
+}
+
+function updateInfoPanel(data) {
+    const panel = document.getElementById('infoPanel');
+    const sym = data.symbol || '\u2014';
+    const tf = data.timeframe || '\u2014';
+    const summary = data.summary || {};
+
+    let html = `<h3>${sym} \u00b7 ${tf.toUpperCase()}</h3>`;
+
+    const trend = data.trend || 'neutral';
+    const tc = trend === 'bullish' ? 'bullish' : trend === 'bearish' ? 'bearish' : 'ranging';
+    html += `<div class="info-row"><span>Trend</span><span class="val ${tc}">${trend.toUpperCase()}</span></div>`;
+    html += `<div class="info-row"><span>Price</span><span class="val">${fmtPrice(data.current_price)}</span></div>`;
+
+    // BSL/SSL counts
+    html += `<h3>Liquidity Pools</h3>`;
+    html += `<div class="info-row"><span>BSL Pools</span><span class="val" style="color:#2196f3">${summary.total_bsl || 0}</span></div>`;
+    html += `<div class="info-row"><span>\u2003Primary Highs</span><span class="val">${summary.primary_highs || 0}</span></div>`;
+    html += `<div class="info-row"><span>\u2003Internal Highs</span><span class="val">${summary.internal_highs || 0}</span></div>`;
+    html += `<div class="info-row"><span>SSL Pools</span><span class="val" style="color:#ff9800">${summary.total_ssl || 0}</span></div>`;
+    html += `<div class="info-row"><span>\u2003Primary Lows</span><span class="val">${summary.primary_lows || 0}</span></div>`;
+    html += `<div class="info-row"><span>\u2003Internal Lows</span><span class="val">${summary.internal_lows || 0}</span></div>`;
+    html += `<div class="info-row"><span>Equal Highs</span><span class="val" style="color:#9c27b0">${summary.equal_highs || 0}</span></div>`;
+    html += `<div class="info-row"><span>Equal Lows</span><span class="val" style="color:#9c27b0">${summary.equal_lows || 0}</span></div>`;
+
+    // BSL pool details
+    const bslPools = data.bsl_pools || [];
+    if (bslPools.length > 0) {
+        html += `<h3>BSL Pools (Buy-Side)</h3>`;
+        html += `<div class="pool-list">`;
+        bslPools.slice(0, 10).forEach(pool => {
+            const cls = pool.is_primary ? 'primary' : 'internal';
+            const eqTag = pool.is_equal ? '<span class="tag equal">EQUAL</span>' : '';
+            const msTag = pool.is_confirmed_ms ? '<span class="tag primary">MS</span>' : '';
+            html += `<div class="pool-item bsl">
+                <div class="pool-header">
+                    <span class="pool-label">${fmtPrice(pool.price)}</span>
+                    <span class="tag ${cls}">${pool.is_primary ? 'PRIMARY' : 'INTERNAL'}</span>
+                    ${eqTag}${msTag}
+                </div>
+                <div>Strength: ${(pool.strength * 100).toFixed(0)}% | Dist: ${pool.distance_from_price?.toFixed(2) || 0}%</div>
+            </div>`;
+        });
+        html += `</div>`;
+    }
+
+    // SSL pool details
+    const sslPools = data.ssl_pools || [];
+    if (sslPools.length > 0) {
+        html += `<h3>SSL Pools (Sell-Side)</h3>`;
+        html += `<div class="pool-list">`;
+        sslPools.slice(0, 10).forEach(pool => {
+            const cls = pool.is_primary ? 'primary' : 'internal';
+            const eqTag = pool.is_equal ? '<span class="tag equal">EQUAL</span>' : '';
+            const msTag = pool.is_confirmed_ms ? '<span class="tag primary">MS</span>' : '';
+            html += `<div class="pool-item ssl">
+                <div class="pool-header">
+                    <span class="pool-label">${fmtPrice(pool.price)}</span>
+                    <span class="tag ${cls}">${pool.is_primary ? 'PRIMARY' : 'INTERNAL'}</span>
+                    ${eqTag}${msTag}
+                </div>
+                <div>Strength: ${(pool.strength * 100).toFixed(0)}% | Dist: ${pool.distance_from_price?.toFixed(2) || 0}%</div>
+            </div>`;
+        });
+        html += `</div>`;
+    }
+
+    // Curves
+    const sellCurves = data.sell_side_curves || [];
+    const buyCurves = data.buy_side_curves || [];
+    if (sellCurves.length > 0 || buyCurves.length > 0) {
+        html += `<h3>Liquidity Curves</h3>`;
+        html += `<div class="info-row"><span>Sell-Side (Dist)</span><span class="val">${sellCurves.length}</span></div>`;
+        html += `<div class="info-row"><span>Buy-Side (Accum)</span><span class="val">${buyCurves.length}</span></div>`;
+        html += `<div class="pool-list">`;
+        sellCurves.forEach((c, i) => {
+            html += `<div class="pool-item curve">
+                <div class="pool-header">
+                    <span class="pool-label">Sell-Side #${i+1}</span>
+                    <span class="tag ${c.quality === 'EXCELLENT' ? 'good' : 'moderate'}">${c.quality} (${c.tap_count} taps)</span>
+                </div>
+                <div>Range: ${fmtPrice(c.highest_price)} \u2192 ${fmtPrice(c.lowest_price)}</div>
+            </div>`;
+        });
+        buyCurves.forEach((c, i) => {
+            html += `<div class="pool-item curve">
+                <div class="pool-header">
+                    <span class="pool-label">Buy-Side #${i+1}</span>
+                    <span class="tag ${c.quality === 'EXCELLENT' ? 'good' : 'moderate'}">${c.quality} (${c.tap_count} taps)</span>
+                </div>
+                <div>Range: ${fmtPrice(c.lowest_price)} \u2192 ${fmtPrice(c.highest_price)}</div>
+            </div>`;
+        });
+        html += `</div>`;
+    }
+
+    // Extreme targets
+    const sellTargets = data.sell_side_targets || [];
+    const buyTargets = data.buy_side_targets || [];
+    if (sellTargets.length > 0 || buyTargets.length > 0) {
+        html += `<h3>Extreme Liquidity Targets</h3>`;
+        html += `<div class="pool-list">`;
+        sellTargets.forEach(t => {
+            html += `<div class="pool-item target">
+                <div class="pool-header">
+                    <span class="pool-label">Dist ELT: ${fmtPrice(t.target_price)}</span>
+                    <span class="tag ${t.is_swept ? 'bad' : 'good'}">${t.is_swept ? 'SWEPT' : 'ACTIVE'}</span>
+                </div>
+                <div>2nd tap: ${fmtPrice(t.second_tap_price)}</div>
+            </div>`;
+        });
+        buyTargets.forEach(t => {
+            html += `<div class="pool-item target">
+                <div class="pool-header">
+                    <span class="pool-label">Accum ELT: ${fmtPrice(t.target_price)}</span>
+                    <span class="tag ${t.is_swept ? 'bad' : 'good'}">${t.is_swept ? 'SWEPT' : 'ACTIVE'}</span>
+                </div>
+                <div>2nd tap: ${fmtPrice(t.second_tap_price)}</div>
+            </div>`;
+        });
+        html += `</div>`;
+    }
+
+    // Voids
+    const voids = data.voids || [];
+    if (voids.length > 0) {
+        html += `<h3>Liquidity Voids</h3>`;
+        html += `<div class="pool-list">`;
+        voids.forEach(v => {
+            html += `<div class="pool-item void">
+                <div class="pool-header">
+                    <span class="pool-label">${fmtPrice(v.low)} - ${fmtPrice(v.high)}</span>
+                    <span class="tag ${v.quality === 'LARGE' ? 'bad' : 'moderate'}">${v.quality}</span>
+                </div>
+                <div>Size: ${v.size_percent?.toFixed(1) || 0}% | Dist: ${v.distance_from_price?.toFixed(2) || 0}%</div>
+            </div>`;
+        });
+        html += `</div>`;
+    }
+
+    // TCT Liquidity rules reference
+    html += `<h3>TCT Liquidity Rules</h3>`;
+    html += `<div class="info-row" style="flex-direction:column;gap:2px">
+        <div>\u2022 BSL = above highs (shorts' stop losses)</div>
+        <div>\u2022 SSL = below lows (longs' stop losses)</div>
+        <div>\u2022 Primary = confirmed MS pivots (strongest)</div>
+        <div>\u2022 Internal = 6CR pivots between primaries</div>
+        <div>\u2022 Equal H/L = amazing liquidity targets</div>
+        <div>\u2022 Curve = 3+ taps, no S/D backing levels</div>
+        <div>\u2022 ELT = 1st higher low / lower high after 2nd tap</div>
+        <div>\u2022 Void = no S/D zones, price moves freely</div>
+        <div>\u2022 Markets move from liquidity to liquidity</div>
+    </div>`;
+
+    panel.innerHTML = html;
+}
+
+initChart();
+loadPairs();
+document.getElementById('pairSelect').addEventListener('change', loadData);
+document.getElementById('tfSelect').addEventListener('change', loadData);
+</script>
+</body>
+</html>"""
+
+    return HTMLResponse(content=html)
+
+
+# ================================================================
 # ENTRY POINT
 # ================================================================
 
