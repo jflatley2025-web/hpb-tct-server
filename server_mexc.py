@@ -10063,8 +10063,9 @@ async function loadData(retryCount) {
             prec = Math.min(prec, 12);
             candleSeries.applyOptions({ priceFormat: { type: 'price', precision: prec, minMove: Math.pow(10, -prec) } });
         }
+        // Set candle data BEFORE adding any line series
         candleSeries.setData(lastLoadedCandles);
-        console.log('[MS] setData done');
+        console.log('[MS] setData done, candles:', lastLoadedCandles.length);
 
         // Draw structure in order: HTF first (back), then MTF, then LTF (front)
         if (data.htf_structure) {
@@ -10133,17 +10134,33 @@ function drawStructure(st, candles, tfType) {
 
     // Draw zigzag line through pivot points
     if (pivots.length >= 2) {
-        const zigzagData = pivots.map(p => ({ time: p.time, value: p.price }));
-        const zz = chart.addLineSeries({
-            color: c.line,
-            lineWidth: c.lineWidth,
-            lineStyle: 0,
-            crosshairMarkerVisible: false,
-            lastValueVisible: false,
-            priceLineVisible: false,
-        });
-        zz.setData(zigzagData);
-        msLineSeries.push(zz);
+        // CRITICAL: Lightweight Charts v4.1 crashes with "Value is null" if a
+        // line series has duplicate timestamps. Deduplicate by keeping only the
+        // last entry per timestamp (pivot high+low on same candle).
+        const deduped = [];
+        const seenTimes = new Set();
+        for (let i = pivots.length - 1; i >= 0; i--) {
+            if (!seenTimes.has(pivots[i].time)) {
+                seenTimes.add(pivots[i].time);
+                deduped.unshift({ time: pivots[i].time, value: pivots[i].price });
+            }
+        }
+        if (deduped.length >= 2) {
+            try {
+                const zz = chart.addLineSeries({
+                    color: c.line,
+                    lineWidth: c.lineWidth,
+                    lineStyle: 0,
+                    crosshairMarkerVisible: false,
+                    lastValueVisible: false,
+                    priceLineVisible: false,
+                });
+                zz.setData(deduped);
+                msLineSeries.push(zz);
+            } catch(e) {
+                console.error('[MS] Zigzag line error (' + tfType + '):', e);
+            }
+        }
     }
 
     // Only draw BOS markers for MTF (primary structure)
@@ -10161,27 +10178,37 @@ function drawStructure(st, candles, tfType) {
                 text: 'BOS',
             });
 
-            // Horizontal BOS line
-            if (b.broken_level_time && b.broken_level && isFinite(b.broken_level)) {
-                const bosLine = chart.addLineSeries({
-                    color: 'rgba(255,193,7,.6)',
-                    lineWidth: 1,
-                    lineStyle: LightweightCharts.LineStyle.Dashed,
-                    crosshairMarkerVisible: false,
-                    lastValueVisible: false,
-                    priceLineVisible: false,
-                });
-                bosLine.setData([
-                    { time: b.broken_level_time, value: b.broken_level },
-                    { time: b.time, value: b.broken_level },
-                ]);
-                msLineSeries.push(bosLine);
+            // Horizontal BOS line — both times must be valid and different
+            if (b.broken_level_time && b.broken_level && isFinite(b.broken_level)
+                && b.broken_level_time !== b.time) {
+                try {
+                    const bosLine = chart.addLineSeries({
+                        color: 'rgba(255,193,7,.6)',
+                        lineWidth: 1,
+                        lineStyle: LightweightCharts.LineStyle.Dashed,
+                        crosshairMarkerVisible: false,
+                        lastValueVisible: false,
+                        priceLineVisible: false,
+                    });
+                    bosLine.setData([
+                        { time: b.broken_level_time, value: b.broken_level },
+                        { time: b.time, value: b.broken_level },
+                    ]);
+                    msLineSeries.push(bosLine);
+                } catch(e) {
+                    console.error('[MS] BOS line error:', e);
+                }
             }
         });
 
         if (markers.length > 0) {
-            markers.sort((a,b) => a.time - b.time);
-            candleSeries.setMarkers(markers);
+            // Deduplicate markers by time (only one marker per candle)
+            const markerMap = new Map();
+            markers.forEach(m => { if (!markerMap.has(m.time)) markerMap.set(m.time, m); });
+            const uniqueMarkers = Array.from(markerMap.values()).sort((a,b) => a.time - b.time);
+            try { candleSeries.setMarkers(uniqueMarkers); } catch(e) {
+                console.error('[MS] Markers error:', e);
+            }
         }
     }
 }
