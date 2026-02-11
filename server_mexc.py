@@ -6247,10 +6247,11 @@ async def dashboard():
         }
 
         // Fetch candle data from server (avoids CORS issues)
-        async function fetchCandles(interval = '4h', limit = 100) {
+        async function fetchCandles(interval = '4h', limit = 100, symbol = null) {
+            const sym = symbol || currentSymbol;
             try {
                 const data = await fetchWithRetry(
-                    `/api/candles?interval=${interval}&limit=${limit}&symbol=${currentSymbol}`,
+                    `/api/candles?interval=${interval}&limit=${limit}&symbol=${sym}`,
                     {}, 3, 20000
                 );
                 if (data.error) {
@@ -6375,8 +6376,14 @@ async def dashboard():
             if (isLoading) return;
             isLoading = true;
 
+            // Capture symbol at start to prevent race conditions when user switches
+            // pairs during async API calls. All fetches use this snapshot so data
+            // stays consistent even if currentSymbol changes mid-refresh.
+            const targetSymbol = currentSymbol;
+            const targetTimeframe = currentTimeframe;
+
             // Determine if this is a new pair (full fetch) or just a timeframe change (reuse HTF cache)
-            const isNewPair = (htfCache.symbol !== currentSymbol);
+            const isNewPair = (htfCache.symbol !== targetSymbol);
 
             // Show loading states for all sections
             setLoading('trendBadge', true);
@@ -6418,7 +6425,15 @@ async def dashboard():
             }
 
             // ─── STEP 1: Fetch candles and update chart ───
-            lastCandles = await fetchCandles(currentTimeframe, getCandleLimit(currentTimeframe));
+            lastCandles = await fetchCandles(targetTimeframe, getCandleLimit(targetTimeframe), targetSymbol);
+
+            // If user switched pairs while candles were loading, discard stale results
+            if (currentSymbol !== targetSymbol) {
+                isLoading = false;
+                refreshData();
+                return;
+            }
+
             if (lastCandles.length > 0) {
                 candleSeries.setData(lastCandles);
                 // Auto-fit chart to bring new pair's candles into view
@@ -6435,7 +6450,7 @@ async def dashboard():
             if (isNewPair) {
                 // ─── STEP 2: Market Structure + Active Range + Deviations ───
                 try {
-                    rangesData = await fetchWithRetry(`/api/ranges?symbol=${currentSymbol}`, {}, 3, 25000);
+                    rangesData = await fetchWithRetry(`/api/ranges?symbol=${targetSymbol}`, {}, 3, 25000);
                     if (rangesData && !rangesData.error) {
                         updateRangesUI(rangesData, lastCandles);
                     } else { setError('trendBadge'); setError('zoneBadge'); }
@@ -6443,7 +6458,7 @@ async def dashboard():
 
                 // ─── STEP 3: S&D Zones ───
                 try {
-                    zonesData = await fetchWithRetry(`/api/zones?symbol=${currentSymbol}`, {}, 3, 25000);
+                    zonesData = await fetchWithRetry(`/api/zones?symbol=${targetSymbol}`, {}, 3, 25000);
                     if (zonesData && !zonesData.error) {
                         updateZonesUI(zonesData);
                     } else { setError('zoneCount'); }
@@ -6451,7 +6466,7 @@ async def dashboard():
 
                 // ─── STEP 4: Liquidity Pools ───
                 try {
-                    liqData = await fetchWithRetry(`/api/liquidity?symbol=${currentSymbol}`, {}, 3, 25000);
+                    liqData = await fetchWithRetry(`/api/liquidity?symbol=${targetSymbol}`, {}, 3, 25000);
                     if (liqData && !liqData.error) {
                         updateLiquidityUI(liqData, lastCandles);
                     } else { setError('liqCount'); }
@@ -6459,7 +6474,7 @@ async def dashboard():
 
                 // ─── STEP 5: TCT Schematics ───
                 try {
-                    schematicsData = await fetchWithRetry(`/api/schematics?symbol=${currentSymbol}&timeframe=${currentTimeframe}`, {}, 3, 30000);
+                    schematicsData = await fetchWithRetry(`/api/schematics?symbol=${targetSymbol}&timeframe=${targetTimeframe}`, {}, 3, 30000);
                     if (schematicsData && !schematicsData.error) {
                         updateSchematicsUI(schematicsData);
                     } else { setError('schematicsBadge'); }
@@ -6467,7 +6482,7 @@ async def dashboard():
 
                 // ─── STEP 6: PO3 Schematics ───
                 try {
-                    po3Data = await fetchWithRetry(`/api/po3?symbol=${currentSymbol}&timeframe=${currentTimeframe}`, {}, 3, 30000);
+                    po3Data = await fetchWithRetry(`/api/po3?symbol=${targetSymbol}&timeframe=${targetTimeframe}`, {}, 3, 30000);
                     if (po3Data && !po3Data.error) {
                         updatePO3UI(po3Data);
                     } else { setError('po3Badge'); }
@@ -6475,15 +6490,16 @@ async def dashboard():
 
                 // ─── STEP 7: 7-Gate Validation ───
                 try {
-                    valData = await fetchWithRetry(`/api/validate?symbol=${currentSymbol}`, {}, 3, 25000);
+                    valData = await fetchWithRetry(`/api/validate?symbol=${targetSymbol}`, {}, 3, 25000);
                     if (valData) {
                         updateValidationUI(valData);
                     } else { setError('actionBadge'); }
                 } catch (e) { console.error('Validation error:', e); setError('actionBadge'); }
 
-                // Cache all HTF data for this symbol
+                // Cache all HTF data for this symbol (use targetSymbol, not currentSymbol,
+                // to ensure cache key matches the data that was actually fetched)
                 htfCache = {
-                    symbol: currentSymbol,
+                    symbol: targetSymbol,
                     rangesData, zonesData, liqData, valData, schematicsData, po3Data,
                 };
 
@@ -6506,13 +6522,13 @@ async def dashboard():
 
                 // Re-fetch schematics and PO3 with new timeframe context
                 try {
-                    schematicsData = await fetchWithRetry(`/api/schematics?symbol=${currentSymbol}&timeframe=${currentTimeframe}`, {}, 3, 30000);
+                    schematicsData = await fetchWithRetry(`/api/schematics?symbol=${targetSymbol}&timeframe=${targetTimeframe}`, {}, 3, 30000);
                     if (schematicsData && !schematicsData.error) updateSchematicsUI(schematicsData);
                     else setError('schematicsBadge');
                 } catch (e) { console.error('Schematics error:', e); setError('schematicsBadge'); }
 
                 try {
-                    po3Data = await fetchWithRetry(`/api/po3?symbol=${currentSymbol}&timeframe=${currentTimeframe}`, {}, 3, 30000);
+                    po3Data = await fetchWithRetry(`/api/po3?symbol=${targetSymbol}&timeframe=${targetTimeframe}`, {}, 3, 30000);
                     if (po3Data && !po3Data.error) updatePO3UI(po3Data);
                     else setError('po3Badge');
                 } catch (e) { console.error('PO3 error:', e); setError('po3Badge'); }
@@ -6531,6 +6547,12 @@ async def dashboard():
             drawTCTModelOverlays(bestSetup, lastCandles);
 
             isLoading = false;
+
+            // If user switched pairs while we were loading, immediately refresh
+            // with the new pair instead of waiting for the next auto-refresh cycle
+            if (currentSymbol !== targetSymbol || currentTimeframe !== targetTimeframe) {
+                refreshData();
+            }
         }
 
         // Derive Forming Models from current pair's HTF+LTF schematic data
