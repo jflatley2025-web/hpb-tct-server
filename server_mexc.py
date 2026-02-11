@@ -5493,15 +5493,18 @@ async def dashboard():
                 </div>
                 <div id="msLevelsContent" style="margin-top:6px;"></div>
                 <div class="metric-row">
-                    <span class="label">HTF Pivots (6CR)</span>
-                    <span class="value" id="htfPivots">--</span>
+                    <span class="label">MS Highs / Lows</span>
+                    <span class="value" id="msPivotCounts">--</span>
                 </div>
+                <div id="bosEventsContent" style="margin-top:6px;"></div>
+                <div id="dominoContent" style="margin-top:6px;"></div>
             </div>
 
             <!-- Active Range -->
             <div class="metric-card">
                 <h3>Active Range <span class="badge" id="zoneBadge">--</span></h3>
                 <div class="tct-lecture">TCT Lecture 2 - Ranges</div>
+                <div id="rangeQualityTag" style="margin-bottom:6px;"></div>
                 <div class="metric-row">
                     <span class="label">Range High</span>
                     <span class="value" id="rangeHigh">--</span>
@@ -5513,6 +5516,14 @@ async def dashboard():
                 <div class="metric-row">
                     <span class="label">Range Low</span>
                     <span class="value" id="rangeLow">--</span>
+                </div>
+                <div class="metric-row">
+                    <span class="label">Range Size</span>
+                    <span class="value" id="rangeSize">--</span>
+                </div>
+                <div class="metric-row">
+                    <span class="label">DL+ / DL&minus;</span>
+                    <span class="value" id="rangeDL" style="font-size:0.65rem;">--</span>
                 </div>
                 <div class="range-viz" id="rangeViz" style="display:none;">
                     <div class="range-labels">
@@ -5561,13 +5572,22 @@ async def dashboard():
                 <h3>S&D Zones <span class="badge badge-neutral" id="zoneCount">0</span></h3>
                 <div class="tct-lecture">TCT Lecture 3</div>
                 <div class="metric-row">
-                    <span class="label">HTF Zones</span>
-                    <span class="value" id="htfZones">--</span>
+                    <span class="label">Demand OBs</span>
+                    <span class="value bullish" id="demandOBCount">--</span>
                 </div>
                 <div class="metric-row">
-                    <span class="label">High Quality</span>
-                    <span class="value bullish" id="hqZones">--</span>
+                    <span class="label">Supply OBs</span>
+                    <span class="value bearish" id="supplyOBCount">--</span>
                 </div>
+                <div class="metric-row">
+                    <span class="label">Structure S/D</span>
+                    <span class="value" id="structureSDCount">--</span>
+                </div>
+                <div class="metric-row">
+                    <span class="label">Mitigated</span>
+                    <span class="value" id="mitigatedCount" style="color:#888;">--</span>
+                </div>
+                <div id="topScoredZones" style="margin-top:6px;"></div>
                 <div class="zone-list" id="topZones"></div>
             </div>
 
@@ -5580,17 +5600,27 @@ async def dashboard():
                     <span class="value bearish" id="bslCount">--</span>
                 </div>
                 <div class="metric-row">
+                    <span class="label">&emsp;Primary / Internal</span>
+                    <span class="value" id="bslBreakdown" style="font-size:0.7rem;">--</span>
+                </div>
+                <div class="metric-row">
                     <span class="label">SSL Pools (Below)</span>
                     <span class="value bullish" id="sslCount">--</span>
                 </div>
                 <div class="metric-row">
+                    <span class="label">&emsp;Primary / Internal</span>
+                    <span class="value" id="sslBreakdown" style="font-size:0.7rem;">--</span>
+                </div>
+                <div class="metric-row">
                     <span class="label">Equal Highs</span>
-                    <span class="value" id="eqHighs">--</span>
+                    <span class="value" id="eqHighs" style="color:#9c27b0;">--</span>
                 </div>
                 <div class="metric-row">
                     <span class="label">Equal Lows</span>
-                    <span class="value" id="eqLows">--</span>
+                    <span class="value" id="eqLows" style="color:#9c27b0;">--</span>
                 </div>
+                <div id="liqCurvesContent" style="margin-top:6px;"></div>
+                <div id="liqTargetsContent" style="margin-top:4px;"></div>
                 <div class="zone-list" id="liqPools"></div>
             </div>
 
@@ -6400,26 +6430,49 @@ async def dashboard():
             document.getElementById('formingCount').textContent = '...';
             document.getElementById('formingContent').innerHTML = '<div class="forming-empty">Analyzing pair...</div>';
 
-            // Reset Active Range sidebar to clear stale data from previous pair
+            // Reset sidebar to clear stale data from previous pair
             if (isNewPair) {
+                // Market Structure
+                document.getElementById('htfTrend').textContent = '--';
+                document.getElementById('ltfTrend').textContent = '--';
+                document.getElementById('htfEOF').textContent = '--';
+                document.getElementById('ltfEOF').textContent = '--';
+                document.getElementById('msPivotCounts').textContent = '--';
+                document.getElementById('msLevelsContent').innerHTML = '';
+                document.getElementById('bosEventsContent').innerHTML = '';
+                document.getElementById('dominoContent').innerHTML = '';
+                // Active Range
                 document.getElementById('rangeHigh').textContent = '--';
                 document.getElementById('rangeEq').textContent = '--';
                 document.getElementById('rangeLow').textContent = '--';
+                document.getElementById('rangeSize').textContent = '--';
+                document.getElementById('rangeDL').textContent = '--';
+                document.getElementById('rangeQualityTag').innerHTML = '';
                 document.getElementById('tradingBias').textContent = '--';
                 document.getElementById('tradingBias').className = 'value';
                 document.getElementById('biasStrength').textContent = '--';
                 document.getElementById('rangeViz').style.display = 'none';
                 document.getElementById('rangeHighLabel').textContent = '--';
                 document.getElementById('rangeLowLabel').textContent = '--';
-                document.getElementById('htfTrend').textContent = '--';
-                document.getElementById('ltfTrend').textContent = '--';
-                document.getElementById('htfEOF').textContent = '--';
-                document.getElementById('ltfEOF').textContent = '--';
-                document.getElementById('htfPivots').textContent = '--';
+                // Deviations
                 document.getElementById('wickDevs').textContent = '0';
                 document.getElementById('candleDevs').textContent = '0';
                 document.getElementById('dlDevs').textContent = '0';
                 document.getElementById('devBadge').textContent = '0';
+                // S&D Zones
+                document.getElementById('demandOBCount').textContent = '--';
+                document.getElementById('supplyOBCount').textContent = '--';
+                document.getElementById('structureSDCount').textContent = '--';
+                document.getElementById('mitigatedCount').textContent = '--';
+                document.getElementById('topScoredZones').innerHTML = '';
+                document.getElementById('topZones').innerHTML = '';
+                // Liquidity
+                document.getElementById('bslBreakdown').textContent = '--';
+                document.getElementById('sslBreakdown').textContent = '--';
+                document.getElementById('liqCurvesContent').innerHTML = '';
+                document.getElementById('liqTargetsContent').innerHTML = '';
+                document.getElementById('liqPools').innerHTML = '';
+                // Schematics
                 document.getElementById('schematicsContent').innerHTML = '<div class="metric-row"><span class="label">Loading...</span></div>';
                 document.getElementById('po3Content').innerHTML = '<div class="metric-row"><span class="label">Loading...</span></div>';
             }
@@ -6651,7 +6704,9 @@ async def dashboard():
 
             const ms = data.market_structure || {};
 
-            // Market structure trends
+            // ═══ MARKET STRUCTURE CARD ═══
+
+            // HTF / LTF trends
             const htfTrend = ms.htf_trend || 'neutral';
             const ltfTrend = ms.ltf_trend || 'neutral';
             document.getElementById('htfTrend').textContent = htfTrend.toUpperCase();
@@ -6694,8 +6749,6 @@ async def dashboard():
                 const ld = htfLevels[lvl] || {};
                 const lvlTrend = ld.trend || '--';
                 const bosCount = (ld.bos || []).length;
-                const hiCount = (ld.highs || []).length;
-                const loCount = (ld.lows || []).length;
                 if (lvlTrend && lvlTrend !== '--' && lvlTrend !== 'neutral' && lvlTrend !== '') {
                     lvlHtml += '<div style="display:flex;justify-content:space-between;align-items:center;padding:2px 0;font-size:0.65rem;">';
                     lvlHtml += '<span style="color:' + lvlColors[lvl] + ';font-weight:600;">' + lvlLabels[lvl] + '</span>';
@@ -6705,36 +6758,112 @@ async def dashboard():
                     lvlHtml += '</span></div>';
                 }
             });
-            // Show BOS events on chart
+            levelsEl.innerHTML = lvlHtml;
+
+            // MS Highs / Lows count
+            const msHighs = ms.htf_ms_highs || [];
+            const msLows = ms.htf_ms_lows || [];
+            document.getElementById('msPivotCounts').textContent = msHighs.length + ' H / ' + msLows.length + ' L';
+
+            // BOS events on chart + sidebar list
             const htfBosEvents = ms.htf_bos_events || [];
             htfBosEvents.forEach(bos => {
-                if (bos.bos_idx >= 0 && bos.bos_idx < candles.length && candles.length > 0) {
+                if (bos.broken_level) {
                     const bosColor = bos.type === 'bullish' ? '#00ff88' : '#ff4444';
                     const bosLabel = bos.type === 'bullish' ? 'BOS \u2191' : 'BOS \u2193';
                     lineSeries.push(addPriceLine(bos.broken_level, bosColor, bosLabel, 2, 1));
                 }
             });
-            levelsEl.innerHTML = lvlHtml;
 
-            // Active range
+            // BOS events sidebar list (last 5, matching /market-structure page)
+            let bosHtml = '';
+            if (htfBosEvents.length > 0) {
+                bosHtml += '<div style="font-size:0.7rem;font-weight:600;color:#ffc107;margin-bottom:4px;">BOS Events (' + htfBosEvents.length + ')</div>';
+                htfBosEvents.slice(-5).reverse().forEach(b => {
+                    const dir = b.type === 'bullish' ? '\u25B2' : '\u25BC';
+                    const dirColor = b.type === 'bullish' ? '#00ff88' : '#ff4444';
+                    const qualCls = b.quality === 'good' ? 'bullish' : b.quality === 'bad' ? 'bearish' : 'warning';
+                    const qualBg = b.quality === 'good' ? 'rgba(0,255,136,0.15)' : b.quality === 'bad' ? 'rgba(255,68,68,0.15)' : 'rgba(255,193,7,0.15)';
+                    bosHtml += '<div style="display:flex;justify-content:space-between;align-items:center;padding:2px 0;font-size:0.65rem;">';
+                    bosHtml += '<span style="color:' + dirColor + ';">' + dir + ' ' + b.type + '</span>';
+                    bosHtml += '<span>$' + (b.broken_level || 0).toLocaleString(undefined, {maximumFractionDigits: 2}) + '</span>';
+                    if (b.quality) bosHtml += '<span style="padding:1px 5px;border-radius:3px;background:' + qualBg + ';color:' + dirColor + ';font-size:0.6rem;">' + b.quality + '</span>';
+                    bosHtml += '</div>';
+                });
+            }
+            document.getElementById('bosEventsContent').innerHTML = bosHtml;
+
+            // Domino Effect (from /market-structure page logic)
+            // Note: domino data is not in the /api/ranges response, but we can derive from level data
+            let dominoHtml = '';
+            const l1 = htfLevels.level_1 || {};
+            const l2 = htfLevels.level_2 || {};
+            const l3 = htfLevels.level_3 || {};
+            if (l1.trend && l1.trend !== 'neutral') {
+                const l2HasBos = (l2.bos || []).length > 0;
+                const l3HasBos = (l3.bos || []).length > 0;
+                let stage = 'L1 rotation';
+                let conf = 'low';
+                if (l3HasBos) { stage = 'L3 confirmed'; conf = 'high'; }
+                else if (l2HasBos) { stage = 'L2 confirmed, awaiting L3'; conf = 'moderate'; }
+                else { stage = 'Awaiting L2 rotation'; conf = 'low'; }
+                const confColor = conf === 'high' ? '#00ff88' : conf === 'moderate' ? '#ffc107' : '#888';
+                const confBg = conf === 'high' ? 'rgba(0,255,136,0.15)' : conf === 'moderate' ? 'rgba(255,193,7,0.15)' : 'rgba(136,136,136,0.15)';
+                dominoHtml += '<div style="font-size:0.7rem;font-weight:600;color:#00d4ff;margin-bottom:4px;">Domino Effect</div>';
+                dominoHtml += '<div style="display:flex;justify-content:space-between;align-items:center;padding:2px 0;font-size:0.65rem;">';
+                dominoHtml += '<span style="color:#888;">Stage</span><span style="color:#e0e0e0;">' + stage + '</span>';
+                dominoHtml += '</div>';
+                dominoHtml += '<div style="display:flex;justify-content:space-between;align-items:center;padding:2px 0;font-size:0.65rem;">';
+                dominoHtml += '<span style="color:#888;">Confidence</span><span style="padding:1px 5px;border-radius:3px;background:' + confBg + ';color:' + confColor + ';">' + conf + '</span>';
+                dominoHtml += '</div>';
+            }
+            document.getElementById('dominoContent').innerHTML = dominoHtml;
+
+            // ═══ ACTIVE RANGE CARD ═══
+
             const activeRange = data.htf_ranges?.active_range || data.ltf_ranges?.active_range;
             if (activeRange) {
                 const high = activeRange.range_high || activeRange.high;
                 const low = activeRange.range_low || activeRange.low;
                 const eq = activeRange.equilibrium || ((high + low) / 2);
+                const rangeSize = activeRange.range_size || (high && low ? high - low : 0);
+                const dlHigh = activeRange.deviation_limit_high;
+                const dlLow = activeRange.deviation_limit_low;
+                const isFallback = activeRange.is_fallback;
+                const isConfirmed = activeRange.is_confirmed;
+
+                // Quality tag (matching /ranges page)
+                let qualHtml = '';
+                if (isFallback) {
+                    qualHtml = '<span style="padding:2px 8px;border-radius:3px;background:rgba(136,136,136,0.15);color:#888;font-size:0.65rem;">Fallback (not TCT validated)</span>';
+                } else if (isConfirmed) {
+                    qualHtml = '<span style="padding:2px 8px;border-radius:3px;background:rgba(0,255,136,0.15);color:#00ff88;font-size:0.65rem;">Confirmed</span>';
+                }
+                document.getElementById('rangeQualityTag').innerHTML = qualHtml;
 
                 document.getElementById('rangeHigh').textContent = '$' + high?.toLocaleString(undefined, {maximumFractionDigits: 2});
                 document.getElementById('rangeEq').textContent = '$' + eq?.toLocaleString(undefined, {maximumFractionDigits: 2});
                 document.getElementById('rangeLow').textContent = '$' + low?.toLocaleString(undefined, {maximumFractionDigits: 2});
 
-                // Add PROMINENT range lines to chart (thicker lines)
+                // Range size
+                document.getElementById('rangeSize').textContent = '$' + rangeSize.toLocaleString(undefined, {maximumFractionDigits: 2});
+
+                // DL+ / DL-
+                if (dlHigh && dlLow) {
+                    document.getElementById('rangeDL').textContent = '$' + dlHigh.toLocaleString(undefined, {maximumFractionDigits: 0}) + ' / $' + dlLow.toLocaleString(undefined, {maximumFractionDigits: 0});
+                }
+
+                // Chart lines
                 if (high) lineSeries.push(addPriceLine(high, '#ff4444', 'RANGE HIGH', 0, 2));
                 if (eq) lineSeries.push(addPriceLine(eq, '#ffc107', 'EQ (0.5)', 1, 2));
                 if (low) lineSeries.push(addPriceLine(low, '#00ff88', 'RANGE LOW', 0, 2));
 
-                // Add Premium/Discount shaded zones
+                // DL lines on chart (dotted gray, matching /ranges page)
+                if (dlHigh) lineSeries.push(addPriceLine(dlHigh, '#6c757d', 'DL+', 2, 1));
+                if (dlLow) lineSeries.push(addPriceLine(dlLow, '#6c757d', 'DL-', 2, 1));
+
+                // Shaded range zones on chart
                 if (high && low && candles.length > 0) {
-                    // Premium zone (high to eq) - subtle red
                     const premiumData = candles.map(c => ({ time: c.time, value: high }));
                     const premiumSeries = chart.addLineSeries({
                         color: 'rgba(255, 68, 68, 0.4)',
@@ -6746,7 +6875,6 @@ async def dashboard():
                     premiumSeries.setData(premiumData);
                     additionalSeries.push(premiumSeries);
 
-                    // Discount zone (eq to low) - subtle green
                     const discountData = candles.map(c => ({ time: c.time, value: low }));
                     const discountSeries = chart.addLineSeries({
                         color: 'rgba(0, 255, 136, 0.4)',
@@ -6758,7 +6886,6 @@ async def dashboard():
                     discountSeries.setData(discountData);
                     additionalSeries.push(discountSeries);
 
-                    // Equilibrium line (prominent yellow dashed)
                     const eqData = candles.map(c => ({ time: c.time, value: eq }));
                     const eqSeries = chart.addLineSeries({
                         color: '#ffc107',
@@ -6771,12 +6898,11 @@ async def dashboard():
                     additionalSeries.push(eqSeries);
                 }
 
-                // Range visualization in sidebar
+                // Range viz sidebar
                 document.getElementById('rangeViz').style.display = 'block';
                 document.getElementById('rangeHighLabel').textContent = '$' + high?.toLocaleString(undefined, {maximumFractionDigits: 0});
                 document.getElementById('rangeLowLabel').textContent = '$' + low?.toLocaleString(undefined, {maximumFractionDigits: 0});
 
-                // Position price marker
                 const currentPrice = data.current_price;
                 if (currentPrice && high && low) {
                     const pct = ((high - currentPrice) / (high - low)) * 100;
@@ -6797,7 +6923,7 @@ async def dashboard():
             document.getElementById('tradingBias').className = 'value ' + (position.trading_bias === 'SELL' ? 'bearish' : position.trading_bias === 'BUY' ? 'bullish' : '');
             document.getElementById('biasStrength').textContent = position.bias_strength ? (position.bias_strength * 100).toFixed(0) + '%' : '--';
 
-            // Deviations
+            // ═══ DEVIATIONS CARD ═══
             const htfDevs = data.deviations?.htf_deviations || {};
             const ltfDevs = data.deviations?.ltf_deviations || {};
             const totalDevs = (htfDevs.total_deviations || 0) + (ltfDevs.total_deviations || 0);
@@ -6806,42 +6932,71 @@ async def dashboard():
             document.getElementById('wickDevs').textContent = (htfDevs.wick_deviations?.length || 0) + (ltfDevs.wick_deviations?.length || 0);
             document.getElementById('candleDevs').textContent = (htfDevs.candle_close_deviations?.length || 0) + (ltfDevs.candle_close_deviations?.length || 0);
             document.getElementById('dlDevs').textContent = (htfDevs.dl_deviations?.length || 0) + (ltfDevs.dl_deviations?.length || 0);
-
-            document.getElementById('htfPivots').textContent =
-                (data.htf_ranges?.total_ranges || 0) + ' ranges, ' +
-                (data.htf_ranges?.confirmed_ranges || 0) + ' confirmed';
         }
 
         function updateZonesUI(data) {
             if (data.error) return;
 
-            const htfTotal = data.htf_zones?.total_zones || 0;
-            const hqCount = data.htf_zones?.high_quality_count || 0;
+            // Count OBs and structure zones separately (matching /supply-demand page)
+            const allOBs = data.htf_zones?.order_blocks || [];
+            const allStructure = data.htf_zones?.structure_zones || [];
+            const demandOBs = allOBs.filter(z => z.type === 'bullish' && !z.mitigated);
+            const supplyOBs = allOBs.filter(z => z.type === 'bearish' && !z.mitigated);
+            const activeStructDemand = allStructure.filter(z => z.type === 'demand' && !z.mitigated);
+            const activeStructSupply = allStructure.filter(z => z.type === 'supply' && !z.mitigated);
+            const mitigatedTotal = allOBs.filter(z => z.mitigated).length + allStructure.filter(z => z.mitigated).length;
+            const totalActive = demandOBs.length + supplyOBs.length + activeStructDemand.length + activeStructSupply.length;
 
-            document.getElementById('htfZones').textContent = htfTotal;
-            document.getElementById('hqZones').textContent = hqCount;
-            document.getElementById('zoneCount').textContent = htfTotal;
+            document.getElementById('demandOBCount').textContent = demandOBs.length;
+            document.getElementById('supplyOBCount').textContent = supplyOBs.length;
+            document.getElementById('structureSDCount').textContent = (activeStructDemand.length + activeStructSupply.length) + ' (' + activeStructDemand.length + 'D / ' + activeStructSupply.length + 'S)';
+            document.getElementById('mitigatedCount').textContent = mitigatedTotal;
+            document.getElementById('zoneCount').textContent = totalActive;
 
-            // Display top zones
+            // Top scored zones (matching /supply-demand page)
+            const topScored = data.htf_zones?.top_3_high_quality || data.htf_zones?.top_3_all || [];
+            let scoredHtml = '';
+            if (topScored.length > 0) {
+                scoredHtml += '<div style="font-size:0.7rem;font-weight:600;color:#00d4ff;margin-bottom:4px;">Top Scored</div>';
+                topScored.slice(0, 4).forEach(z => {
+                    const zoneType = z.type || (z.top > data.current_price ? 'supply' : 'demand');
+                    const isDemand = zoneType === 'demand' || z.type === 'bullish';
+                    const zClass = z.zone_class || (z.fvg ? 'order_block' : 'structure');
+                    const label = (isDemand ? 'Demand' : 'Supply') + ' ' + (zClass === 'order_block' ? 'OB' : 'SS');
+                    const strength = z.strength || 0;
+                    const strengthColor = strength >= 70 ? '#00ff88' : strength >= 40 ? '#ffc107' : '#ff4444';
+                    const locType = z.location_type || '';
+                    const hasLiqSweep = z.pivot_quality?.has_liquidity_sweep;
+
+                    scoredHtml += '<div style="background:#1a1a2e;border-radius:4px;padding:5px 7px;margin-bottom:3px;border-left:3px solid ' + (isDemand ? '#00ff88' : '#ff4444') + ';font-size:0.65rem;">';
+                    scoredHtml += '<div style="display:flex;justify-content:space-between;align-items:center;">';
+                    scoredHtml += '<span style="font-weight:600;color:' + (isDemand ? '#00ff88' : '#ff4444') + ';">' + label + '</span>';
+                    scoredHtml += '<span style="padding:1px 5px;border-radius:3px;background:rgba(0,255,136,0.15);color:' + strengthColor + ';font-size:0.6rem;">' + strength + '%</span>';
+                    scoredHtml += '</div>';
+                    scoredHtml += '<div style="color:#888;margin-top:2px;">$' + (z.top || 0).toLocaleString(undefined, {maximumFractionDigits: 2}) + ' - $' + (z.bottom || 0).toLocaleString(undefined, {maximumFractionDigits: 2}) + '</div>';
+                    if (locType || hasLiqSweep) {
+                        scoredHtml += '<div style="display:flex;gap:4px;margin-top:2px;">';
+                        if (locType) scoredHtml += '<span style="padding:1px 4px;border-radius:2px;background:rgba(0,212,255,0.15);color:#00d4ff;font-size:0.55rem;">' + locType + '</span>';
+                        if (hasLiqSweep) scoredHtml += '<span style="padding:1px 4px;border-radius:2px;background:rgba(255,193,7,0.15);color:#ffc107;font-size:0.55rem;">Liq Sweep</span>';
+                        scoredHtml += '</div>';
+                    }
+                    scoredHtml += '</div>';
+                });
+            }
+            document.getElementById('topScoredZones').innerHTML = scoredHtml;
+
+            // Zone list on chart
             const topZonesEl = document.getElementById('topZones');
             topZonesEl.innerHTML = '';
 
             const topZones = data.htf_zones?.top_3_high_quality || data.htf_zones?.top_3_all || [];
             topZones.slice(0, 3).forEach(zone => {
                 const zoneType = zone.type || (zone.top > data.current_price ? 'supply' : 'demand');
-                const div = document.createElement('div');
-                div.className = 'zone-item ' + zoneType;
-                div.innerHTML = `
-                    <span>${zoneType.toUpperCase()}</span>
-                    <span>$${zone.top?.toLocaleString(undefined, {maximumFractionDigits: 0})} - $${zone.bottom?.toLocaleString(undefined, {maximumFractionDigits: 0})}</span>
-                `;
-                topZonesEl.appendChild(div);
+                const isDemand = zoneType === 'demand' || zone.type === 'bullish';
 
                 // Add zone to chart
                 if (zone.top && zone.bottom) {
-                    const color = zoneType === 'demand' ? 'rgba(0, 255, 136, 0.3)' : 'rgba(255, 68, 68, 0.3)';
-                    // Note: Lightweight Charts doesn't support rectangles natively, using price lines
-                    lineSeries.push(addPriceLine(zone.top, zoneType === 'demand' ? '#00ff88' : '#ff4444', zoneType.charAt(0).toUpperCase(), 2));
+                    lineSeries.push(addPriceLine(zone.top, isDemand ? '#00ff88' : '#ff4444', isDemand ? 'D' : 'S', 2));
                 }
             });
         }
@@ -6858,69 +7013,130 @@ async def dashboard():
             document.getElementById('eqLows').textContent = data.htf_liquidity?.equal_lows?.length || 0;
             document.getElementById('liqCount').textContent = bslPools.length + sslPools.length;
 
-            // Display top liquidity pools
+            // Primary / Internal breakdown (matching /liquidity page)
+            const bslPrimary = bslPools.filter(p => p.is_primary).length;
+            const bslInternal = bslPools.length - bslPrimary;
+            const sslPrimary = sslPools.filter(p => p.is_primary).length;
+            const sslInternal = sslPools.length - sslPrimary;
+            document.getElementById('bslBreakdown').textContent = bslPrimary + ' / ' + bslInternal;
+            document.getElementById('sslBreakdown').textContent = sslPrimary + ' / ' + sslInternal;
+
+            // Display top liquidity pools with details
             const liqPoolsEl = document.getElementById('liqPools');
-            liqPoolsEl.innerHTML = '';
+            let poolHtml = '';
 
-            // Top 2 BSL pools
-            bslPools.slice(0, 2).forEach(pool => {
-                const div = document.createElement('div');
-                div.className = 'zone-item bsl';
-                div.innerHTML = `
-                    <span>BSL ${pool.is_equal ? '(EQ)' : ''}</span>
-                    <span>$${pool.price?.toLocaleString(undefined, {maximumFractionDigits: 0})}</span>
-                `;
-                liqPoolsEl.appendChild(div);
+            // Top 3 BSL pools with strength + distance
+            bslPools.slice(0, 3).forEach(pool => {
+                const isPrimary = pool.is_primary;
+                const isEqual = pool.is_equal;
+                const strength = pool.strength ? Math.round(pool.strength * 100) : 0;
+                const dist = pool.distance_from_price ? pool.distance_from_price.toFixed(1) : '?';
+                poolHtml += '<div class="zone-item bsl" style="flex-direction:column;align-items:flex-start;gap:2px;">';
+                poolHtml += '<div style="display:flex;justify-content:space-between;width:100%;align-items:center;">';
+                poolHtml += '<span style="font-weight:600;">BSL $' + (pool.price || 0).toLocaleString(undefined, {maximumFractionDigits: 2}) + '</span>';
+                poolHtml += '<span style="display:flex;gap:3px;">';
+                if (isPrimary) poolHtml += '<span style="padding:1px 4px;border-radius:2px;background:rgba(33,150,243,0.15);color:#2196f3;font-size:0.55rem;">PRIMARY</span>';
+                else poolHtml += '<span style="padding:1px 4px;border-radius:2px;background:rgba(136,136,136,0.15);color:#888;font-size:0.55rem;">INTERNAL</span>';
+                if (isEqual) poolHtml += '<span style="padding:1px 4px;border-radius:2px;background:rgba(156,39,176,0.15);color:#9c27b0;font-size:0.55rem;">EQ</span>';
+                poolHtml += '</span></div>';
+                poolHtml += '<div style="color:#888;font-size:0.6rem;">Str: ' + strength + '% | Dist: ' + dist + '%</div>';
+                poolHtml += '</div>';
 
-                // Add to chart with thicker line
                 if (pool.price) {
-                    lineSeries.push(addPriceLine(pool.price, '#ff6b6b', 'BSL', 1, 1));
+                    const lineColor = isPrimary ? '#ff6b6b' : 'rgba(255,107,107,0.5)';
+                    const lineStyle = isPrimary ? 0 : 2;
+                    lineSeries.push(addPriceLine(pool.price, lineColor, 'BSL', lineStyle, isPrimary ? 2 : 1));
                 }
             });
 
-            // Top 2 SSL pools
-            sslPools.slice(0, 2).forEach(pool => {
-                const div = document.createElement('div');
-                div.className = 'zone-item ssl';
-                div.innerHTML = `
-                    <span>SSL ${pool.is_equal ? '(EQ)' : ''}</span>
-                    <span>$${pool.price?.toLocaleString(undefined, {maximumFractionDigits: 0})}</span>
-                `;
-                liqPoolsEl.appendChild(div);
+            // Top 3 SSL pools with strength + distance
+            sslPools.slice(0, 3).forEach(pool => {
+                const isPrimary = pool.is_primary;
+                const isEqual = pool.is_equal;
+                const strength = pool.strength ? Math.round(pool.strength * 100) : 0;
+                const dist = pool.distance_from_price ? pool.distance_from_price.toFixed(1) : '?';
+                poolHtml += '<div class="zone-item ssl" style="flex-direction:column;align-items:flex-start;gap:2px;">';
+                poolHtml += '<div style="display:flex;justify-content:space-between;width:100%;align-items:center;">';
+                poolHtml += '<span style="font-weight:600;">SSL $' + (pool.price || 0).toLocaleString(undefined, {maximumFractionDigits: 2}) + '</span>';
+                poolHtml += '<span style="display:flex;gap:3px;">';
+                if (isPrimary) poolHtml += '<span style="padding:1px 4px;border-radius:2px;background:rgba(255,152,0,0.15);color:#ff9800;font-size:0.55rem;">PRIMARY</span>';
+                else poolHtml += '<span style="padding:1px 4px;border-radius:2px;background:rgba(136,136,136,0.15);color:#888;font-size:0.55rem;">INTERNAL</span>';
+                if (isEqual) poolHtml += '<span style="padding:1px 4px;border-radius:2px;background:rgba(156,39,176,0.15);color:#9c27b0;font-size:0.55rem;">EQ</span>';
+                poolHtml += '</span></div>';
+                poolHtml += '<div style="color:#888;font-size:0.6rem;">Str: ' + strength + '% | Dist: ' + dist + '%</div>';
+                poolHtml += '</div>';
 
-                // Add to chart with thicker line
                 if (pool.price) {
-                    lineSeries.push(addPriceLine(pool.price, '#4ecdc4', 'SSL', 1, 1));
+                    const lineColor = isPrimary ? '#4ecdc4' : 'rgba(78,205,196,0.5)';
+                    const lineStyle = isPrimary ? 0 : 2;
+                    lineSeries.push(addPriceLine(pool.price, lineColor, 'SSL', lineStyle, isPrimary ? 2 : 1));
                 }
             });
 
-            // === DRAW LIQUIDITY CURVES ON CHART ===
+            liqPoolsEl.innerHTML = poolHtml;
+
+            // Liquidity curves summary (matching /liquidity page)
             const sellSideCurves = data.htf_curves?.sell_side_curves || [];
             const buySideCurves = data.htf_curves?.buy_side_curves || [];
+            let curvesHtml = '';
+            if (sellSideCurves.length > 0 || buySideCurves.length > 0) {
+                curvesHtml += '<div style="font-size:0.7rem;font-weight:600;color:#9c27b0;margin-bottom:4px;">Curves</div>';
+                sellSideCurves.slice(0, 2).forEach((c, i) => {
+                    const q = c.quality || 'WEAK';
+                    const qColor = q === 'EXCELLENT' ? '#00ff88' : q === 'GOOD' ? '#ffc107' : '#888';
+                    curvesHtml += '<div style="display:flex;justify-content:space-between;font-size:0.6rem;padding:1px 0;">';
+                    curvesHtml += '<span style="color:#ff6b6b;">Sell #' + (i + 1) + ' (' + (c.tap_count || 0) + ' taps)</span>';
+                    curvesHtml += '<span style="color:' + qColor + ';">' + q + '</span>';
+                    curvesHtml += '</div>';
+                });
+                buySideCurves.slice(0, 2).forEach((c, i) => {
+                    const q = c.quality || 'WEAK';
+                    const qColor = q === 'EXCELLENT' ? '#00ff88' : q === 'GOOD' ? '#ffc107' : '#888';
+                    curvesHtml += '<div style="display:flex;justify-content:space-between;font-size:0.6rem;padding:1px 0;">';
+                    curvesHtml += '<span style="color:#4ecdc4;">Buy #' + (i + 1) + ' (' + (c.tap_count || 0) + ' taps)</span>';
+                    curvesHtml += '<span style="color:' + qColor + ';">' + q + '</span>';
+                    curvesHtml += '</div>';
+                });
+            }
+            document.getElementById('liqCurvesContent').innerHTML = curvesHtml;
 
-            // Draw best quality sell-side curve (descending highs - bearish liquidity)
+            // Extreme liquidity targets (matching /liquidity page)
+            const sellTargets = data.extreme_targets?.htf?.sell_side_targets || [];
+            const buyTargets = data.extreme_targets?.htf?.buy_side_targets || [];
+            let targetsHtml = '';
+            if (sellTargets.length > 0 || buyTargets.length > 0) {
+                targetsHtml += '<div style="font-size:0.7rem;font-weight:600;color:#4caf50;margin-bottom:4px;">Extreme Targets</div>';
+                [...sellTargets, ...buyTargets].slice(0, 3).forEach(t => {
+                    const isSwept = t.is_swept;
+                    const label = t.type === 'distribution' ? 'Dist' : 'Accum';
+                    const color = isSwept ? '#ff4444' : '#4caf50';
+                    const statusTag = isSwept ? 'SWEPT' : 'ACTIVE';
+                    targetsHtml += '<div style="display:flex;justify-content:space-between;font-size:0.6rem;padding:2px 0;">';
+                    targetsHtml += '<span style="color:' + color + ';">' + label + ': $' + (t.target_price || 0).toLocaleString(undefined, {maximumFractionDigits: 2}) + '</span>';
+                    targetsHtml += '<span style="padding:1px 4px;border-radius:2px;background:' + (isSwept ? 'rgba(255,68,68,0.15)' : 'rgba(76,175,80,0.15)') + ';color:' + color + ';font-size:0.55rem;' + (isSwept ? 'text-decoration:line-through;' : '') + '">' + statusTag + '</span>';
+                    targetsHtml += '</div>';
+                });
+            }
+            document.getElementById('liqTargetsContent').innerHTML = targetsHtml;
+
+            // === DRAW LIQUIDITY CURVES ON CHART ===
+            // Draw best quality sell-side curve
             if (sellSideCurves.length > 0 && candles.length > 0) {
-                // Sort by quality/tap count to get best curve
-                const bestSellCurve = sellSideCurves.sort((a, b) =>
+                const bestSellCurve = [...sellSideCurves].sort((a, b) =>
                     (b.quality || b.tap_count || 0) - (a.quality || a.tap_count || 0)
                 )[0];
-
                 if (bestSellCurve && bestSellCurve.taps && bestSellCurve.taps.length >= 2) {
                     addLiquidityCurve(bestSellCurve, candles, true);
-                    console.log('Drew sell-side liquidity curve with', bestSellCurve.taps.length, 'taps');
                 }
             }
 
-            // Draw best quality buy-side curve (ascending lows - bullish liquidity)
+            // Draw best quality buy-side curve
             if (buySideCurves.length > 0 && candles.length > 0) {
-                // Sort by quality/tap count to get best curve
-                const bestBuyCurve = buySideCurves.sort((a, b) =>
+                const bestBuyCurve = [...buySideCurves].sort((a, b) =>
                     (b.quality || b.tap_count || 0) - (a.quality || a.tap_count || 0)
                 )[0];
-
                 if (bestBuyCurve && bestBuyCurve.taps && bestBuyCurve.taps.length >= 2) {
                     addLiquidityCurve(bestBuyCurve, candles, false);
-                    console.log('Drew buy-side liquidity curve with', bestBuyCurve.taps.length, 'taps');
                 }
             }
         }
