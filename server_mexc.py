@@ -3287,9 +3287,11 @@ async def schematic_chart_page(symbol: str = "BTCUSDT", timeframe: str = "4h", t
         }
 
         function fmt(p) {
-            if (p === null || p === undefined) return '--';
-            if (p >= 1000) return '$' + p.toLocaleString(undefined, {maximumFractionDigits: 0});
-            if (p >= 1) return '$' + p.toFixed(2);
+            if (p == null || isNaN(p)) return '--';
+            if (p >= 10000) return '$' + p.toLocaleString(undefined, {maximumFractionDigits: 0});
+            if (p >= 100)   return '$' + p.toLocaleString(undefined, {maximumFractionDigits: 2});
+            if (p >= 1)     return '$' + p.toFixed(2);
+            if (p >= 0.01)  return '$' + p.toFixed(4);
             return '$' + p.toPrecision(4);
         }
 
@@ -3829,9 +3831,11 @@ async def po3_chart_page(symbol: str = "BTCUSDT", timeframe: str = "4h"):
         }
 
         function fmt(p) {
-            if (p === null || p === undefined) return '--';
-            if (p >= 1000) return '$' + p.toLocaleString(undefined, {maximumFractionDigits: 0});
-            if (p >= 1) return '$' + p.toFixed(2);
+            if (p == null || isNaN(p)) return '--';
+            if (p >= 10000) return '$' + p.toLocaleString(undefined, {maximumFractionDigits: 0});
+            if (p >= 100)   return '$' + p.toLocaleString(undefined, {maximumFractionDigits: 2});
+            if (p >= 1)     return '$' + p.toFixed(2);
+            if (p >= 0.01)  return '$' + p.toFixed(4);
             return '$' + p.toPrecision(4);
         }
 
@@ -6556,6 +6560,16 @@ async def dashboard():
             }
         }
 
+        // Smart price formatter: adapts decimal places to price magnitude
+        function fmtPrice(p) {
+            if (p == null || isNaN(p)) return '--';
+            if (p >= 10000) return '$' + p.toLocaleString(undefined, {maximumFractionDigits: 0});
+            if (p >= 100)   return '$' + p.toLocaleString(undefined, {maximumFractionDigits: 2});
+            if (p >= 1)     return '$' + p.toFixed(2);
+            if (p >= 0.01)  return '$' + p.toFixed(4);
+            return '$' + p.toPrecision(4);
+        }
+
         // Add horizontal line to chart
         function addPriceLine(price, color, title, lineStyle = 0, lineWidth = 1) {
             return candleSeries.createPriceLine({
@@ -6760,6 +6774,11 @@ async def dashboard():
                 chart.timeScale().fitContent();
                 chart.priceScale('right').applyOptions({ autoScale: true });
                 const lastPrice = lastCandles[lastCandles.length - 1].close;
+                document.getElementById('currentPrice').textContent = fmtPrice(lastPrice);
+            } else {
+                // No candle data — clear chart and show error
+                candleSeries.setData([]);
+                document.getElementById('currentPrice').textContent = 'No data';
                 document.getElementById('currentPrice').textContent = '$' + lastPrice.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 8});
             } else {
                 // Candle fetch failed - clear chart and show error price
@@ -7080,7 +7099,7 @@ async def dashboard():
                     const qualBg = b.quality === 'good' ? 'rgba(0,255,136,0.15)' : b.quality === 'bad' ? 'rgba(255,68,68,0.15)' : 'rgba(255,193,7,0.15)';
                     bosHtml += '<div style="display:flex;justify-content:space-between;align-items:center;padding:2px 0;font-size:0.65rem;">';
                     bosHtml += '<span style="color:' + dirColor + ';">' + dir + ' ' + b.type + '</span>';
-                    bosHtml += '<span>$' + (b.broken_level || 0).toLocaleString(undefined, {maximumFractionDigits: 2}) + '</span>';
+                    bosHtml += '<span>' + fmtPrice(b.broken_level || 0) + '</span>';
                     if (b.quality) bosHtml += '<span style="padding:1px 5px;border-radius:3px;background:' + qualBg + ';color:' + dirColor + ';font-size:0.6rem;">' + b.quality + '</span>';
                     bosHtml += '</div>';
                 });
@@ -7135,16 +7154,16 @@ async def dashboard():
                 }
                 document.getElementById('rangeQualityTag').innerHTML = qualHtml;
 
-                document.getElementById('rangeHigh').textContent = '$' + high?.toLocaleString(undefined, {maximumFractionDigits: 2});
-                document.getElementById('rangeEq').textContent = '$' + eq?.toLocaleString(undefined, {maximumFractionDigits: 2});
-                document.getElementById('rangeLow').textContent = '$' + low?.toLocaleString(undefined, {maximumFractionDigits: 2});
+                document.getElementById('rangeHigh').textContent = fmtPrice(high);
+                document.getElementById('rangeEq').textContent = fmtPrice(eq);
+                document.getElementById('rangeLow').textContent = fmtPrice(low);
 
                 // Range size
-                document.getElementById('rangeSize').textContent = '$' + rangeSize.toLocaleString(undefined, {maximumFractionDigits: 2});
+                document.getElementById('rangeSize').textContent = fmtPrice(rangeSize);
 
                 // DL+ / DL-
                 if (dlHigh && dlLow) {
-                    document.getElementById('rangeDL').textContent = '$' + dlHigh.toLocaleString(undefined, {maximumFractionDigits: 0}) + ' / $' + dlLow.toLocaleString(undefined, {maximumFractionDigits: 0});
+                    document.getElementById('rangeDL').textContent = fmtPrice(dlHigh) + ' / ' + fmtPrice(dlLow);
                 }
 
                 // Chart lines — Range High/Low/EQ
@@ -7206,8 +7225,8 @@ async def dashboard():
 
                 // Range viz sidebar
                 document.getElementById('rangeViz').style.display = 'block';
-                document.getElementById('rangeHighLabel').textContent = '$' + high?.toLocaleString(undefined, {maximumFractionDigits: 0});
-                document.getElementById('rangeLowLabel').textContent = '$' + low?.toLocaleString(undefined, {maximumFractionDigits: 0});
+                document.getElementById('rangeHighLabel').textContent = fmtPrice(high);
+                document.getElementById('rangeLowLabel').textContent = fmtPrice(low);
 
                 const currentPrice = data.current_price;
                 if (currentPrice && high && low) {
@@ -7378,7 +7397,7 @@ async def dashboard():
                     scoredHtml += '<span style="font-weight:600;color:' + (isDemand ? '#00ff88' : '#ff4444') + ';">' + label + '</span>';
                     scoredHtml += '<span style="padding:1px 5px;border-radius:3px;background:rgba(0,255,136,0.15);color:' + strengthColor + ';font-size:0.6rem;">' + strength + '%</span>';
                     scoredHtml += '</div>';
-                    scoredHtml += '<div style="color:#888;margin-top:2px;">$' + (z.top || 0).toLocaleString(undefined, {maximumFractionDigits: 2}) + ' - $' + (z.bottom || 0).toLocaleString(undefined, {maximumFractionDigits: 2}) + '</div>';
+                    scoredHtml += '<div style="color:#888;margin-top:2px;">' + fmtPrice(z.top || 0) + ' - ' + fmtPrice(z.bottom || 0) + '</div>';
                     if (locType || hasLiqSweep) {
                         scoredHtml += '<div style="display:flex;gap:4px;margin-top:2px;">';
                         if (locType) scoredHtml += '<span style="padding:1px 4px;border-radius:2px;background:rgba(0,212,255,0.15);color:#00d4ff;font-size:0.55rem;">' + locType + '</span>';
@@ -7438,7 +7457,7 @@ async def dashboard():
                 const dist = pool.distance_from_price ? pool.distance_from_price.toFixed(1) : '?';
                 poolHtml += '<div class="zone-item bsl" style="flex-direction:column;align-items:flex-start;gap:2px;">';
                 poolHtml += '<div style="display:flex;justify-content:space-between;width:100%;align-items:center;">';
-                poolHtml += '<span style="font-weight:600;">BSL $' + (pool.price || 0).toLocaleString(undefined, {maximumFractionDigits: 2}) + '</span>';
+                poolHtml += '<span style="font-weight:600;">BSL ' + fmtPrice(pool.price || 0) + '</span>';
                 poolHtml += '<span style="display:flex;gap:3px;">';
                 if (isPrimary) poolHtml += '<span style="padding:1px 4px;border-radius:2px;background:rgba(33,150,243,0.15);color:#2196f3;font-size:0.55rem;">PRIMARY</span>';
                 else poolHtml += '<span style="padding:1px 4px;border-radius:2px;background:rgba(136,136,136,0.15);color:#888;font-size:0.55rem;">INTERNAL</span>';
@@ -7462,7 +7481,7 @@ async def dashboard():
                 const dist = pool.distance_from_price ? pool.distance_from_price.toFixed(1) : '?';
                 poolHtml += '<div class="zone-item ssl" style="flex-direction:column;align-items:flex-start;gap:2px;">';
                 poolHtml += '<div style="display:flex;justify-content:space-between;width:100%;align-items:center;">';
-                poolHtml += '<span style="font-weight:600;">SSL $' + (pool.price || 0).toLocaleString(undefined, {maximumFractionDigits: 2}) + '</span>';
+                poolHtml += '<span style="font-weight:600;">SSL ' + fmtPrice(pool.price || 0) + '</span>';
                 poolHtml += '<span style="display:flex;gap:3px;">';
                 if (isPrimary) poolHtml += '<span style="padding:1px 4px;border-radius:2px;background:rgba(255,152,0,0.15);color:#ff9800;font-size:0.55rem;">PRIMARY</span>';
                 else poolHtml += '<span style="padding:1px 4px;border-radius:2px;background:rgba(136,136,136,0.15);color:#888;font-size:0.55rem;">INTERNAL</span>';
@@ -7517,7 +7536,7 @@ async def dashboard():
                     const color = isSwept ? '#ff4444' : '#4caf50';
                     const statusTag = isSwept ? 'SWEPT' : 'ACTIVE';
                     targetsHtml += '<div style="display:flex;justify-content:space-between;font-size:0.6rem;padding:2px 0;">';
-                    targetsHtml += '<span style="color:' + color + ';">' + label + ': $' + (t.target_price || 0).toLocaleString(undefined, {maximumFractionDigits: 2}) + '</span>';
+                    targetsHtml += '<span style="color:' + color + ';">' + label + ': ' + fmtPrice(t.target_price || 0) + '</span>';
                     targetsHtml += '<span style="padding:1px 4px;border-radius:2px;background:' + (isSwept ? 'rgba(255,68,68,0.15)' : 'rgba(76,175,80,0.15)') + ';color:' + color + ';font-size:0.55rem;' + (isSwept ? 'text-decoration:line-through;' : '') + '">' + statusTag + '</span>';
                     targetsHtml += '</div>';
                 });
@@ -7592,13 +7611,6 @@ async def dashboard():
             const typeClass = isAccum ? 'accumulation' : 'distribution';
             const schType = s.schematic_type || '';
             let typeLabel = schType.replace(/_/g, ' ').toUpperCase() || (isAccum ? 'ACCUMULATION' : 'DISTRIBUTION');
-            // Add accumulation/reaccumulation and distribution/redistribution context
-            if (isAccum && schType.includes('accumulation')) {
-                typeLabel = typeLabel; // Already labeled accumulation
-            }
-            if (!isAccum && schType.includes('distribution')) {
-                typeLabel = typeLabel; // Already labeled distribution
-            }
             const quality = Math.round((s.quality_score || 0) * 100);
             const entry = s.entry?.price;
             const stop = s.stop_loss?.price;
@@ -7606,6 +7618,9 @@ async def dashboard():
             const rr = s.risk_reward;
             const isSafe = s.entry?.is_safe !== false;
             const isConfirmed = s.is_confirmed;
+            const statusLabel = isConfirmed ? 'CONFIRMED' : 'FORMING';
+            const statusColor = isConfirmed ? '#00ff88' : '#ffc107';
+            const statusBg = isConfirmed ? 'rgba(0,255,136,0.2)' : 'rgba(255,193,7,0.2)';
 
             // Lecture 5B enhancements
             const enhancements = s.lecture_5b_enhancements || {};
@@ -7621,27 +7636,44 @@ async def dashboard():
             const followBias = l6.follow_through_bias;
             const enhancedTarget = l6.enhanced_target;
 
+            // Tap status
+            const tap1 = s.tap1;
+            const tap2 = s.tap2;
+            const tap3 = s.tap3;
+            let tapStatus = '';
+            if (tap3) tapStatus = 'Tap3 ' + (isConfirmed ? 'confirmed' : 'forming');
+            else if (tap2) tapStatus = 'Tap2 hit, awaiting Tap3';
+            else if (tap1) tapStatus = 'Tap1 hit';
+
             const chartUrl = '/schematic-chart?symbol=' + currentSymbol + '&timeframe=' + tf;
 
             let html = '<a href="' + chartUrl + '" target="_blank" rel="noopener" class="schematic-link" title="Open schematic chart in new tab">';
             html += '<div class="schematic-item ' + typeClass + '">';
             html += '<div class="schematic-header">';
             html += '<span class="schematic-type">' + typeLabel + '</span>';
+            html += '<span style="display:flex;gap:4px;align-items:center;">';
+            html += '<span style="padding:2px 6px;border-radius:3px;background:' + statusBg + ';color:' + statusColor + ';font-size:0.6rem;font-weight:600;">' + statusLabel + '</span>';
             html += '<span class="schematic-quality">' + quality + '%</span>';
+            html += '</span>';
+            html += '</div>';
+
+            // Direction badge
+            html += '<div style="display:flex;justify-content:space-between;align-items:center;margin:4px 0;font-size:0.65rem;">';
+            html += '<span style="color:' + (isAccum ? '#00ff88' : '#ff4444') + ';font-weight:600;">' + (isAccum ? 'LONG' : 'SHORT') + '</span>';
+            if (tapStatus) html += '<span style="color:#888;">' + tapStatus + '</span>';
             html += '</div>';
 
             if (entry && stop && target) {
                 html += '<div class="schematic-levels">';
-                html += '<div class="level-box entry"><span class="level-label">ENTRY</span><span class="level-price">$' + entry.toLocaleString(undefined, {maximumFractionDigits: 0}) + '</span></div>';
-                html += '<div class="level-box stop"><span class="level-label">STOP</span><span class="level-price">$' + stop.toLocaleString(undefined, {maximumFractionDigits: 0}) + '</span></div>';
-                html += '<div class="level-box target"><span class="level-label">TARGET</span><span class="level-price">$' + target.toLocaleString(undefined, {maximumFractionDigits: 0}) + '</span></div>';
+                html += '<div class="level-box entry"><span class="level-label">ENTRY</span><span class="level-price">' + fmtPrice(entry) + '</span></div>';
+                html += '<div class="level-box stop"><span class="level-label">STOP</span><span class="level-price">' + fmtPrice(stop) + '</span></div>';
+                html += '<div class="level-box target"><span class="level-label">TARGET</span><span class="level-price">' + fmtPrice(target) + '</span></div>';
                 html += '</div>';
             }
 
             html += '<div class="schematic-meta">';
             if (rr) html += '<span class="rr">R:R ' + rr.toFixed(1) + '</span>';
             html += '<span class="' + (isSafe ? 'safe' : 'unsafe') + '">' + (isSafe ? 'Safe Entry' : 'Caution: S/D Zone') + '</span>';
-            if (isConfirmed) html += '<span class="safe">Confirmed</span>';
             if (has6CR) html += '<span class="safe">6CR Valid</span>';
             if (hasTrendline) html += '<span class="safe">TL Confluence</span>';
             html += '</div>';
@@ -7654,7 +7686,7 @@ async def dashboard():
                 if (hasWOV) html += '<span style="color:#00bcd4;">WOV Entry</span>';
                 if (hasM1toM2) html += '<span style="color:#9c27b0;">M1&rarr;M2</span>';
                 if (followBias && followBias !== 'neutral') html += '<span style="color:#8bc34a;">' + followBias + '</span>';
-                if (enhancedTarget) html += '<span style="color:#ffc107;">Ext: $' + enhancedTarget.toLocaleString(undefined, {maximumFractionDigits: 0}) + '</span>';
+                if (enhancedTarget) html += '<span style="color:#ffc107;">Ext: ' + fmtPrice(enhancedTarget) + '</span>';
                 html += '</div>';
             }
             html += '<div class="view-chart-hint">View chart &rarr;</div>';
@@ -8252,10 +8284,11 @@ async def dashboard():
                             stop: s.stop_loss.price,
                             target: s.lecture_6_enhancements?.enhanced_target || s.target.price,
                             rr: rr,
+                            isConfirmed: !!isConfirmed,
                             source: 'TCT Schematic (' + (s.schematic_type || 'unknown').replace(/_/g, ' ') + ')',
                             tags: [
+                                isConfirmed ? { text: 'CONFIRMED', cls: 'good' } : { text: 'FORMING', cls: 'warn' },
                                 quality >= 0.7 ? { text: 'HQ ' + Math.round(quality * 100) + '%', cls: 'good' } : { text: 'Q ' + Math.round(quality * 100) + '%', cls: 'warn' },
-                                isConfirmed ? { text: 'Confirmed', cls: 'good' } : null,
                                 has6CR ? { text: '6CR Valid', cls: 'good' } : null,
                                 hasTL ? { text: 'TL Confluence', cls: 'good' } : null,
                                 s.lecture_6_enhancements?.has_conversion ? { text: 'Converted', cls: 'good' } : null,
@@ -8351,6 +8384,7 @@ async def dashboard():
                 setup.rr = best.rr;
                 setup.source = best.source;
                 setup.tags = best.tags;
+                setup.isConfirmed = best.isConfirmed || false;
 
                 // Calculate SL trail (midpoint between entry and target)
                 if (setup.entry && setup.target) {
@@ -8378,12 +8412,22 @@ async def dashboard():
             let html = '';
 
             if (setup.entry && setup.stop && setup.target) {
+                // Status banner (forming vs confirmed)
+                const isConfirmed = setup.isConfirmed;
+                const statusLabel = isConfirmed ? 'CONFIRMED - Active Trade Setup' : 'FORMING - Watch for Confirmation';
+                const statusColor = isConfirmed ? '#00ff88' : '#ffc107';
+                const statusBg = isConfirmed ? 'rgba(0,255,136,0.15)' : 'rgba(255,193,7,0.15)';
+                html += '<div style="text-align:center;padding:4px 8px;border-radius:4px;background:' + statusBg + ';color:' + statusColor + ';font-size:0.7rem;font-weight:600;margin-bottom:8px;">' + statusLabel + '</div>';
+
                 html += '<div class="setup-levels">';
-                html += '<div class="setup-level-box entry"><span class="setup-level-label">ENTRY</span><span class="setup-level-price">$' + setup.entry.toLocaleString(undefined, {maximumFractionDigits: 2}) + '</span></div>';
-                html += '<div class="setup-level-box sl"><span class="setup-level-label">STOP</span><span class="setup-level-price">$' + setup.stop.toLocaleString(undefined, {maximumFractionDigits: 2}) + '</span></div>';
-                html += '<div class="setup-level-box tp"><span class="setup-level-label">TARGET</span><span class="setup-level-price">$' + setup.target.toLocaleString(undefined, {maximumFractionDigits: 2}) + '</span></div>';
+                html += '<div class="setup-level-box entry"><span class="setup-level-label">ENTRY</span><span class="setup-level-price">' + fmtPrice(setup.entry) + '</span></div>';
+                html += '<div class="setup-level-box sl"><span class="setup-level-label">STOP</span><span class="setup-level-price">' + fmtPrice(setup.stop) + '</span></div>';
+                html += '<div class="setup-level-box tp"><span class="setup-level-label">TARGET</span><span class="setup-level-price">' + fmtPrice(setup.target) + '</span></div>';
                 html += '</div>';
 
+                if (setup.rr) {
+                    html += '<div class="metric-row"><span class="label">Risk : Reward</span><span class="value" style="color:#ffc107;font-weight:bold;">' + setup.rr.toFixed(1) + 'R</span></div>';
+                }
                 if (setup.source) {
                     html += '<div class="metric-row"><span class="label">Source</span><span class="value" style="font-size:0.7rem;">' + setup.source + '</span></div>';
                 }
@@ -8439,10 +8483,17 @@ async def dashboard():
 
             // 5. Draw entry/stop/target on chart if we have a setup
             if (setup.entry && setup.stop && setup.target) {
-                // Entry level (cyan)
-                drawKeyLevel(setup.entry, candles, '#00d4ff', 'Entry', 1);
+                const isForming = !setup.isConfirmed;
+                const entryLabel = (isForming ? 'Entry (forming)' : 'Entry') + ' ' + fmtPrice(setup.entry);
+                const slLabel = 'Stop ' + fmtPrice(setup.stop);
+                const tpLabel = 'Target ' + fmtPrice(setup.target);
+
+                // Entry level (cyan, prominent)
+                lineSeries.push(addPriceLine(setup.entry, '#00d4ff', entryLabel, 0, 2));
+                drawKeyLevel(setup.entry, candles, '#00d4ff', '', 2);
 
                 // Stop level (red dashed)
+                lineSeries.push(addPriceLine(setup.stop, '#ff4444', slLabel, 2, 1));
                 const slData = candles.map(c => ({ time: c.time, value: setup.stop }));
                 const slSeries = chart.addLineSeries({
                     color: 'rgba(255, 68, 68, 0.8)',
@@ -8455,6 +8506,9 @@ async def dashboard():
                 });
                 slSeries.setData(slData);
                 additionalSeries.push(slSeries);
+
+                // Target level (green, prominent)
+                lineSeries.push(addPriceLine(setup.target, '#00ff88', tpLabel, 0, 2));
 
                 // Target zone (shaded blue/purple area around target)
                 const targetRange = Math.abs(setup.target - setup.entry) * 0.05;
@@ -8498,9 +8552,9 @@ async def dashboard():
             // Entry/Stop/Target levels
             if (entry && stop && target) {
                 html += '<div class="po3-levels">';
-                html += '<div class="po3-level-box entry"><span class="po3-level-label">ENTRY</span><span class="po3-level-price">$' + entry.toLocaleString(undefined, {maximumFractionDigits: 0}) + '</span></div>';
-                html += '<div class="po3-level-box stop"><span class="po3-level-label">STOP</span><span class="po3-level-price">$' + stop.toLocaleString(undefined, {maximumFractionDigits: 0}) + '</span></div>';
-                html += '<div class="po3-level-box target"><span class="po3-level-label">TARGET</span><span class="po3-level-price">$' + target.toLocaleString(undefined, {maximumFractionDigits: 0}) + '</span></div>';
+                html += '<div class="po3-level-box entry"><span class="po3-level-label">ENTRY</span><span class="po3-level-price">' + fmtPrice(entry) + '</span></div>';
+                html += '<div class="po3-level-box stop"><span class="po3-level-label">STOP</span><span class="po3-level-price">' + fmtPrice(stop) + '</span></div>';
+                html += '<div class="po3-level-box target"><span class="po3-level-label">TARGET</span><span class="po3-level-price">' + fmtPrice(target) + '</span></div>';
                 html += '</div>';
             }
 
@@ -8536,8 +8590,8 @@ async def dashboard():
             // Range info
             if (p.range) {
                 html += '<div style="margin-top:4px;font-size:0.6rem;color:#555;">';
-                html += 'Range: $' + (p.range.low || 0).toLocaleString(undefined, {maximumFractionDigits: 0});
-                html += ' &mdash; $' + (p.range.high || 0).toLocaleString(undefined, {maximumFractionDigits: 0});
+                html += 'Range: ' + fmtPrice(p.range.low || 0);
+                html += ' &mdash; ' + fmtPrice(p.range.high || 0);
                 html += ' (' + (p.range.size_pct || 0) + '%)';
                 html += '</div>';
             }
@@ -9048,8 +9102,11 @@ async def dashboard():
 
                 // Format prices compactly
                 const fmt = (p) => {
-                    if (p >= 1000) return '$' + p.toLocaleString(undefined, {maximumFractionDigits: 0});
-                    if (p >= 1) return '$' + p.toFixed(2);
+                    if (p == null || isNaN(p)) return '--';
+                    if (p >= 10000) return '$' + p.toLocaleString(undefined, {maximumFractionDigits: 0});
+                    if (p >= 100)   return '$' + p.toLocaleString(undefined, {maximumFractionDigits: 2});
+                    if (p >= 1)     return '$' + p.toFixed(2);
+                    if (p >= 0.01)  return '$' + p.toFixed(4);
                     return '$' + p.toPrecision(4);
                 };
 
