@@ -6776,11 +6776,6 @@ async def dashboard():
                 const lastPrice = lastCandles[lastCandles.length - 1].close;
                 document.getElementById('currentPrice').textContent = fmtPrice(lastPrice);
             } else {
-                // No candle data — clear chart and show error
-                candleSeries.setData([]);
-                document.getElementById('currentPrice').textContent = 'No data';
-                document.getElementById('currentPrice').textContent = '$' + lastPrice.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 8});
-            } else {
                 // Candle fetch failed - clear chart and show error price
                 candleSeries.setData([]);
                 document.getElementById('currentPrice').textContent = 'No data';
@@ -6793,72 +6788,63 @@ async def dashboard():
             let rangesData = null, zonesData = null, liqData = null, valData = null, schematicsData = null, po3Data = null;
 
             if (isNewPair) {
-                // ─── STEP 2: Market Structure + Active Range + Deviations ───
-                try {
-                    rangesData = await fetchWithRetry(`/api/ranges?symbol=${targetSymbol}`, {}, 3, 25000);
-                    if (isStale()) { isLoading = false; return; }
-                    if (rangesData && !rangesData.error) {
-                        updateRangesUI(rangesData, lastCandles);
-                    } else { setError('trendBadge'); setError('zoneBadge'); }
-                } catch (e) { console.error('Ranges error:', e); setError('trendBadge'); setError('zoneBadge'); }
+                // ─── STEP 2: Fetch ranges, zones, liquidity in PARALLEL ───
+                const [rangesResult, zonesResult, liqResult] = await Promise.allSettled([
+                    fetchWithRetry(`/api/ranges?symbol=${targetSymbol}`, {}, 3, 25000),
+                    fetchWithRetry(`/api/zones?symbol=${targetSymbol}`, {}, 3, 25000),
+                    fetchWithRetry(`/api/liquidity?symbol=${targetSymbol}`, {}, 3, 25000),
+                ]);
 
                 if (isStale()) { isLoading = false; return; }
 
-                // ─── STEP 3: S&D Zones ───
-                try {
-                    zonesData = await fetchWithRetry(`/api/zones?symbol=${targetSymbol}`, {}, 3, 25000);
-                    if (isStale()) { isLoading = false; return; }
-                    if (zonesData && !zonesData.error) {
-                        updateZonesUI(zonesData);
-                    } else { setError('zoneCount'); }
-                } catch (e) { console.error('Zones error:', e); setError('zoneCount'); }
+                // Process ranges
+                rangesData = rangesResult.status === 'fulfilled' ? rangesResult.value : null;
+                if (rangesData && !rangesData.error) {
+                    try { updateRangesUI(rangesData, lastCandles); } catch(e) { console.error('Ranges render error:', e); }
+                } else { setError('trendBadge'); setError('zoneBadge'); }
+
+                // Process zones
+                zonesData = zonesResult.status === 'fulfilled' ? zonesResult.value : null;
+                if (zonesData && !zonesData.error) {
+                    try { updateZonesUI(zonesData); } catch(e) { console.error('Zones render error:', e); }
+                } else { setError('zoneCount'); }
+
+                // Process liquidity
+                liqData = liqResult.status === 'fulfilled' ? liqResult.value : null;
+                if (liqData && !liqData.error) {
+                    try { updateLiquidityUI(liqData, lastCandles); } catch(e) { console.error('Liq render error:', e); }
+                } else { setError('liqCount'); }
 
                 if (isStale()) { isLoading = false; return; }
 
-                // ─── STEP 4: Liquidity Pools ───
-                try {
-                    liqData = await fetchWithRetry(`/api/liquidity?symbol=${targetSymbol}`, {}, 3, 25000);
-                    if (isStale()) { isLoading = false; return; }
-                    if (liqData && !liqData.error) {
-                        updateLiquidityUI(liqData, lastCandles);
-                    } else { setError('liqCount'); }
-                } catch (e) { console.error('Liquidity error:', e); setError('liqCount'); }
+                // ─── STEP 3: Fetch schematics, PO3, validation in PARALLEL ───
+                const [schResult, po3Result, valResult] = await Promise.allSettled([
+                    fetchWithRetry(`/api/schematics?symbol=${targetSymbol}&timeframe=${targetTimeframe}`, {}, 3, 30000),
+                    fetchWithRetry(`/api/po3?symbol=${targetSymbol}&timeframe=${targetTimeframe}`, {}, 3, 30000),
+                    fetchWithRetry(`/api/validate?symbol=${targetSymbol}`, {}, 3, 25000),
+                ]);
 
                 if (isStale()) { isLoading = false; return; }
 
-                // ─── STEP 5: TCT Schematics ───
-                try {
-                    schematicsData = await fetchWithRetry(`/api/schematics?symbol=${targetSymbol}&timeframe=${targetTimeframe}`, {}, 3, 30000);
-                    if (isStale()) { isLoading = false; return; }
-                    if (schematicsData && !schematicsData.error) {
-                        updateSchematicsUI(schematicsData);
-                    } else { setError('schematicsBadge'); }
-                } catch (e) { console.error('Schematics error:', e); setError('schematicsBadge'); }
+                // Process schematics
+                schematicsData = schResult.status === 'fulfilled' ? schResult.value : null;
+                if (schematicsData && !schematicsData.error) {
+                    try { updateSchematicsUI(schematicsData); } catch(e) { console.error('Schematics render error:', e); }
+                } else { setError('schematicsBadge'); }
 
-                if (isStale()) { isLoading = false; return; }
+                // Process PO3
+                po3Data = po3Result.status === 'fulfilled' ? po3Result.value : null;
+                if (po3Data && !po3Data.error) {
+                    try { updatePO3UI(po3Data); } catch(e) { console.error('PO3 render error:', e); }
+                } else { setError('po3Badge'); }
 
-                // ─── STEP 6: PO3 Schematics ───
-                try {
-                    po3Data = await fetchWithRetry(`/api/po3?symbol=${targetSymbol}&timeframe=${targetTimeframe}`, {}, 3, 30000);
-                    if (isStale()) { isLoading = false; return; }
-                    if (po3Data && !po3Data.error) {
-                        updatePO3UI(po3Data);
-                    } else { setError('po3Badge'); }
-                } catch (e) { console.error('PO3 error:', e); setError('po3Badge'); }
+                // Process validation
+                valData = valResult.status === 'fulfilled' ? valResult.value : null;
+                if (valData && !valData.error) {
+                    try { updateValidationUI(valData); } catch(e) { console.error('Validation render error:', e); }
+                } else { setError('actionBadge'); }
 
-                if (isStale()) { isLoading = false; return; }
-
-                // ─── STEP 7: 7-Gate Validation ───
-                try {
-                    valData = await fetchWithRetry(`/api/validate?symbol=${targetSymbol}`, {}, 3, 25000);
-                    if (isStale()) { isLoading = false; return; }
-                    if (valData) {
-                        updateValidationUI(valData);
-                    } else { setError('actionBadge'); }
-                } catch (e) { console.error('Validation error:', e); setError('actionBadge'); }
-
-                // Cache all HTF data for this symbol (use targetSymbol, not currentSymbol,
-                // to ensure cache key matches the data that was actually fetched)
+                // Cache all HTF data for this symbol
                 if (!isStale()) {
                     htfCache = {
                         symbol: targetSymbol,
@@ -6874,31 +6860,38 @@ async def dashboard():
                 valData = htfCache.valData;
 
                 // Re-render cached data with new timeframe candles
-                if (rangesData && !rangesData.error) updateRangesUI(rangesData, lastCandles);
-                else { setError('trendBadge'); setError('zoneBadge'); }
-                if (zonesData && !zonesData.error) updateZonesUI(zonesData);
-                else setError('zoneCount');
-                if (liqData && !liqData.error) updateLiquidityUI(liqData, lastCandles);
-                else setError('liqCount');
-                if (valData) updateValidationUI(valData);
-                else setError('actionBadge');
+                if (rangesData && !rangesData.error) {
+                    try { updateRangesUI(rangesData, lastCandles); } catch(e) { console.error('Ranges render error:', e); }
+                } else { setError('trendBadge'); setError('zoneBadge'); }
+                if (zonesData && !zonesData.error) {
+                    try { updateZonesUI(zonesData); } catch(e) { console.error('Zones render error:', e); }
+                } else { setError('zoneCount'); }
+                if (liqData && !liqData.error) {
+                    try { updateLiquidityUI(liqData, lastCandles); } catch(e) { console.error('Liq render error:', e); }
+                } else { setError('liqCount'); }
+                if (valData && !valData.error) {
+                    try { updateValidationUI(valData); } catch(e) { console.error('Validation render error:', e); }
+                } else { setError('actionBadge'); }
 
                 if (isStale()) { isLoading = false; return; }
 
-                // Re-fetch schematics and PO3 with new timeframe context
-                try {
-                    schematicsData = await fetchWithRetry(`/api/schematics?symbol=${targetSymbol}&timeframe=${targetTimeframe}`, {}, 3, 30000);
-                    if (isStale()) { isLoading = false; return; }
-                    if (schematicsData && !schematicsData.error) updateSchematicsUI(schematicsData);
-                    else setError('schematicsBadge');
-                } catch (e) { console.error('Schematics error:', e); setError('schematicsBadge'); }
+                // Re-fetch schematics and PO3 with new timeframe context in parallel
+                const [schResult2, po3Result2] = await Promise.allSettled([
+                    fetchWithRetry(`/api/schematics?symbol=${targetSymbol}&timeframe=${targetTimeframe}`, {}, 3, 30000),
+                    fetchWithRetry(`/api/po3?symbol=${targetSymbol}&timeframe=${targetTimeframe}`, {}, 3, 30000),
+                ]);
 
-                try {
-                    po3Data = await fetchWithRetry(`/api/po3?symbol=${targetSymbol}&timeframe=${targetTimeframe}`, {}, 3, 30000);
-                    if (isStale()) { isLoading = false; return; }
-                    if (po3Data && !po3Data.error) updatePO3UI(po3Data);
-                    else setError('po3Badge');
-                } catch (e) { console.error('PO3 error:', e); setError('po3Badge'); }
+                if (isStale()) { isLoading = false; return; }
+
+                schematicsData = schResult2.status === 'fulfilled' ? schResult2.value : null;
+                if (schematicsData && !schematicsData.error) {
+                    try { updateSchematicsUI(schematicsData); } catch(e) { console.error('Schematics render error:', e); }
+                } else { setError('schematicsBadge'); }
+
+                po3Data = po3Result2.status === 'fulfilled' ? po3Result2.value : null;
+                if (po3Data && !po3Data.error) {
+                    try { updatePO3UI(po3Data); } catch(e) { console.error('PO3 render error:', e); }
+                } else { setError('po3Badge'); }
 
                 // Update cache with new schematics/PO3 data
                 if (!isStale()) {
@@ -6910,13 +6903,23 @@ async def dashboard():
             // If stale at this point, discard final rendering
             if (isStale()) { isLoading = false; return; }
 
-            // ─── STEP 8: Forming Models (derived from current pair's schematic data) ───
-            deriveFormingModels(schematicsData, po3Data);
+            // ─── STEP 4: Forming Models (derived from current pair's schematic data) ───
+            try { deriveFormingModels(schematicsData, po3Data); }
+            catch(e) { console.error('Forming models error:', e); }
 
-            // ─── STEP 9: Highest Probability Setup (uses all data from pipeline) ───
-            const bestSetup = analyzeHighestProbabilitySetup(rangesData, zonesData, liqData, schematicsData, po3Data, valData, lastCandles);
-            renderSetupPanel(bestSetup);
-            drawTCTModelOverlays(bestSetup, lastCandles);
+            // ─── STEP 5: Highest Probability Setup (uses all data from pipeline) ───
+            try {
+                const bestSetup = analyzeHighestProbabilitySetup(rangesData, zonesData, liqData, schematicsData, po3Data, valData, lastCandles);
+                renderSetupPanel(bestSetup);
+                try { drawTCTModelOverlays(bestSetup, lastCandles); }
+                catch(e) { console.error('Overlay draw error:', e); }
+            } catch(e) {
+                console.error('Setup analysis error:', e);
+                // Show error in setup panel instead of blank
+                document.getElementById('setupDirection').textContent = 'ERR';
+                document.getElementById('setupDirection').className = 'setup-direction none';
+                document.getElementById('setupContent').innerHTML = '<div class="metric-row"><span class="label" style="color:#ff4444;">Analysis error: ' + e.message + '</span></div>';
+            }
 
             isLoading = false;
         }
@@ -6985,7 +6988,71 @@ async def dashboard():
             countEl.textContent = formingOnly.length + ' forming / ' + confirmedOnly.length + ' confirmed';
 
             if (models.length === 0) {
-                contentEl.innerHTML = '<div class="forming-empty">No forming models detected on this pair</div>';
+                // No schematic/PO3 models — derive from range + candle context
+                let emptyHtml = '<div class="forming-empty" style="color:#888;font-size:0.7rem;padding:6px 0;">No TCT/PO3 schematics detected.</div>';
+
+                // Analyze what could be forming from available candle data
+                if (lastCandles && lastCandles.length >= 20) {
+                    const recent = lastCandles.slice(-30);
+                    const rHigh = Math.max(...recent.map(c => c.high));
+                    const rLow = Math.min(...recent.map(c => c.low));
+                    const rSize = rHigh - rLow;
+                    const price = lastCandles[lastCandles.length - 1].close;
+                    const posInRange = rSize > 0 ? (price - rLow) / rSize : 0.5;
+                    const sma10 = recent.slice(-10).reduce((s,c) => s + c.close, 0) / 10;
+                    const sma20 = recent.slice(-20).reduce((s,c) => s + c.close, 0) / Math.min(recent.length, 20);
+                    const trendUp = sma10 > sma20;
+
+                    // Count consolidation (small body candles)
+                    const last10 = recent.slice(-10);
+                    const consolidating = last10.filter(c => Math.abs(c.close - c.open) / (c.high - c.low + 0.0001) < 0.4).length;
+                    const isConsolidating = consolidating >= 5;
+
+                    emptyHtml += '<div style="background:#1a1a2e;border-radius:6px;padding:8px;margin-top:4px;">';
+                    emptyHtml += '<div style="font-size:0.7rem;font-weight:600;color:#00d4ff;margin-bottom:4px;">What\'s Forming</div>';
+
+                    if (isConsolidating) {
+                        const model = trendUp ? 'Re-Accumulation' : 'Re-Distribution';
+                        const modelColor = trendUp ? '#00ff88' : '#ff4444';
+                        emptyHtml += '<div style="display:flex;justify-content:space-between;font-size:0.7rem;padding:2px 0;">';
+                        emptyHtml += '<span style="color:#888;">Pattern</span><span style="color:' + modelColor + ';font-weight:600;">' + model + ' forming</span></div>';
+                        emptyHtml += '<div style="display:flex;justify-content:space-between;font-size:0.65rem;padding:2px 0;">';
+                        emptyHtml += '<span style="color:#888;">Phase</span><span style="color:#ffc107;">Consolidation / Range</span></div>';
+                        emptyHtml += '<div style="display:flex;justify-content:space-between;font-size:0.65rem;padding:2px 0;">';
+                        emptyHtml += '<span style="color:#888;">Look for</span><span style="color:#e0e0e0;">EQ tap → deviation → expansion</span></div>';
+                    } else if (posInRange < 0.3) {
+                        emptyHtml += '<div style="display:flex;justify-content:space-between;font-size:0.7rem;padding:2px 0;">';
+                        emptyHtml += '<span style="color:#888;">Pattern</span><span style="color:#00ff88;font-weight:600;">Accumulation watch</span></div>';
+                        emptyHtml += '<div style="display:flex;justify-content:space-between;font-size:0.65rem;padding:2px 0;">';
+                        emptyHtml += '<span style="color:#888;">Phase</span><span style="color:#ffc107;">Near range low / discount</span></div>';
+                        emptyHtml += '<div style="display:flex;justify-content:space-between;font-size:0.65rem;padding:2px 0;">';
+                        emptyHtml += '<span style="color:#888;">Look for</span><span style="color:#e0e0e0;">Spring / SSL sweep → BOS up</span></div>';
+                    } else if (posInRange > 0.7) {
+                        emptyHtml += '<div style="display:flex;justify-content:space-between;font-size:0.7rem;padding:2px 0;">';
+                        emptyHtml += '<span style="color:#888;">Pattern</span><span style="color:#ff4444;font-weight:600;">Distribution watch</span></div>';
+                        emptyHtml += '<div style="display:flex;justify-content:space-between;font-size:0.65rem;padding:2px 0;">';
+                        emptyHtml += '<span style="color:#888;">Phase</span><span style="color:#ffc107;">Near range high / premium</span></div>';
+                        emptyHtml += '<div style="display:flex;justify-content:space-between;font-size:0.65rem;padding:2px 0;">';
+                        emptyHtml += '<span style="color:#888;">Look for</span><span style="color:#e0e0e0;">UTAD / BSL sweep → BOS down</span></div>';
+                    } else {
+                        emptyHtml += '<div style="display:flex;justify-content:space-between;font-size:0.7rem;padding:2px 0;">';
+                        emptyHtml += '<span style="color:#888;">Pattern</span><span style="color:#ffc107;font-weight:600;">Ranging / EQ test</span></div>';
+                        emptyHtml += '<div style="display:flex;justify-content:space-between;font-size:0.65rem;padding:2px 0;">';
+                        emptyHtml += '<span style="color:#888;">Phase</span><span style="color:#ffc107;">Mid-range / equilibrium</span></div>';
+                        emptyHtml += '<div style="display:flex;justify-content:space-between;font-size:0.65rem;padding:2px 0;">';
+                        emptyHtml += '<span style="color:#888;">Look for</span><span style="color:#e0e0e0;">Directional BOS from EQ</span></div>';
+                    }
+
+                    emptyHtml += '<div style="display:flex;justify-content:space-between;font-size:0.65rem;padding:2px 0;margin-top:2px;">';
+                    emptyHtml += '<span style="color:#888;">Range</span><span style="color:#e0e0e0;">' + fmtPrice(rLow) + ' - ' + fmtPrice(rHigh) + '</span></div>';
+                    emptyHtml += '<div style="display:flex;justify-content:space-between;font-size:0.65rem;padding:2px 0;">';
+                    emptyHtml += '<span style="color:#888;">Pos in range</span><span style="color:#e0e0e0;">' + (posInRange * 100).toFixed(0) + '%</span></div>';
+                    emptyHtml += '</div>';
+
+                    countEl.textContent = '0 (analyzing)';
+                }
+
+                contentEl.innerHTML = emptyHtml;
                 return;
             }
 
@@ -8391,15 +8458,200 @@ async def dashboard():
                     setup.slTrail = setup.entry + (setup.target - setup.entry) * 0.33;
                 }
             } else {
-                // No active setup
-                setup.tags = [{ text: 'No Active Setup', cls: 'warn' }];
-                if (gateBias !== 'none') {
-                    setup.direction = gateBias;
-                    setup.tags.push({ text: 'Gate Bias: ' + gateBias.toUpperCase(), cls: 'warn' });
-                }
+                // No schematic/PO3 candidates — build a forming setup from range + candle analysis
+                const formingSetup = analyzeFormingSetupFromData(rangesData, zonesData, liqData, candles, gateBias);
+                setup.direction = formingSetup.direction;
+                setup.confidence = formingSetup.confidence;
+                setup.entry = formingSetup.entry;
+                setup.stop = formingSetup.stop;
+                setup.target = formingSetup.target;
+                setup.rr = formingSetup.rr;
+                setup.source = formingSetup.source;
+                setup.tags = formingSetup.tags;
+                setup.isConfirmed = false;
             }
 
             return setup;
+        }
+
+        // Fallback: analyze forming setups from range/zone/candle data when no schematics exist
+        function analyzeFormingSetupFromData(rangesData, zonesData, liqData, candles, gateBias) {
+            const result = { direction: 'none', confidence: 0, entry: null, stop: null, target: null, rr: null, source: null, tags: [] };
+
+            if (!candles || candles.length < 20) {
+                result.tags = [{ text: 'Insufficient Data', cls: 'warn' }];
+                return result;
+            }
+
+            const lastPrice = candles[candles.length - 1].close;
+            const recent20 = candles.slice(-20);
+            const recent50 = candles.slice(-50);
+            const recentHigh = Math.max(...recent50.map(c => c.high));
+            const recentLow = Math.min(...recent50.map(c => c.low));
+            const rangeSize = recentHigh - recentLow;
+            const eq = (recentHigh + recentLow) / 2;
+
+            // Determine trend from candle data
+            const sma20 = recent20.reduce((s, c) => s + c.close, 0) / recent20.length;
+            const firstHalf = recent20.slice(0, 10);
+            const secondHalf = recent20.slice(-10);
+            const smaFirst = firstHalf.reduce((s, c) => s + c.close, 0) / firstHalf.length;
+            const smaSecond = secondHalf.reduce((s, c) => s + c.close, 0) / secondHalf.length;
+            const trendUp = smaSecond > smaFirst;
+            const trendStrength = Math.abs(smaSecond - smaFirst) / smaFirst * 100;
+
+            // Check premium vs discount
+            const inPremium = lastPrice > eq;
+            const inDiscount = lastPrice < eq;
+            const posInRange = (lastPrice - recentLow) / rangeSize;
+
+            // Use range data if available
+            let activeRange = null;
+            if (rangesData) {
+                activeRange = rangesData.htf_ranges?.active_range || rangesData.ltf_ranges?.active_range;
+            }
+
+            // Look at market structure from range data
+            const msTrend = rangesData?.market_structure?.htf_trend || (trendUp ? 'bullish' : 'bearish');
+
+            // Find nearest demand/supply zones
+            let nearestDemand = null, nearestSupply = null;
+            if (zonesData) {
+                const allOBs = zonesData.htf_zones?.order_blocks || [];
+                const allStruct = zonesData.htf_zones?.structure_zones || [];
+                const allZones = [...allOBs, ...allStruct].filter(z => !z.mitigated);
+                const demandZones = allZones.filter(z => z.type === 'bullish' || z.type === 'demand');
+                const supplyZones = allZones.filter(z => z.type === 'bearish' || z.type === 'supply');
+
+                demandZones.forEach(z => {
+                    const mid = ((z.top || z.high || 0) + (z.bottom || z.low || 0)) / 2;
+                    if (mid < lastPrice && (!nearestDemand || mid > nearestDemand.mid)) {
+                        nearestDemand = { top: z.top || z.high, bottom: z.bottom || z.low, mid };
+                    }
+                });
+                supplyZones.forEach(z => {
+                    const mid = ((z.top || z.high || 0) + (z.bottom || z.low || 0)) / 2;
+                    if (mid > lastPrice && (!nearestSupply || mid < nearestSupply.mid)) {
+                        nearestSupply = { top: z.top || z.high, bottom: z.bottom || z.low, mid };
+                    }
+                });
+            }
+
+            // Find nearest liquidity
+            let nearestBSL = null, nearestSSL = null;
+            if (liqData) {
+                const bslPools = liqData.htf_liquidity?.bsl_pools || [];
+                const sslPools = liqData.htf_liquidity?.ssl_pools || [];
+                if (bslPools.length > 0) nearestBSL = bslPools[0].price;
+                if (sslPools.length > 0) nearestSSL = sslPools[0].price;
+            }
+
+            // Build forming setup
+            let score = 0;
+            const tags = [];
+
+            if (activeRange) {
+                const rHigh = activeRange.range_high || activeRange.high;
+                const rLow = activeRange.range_low || activeRange.low;
+                const rEq = activeRange.equilibrium || (rHigh + rLow) / 2;
+                const rSize = rHigh - rLow;
+
+                if (inDiscount && msTrend === 'bullish') {
+                    // Bullish forming: in discount of range with bullish trend
+                    result.direction = 'long';
+                    result.entry = nearestDemand ? nearestDemand.top : rLow + rSize * 0.236;
+                    result.stop = nearestDemand ? nearestDemand.bottom - rSize * 0.02 : rLow - rSize * 0.05;
+                    result.target = nearestSupply ? nearestSupply.bottom : rHigh;
+                    result.source = 'Range Discount + ' + msTrend + ' trend';
+                    score = 35;
+                    tags.push({ text: 'FORMING', cls: 'warn' });
+                    tags.push({ text: 'Discount Zone', cls: 'good' });
+                    tags.push({ text: 'Bullish Trend', cls: 'good' });
+                    if (nearestDemand) { tags.push({ text: 'Near Demand OB', cls: 'good' }); score += 15; }
+                    if (nearestSSL && nearestSSL < lastPrice) { tags.push({ text: 'SSL Below', cls: 'good' }); score += 10; }
+                } else if (inPremium && msTrend === 'bearish') {
+                    // Bearish forming: in premium of range with bearish trend
+                    result.direction = 'short';
+                    result.entry = nearestSupply ? nearestSupply.bottom : rHigh - rSize * 0.236;
+                    result.stop = nearestSupply ? nearestSupply.top + rSize * 0.02 : rHigh + rSize * 0.05;
+                    result.target = nearestDemand ? nearestDemand.top : rLow;
+                    result.source = 'Range Premium + ' + msTrend + ' trend';
+                    score = 35;
+                    tags.push({ text: 'FORMING', cls: 'warn' });
+                    tags.push({ text: 'Premium Zone', cls: 'good' });
+                    tags.push({ text: 'Bearish Trend', cls: 'good' });
+                    if (nearestSupply) { tags.push({ text: 'Near Supply OB', cls: 'good' }); score += 15; }
+                    if (nearestBSL && nearestBSL > lastPrice) { tags.push({ text: 'BSL Above', cls: 'good' }); score += 10; }
+                } else if (inDiscount) {
+                    // In discount but trend unclear — watch for bullish reversal
+                    result.direction = 'long';
+                    result.entry = rLow + rSize * 0.236;
+                    result.stop = rLow - rSize * 0.05;
+                    result.target = rEq;
+                    result.source = 'Discount bounce watch';
+                    score = 20;
+                    tags.push({ text: 'FORMING', cls: 'warn' });
+                    tags.push({ text: 'Discount Zone', cls: 'good' });
+                    tags.push({ text: 'Watch for HL', cls: 'warn' });
+                } else if (inPremium) {
+                    // In premium but trend unclear — watch for bearish reversal
+                    result.direction = 'short';
+                    result.entry = rHigh - rSize * 0.236;
+                    result.stop = rHigh + rSize * 0.05;
+                    result.target = rEq;
+                    result.source = 'Premium rejection watch';
+                    score = 20;
+                    tags.push({ text: 'FORMING', cls: 'warn' });
+                    tags.push({ text: 'Premium Zone', cls: 'warn' });
+                    tags.push({ text: 'Watch for LH', cls: 'warn' });
+                }
+            } else {
+                // No range data — use pure candle analysis
+                if (trendUp && posInRange < 0.5) {
+                    result.direction = 'long';
+                    result.entry = recentLow + rangeSize * 0.382;
+                    result.stop = recentLow - rangeSize * 0.05;
+                    result.target = recentHigh;
+                    result.source = 'Candle trend analysis';
+                    score = 15;
+                    tags.push({ text: 'FORMING', cls: 'warn' });
+                    tags.push({ text: 'Uptrend', cls: 'good' });
+                } else if (!trendUp && posInRange > 0.5) {
+                    result.direction = 'short';
+                    result.entry = recentHigh - rangeSize * 0.382;
+                    result.stop = recentHigh + rangeSize * 0.05;
+                    result.target = recentLow;
+                    result.source = 'Candle trend analysis';
+                    score = 15;
+                    tags.push({ text: 'FORMING', cls: 'warn' });
+                    tags.push({ text: 'Downtrend', cls: 'warn' });
+                } else {
+                    result.source = 'Awaiting structure';
+                    tags.push({ text: 'NO SETUP', cls: 'warn' });
+                    tags.push({ text: 'Range: ' + fmtPrice(recentLow) + ' - ' + fmtPrice(recentHigh), cls: '' });
+                    tags.push({ text: trendUp ? 'Bias: Bullish' : 'Bias: Bearish', cls: 'warn' });
+                }
+            }
+
+            // Apply gate bias boost
+            if (gateBias !== 'none' && result.direction === gateBias) {
+                score += 10;
+                tags.push({ text: 'Gate Aligned', cls: 'good' });
+            } else if (gateBias !== 'none') {
+                tags.push({ text: 'Gate: ' + gateBias.toUpperCase(), cls: 'warn' });
+            }
+
+            // Calculate R:R
+            if (result.entry && result.stop && result.target) {
+                const risk = Math.abs(result.entry - result.stop);
+                const reward = Math.abs(result.target - result.entry);
+                result.rr = risk > 0 ? reward / risk : 0;
+                if (result.rr >= 3) score += 10;
+            }
+
+            result.confidence = Math.min(100, score);
+            result.tags = tags;
+            return result;
         }
 
         // Render the highest probability setup in sidebar
