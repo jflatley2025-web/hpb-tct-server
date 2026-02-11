@@ -4312,7 +4312,9 @@ async def dashboard():
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=5">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <title>HPB-TCT Dashboard</title>
     <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
     <style>
@@ -5412,6 +5414,263 @@ async def dashboard():
             border-radius: 4px; padding: 8px; margin-top: 8px;
             font-size: 0.7rem; color: #80deea;
         }
+
+        /* ===== RESPONSIVE DESIGN ===== */
+
+        /* Tablets landscape + small laptops (iPad Air, Asus PZ13 ProArt ~820-1100px) */
+        @media (max-width: 1100px) {
+            .main-container {
+                grid-template-columns: 1fr 280px;
+                gap: 10px;
+                padding: 10px;
+            }
+            .header { padding: 10px 15px; }
+            .header h1 { font-size: 1.2rem; }
+            .header .price-display { font-size: 1.4rem; }
+            .metric-card { padding: 10px; }
+            .metric-card h3 { font-size: 0.8rem; }
+        }
+
+        /* Tablets portrait + large phones (iPad Air portrait ~820px, Asus PZ13 ProArt portrait) */
+        @media (max-width: 860px) {
+            .main-container {
+                grid-template-columns: 1fr;
+                height: auto;
+                gap: 10px;
+                padding: 10px;
+            }
+            .chart-section {
+                height: 50vh;
+                min-height: 350px;
+            }
+            #chart { height: calc(100% - 36px) !important; }
+            .metrics-panel {
+                max-height: none;
+                overflow-y: visible;
+                padding-right: 0;
+            }
+            .header {
+                flex-direction: column;
+                gap: 10px;
+                align-items: flex-start;
+                padding: 10px 15px;
+            }
+            .header > div {
+                width: 100%;
+                justify-content: space-between;
+                flex-wrap: wrap;
+                gap: 8px;
+            }
+            .timeframe-selector {
+                flex-wrap: wrap;
+                gap: 6px;
+            }
+            .pair-search { min-width: 120px; width: 120px; font-size: 0.8rem; }
+            .pair-dropdown { min-width: 220px; }
+            .header .price-display { font-size: 1.3rem; }
+            /* Stack validation gates 2x2 on tablet */
+            .validation-gates { grid-template-columns: repeat(4, 1fr); }
+            /* Setup levels stay 3-col */
+            .setup-levels { grid-template-columns: 1fr 1fr 1fr; }
+            .schematic-levels { grid-template-columns: repeat(3, 1fr); }
+            .po3-levels { grid-template-columns: repeat(3, 1fr); }
+        }
+
+        /* Phones (iPhone 13 ~390px, Samsung S22 ~360px) */
+        @media (max-width: 480px) {
+            body { font-size: 14px; -webkit-text-size-adjust: 100%; }
+            .header {
+                flex-direction: column;
+                gap: 8px;
+                align-items: stretch;
+                padding: 8px 10px;
+            }
+            .header h1 {
+                font-size: 1rem;
+                justify-content: center;
+                text-align: center;
+            }
+            .header > div {
+                flex-direction: column;
+                align-items: stretch;
+                gap: 6px;
+            }
+            .timeframe-selector {
+                flex-direction: row;
+                flex-wrap: wrap;
+                justify-content: space-between;
+                gap: 6px;
+                width: 100%;
+            }
+            .timeframe-selector > div {
+                flex: 1;
+                min-width: 0;
+            }
+            .pair-search-wrapper { display: block; width: 100%; }
+            .pair-search {
+                width: 100% !important;
+                min-width: unset;
+                font-size: 0.9rem;
+                padding: 8px 12px;
+            }
+            .tf-dropdown {
+                width: 100%;
+                font-size: 0.85rem;
+                padding: 8px 28px 8px 12px;
+            }
+            .pair-dropdown {
+                min-width: unset;
+                width: 100%;
+                max-height: 300px;
+            }
+            .header .price-display {
+                font-size: 1.5rem;
+                text-align: center;
+                width: 100%;
+            }
+            .refresh-btn {
+                width: 100%;
+                padding: 10px 12px;
+                font-size: 0.85rem;
+            }
+            .main-container {
+                grid-template-columns: 1fr;
+                height: auto;
+                gap: 8px;
+                padding: 8px;
+            }
+            .chart-section {
+                height: 45vh;
+                min-height: 280px;
+                border-radius: 6px;
+            }
+            .chart-controls {
+                overflow-x: auto;
+                -webkit-overflow-scrolling: touch;
+                flex-wrap: nowrap;
+                padding: 4px 6px;
+            }
+            .chart-ctrl-btn {
+                padding: 6px 10px;
+                font-size: 0.7rem;
+                white-space: nowrap;
+                flex-shrink: 0;
+            }
+            .metrics-panel {
+                gap: 8px;
+                padding-right: 0;
+                max-height: none;
+                overflow-y: visible;
+            }
+            .metric-card {
+                padding: 10px;
+                border-radius: 6px;
+            }
+            .metric-card h3 { font-size: 0.8rem; }
+            .metric-row { padding: 3px 0; font-size: 0.78rem; }
+            .tct-lecture { font-size: 0.6rem; }
+
+            /* Touch-friendly tap targets */
+            .pair-dropdown-item { padding: 10px 12px; font-size: 0.85rem; }
+            .top5-item { padding: 10px; }
+            .forming-link { padding: 8px 10px; font-size: 0.8rem; }
+            .scan-btn { padding: 8px 12px; font-size: 0.75rem; }
+
+            /* Validation gates: 2 per row on phone */
+            .validation-gates {
+                grid-template-columns: repeat(2, 1fr);
+                gap: 4px;
+            }
+            .gate { padding: 8px 4px; font-size: 0.65rem; }
+
+            /* Setup levels stack on phone */
+            .setup-levels { grid-template-columns: 1fr 1fr 1fr; gap: 4px; }
+            .setup-level-box { padding: 8px 4px; }
+
+            /* Risk input 1-col on phone */
+            .risk-input-group { grid-template-columns: 1fr; }
+            .risk-input.full-width { grid-column: 1; }
+            .risk-input input, .risk-input select { padding: 8px 10px; font-size: 0.85rem; }
+            .calc-btn { padding: 10px 12px; font-size: 0.85rem; }
+
+            /* Risk tabs scrollable */
+            .risk-tabs { flex-wrap: wrap; }
+            .risk-tab { padding: 6px 4px; font-size: 0.6rem; }
+
+            /* Schematic levels stack */
+            .schematic-levels { grid-template-columns: repeat(3, 1fr); gap: 4px; }
+            .po3-levels { grid-template-columns: repeat(3, 1fr); gap: 4px; }
+
+            /* Streak bar smaller */
+            .streak-bar-container { height: 60px; }
+
+            /* Compound table scroll */
+            .compound-table { font-size: 0.65rem; }
+
+            /* Top5 panel */
+            .top5-panel, .forming-panel, .setup-panel {
+                padding: 8px 10px;
+            }
+            .top5-levels { font-size: 0.55rem; }
+            .top5-tags { gap: 3px; }
+            .top5-tag { font-size: 0.5rem; }
+
+            /* Zone items */
+            .zone-item { padding: 8px; font-size: 0.75rem; }
+
+            /* Range bar */
+            .range-bar { height: 36px; }
+        }
+
+        /* Very small phones (under 360px) */
+        @media (max-width: 360px) {
+            .header h1 { font-size: 0.9rem; }
+            .header .price-display { font-size: 1.3rem; }
+            .chart-section { height: 40vh; min-height: 240px; }
+            .setup-levels { grid-template-columns: 1fr; gap: 3px; }
+            .schematic-levels { grid-template-columns: 1fr 1fr; }
+            .po3-levels { grid-template-columns: 1fr 1fr; }
+        }
+
+        /* Desktop large screens (Asus ROG Zephyrus 16", desktop 1920px) */
+        @media (min-width: 1440px) {
+            .main-container {
+                grid-template-columns: 1fr 360px;
+                max-width: 1800px;
+                margin: 0 auto;
+            }
+            .header {
+                max-width: 1800px;
+                margin: 0 auto;
+            }
+        }
+
+        /* Touch device optimizations */
+        @media (hover: none) and (pointer: coarse) {
+            .chart-ctrl-btn { padding: 6px 12px; min-height: 36px; }
+            .pair-dropdown-item { padding: 12px; min-height: 44px; }
+            .tf-btn { padding: 8px 12px; min-height: 36px; }
+            .top5-item { padding: 12px; }
+            .forming-link { padding: 10px 12px; min-height: 44px; }
+            .scan-btn { min-height: 40px; }
+            .refresh-btn { min-height: 40px; }
+            .calc-btn { min-height: 44px; }
+            .risk-tab { min-height: 36px; }
+        }
+
+        /* Safe area insets for iPhone notch / dynamic island */
+        @supports (padding: max(0px)) {
+            .header {
+                padding-left: max(15px, env(safe-area-inset-left));
+                padding-right: max(15px, env(safe-area-inset-right));
+                padding-top: max(10px, env(safe-area-inset-top));
+            }
+            .main-container {
+                padding-left: max(10px, env(safe-area-inset-left));
+                padding-right: max(10px, env(safe-area-inset-right));
+                padding-bottom: max(10px, env(safe-area-inset-bottom));
+            }
+        }
     </style>
 </head>
 <body>
@@ -5551,6 +5810,7 @@ async def dashboard():
                     <span class="label">Bias Strength</span>
                     <span class="value" id="biasStrength">--</span>
                 </div>
+                <div id="fibContent"></div>
             </div>
 
             <!-- Deviations -->
@@ -6117,6 +6377,7 @@ async def dashboard():
         let currentSymbol = 'BTCUSDT';
         let coinList = { categories: {}, all: [] };
         let isLoading = false;
+        let refreshGeneration = 0; // Incremented on each refresh request to abort stale ones
         let lastCandles = []; // Store candles for index-to-time mapping
 
         // HTF context cache: stores fetched HTF data per symbol so timeframe changes reuse it
@@ -6401,7 +6662,7 @@ async def dashboard():
             }
         }
 
-        // Clear all price lines and additional series
+        // Clear all price lines, additional series, and chart markers
         function clearPriceLines() {
             lineSeries.forEach(line => {
                 try { candleSeries.removePriceLine(line); } catch(e) {}
@@ -6413,11 +6674,20 @@ async def dashboard():
                 try { chart.removeSeries(series); } catch(e) {}
             });
             additionalSeries = [];
+
+            // Clear tap markers
+            try { candleSeries.setMarkers([]); } catch(e) {}
         }
 
         // Fetch and display all TCT data
         async function refreshData() {
-            if (isLoading) return;
+            // Abort-aware refresh: each call gets a generation number.
+            // If a newer refresh starts, stale fetches are discarded.
+            const thisGen = ++refreshGeneration;
+            const isStale = () => refreshGeneration !== thisGen;
+
+            // If another refresh is already running, it will detect staleness
+            // via its own generation check and stop. Allow this one to proceed.
             isLoading = true;
 
             // Capture symbol at start to prevent race conditions when user switches
@@ -6465,6 +6735,7 @@ async def dashboard():
                 document.getElementById('tradingBias').textContent = '--';
                 document.getElementById('tradingBias').className = 'value';
                 document.getElementById('biasStrength').textContent = '--';
+                document.getElementById('fibContent').innerHTML = '';
                 document.getElementById('rangeViz').style.display = 'none';
                 document.getElementById('rangeHighLabel').textContent = '--';
                 document.getElementById('rangeLowLabel').textContent = '--';
@@ -6494,12 +6765,8 @@ async def dashboard():
             // ─── STEP 1: Fetch candles and update chart ───
             lastCandles = await fetchCandles(targetTimeframe, getCandleLimit(targetTimeframe), targetSymbol);
 
-            // If user switched pairs while candles were loading, discard stale results
-            if (currentSymbol !== targetSymbol) {
-                isLoading = false;
-                refreshData();
-                return;
-            }
+            // If a newer refresh has started, abort this stale one
+            if (isStale()) { isLoading = false; return; }
 
             if (lastCandles.length > 0) {
                 candleSeries.setData(lastCandles);
@@ -6512,6 +6779,13 @@ async def dashboard():
                 // No candle data — clear chart and show error
                 candleSeries.setData([]);
                 document.getElementById('currentPrice').textContent = 'No data';
+                document.getElementById('currentPrice').textContent = '$' + lastPrice.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 8});
+            } else {
+                // Candle fetch failed - clear chart and show error price
+                candleSeries.setData([]);
+                document.getElementById('currentPrice').textContent = 'No data';
+                document.getElementById('currentPrice').style.color = '#ff4444';
+                setTimeout(() => { document.getElementById('currentPrice').style.color = ''; }, 3000);
             }
             clearPriceLines();
 
@@ -6522,46 +6796,62 @@ async def dashboard():
                 // ─── STEP 2: Market Structure + Active Range + Deviations ───
                 try {
                     rangesData = await fetchWithRetry(`/api/ranges?symbol=${targetSymbol}`, {}, 3, 25000);
+                    if (isStale()) { isLoading = false; return; }
                     if (rangesData && !rangesData.error) {
                         updateRangesUI(rangesData, lastCandles);
                     } else { setError('trendBadge'); setError('zoneBadge'); }
                 } catch (e) { console.error('Ranges error:', e); setError('trendBadge'); setError('zoneBadge'); }
 
+                if (isStale()) { isLoading = false; return; }
+
                 // ─── STEP 3: S&D Zones ───
                 try {
                     zonesData = await fetchWithRetry(`/api/zones?symbol=${targetSymbol}`, {}, 3, 25000);
+                    if (isStale()) { isLoading = false; return; }
                     if (zonesData && !zonesData.error) {
                         updateZonesUI(zonesData);
                     } else { setError('zoneCount'); }
                 } catch (e) { console.error('Zones error:', e); setError('zoneCount'); }
 
+                if (isStale()) { isLoading = false; return; }
+
                 // ─── STEP 4: Liquidity Pools ───
                 try {
                     liqData = await fetchWithRetry(`/api/liquidity?symbol=${targetSymbol}`, {}, 3, 25000);
+                    if (isStale()) { isLoading = false; return; }
                     if (liqData && !liqData.error) {
                         updateLiquidityUI(liqData, lastCandles);
                     } else { setError('liqCount'); }
                 } catch (e) { console.error('Liquidity error:', e); setError('liqCount'); }
 
+                if (isStale()) { isLoading = false; return; }
+
                 // ─── STEP 5: TCT Schematics ───
                 try {
                     schematicsData = await fetchWithRetry(`/api/schematics?symbol=${targetSymbol}&timeframe=${targetTimeframe}`, {}, 3, 30000);
+                    if (isStale()) { isLoading = false; return; }
                     if (schematicsData && !schematicsData.error) {
                         updateSchematicsUI(schematicsData);
                     } else { setError('schematicsBadge'); }
                 } catch (e) { console.error('Schematics error:', e); setError('schematicsBadge'); }
 
+                if (isStale()) { isLoading = false; return; }
+
                 // ─── STEP 6: PO3 Schematics ───
                 try {
                     po3Data = await fetchWithRetry(`/api/po3?symbol=${targetSymbol}&timeframe=${targetTimeframe}`, {}, 3, 30000);
+                    if (isStale()) { isLoading = false; return; }
                     if (po3Data && !po3Data.error) {
                         updatePO3UI(po3Data);
                     } else { setError('po3Badge'); }
                 } catch (e) { console.error('PO3 error:', e); setError('po3Badge'); }
 
+                if (isStale()) { isLoading = false; return; }
+
                 // ─── STEP 7: 7-Gate Validation ───
                 try {
                     valData = await fetchWithRetry(`/api/validate?symbol=${targetSymbol}`, {}, 3, 25000);
+                    if (isStale()) { isLoading = false; return; }
                     if (valData) {
                         updateValidationUI(valData);
                     } else { setError('actionBadge'); }
@@ -6569,10 +6859,12 @@ async def dashboard():
 
                 // Cache all HTF data for this symbol (use targetSymbol, not currentSymbol,
                 // to ensure cache key matches the data that was actually fetched)
-                htfCache = {
-                    symbol: targetSymbol,
-                    rangesData, zonesData, liqData, valData, schematicsData, po3Data,
-                };
+                if (!isStale()) {
+                    htfCache = {
+                        symbol: targetSymbol,
+                        rangesData, zonesData, liqData, valData, schematicsData, po3Data,
+                    };
+                }
 
             } else {
                 // ─── TIMEFRAME CHANGE: Reuse cached ranges/zones/liq/val, re-fetch schematics/PO3 ───
@@ -6591,23 +6883,32 @@ async def dashboard():
                 if (valData) updateValidationUI(valData);
                 else setError('actionBadge');
 
+                if (isStale()) { isLoading = false; return; }
+
                 // Re-fetch schematics and PO3 with new timeframe context
                 try {
                     schematicsData = await fetchWithRetry(`/api/schematics?symbol=${targetSymbol}&timeframe=${targetTimeframe}`, {}, 3, 30000);
+                    if (isStale()) { isLoading = false; return; }
                     if (schematicsData && !schematicsData.error) updateSchematicsUI(schematicsData);
                     else setError('schematicsBadge');
                 } catch (e) { console.error('Schematics error:', e); setError('schematicsBadge'); }
 
                 try {
                     po3Data = await fetchWithRetry(`/api/po3?symbol=${targetSymbol}&timeframe=${targetTimeframe}`, {}, 3, 30000);
+                    if (isStale()) { isLoading = false; return; }
                     if (po3Data && !po3Data.error) updatePO3UI(po3Data);
                     else setError('po3Badge');
                 } catch (e) { console.error('PO3 error:', e); setError('po3Badge'); }
 
                 // Update cache with new schematics/PO3 data
-                htfCache.schematicsData = schematicsData;
-                htfCache.po3Data = po3Data;
+                if (!isStale()) {
+                    htfCache.schematicsData = schematicsData;
+                    htfCache.po3Data = po3Data;
+                }
             }
+
+            // If stale at this point, discard final rendering
+            if (isStale()) { isLoading = false; return; }
 
             // ─── STEP 8: Forming Models (derived from current pair's schematic data) ───
             deriveFormingModels(schematicsData, po3Data);
@@ -6618,12 +6919,6 @@ async def dashboard():
             drawTCTModelOverlays(bestSetup, lastCandles);
 
             isLoading = false;
-
-            // If user switched pairs while we were loading, immediately refresh
-            // with the new pair instead of waiting for the next auto-refresh cycle
-            if (currentSymbol !== targetSymbol || currentTimeframe !== targetTimeframe) {
-                refreshData();
-            }
         }
 
         // Derive Forming Models from current pair's HTF+LTF schematic data
@@ -6871,10 +7166,22 @@ async def dashboard():
                     document.getElementById('rangeDL').textContent = fmtPrice(dlHigh) + ' / ' + fmtPrice(dlLow);
                 }
 
-                // Chart lines
-                if (high) lineSeries.push(addPriceLine(high, '#ff4444', 'RANGE HIGH', 0, 2));
+                // Chart lines — Range High/Low/EQ
+                if (high) lineSeries.push(addPriceLine(high, '#ff4444', 'RANGE HIGH (1.0)', 0, 2));
                 if (eq) lineSeries.push(addPriceLine(eq, '#ffc107', 'EQ (0.5)', 1, 2));
-                if (low) lineSeries.push(addPriceLine(low, '#00ff88', 'RANGE LOW', 0, 2));
+                if (low) lineSeries.push(addPriceLine(low, '#00ff88', 'RANGE LOW (0.0)', 0, 2));
+
+                // Fibonacci retracement levels on chart
+                if (high && low) {
+                    const fib236 = high - (rangeSize * 0.236);
+                    const fib382 = high - (rangeSize * 0.382);
+                    const fib618 = high - (rangeSize * 0.618);
+                    const fib786 = high - (rangeSize * 0.786);
+                    lineSeries.push(addPriceLine(fib236, '#b388ff', '0.236', 2, 1));
+                    lineSeries.push(addPriceLine(fib382, '#7c4dff', '0.382', 2, 1));
+                    lineSeries.push(addPriceLine(fib618, '#7c4dff', '0.618', 2, 1));
+                    lineSeries.push(addPriceLine(fib786, '#b388ff', '0.786', 2, 1));
+                }
 
                 // DL lines on chart (dotted gray, matching /ranges page)
                 if (dlHigh) lineSeries.push(addPriceLine(dlHigh, '#6c757d', 'DL+', 2, 1));
@@ -6927,6 +7234,105 @@ async def dashboard():
                     const marker = document.getElementById('priceMarker');
                     marker.style.top = Math.min(100, Math.max(0, pct)) + '%';
                     marker.style.left = '50%';
+                }
+
+                // === Fibonacci Retracement Sidebar ===
+                if (high && low) {
+                    const fib236 = high - (rangeSize * 0.236);
+                    const fib382 = high - (rangeSize * 0.382);
+                    const fib618 = high - (rangeSize * 0.618);
+                    const fib786 = high - (rangeSize * 0.786);
+                    const fmt = (v) => '$' + v.toLocaleString(undefined, {maximumFractionDigits: 2});
+
+                    let fibHtml = '<div style="font-size:0.7rem;font-weight:600;color:#b388ff;margin-bottom:4px;margin-top:8px;">Fib Retracement</div>';
+                    const fibLevels = [
+                        { label: '1.0 (High)', price: high, color: '#ff4444' },
+                        { label: '0.786', price: fib786, color: '#b388ff' },
+                        { label: '0.618', price: fib618, color: '#7c4dff' },
+                        { label: '0.5 (EQ)', price: eq, color: '#ffc107' },
+                        { label: '0.382', price: fib382, color: '#7c4dff' },
+                        { label: '0.236', price: fib236, color: '#b388ff' },
+                        { label: '0.0 (Low)', price: low, color: '#00ff88' },
+                    ];
+                    fibLevels.forEach(f => {
+                        fibHtml += '<div style="display:flex;justify-content:space-between;padding:1px 0;font-size:0.65rem;">';
+                        fibHtml += '<span style="color:' + f.color + ';">' + f.label + '</span>';
+                        fibHtml += '<span style="color:#e0e0e0;">' + fmt(f.price) + '</span>';
+                        fibHtml += '</div>';
+                    });
+
+                    // Tap detection: count how many times price touched range high/low/EQ
+                    if (candles.length > 0) {
+                        const tolerance = rangeSize * 0.01;
+                        let highTaps = 0, lowTaps = 0, eqTaps = 0;
+                        let highTapTimes = [], lowTapTimes = [], eqTapTimes = [];
+                        let lastHighTap = -3, lastLowTap = -3, lastEqTap = -3;
+                        candles.forEach((c, idx) => {
+                            if (Math.abs(c.high - high) <= tolerance && idx - lastHighTap > 2) {
+                                highTaps++; lastHighTap = idx;
+                                highTapTimes.push(idx);
+                            }
+                            if (Math.abs(c.low - low) <= tolerance && idx - lastLowTap > 2) {
+                                lowTaps++; lastLowTap = idx;
+                                lowTapTimes.push(idx);
+                            }
+                            if ((c.low <= eq + tolerance && c.high >= eq - tolerance) && idx - lastEqTap > 2) {
+                                eqTaps++; lastEqTap = idx;
+                                eqTapTimes.push(idx);
+                            }
+                        });
+
+                        fibHtml += '<div style="font-size:0.7rem;font-weight:600;color:#00d4ff;margin-top:8px;margin-bottom:4px;">Range Taps</div>';
+                        fibHtml += '<div style="display:flex;justify-content:space-between;padding:1px 0;font-size:0.65rem;">';
+                        fibHtml += '<span style="color:#ff4444;">High Taps</span><span style="color:#e0e0e0;">' + highTaps + '</span></div>';
+                        fibHtml += '<div style="display:flex;justify-content:space-between;padding:1px 0;font-size:0.65rem;">';
+                        fibHtml += '<span style="color:#ffc107;">EQ Taps</span><span style="color:#e0e0e0;">' + eqTaps + '</span></div>';
+                        fibHtml += '<div style="display:flex;justify-content:space-between;padding:1px 0;font-size:0.65rem;">';
+                        fibHtml += '<span style="color:#00ff88;">Low Taps</span><span style="color:#e0e0e0;">' + lowTaps + '</span></div>';
+
+                        // Determine model forming based on taps and trend
+                        const htfTrendVal = ms.htf_trend || 'neutral';
+                        let modelType = 'Undetermined';
+                        let modelColor = '#888';
+                        if (highTaps >= 2 && lowTaps >= 1 && eqTaps >= 1) {
+                            if (htfTrendVal === 'bearish') { modelType = 'Distribution'; modelColor = '#ff4444'; }
+                            else if (htfTrendVal === 'bullish') { modelType = 'Re-Accumulation'; modelColor = '#00d4ff'; }
+                            else { modelType = 'Distribution (poss.)'; modelColor = '#ffc107'; }
+                        } else if (lowTaps >= 2 && highTaps >= 1 && eqTaps >= 1) {
+                            if (htfTrendVal === 'bullish') { modelType = 'Accumulation'; modelColor = '#00ff88'; }
+                            else if (htfTrendVal === 'bearish') { modelType = 'Re-Distribution'; modelColor = '#e040fb'; }
+                            else { modelType = 'Accumulation (poss.)'; modelColor = '#ffc107'; }
+                        } else if (eqTaps >= 2) {
+                            modelType = 'Consolidation'; modelColor = '#ffc107';
+                        } else if (highTaps + lowTaps + eqTaps < 3) {
+                            modelType = 'Forming (early)'; modelColor = '#888';
+                        }
+
+                        fibHtml += '<div style="font-size:0.7rem;font-weight:600;color:#e040fb;margin-top:8px;margin-bottom:4px;">Model Forming</div>';
+                        fibHtml += '<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:0.7rem;">';
+                        fibHtml += '<span style="color:#888;">Type</span>';
+                        fibHtml += '<span style="padding:2px 8px;border-radius:3px;background:rgba(255,255,255,0.05);color:' + modelColor + ';font-weight:600;">' + modelType + '</span>';
+                        fibHtml += '</div>';
+
+                        // Add tap markers on chart
+                        const markers = [];
+                        highTapTimes.slice(0, 5).forEach((idx, i) => {
+                            if (idx < candles.length) {
+                                markers.push({ time: candles[idx].time, position: 'aboveBar', color: '#ff4444', shape: 'arrowDown', text: 'T' + (i+1) });
+                            }
+                        });
+                        lowTapTimes.slice(0, 5).forEach((idx, i) => {
+                            if (idx < candles.length) {
+                                markers.push({ time: candles[idx].time, position: 'belowBar', color: '#00ff88', shape: 'arrowUp', text: 'T' + (i+1) });
+                            }
+                        });
+                        if (markers.length > 0) {
+                            markers.sort((a, b) => a.time - b.time);
+                            candleSeries.setMarkers(markers);
+                        }
+                    }
+
+                    document.getElementById('fibContent').innerHTML = fibHtml;
                 }
             }
 
