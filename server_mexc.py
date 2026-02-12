@@ -2821,10 +2821,8 @@ async def scan_pair_for_forming(symbol: str, timeframe: str) -> List[Dict]:
                 'volume': float(row['volume'])
             })
 
-        detected_range = await detect_best_range(candles_list)
-        range_list = [detected_range] if detected_range and not isinstance(detected_range, list) else (detected_range or [])
-
-        schematics_result = detect_tct_schematics(df, range_list)
+        # Let TCT detector use its own internal range detection
+        schematics_result = detect_tct_schematics(df, None)
 
         all_schematics = (
             schematics_result.get("accumulation_schematics", []) +
@@ -3101,12 +3099,10 @@ async def get_schematic_data(symbol: str, timeframe: str = "4h", type: str = "tc
                 'close': float(row['close']),
             })
 
-        detected_range = await detect_best_range(candles_list)
-        range_list = [detected_range] if detected_range and not isinstance(detected_range, list) else (detected_range or [])
-
+        # Let detectors use their own internal range detection
         if type == "po3":
             # PO3 schematic detection
-            po3_result = detect_po3_schematics(df, range_list)
+            po3_result = detect_po3_schematics(df, None)
             all_po3 = po3_result.get("bullish_po3", []) + po3_result.get("bearish_po3", [])
 
             # Convert PO3 range indices to timestamps
@@ -3129,11 +3125,11 @@ async def get_schematic_data(symbol: str, timeframe: str = "4h", type: str = "tc
                 "current_price": current_price,
                 "candles": candles_json,
                 "po3_schematics": po3_with_timestamps,
-                "ranges": range_list,
+                "ranges": [],
             })
         else:
             # TCT schematic detection
-            schematics_result = detect_tct_schematics(df, range_list)
+            schematics_result = detect_tct_schematics(df, None)
 
             all_schematics = (
                 schematics_result.get("accumulation_schematics", []) +
@@ -3664,14 +3660,12 @@ async def get_po3_data(symbol: str, timeframe: str = "4h"):
                 'close': float(row['close']),
             })
 
-        detected_range = await detect_best_range(candles_list)
-        range_list = [detected_range] if detected_range and not isinstance(detected_range, list) else (detected_range or [])
-
-        po3_result = detect_po3_schematics(df, range_list)
+        # Let detectors use their own internal range detection
+        po3_result = detect_po3_schematics(df, None)
         all_po3 = po3_result.get("bullish_po3", []) + po3_result.get("bearish_po3", [])
 
         # Also get TCT schematics for the manipulation phase overlay
-        tct_result = detect_tct_schematics(df, range_list)
+        tct_result = detect_tct_schematics(df, None)
         all_tct = (
             tct_result.get("accumulation_schematics", []) +
             tct_result.get("distribution_schematics", [])
@@ -8693,6 +8687,21 @@ async def dashboard():
                 html += '</div>';
             }
 
+            // Show forming signals when no confirmed setup exists
+            if (!setup.entry && setup.formingSignals && setup.formingSignals.length > 0) {
+                html += '<div style="margin-top:8px;padding:6px 8px;border-radius:4px;background:rgba(255,193,7,0.1);border:1px solid rgba(255,193,7,0.2);">';
+                html += '<div style="font-size:0.65rem;color:#ffc107;font-weight:600;margin-bottom:4px;">SETUPS FORMING</div>';
+                setup.formingSignals.slice(0, 5).forEach(sig => {
+                    const dirColor = sig.direction === 'bullish' ? '#00ff88' : sig.direction === 'bearish' ? '#ff4444' : '#888';
+                    const qualPct = Math.round(sig.quality * 100);
+                    html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:2px 0;font-size:0.65rem;">';
+                    html += '<span style="color:' + dirColor + ';">' + sig.source + ' ' + sig.type + '</span>';
+                    html += '<span style="color:#888;">' + sig.tf + ' ' + qualPct + '%</span>';
+                    html += '</div>';
+                });
+                html += '</div>';
+            }
+
             contentEl.innerHTML = html || '<div class="metric-row"><span class="label">No high probability setup on this timeframe</span></div>';
 
             // Confidence bar
@@ -10231,11 +10240,10 @@ async def get_tct_schematics(symbol: Optional[str] = None, timeframe: Optional[s
                 continue
 
             df = dfs[tf_key]
-            candles_list = df_to_candles(df)
-            detected_range = await detect_best_range(candles_list)
-            range_list = [detected_range] if detected_range and not isinstance(detected_range, list) else (detected_range or [])
 
-            schematics_result = detect_tct_schematics(df, range_list)
+            # Let TCT detector use its own internal range detection
+            # (detect_best_range returns incompatible keys)
+            schematics_result = detect_tct_schematics(df, None)
             all_schematics = (
                 schematics_result.get("accumulation_schematics", []) +
                 schematics_result.get("distribution_schematics", [])
@@ -10384,11 +10392,10 @@ async def get_po3_schematics(symbol: Optional[str] = None, timeframe: Optional[s
                 continue
 
             df = dfs[tf_key]
-            candles_list = df_to_candles(df)
-            detected_range = await detect_best_range(candles_list)
-            range_list = [detected_range] if detected_range and not isinstance(detected_range, list) else (detected_range or [])
 
-            po3_result = detect_po3_schematics(df, range_list)
+            # Let PO3 detector use its own internal range detection
+            # (detect_best_range returns incompatible keys)
+            po3_result = detect_po3_schematics(df, None)
             all_po3 = po3_result.get("bullish_po3", []) + po3_result.get("bearish_po3", [])
 
             # Tag each PO3 with its timeframe
