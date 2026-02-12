@@ -3164,7 +3164,7 @@ async def get_schematic_data(symbol: str, timeframe: str = "4h", type: str = "tc
                 "current_price": current_price,
                 "candles": candles_json,
                 "schematics": schematics_with_timestamps,
-                "ranges": range_list,
+                "ranges": [],
             })
 
     except Exception as e:
@@ -3697,7 +3697,7 @@ async def get_po3_data(symbol: str, timeframe: str = "4h"):
             "candles": candles_json,
             "po3_schematics": all_po3,
             "tct_schematics": tct_with_timestamps,
-            "ranges": range_list,
+            "ranges": [],
         })
 
     except Exception as e:
