@@ -2821,10 +2821,8 @@ async def scan_pair_for_forming(symbol: str, timeframe: str) -> List[Dict]:
                 'volume': float(row['volume'])
             })
 
-        detected_range = await detect_best_range(candles_list)
-        range_list = [detected_range] if detected_range and not isinstance(detected_range, list) else (detected_range or [])
-
-        schematics_result = detect_tct_schematics(df, range_list)
+        # Let TCT detector use its own internal range detection
+        schematics_result = detect_tct_schematics(df, None)
 
         all_schematics = (
             schematics_result.get("accumulation_schematics", []) +
@@ -3101,12 +3099,10 @@ async def get_schematic_data(symbol: str, timeframe: str = "4h", type: str = "tc
                 'close': float(row['close']),
             })
 
-        detected_range = await detect_best_range(candles_list)
-        range_list = [detected_range] if detected_range and not isinstance(detected_range, list) else (detected_range or [])
-
+        # Let detectors use their own internal range detection
         if type == "po3":
             # PO3 schematic detection
-            po3_result = detect_po3_schematics(df, range_list)
+            po3_result = detect_po3_schematics(df, None)
             all_po3 = po3_result.get("bullish_po3", []) + po3_result.get("bearish_po3", [])
 
             # Convert PO3 range indices to timestamps
@@ -3129,11 +3125,11 @@ async def get_schematic_data(symbol: str, timeframe: str = "4h", type: str = "tc
                 "current_price": current_price,
                 "candles": candles_json,
                 "po3_schematics": po3_with_timestamps,
-                "ranges": range_list,
+                "ranges": [],
             })
         else:
             # TCT schematic detection
-            schematics_result = detect_tct_schematics(df, range_list)
+            schematics_result = detect_tct_schematics(df, None)
 
             all_schematics = (
                 schematics_result.get("accumulation_schematics", []) +
@@ -3168,7 +3164,7 @@ async def get_schematic_data(symbol: str, timeframe: str = "4h", type: str = "tc
                 "current_price": current_price,
                 "candles": candles_json,
                 "schematics": schematics_with_timestamps,
-                "ranges": range_list,
+                "ranges": [],
             })
 
     except Exception as e:
@@ -3664,14 +3660,12 @@ async def get_po3_data(symbol: str, timeframe: str = "4h"):
                 'close': float(row['close']),
             })
 
-        detected_range = await detect_best_range(candles_list)
-        range_list = [detected_range] if detected_range and not isinstance(detected_range, list) else (detected_range or [])
-
-        po3_result = detect_po3_schematics(df, range_list)
+        # Let detectors use their own internal range detection
+        po3_result = detect_po3_schematics(df, None)
         all_po3 = po3_result.get("bullish_po3", []) + po3_result.get("bearish_po3", [])
 
         # Also get TCT schematics for the manipulation phase overlay
-        tct_result = detect_tct_schematics(df, range_list)
+        tct_result = detect_tct_schematics(df, None)
         all_tct = (
             tct_result.get("accumulation_schematics", []) +
             tct_result.get("distribution_schematics", [])
@@ -3703,7 +3697,7 @@ async def get_po3_data(symbol: str, timeframe: str = "4h"):
             "candles": candles_json,
             "po3_schematics": all_po3,
             "tct_schematics": tct_with_timestamps,
-            "ranges": range_list,
+            "ranges": [],
         })
 
     except Exception as e:
@@ -6391,6 +6385,9 @@ async def dashboard():
             po3Data: null,
         };
 
+        // Last completed HPS cache: keyed by symbol, stores the last setup that had valid levels
+        const lastCompletedSetups = {};
+
         // Fetch with retry and timeout
         async function fetchWithRetry(url, options = {}, retries = 3, timeout = 20000) {
             for (let i = 0; i < retries; i++) {
@@ -6568,6 +6565,17 @@ async def dashboard():
             if (p >= 1)     return '$' + p.toFixed(2);
             if (p >= 0.01)  return '$' + p.toFixed(4);
             return '$' + p.toPrecision(4);
+        }
+
+        function timeSince(isoStr) {
+            if (!isoStr) return '';
+            const diff = Date.now() - new Date(isoStr).getTime();
+            const mins = Math.floor(diff / 60000);
+            if (mins < 1) return 'just now';
+            if (mins < 60) return mins + 'm ago';
+            const hrs = Math.floor(mins / 60);
+            if (hrs < 24) return hrs + 'h ago';
+            return Math.floor(hrs / 24) + 'd ago';
         }
 
         // Add horizontal line to chart
@@ -8457,6 +8465,20 @@ async def dashboard():
                 if (setup.entry && setup.target) {
                     setup.slTrail = setup.entry + (setup.target - setup.entry) * 0.33;
                 }
+
+                // Cache this as the last completed setup for this symbol
+                lastCompletedSetups[currentSymbol] = {
+                    direction: setup.direction,
+                    confidence: setup.confidence,
+                    entry: setup.entry,
+                    stop: setup.stop,
+                    target: setup.target,
+                    rr: setup.rr,
+                    source: setup.source,
+                    tags: setup.tags.map(t => ({...t})),
+                    isConfirmed: setup.isConfirmed,
+                    timestamp: new Date().toISOString(),
+                };
             } else {
                 // No schematic/PO3 candidates — build a forming setup from range + candle analysis
                 const formingSetup = analyzeFormingSetupFromData(rangesData, zonesData, liqData, candles, gateBias);
@@ -8469,6 +8491,12 @@ async def dashboard():
                 setup.source = formingSetup.source;
                 setup.tags = formingSetup.tags;
                 setup.isConfirmed = false;
+
+                // Attach last completed setup for this symbol (if any)
+                const lastSetup = lastCompletedSetups[currentSymbol];
+                if (lastSetup) {
+                    setup.lastCompleted = lastSetup;
+                }
             }
 
             return setup;
@@ -8690,6 +8718,53 @@ async def dashboard():
                 setup.tags.forEach(tag => {
                     html += '<span class="setup-tag ' + tag.cls + '">' + tag.text + '</span>';
                 });
+                html += '</div>';
+            }
+
+            // Show forming signals when no confirmed setup exists
+            if (!setup.entry && setup.formingSignals && setup.formingSignals.length > 0) {
+                html += '<div style="margin-top:8px;padding:6px 8px;border-radius:4px;background:rgba(255,193,7,0.1);border:1px solid rgba(255,193,7,0.2);">';
+                html += '<div style="font-size:0.65rem;color:#ffc107;font-weight:600;margin-bottom:4px;">SETUPS FORMING</div>';
+                setup.formingSignals.slice(0, 5).forEach(sig => {
+                    const dirColor = sig.direction === 'bullish' ? '#00ff88' : sig.direction === 'bearish' ? '#ff4444' : '#888';
+                    const qualPct = Math.round(sig.quality * 100);
+                    html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:2px 0;font-size:0.65rem;">';
+                    html += '<span style="color:' + dirColor + ';">' + sig.source + ' ' + sig.type + '</span>';
+                    html += '<span style="color:#888;">' + sig.tf + ' ' + qualPct + '%</span>';
+                    html += '</div>';
+                });
+                html += '</div>';
+            }
+
+            // Show last completed setup when no active setup exists
+            if (!setup.entry && setup.lastCompleted) {
+                const lc = setup.lastCompleted;
+                const ago = timeSince(lc.timestamp);
+                const lcDirColor = lc.direction === 'long' ? '#00ff88' : lc.direction === 'short' ? '#ff4444' : '#888';
+                html += '<div style="margin-top:8px;padding:8px;border-radius:4px;background:rgba(100,100,120,0.15);border:1px solid rgba(100,100,120,0.3);">';
+                html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">';
+                html += '<span style="font-size:0.65rem;color:#888;font-weight:600;">LAST COMPLETED SETUP</span>';
+                html += '<span style="font-size:0.6rem;color:#666;">' + ago + '</span>';
+                html += '</div>';
+                html += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">';
+                html += '<span style="color:' + lcDirColor + ';font-weight:700;font-size:0.75rem;">' + (lc.direction === 'long' ? 'LONG' : 'SHORT') + '</span>';
+                if (lc.source) html += '<span style="color:#888;font-size:0.6rem;">' + lc.source + '</span>';
+                html += '</div>';
+                html += '<div class="setup-levels" style="opacity:0.7;">';
+                html += '<div class="setup-level-box entry"><span class="setup-level-label">ENTRY</span><span class="setup-level-price">' + fmtPrice(lc.entry) + '</span></div>';
+                html += '<div class="setup-level-box sl"><span class="setup-level-label">STOP</span><span class="setup-level-price">' + fmtPrice(lc.stop) + '</span></div>';
+                html += '<div class="setup-level-box tp"><span class="setup-level-label">TARGET</span><span class="setup-level-price">' + fmtPrice(lc.target) + '</span></div>';
+                html += '</div>';
+                if (lc.rr) {
+                    html += '<div class="metric-row" style="opacity:0.7;"><span class="label">R:R</span><span class="value" style="font-size:0.7rem;">' + lc.rr.toFixed(1) + 'R</span></div>';
+                }
+                if (lc.tags && lc.tags.length > 0) {
+                    html += '<div class="setup-meta" style="opacity:0.7;">';
+                    lc.tags.forEach(tag => {
+                        html += '<span class="setup-tag ' + tag.cls + '">' + tag.text + '</span>';
+                    });
+                    html += '</div>';
+                }
                 html += '</div>';
             }
 
@@ -10231,11 +10306,10 @@ async def get_tct_schematics(symbol: Optional[str] = None, timeframe: Optional[s
                 continue
 
             df = dfs[tf_key]
-            candles_list = df_to_candles(df)
-            detected_range = await detect_best_range(candles_list)
-            range_list = [detected_range] if detected_range and not isinstance(detected_range, list) else (detected_range or [])
 
-            schematics_result = detect_tct_schematics(df, range_list)
+            # Let TCT detector use its own internal range detection
+            # (detect_best_range returns incompatible keys)
+            schematics_result = detect_tct_schematics(df, None)
             all_schematics = (
                 schematics_result.get("accumulation_schematics", []) +
                 schematics_result.get("distribution_schematics", [])
@@ -10384,11 +10458,10 @@ async def get_po3_schematics(symbol: Optional[str] = None, timeframe: Optional[s
                 continue
 
             df = dfs[tf_key]
-            candles_list = df_to_candles(df)
-            detected_range = await detect_best_range(candles_list)
-            range_list = [detected_range] if detected_range and not isinstance(detected_range, list) else (detected_range or [])
 
-            po3_result = detect_po3_schematics(df, range_list)
+            # Let PO3 detector use its own internal range detection
+            # (detect_best_range returns incompatible keys)
+            po3_result = detect_po3_schematics(df, None)
             all_po3 = po3_result.get("bullish_po3", []) + po3_result.get("bearish_po3", [])
 
             # Tag each PO3 with its timeframe
