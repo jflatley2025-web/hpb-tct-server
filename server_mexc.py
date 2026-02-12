@@ -6385,6 +6385,9 @@ async def dashboard():
             po3Data: null,
         };
 
+        // Last completed HPS cache: keyed by symbol, stores the last setup that had valid levels
+        const lastCompletedSetups = {};
+
         // Fetch with retry and timeout
         async function fetchWithRetry(url, options = {}, retries = 3, timeout = 20000) {
             for (let i = 0; i < retries; i++) {
@@ -6562,6 +6565,17 @@ async def dashboard():
             if (p >= 1)     return '$' + p.toFixed(2);
             if (p >= 0.01)  return '$' + p.toFixed(4);
             return '$' + p.toPrecision(4);
+        }
+
+        function timeSince(isoStr) {
+            if (!isoStr) return '';
+            const diff = Date.now() - new Date(isoStr).getTime();
+            const mins = Math.floor(diff / 60000);
+            if (mins < 1) return 'just now';
+            if (mins < 60) return mins + 'm ago';
+            const hrs = Math.floor(mins / 60);
+            if (hrs < 24) return hrs + 'h ago';
+            return Math.floor(hrs / 24) + 'd ago';
         }
 
         // Add horizontal line to chart
@@ -8451,6 +8465,20 @@ async def dashboard():
                 if (setup.entry && setup.target) {
                     setup.slTrail = setup.entry + (setup.target - setup.entry) * 0.33;
                 }
+
+                // Cache this as the last completed setup for this symbol
+                lastCompletedSetups[currentSymbol] = {
+                    direction: setup.direction,
+                    confidence: setup.confidence,
+                    entry: setup.entry,
+                    stop: setup.stop,
+                    target: setup.target,
+                    rr: setup.rr,
+                    source: setup.source,
+                    tags: setup.tags.map(t => ({...t})),
+                    isConfirmed: setup.isConfirmed,
+                    timestamp: new Date().toISOString(),
+                };
             } else {
                 // No schematic/PO3 candidates — build a forming setup from range + candle analysis
                 const formingSetup = analyzeFormingSetupFromData(rangesData, zonesData, liqData, candles, gateBias);
@@ -8463,6 +8491,12 @@ async def dashboard():
                 setup.source = formingSetup.source;
                 setup.tags = formingSetup.tags;
                 setup.isConfirmed = false;
+
+                // Attach last completed setup for this symbol (if any)
+                const lastSetup = lastCompletedSetups[currentSymbol];
+                if (lastSetup) {
+                    setup.lastCompleted = lastSetup;
+                }
             }
 
             return setup;
@@ -8699,6 +8733,38 @@ async def dashboard():
                     html += '<span style="color:#888;">' + sig.tf + ' ' + qualPct + '%</span>';
                     html += '</div>';
                 });
+                html += '</div>';
+            }
+
+            // Show last completed setup when no active setup exists
+            if (!setup.entry && setup.lastCompleted) {
+                const lc = setup.lastCompleted;
+                const ago = timeSince(lc.timestamp);
+                const lcDirColor = lc.direction === 'long' ? '#00ff88' : lc.direction === 'short' ? '#ff4444' : '#888';
+                html += '<div style="margin-top:8px;padding:8px;border-radius:4px;background:rgba(100,100,120,0.15);border:1px solid rgba(100,100,120,0.3);">';
+                html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">';
+                html += '<span style="font-size:0.65rem;color:#888;font-weight:600;">LAST COMPLETED SETUP</span>';
+                html += '<span style="font-size:0.6rem;color:#666;">' + ago + '</span>';
+                html += '</div>';
+                html += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">';
+                html += '<span style="color:' + lcDirColor + ';font-weight:700;font-size:0.75rem;">' + (lc.direction === 'long' ? 'LONG' : 'SHORT') + '</span>';
+                if (lc.source) html += '<span style="color:#888;font-size:0.6rem;">' + lc.source + '</span>';
+                html += '</div>';
+                html += '<div class="setup-levels" style="opacity:0.7;">';
+                html += '<div class="setup-level-box entry"><span class="setup-level-label">ENTRY</span><span class="setup-level-price">' + fmtPrice(lc.entry) + '</span></div>';
+                html += '<div class="setup-level-box sl"><span class="setup-level-label">STOP</span><span class="setup-level-price">' + fmtPrice(lc.stop) + '</span></div>';
+                html += '<div class="setup-level-box tp"><span class="setup-level-label">TARGET</span><span class="setup-level-price">' + fmtPrice(lc.target) + '</span></div>';
+                html += '</div>';
+                if (lc.rr) {
+                    html += '<div class="metric-row" style="opacity:0.7;"><span class="label">R:R</span><span class="value" style="font-size:0.7rem;">' + lc.rr.toFixed(1) + 'R</span></div>';
+                }
+                if (lc.tags && lc.tags.length > 0) {
+                    html += '<div class="setup-meta" style="opacity:0.7;">';
+                    lc.tags.forEach(tag => {
+                        html += '<span class="setup-tag ' + tag.cls + '">' + tag.text + '</span>';
+                    });
+                    html += '</div>';
+                }
                 html += '</div>';
             }
 
