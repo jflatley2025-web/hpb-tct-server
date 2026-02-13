@@ -6752,6 +6752,7 @@ async def dashboard():
             // via its own generation check and stop. Allow this one to proceed.
             isLoading = true;
 
+          try {
             // Capture symbol at start to prevent race conditions when user switches
             // pairs during async API calls. All fetches use this snapshot so data
             // stays consistent even if currentSymbol changes mid-refresh.
@@ -6998,6 +6999,10 @@ async def dashboard():
             }
 
             isLoading = false;
+          } catch (topLevelErr) {
+            console.error('refreshData top-level error:', topLevelErr);
+            isLoading = false;
+          }
         }
 
         // Derive Forming Models from current pair's HTF+LTF schematic data
@@ -9694,7 +9699,21 @@ async def dashboard():
 
         // Initialize
         initChart();
-        refreshData();
+
+        // Initial data load with retry for Render cold-start
+        (async function initialLoad() {
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                try {
+                    await refreshData();
+                    // If candles loaded, we're good
+                    if (lastCandles && lastCandles.length > 0) break;
+                    console.warn('Initial load attempt ' + attempt + ': no candle data, retrying in 5s...');
+                } catch (e) {
+                    console.warn('Initial load attempt ' + attempt + ' error:', e.message);
+                }
+                if (attempt < 3) await new Promise(r => setTimeout(r, 5000));
+            }
+        })();
         fetchTop5Setups();
 
         // Auto-refresh every 30 seconds (forming models derived within refreshData)
