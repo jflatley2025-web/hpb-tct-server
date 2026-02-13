@@ -4772,6 +4772,59 @@ async def dashboard():
             justify-content: space-between;
             align-items: center;
         }
+        /* 8-Step Pipeline Display */
+        .hps-pipeline { margin-bottom: 10px; }
+        .hps-step {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 3px 6px;
+            border-radius: 4px;
+            margin-bottom: 2px;
+            font-size: 0.68rem;
+            background: rgba(255,255,255,0.02);
+            border-left: 3px solid #2d2d44;
+            transition: all 0.2s;
+        }
+        .hps-step.active { border-left-color: #00d4ff; background: rgba(0,212,255,0.06); }
+        .hps-step.pass { border-left-color: #00ff88; }
+        .hps-step.fail { border-left-color: #ff4444; }
+        .hps-step.warn { border-left-color: #ffc107; }
+        .hps-step-name { color: #aaa; flex: 1; }
+        .hps-step.pass .hps-step-name { color: #ccc; }
+        .hps-step-result {
+            font-weight: 600;
+            font-size: 0.62rem;
+            padding: 1px 5px;
+            border-radius: 3px;
+            margin-left: 4px;
+            white-space: nowrap;
+        }
+        .hps-step.pass .hps-step-result { color: #00ff88; }
+        .hps-step.fail .hps-step-result { color: #ff4444; }
+        .hps-step.warn .hps-step-result { color: #ffc107; }
+        .hps-step-score {
+            font-size: 0.6rem;
+            color: #555;
+            min-width: 28px;
+            text-align: right;
+            margin-left: 4px;
+        }
+        .hps-step.pass .hps-step-score { color: #00ff88; }
+        .hps-step.warn .hps-step-score { color: #ffc107; }
+        .hps-divider {
+            border-top: 1px solid rgba(0,212,255,0.15);
+            margin: 6px 0;
+        }
+        .hps-total {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.72rem;
+            font-weight: 700;
+            color: #00d4ff;
+            padding: 2px 6px;
+        }
         .setup-direction {
             font-size: 0.75rem;
             font-weight: 700;
@@ -5941,9 +5994,10 @@ async def dashboard():
                 </div>
             </div>
 
-            <!-- Highest Probability Setup (derived from all sections above) -->
+            <!-- Highest Probability Setup (derived from all 8 steps) -->
             <div class="setup-panel" id="setupPanel">
                 <h3>Highest Probability Setup <span class="setup-direction none" id="setupDirection">--</span></h3>
+                <div id="hpsPipeline" class="hps-pipeline"></div>
                 <div id="setupContent">
                     <div class="metric-row"><span class="label">Select a pair to analyze...</span></div>
                 </div>
@@ -6718,6 +6772,7 @@ async def dashboard():
             document.getElementById('setupDirection').textContent = '...';
             document.getElementById('setupDirection').className = 'setup-direction none';
             document.getElementById('setupContent').innerHTML = '<div class="metric-row"><span class="label">Running analysis pipeline...</span></div>';
+            document.getElementById('hpsPipeline').innerHTML = '';
             document.getElementById('setupConfidence').style.width = '0%';
             document.getElementById('formingCount').textContent = '...';
             document.getElementById('formingContent').innerHTML = '<div class="forming-empty">Analyzing pair...</div>';
@@ -6793,17 +6848,27 @@ async def dashboard():
             clearPriceLines();
 
             // For HTF data: fetch fresh if new pair, reuse cache if just timeframe change
-            let rangesData = null, zonesData = null, liqData = null, valData = null, schematicsData = null, po3Data = null;
+            let msData = null, rangesData = null, zonesData = null, liqData = null, valData = null, schematicsData = null, po3Data = null;
 
             if (isNewPair) {
-                // ─── STEP 2: Fetch ranges, zones, liquidity in PARALLEL ───
-                const [rangesResult, zonesResult, liqResult] = await Promise.allSettled([
+                // ─── STEP 1: Market Structure (Lecture 1 — trend, BOS, CHoCH, levels, EOF) ───
+                // ─── STEP 2: Ranges (Lecture 2 — active range, deviations, premium/discount) ───
+                // ─── STEP 3: Supply & Demand (Lecture 3 — OBs, FVGs, zone quality) ───
+                // ─── STEP 4: Liquidity (Lecture 4 — BSL/SSL pools, curves, voids) ───
+                const [msResult, rangesResult, zonesResult, liqResult] = await Promise.allSettled([
+                    fetchWithRetry(`/api/market-structure?symbol=${targetSymbol}&timeframe=4h&limit=300`, {}, 3, 25000),
                     fetchWithRetry(`/api/ranges?symbol=${targetSymbol}`, {}, 3, 25000),
                     fetchWithRetry(`/api/zones?symbol=${targetSymbol}`, {}, 3, 25000),
                     fetchWithRetry(`/api/liquidity?symbol=${targetSymbol}`, {}, 3, 25000),
                 ]);
 
                 if (isStale()) { isLoading = false; return; }
+
+                // Process market structure
+                msData = msResult.status === 'fulfilled' ? msResult.value : null;
+                if (msData && !msData.error) {
+                    console.log('Market structure loaded:', msData.structure?.trend || 'unknown');
+                }
 
                 // Process ranges
                 rangesData = rangesResult.status === 'fulfilled' ? rangesResult.value : null;
@@ -6825,7 +6890,9 @@ async def dashboard():
 
                 if (isStale()) { isLoading = false; return; }
 
-                // ─── STEP 3: Fetch schematics, PO3, validation in PARALLEL ───
+                // ─── STEP 5: TCT Schematics (Lecture 5/6) ───
+                // ─── STEP 6: PO3 Schematics (Lecture 8) ───
+                // ─── STEP 7: Trade Execution / Validation (Lecture 9 + 7-Gate) ───
                 const [schResult, po3Result, valResult] = await Promise.allSettled([
                     fetchWithRetry(`/api/schematics?symbol=${targetSymbol}&timeframe=${targetTimeframe}`, {}, 3, 30000),
                     fetchWithRetry(`/api/po3?symbol=${targetSymbol}&timeframe=${targetTimeframe}`, {}, 3, 30000),
@@ -6856,12 +6923,13 @@ async def dashboard():
                 if (!isStale()) {
                     htfCache = {
                         symbol: targetSymbol,
-                        rangesData, zonesData, liqData, valData, schematicsData, po3Data,
+                        msData, rangesData, zonesData, liqData, valData, schematicsData, po3Data,
                     };
                 }
 
             } else {
-                // ─── TIMEFRAME CHANGE: Reuse cached ranges/zones/liq/val, re-fetch schematics/PO3 ───
+                // ─── TIMEFRAME CHANGE: Reuse cached HTF data, re-fetch schematics/PO3 ───
+                msData = htfCache.msData;
                 rangesData = htfCache.rangesData;
                 zonesData = htfCache.zonesData;
                 liqData = htfCache.liqData;
@@ -6911,22 +6979,22 @@ async def dashboard():
             // If stale at this point, discard final rendering
             if (isStale()) { isLoading = false; return; }
 
-            // ─── STEP 4: Forming Models (derived from current pair's schematic data) ───
+            // ─── Forming Models (derived from current pair's schematic data) ───
             try { deriveFormingModels(schematicsData, po3Data); }
             catch(e) { console.error('Forming models error:', e); }
 
-            // ─── STEP 5: Highest Probability Setup (uses all data from pipeline) ───
+            // ─── STEP 8: Highest Probability Setup (8-step pipeline combining all data) ───
             try {
-                const bestSetup = analyzeHighestProbabilitySetup(rangesData, zonesData, liqData, schematicsData, po3Data, valData, lastCandles);
+                const bestSetup = analyzeHighestProbabilitySetup(msData, rangesData, zonesData, liqData, schematicsData, po3Data, valData, lastCandles);
                 renderSetupPanel(bestSetup);
                 try { drawTCTModelOverlays(bestSetup, lastCandles); }
                 catch(e) { console.error('Overlay draw error:', e); }
             } catch(e) {
                 console.error('Setup analysis error:', e);
-                // Show error in setup panel instead of blank
                 document.getElementById('setupDirection').textContent = 'ERR';
                 document.getElementById('setupDirection').className = 'setup-direction none';
                 document.getElementById('setupContent').innerHTML = '<div class="metric-row"><span class="label" style="color:#ff4444;">Analysis error: ' + e.message + '</span></div>';
+                document.getElementById('hpsPipeline').innerHTML = '';
             }
 
             isLoading = false;
@@ -8315,190 +8383,310 @@ async def dashboard():
 
         // ===== HIGHEST PROBABILITY SETUP ANALYSIS =====
 
-        function analyzeHighestProbabilitySetup(rangesData, zonesData, liqData, schematicsData, po3Data, valData, candles) {
+        function analyzeHighestProbabilitySetup(msData, rangesData, zonesData, liqData, schematicsData, po3Data, valData, candles) {
             const setup = {
-                direction: 'none',
-                confidence: 0,
-                entry: null,
-                stop: null,
-                target: null,
-                rr: null,
-                source: null,
-                tags: [],
-                resistanceZones: [],
-                supportZones: [],
-                keyLevels: [],
-                slTrail: null,
+                direction: 'none', confidence: 0, entry: null, stop: null, target: null,
+                rr: null, source: null, tags: [], resistanceZones: [], supportZones: [],
+                keyLevels: [], slTrail: null, steps: [],
             };
 
-            // Collect all candidate setups with scores
-            const candidates = [];
+            // ═══ STEP 1: Market Structure (Lecture 1) ═══
+            const step1 = { name: 'Market Structure', score: 0, result: '', status: 'fail' };
+            let msTrend = 'neutral', msEOFBias = 'neutral', msBosQuality = 'none';
 
-            // 1. Check TCT Schematics (highest priority - Lecture 5/6)
-            if (schematicsData) {
-                const htfS = schematicsData.htf_schematics?.schematics || [];
-                const mtfS = schematicsData.mtf_schematics?.schematics || [];
-                const ltfS = schematicsData.ltf_schematics?.schematics || [];
-                [...htfS, ...mtfS, ...ltfS].forEach(s => {
-                    if (s.entry?.price && s.stop_loss?.price && s.target?.price) {
-                        const quality = s.quality_score || 0;
-                        const rr = s.risk_reward || 0;
-                        const isConfirmed = s.is_confirmed ? 1 : 0;
-                        const has6CR = s.lecture_5b_enhancements?.htf_validation?.all_taps_valid_6cr ? 1 : 0;
-                        const hasTL = s.lecture_5b_enhancements?.has_trendline_confluence ? 1 : 0;
-                        const l6Score = (s.lecture_6_enhancements?.has_conversion ? 0.1 : 0) +
-                                       (s.lecture_6_enhancements?.has_dual_deviation ? 0.1 : 0) +
-                                       (s.lecture_6_enhancements?.has_wov_opportunity ? 0.05 : 0);
+            if (msData && msData.structure) {
+                const st = msData.structure;
+                msTrend = st.trend || 'neutral';
+                if (st.eof) { msEOFBias = st.eof.bias || 'neutral'; if (st.eof.trend_shift) step1.score += 5; }
+                const bosEvents = st.bos_events || [];
+                if (bosEvents.length > 0) {
+                    msBosQuality = bosEvents[bosEvents.length - 1].quality || 'moderate';
+                    if (msBosQuality === 'good') step1.score += 15;
+                    else if (msBosQuality === 'moderate') step1.score += 8;
+                }
+                if ((st.choch_events || []).length > 0) step1.score += 10;
+                if (st.domino_effect) {
+                    const dc = st.domino_effect.confidence || 'low';
+                    if (dc === 'high') step1.score += 20; else if (dc === 'moderate') step1.score += 10;
+                }
+                if (st.rtz && st.rtz.valid && st.rtz.clean) step1.score += 10;
+                if (msTrend === 'bullish' || msTrend === 'bearish') step1.score += 5;
+                step1.result = msTrend.toUpperCase() + (msBosQuality === 'good' ? ' (Good BOS)' : msBosQuality === 'moderate' ? ' (Mod BOS)' : '');
+                step1.status = step1.score >= 15 ? 'pass' : step1.score >= 5 ? 'warn' : 'fail';
+            } else if (rangesData?.market_structure) {
+                msTrend = rangesData.market_structure.htf_trend || 'neutral';
+                if (msTrend !== 'neutral') { step1.score += 5; step1.result = msTrend.toUpperCase() + ' (from ranges)'; step1.status = 'warn'; }
+                else { step1.result = 'Fallback'; }
+            } else { step1.result = 'No data'; }
+            setup.steps.push(step1);
 
-                        const score = (quality * 40) + (Math.min(rr, 5) * 8) + (isConfirmed * 15) + (has6CR * 10) + (hasTL * 5) + (l6Score * 100);
+            // ═══ STEP 2: Ranges (Lecture 2) ═══
+            const step2 = { name: 'Ranges', score: 0, result: '', status: 'fail' };
+            let activeRange = null, rangeZone = 'unknown', rangeBias = 'neutral', hasDeviation = false;
 
-                        candidates.push({
-                            score,
-                            direction: s.direction === 'bullish' ? 'long' : 'short',
-                            entry: s.entry.price,
-                            stop: s.stop_loss.price,
-                            target: s.lecture_6_enhancements?.enhanced_target || s.target.price,
-                            rr: rr,
-                            isConfirmed: !!isConfirmed,
-                            source: 'TCT Schematic (' + (s.schematic_type || 'unknown').replace(/_/g, ' ') + ')',
-                            tags: [
-                                isConfirmed ? { text: 'CONFIRMED', cls: 'good' } : { text: 'FORMING', cls: 'warn' },
-                                quality >= 0.7 ? { text: 'HQ ' + Math.round(quality * 100) + '%', cls: 'good' } : { text: 'Q ' + Math.round(quality * 100) + '%', cls: 'warn' },
-                                has6CR ? { text: '6CR Valid', cls: 'good' } : null,
-                                hasTL ? { text: 'TL Confluence', cls: 'good' } : null,
-                                s.lecture_6_enhancements?.has_conversion ? { text: 'Converted', cls: 'good' } : null,
-                                rr >= 3 ? { text: 'R:R ' + rr.toFixed(1), cls: 'good' } : { text: 'R:R ' + rr.toFixed(1), cls: 'warn' },
-                            ].filter(Boolean),
-                        });
-                    }
-                });
-            }
-
-            // 2. Check PO3 Schematics (Lecture 8)
-            if (po3Data) {
-                const htfP = po3Data.htf_po3?.schematics || [];
-                const mtfP = po3Data.mtf_po3?.schematics || [];
-                const ltfP = po3Data.ltf_po3?.schematics || [];
-                [...htfP, ...mtfP, ...ltfP].forEach(p => {
-                    if (p.entry?.price && p.stop_loss?.price && p.target?.price) {
-                        const quality = p.quality_score || 0;
-                        const rr = p.risk_reward || 0;
-                        const hasExpansion = p.has_expansion ? 1 : 0;
-                        const hasTCTModel = p.tct_model?.detected ? 1 : 0;
-
-                        const score = (quality * 35) + (Math.min(rr, 5) * 7) + (hasExpansion * 12) + (hasTCTModel * 10);
-
-                        candidates.push({
-                            score,
-                            direction: p.direction === 'bullish' ? 'long' : 'short',
-                            entry: p.entry.price,
-                            stop: p.stop_loss.price,
-                            target: p.target.price,
-                            rr: rr,
-                            source: 'PO3 (' + (p.phase || 'range').replace(/_/g, ' ') + ')',
-                            tags: [
-                                { text: 'PO3', cls: 'good' },
-                                quality >= 0.6 ? { text: Math.round(quality * 100) + '%', cls: 'good' } : { text: Math.round(quality * 100) + '%', cls: 'warn' },
-                                hasExpansion ? { text: 'Expanding', cls: 'good' } : null,
-                                hasTCTModel ? { text: 'TCT Model', cls: 'good' } : null,
-                                rr >= 3 ? { text: 'R:R ' + rr.toFixed(1), cls: 'good' } : { text: 'R:R ' + rr.toFixed(1), cls: 'warn' },
-                            ].filter(Boolean),
-                        });
-                    }
-                });
-            }
-
-            // 3. Check gate validation for directional bias
-            let gateBias = 'none';
-            if (valData && valData.gates) {
-                const action = valData.Action || '';
-                if (action.includes('LONG') || action.includes('VALID')) gateBias = 'long';
-                else if (action.includes('SHORT')) gateBias = 'short';
-            }
-
-            // 4. Use range data for S/R zones overlay
             if (rangesData) {
-                const activeRange = rangesData.htf_ranges?.active_range || rangesData.ltf_ranges?.active_range;
+                activeRange = rangesData.htf_ranges?.active_range || rangesData.ltf_ranges?.active_range;
                 if (activeRange) {
                     const high = activeRange.range_high || activeRange.high;
                     const low = activeRange.range_low || activeRange.low;
                     if (high) setup.keyLevels.push({ price: high, label: 'Range High', color: '#ff4444' });
                     if (low) setup.keyLevels.push({ price: low, label: 'Range Low', color: '#00ff88' });
+                    if (activeRange.is_confirmed) step2.score += 10;
+                    const ql = activeRange.quality?.quality_label || '';
+                    if (ql === 'EXCELLENT') step2.score += 10; else if (ql === 'GOOD') step2.score += 7; else if (ql === 'MODERATE') step2.score += 4;
+                    // HP variable: range duration >= 1 day (~6 candles on 4h)
+                    const span = Math.abs((activeRange.high_idx || 0) - (activeRange.low_idx || 0));
+                    if (span >= 7) step2.score += 10; else if (span >= 4) step2.score += 5;
                 }
-            }
+                if (rangesData.current_position) {
+                    rangeZone = rangesData.current_position.zone || 'unknown';
+                    rangeBias = rangesData.current_position.trading_bias || 'neutral';
+                    if (rangeZone === 'DISCOUNT' || rangeZone === 'PREMIUM') step2.score += 5;
+                }
+                const devs = rangesData.deviations;
+                if (devs) {
+                    hasDeviation = ((devs.total_htf_deviations || 0) + (devs.total_ltf_deviations || 0)) > 0;
+                    if (hasDeviation) step2.score += 15;
+                }
+                step2.result = activeRange ? (rangeZone !== 'unknown' ? rangeZone : 'Active') + (hasDeviation ? ' +Dev' : '') : 'No range';
+                step2.status = step2.score >= 15 ? 'pass' : step2.score >= 5 ? 'warn' : 'fail';
+            } else { step2.result = 'No data'; }
+            setup.steps.push(step2);
 
-            // 5. Collect zone data for overlays
+            // ═══ STEP 3: Supply & Demand (Lecture 3) ═══
+            const step3 = { name: 'Supply & Demand', score: 0, result: '', status: 'fail' };
+            let nearestDemand = null, nearestSupply = null;
+
             if (zonesData) {
-                const topZones = zonesData.htf_zones?.top_3_high_quality || zonesData.htf_zones?.top_3_all || [];
-                topZones.forEach(z => {
-                    if (z.type === 'supply' || z.top > (rangesData?.current_price || 0)) {
-                        setup.resistanceZones.push({ high: z.top, low: z.bottom });
-                    } else {
-                        setup.supportZones.push({ high: z.top, low: z.bottom });
+                const htfZ = zonesData.htf_zones || {};
+                const unmitigated = [...(htfZ.order_blocks || []), ...(htfZ.structure_zones || [])].filter(z => !z.mitigated);
+                const currentPrice = rangesData?.current_price || (candles?.length > 0 ? candles[candles.length - 1].close : 0);
+                if (unmitigated.length > 0) step3.score += 5;
+
+                unmitigated.forEach(z => {
+                    const top = z.top || z.high || 0, bottom = z.bottom || z.low || 0, mid = (top + bottom) / 2;
+                    if ((z.type === 'bullish' || z.type === 'demand') && mid < currentPrice) {
+                        if (!nearestDemand || mid > nearestDemand.mid) nearestDemand = { top, bottom, mid, quality: z.quality_score || 0 };
+                    }
+                    if ((z.type === 'bearish' || z.type === 'supply') && mid > currentPrice) {
+                        if (!nearestSupply || mid < nearestSupply.mid) nearestSupply = { top, bottom, mid, quality: z.quality_score || 0 };
                     }
                 });
+
+                // HP POI quality scoring
+                if (nearestDemand?.quality >= 0.7) step3.score += 15; else if (nearestDemand?.quality >= 0.4) step3.score += 8;
+                if (nearestSupply?.quality >= 0.7) step3.score += 15; else if (nearestSupply?.quality >= 0.4) step3.score += 8;
+                step3.score = Math.min(step3.score, 25);
+
+                // Overlay zones
+                (htfZ.top_3_high_quality || htfZ.top_3_all || []).forEach(z => {
+                    if (z.type === 'supply' || (z.top || 0) > currentPrice) setup.resistanceZones.push({ high: z.top, low: z.bottom });
+                    else setup.supportZones.push({ high: z.top, low: z.bottom });
+                });
+
+                step3.result = unmitigated.length + ' zones' + (nearestDemand ? ' (D)' : '') + (nearestSupply ? ' (S)' : '');
+                step3.status = step3.score >= 10 ? 'pass' : step3.score >= 5 ? 'warn' : 'fail';
+            } else { step3.result = 'No data'; }
+            setup.steps.push(step3);
+
+            // ═══ STEP 4: Liquidity (Lecture 4) ═══
+            const step4 = { name: 'Liquidity', score: 0, result: '', status: 'fail' };
+            let hasLiqCurve = false;
+
+            if (liqData) {
+                const htfLiq = liqData.htf_liquidity || {};
+                const bsl = htfLiq.bsl_pools || [], ssl = htfLiq.ssl_pools || [];
+                const curves = htfLiq.liquidity_curves || [];
+                if (bsl.length > 0) step4.score += 5;
+                if (ssl.length > 0) step4.score += 5;
+                hasLiqCurve = curves.length > 0;
+                if (hasLiqCurve) step4.score += 15; // RTZ present — HP variable
+                if ((htfLiq.sweeps || []).length > 0) step4.score += 5;
+                const parts = [];
+                if (bsl.length > 0) parts.push(bsl.length + ' BSL');
+                if (ssl.length > 0) parts.push(ssl.length + ' SSL');
+                if (hasLiqCurve) parts.push('RTZ');
+                step4.result = parts.length > 0 ? parts.join(', ') : 'None';
+                step4.status = step4.score >= 10 ? 'pass' : step4.score >= 5 ? 'warn' : 'fail';
+            } else { step4.result = 'No data'; }
+            setup.steps.push(step4);
+
+            // ═══ STEP 5: TCT Schematics (Lecture 5/6) ═══
+            const step5 = { name: 'TCT Schematics', score: 0, result: '', status: 'fail' };
+            let bestSchematic = null;
+
+            if (schematicsData) {
+                const all = [...(schematicsData.htf_schematics?.schematics || []),
+                             ...(schematicsData.mtf_schematics?.schematics || []),
+                             ...(schematicsData.ltf_schematics?.schematics || [])];
+                let bestScore = -1;
+                all.forEach(s => {
+                    if (!s.entry?.price || !s.stop_loss?.price || !s.target?.price) return;
+                    const quality = s.quality_score || 0, rr = s.risk_reward || 0;
+                    const isConf = s.is_confirmed ? 1 : 0;
+                    const has6CR = s.lecture_5b_enhancements?.htf_validation?.all_taps_valid_6cr ? 1 : 0;
+                    const hasTL = s.lecture_5b_enhancements?.has_trendline_confluence ? 1 : 0;
+                    const l6 = s.lecture_6_enhancements || {};
+                    let score = (quality * 40) + (Math.min(rr, 5) * 8) + (isConf * 15) + (has6CR * 10) + (hasTL * 5)
+                              + ((l6.has_conversion ? 1 : 0) * 10) + ((l6.has_dual_deviation ? 1 : 0) * 10) + ((l6.has_wov_opportunity ? 1 : 0) * 5);
+                    // HP variable: 3rd tap deviation of tap1
+                    if (s.tap3_is_deviation || s.deviation_of_tap1) score += 20;
+                    else if (s.tap3_near_tap1) score += 15;
+                    if (score > bestScore) {
+                        bestScore = score;
+                        bestSchematic = { raw: s, compositeScore: score,
+                            direction: s.direction === 'bullish' ? 'long' : 'short',
+                            entryPrice: s.entry.price, stopPrice: s.stop_loss.price,
+                            targetPrice: l6.enhanced_target || s.target.price, rrVal: rr,
+                            schematicSource: 'TCT ' + (s.schematic_type || 'schematic').replace(/_/g, ' '),
+                            isConfirmed: !!isConf,
+                            tags: [
+                                isConf ? { text: 'CONFIRMED', cls: 'good' } : { text: 'FORMING', cls: 'warn' },
+                                quality >= 0.7 ? { text: 'HQ ' + Math.round(quality * 100) + '%', cls: 'good' } : { text: 'Q ' + Math.round(quality * 100) + '%', cls: 'warn' },
+                                has6CR ? { text: '6CR', cls: 'good' } : null,
+                                hasTL ? { text: 'TL', cls: 'good' } : null,
+                                l6.has_conversion ? { text: 'Conv', cls: 'good' } : null,
+                            ].filter(Boolean),
+                        };
+                    }
+                });
+                if (bestSchematic) {
+                    step5.score = Math.min(Math.round(bestSchematic.compositeScore * 0.5), 50);
+                    step5.result = bestSchematic.schematicSource;
+                    step5.status = bestSchematic.compositeScore >= 30 ? 'pass' : 'warn';
+                } else { step5.result = 'None detected'; }
+            } else { step5.result = 'No data'; }
+            setup.steps.push(step5);
+
+            // ═══ STEP 6: PO3 Schematics (Lecture 8) ═══
+            const step6 = { name: 'PO3 Schematics', score: 0, result: '', status: 'fail' };
+            let bestPO3 = null;
+
+            if (po3Data) {
+                const all = [...(po3Data.htf_po3?.schematics || []),
+                             ...(po3Data.mtf_po3?.schematics || []),
+                             ...(po3Data.ltf_po3?.schematics || [])];
+                let bestScore = -1;
+                all.forEach(p => {
+                    if (!p.entry?.price || !p.stop_loss?.price || !p.target?.price) return;
+                    const quality = p.quality_score || 0, rr = p.risk_reward || 0;
+                    const score = (quality * 35) + (Math.min(rr, 5) * 7) + ((p.has_expansion ? 1 : 0) * 12) + ((p.tct_model?.detected ? 1 : 0) * 10);
+                    if (score > bestScore) {
+                        bestScore = score;
+                        bestPO3 = { raw: p, compositeScore: score,
+                            direction: p.direction === 'bullish' ? 'long' : 'short',
+                            entryPrice: p.entry.price, stopPrice: p.stop_loss.price,
+                            targetPrice: p.target.price, rrVal: rr, phase: p.phase || 'range',
+                            tags: [{ text: 'PO3', cls: 'good' },
+                                   p.has_expansion ? { text: 'Expanding', cls: 'good' } : null,
+                                   p.tct_model?.detected ? { text: 'TCT Model', cls: 'good' } : null].filter(Boolean),
+                        };
+                    }
+                });
+                if (bestPO3) {
+                    step6.score = Math.min(Math.round(bestPO3.compositeScore * 0.4), 30);
+                    step6.result = 'PO3 ' + bestPO3.phase;
+                    step6.status = bestPO3.compositeScore >= 25 ? 'pass' : 'warn';
+                } else { step6.result = 'None detected'; }
+            } else { step6.result = 'No data'; }
+            setup.steps.push(step6);
+
+            // ═══ STEP 7: Trade Execution (Lecture 9 + Section D PDFs) ═══
+            const step7 = { name: 'Trade Execution', score: 0, result: '', status: 'fail' };
+            let gateBias = 'none', qualityBOS = false;
+
+            if (valData) {
+                const action = valData.Action || '';
+                if (action.includes('LONG') || action.includes('VALID')) gateBias = 'long';
+                else if (action.includes('SHORT')) gateBias = 'short';
+                const msDir = msTrend === 'bullish' ? 'long' : msTrend === 'bearish' ? 'short' : 'none';
+                if (gateBias !== 'none' && gateBias === msDir) step7.score += 10;
             }
+            // Quality BOS: V-shape aggressive displacement (from PDF)
+            if (msBosQuality === 'good') { qualityBOS = true; step7.score += 15; }
+            else if (msBosQuality === 'moderate') step7.score += 5;
+            if (msBosQuality === 'bad') step7.score -= 5;
 
-            // Pick best candidate
-            if (candidates.length > 0) {
-                // Boost candidates that match gate bias
-                candidates.forEach(c => {
-                    if (gateBias !== 'none' && c.direction === gateBias) {
-                        c.score *= 1.3;
+            // Clean path: no opposing S&D between entry and target
+            const primaryCandidate = bestSchematic || bestPO3;
+            if (primaryCandidate && zonesData) {
+                const entry = primaryCandidate.entryPrice, target = primaryCandidate.targetPrice;
+                const isLong = primaryCandidate.direction === 'long';
+                let blocking = 0;
+                [...(zonesData.htf_zones?.order_blocks || []), ...(zonesData.htf_zones?.structure_zones || [])]
+                    .filter(z => !z.mitigated).forEach(z => {
+                        const zMid = ((z.top || z.high || 0) + (z.bottom || z.low || 0)) / 2;
+                        if (isLong && (z.type === 'bearish' || z.type === 'supply') && zMid > entry && zMid < target) blocking++;
+                        if (!isLong && (z.type === 'bullish' || z.type === 'demand') && zMid < entry && zMid > target) blocking++;
+                    });
+                if (blocking === 0) step7.score += 10;
+                else if (blocking === 1) step7.score += 3;
+            }
+            step7.result = (gateBias !== 'none' ? gateBias.toUpperCase() : 'No gate') + (qualityBOS ? ' + Q-BOS' : '');
+            step7.status = step7.score >= 15 ? 'pass' : step7.score >= 5 ? 'warn' : 'fail';
+            setup.steps.push(step7);
+
+            // ═══ STEP 8: Composite HP Setup ═══
+            const step8 = { name: 'HP Setup', score: 0, result: '', status: 'fail' };
+
+            if (primaryCandidate) {
+                setup.direction = primaryCandidate.direction;
+                setup.entry = primaryCandidate.entryPrice;
+                setup.stop = primaryCandidate.stopPrice;
+                setup.target = primaryCandidate.targetPrice;
+                setup.rr = primaryCandidate.rrVal;
+                setup.source = primaryCandidate.schematicSource || ('PO3 ' + (primaryCandidate.phase || 'range'));
+                setup.tags = primaryCandidate.tags || [];
+                setup.isConfirmed = primaryCandidate.isConfirmed || false;
+
+                // PO3 target extension: easy liquidity grab beyond TCT target (from PDF)
+                if (bestSchematic && bestPO3 && bestSchematic.direction === bestPO3.direction) {
+                    const isLong = bestSchematic.direction === 'long';
+                    if ((isLong && bestPO3.targetPrice > bestSchematic.targetPrice) || (!isLong && bestPO3.targetPrice < bestSchematic.targetPrice)) {
+                        setup.target = bestPO3.targetPrice;
+                        const risk = Math.abs(setup.entry - setup.stop);
+                        if (risk > 0) setup.rr = Math.abs(setup.target - setup.entry) / risk;
+                        setup.tags.push({ text: 'PO3 Ext', cls: 'good' });
                     }
-                });
-
-                candidates.sort((a, b) => b.score - a.score);
-                const best = candidates[0];
-
-                setup.direction = best.direction;
-                setup.confidence = Math.min(100, Math.round(best.score));
-                setup.entry = best.entry;
-                setup.stop = best.stop;
-                setup.target = best.target;
-                setup.rr = best.rr;
-                setup.source = best.source;
-                setup.tags = best.tags;
-                setup.isConfirmed = best.isConfirmed || false;
-
-                // Calculate SL trail (midpoint between entry and target)
-                if (setup.entry && setup.target) {
-                    setup.slTrail = setup.entry + (setup.target - setup.entry) * 0.33;
+                    step8.score += 10;
                 }
 
-                // Cache this as the last completed setup for this symbol
+                // SL trail at 33% of range toward target (trail rules from PDF)
+                if (setup.entry && setup.target) setup.slTrail = setup.entry + (setup.target - setup.entry) * 0.33;
+
+                // Direction alignment across pipeline
+                const msDir = msTrend === 'bullish' ? 'long' : msTrend === 'bearish' ? 'short' : 'none';
+                if (msDir === setup.direction) step8.score += 10;
+                if ((rangeZone === 'DISCOUNT' && setup.direction === 'long') || (rangeZone === 'PREMIUM' && setup.direction === 'short')) step8.score += 5;
+                if (gateBias === setup.direction) step8.score += 5;
+                if (setup.rr >= 4) step8.score += 10; else if (setup.rr >= 3) step8.score += 7; else if (setup.rr >= 2) step8.score += 3;
+
+                // R:R tag
+                if (setup.rr) setup.tags.push(setup.rr >= 3 ? { text: 'R:R ' + setup.rr.toFixed(1), cls: 'good' } : { text: 'R:R ' + setup.rr.toFixed(1), cls: 'warn' });
+
+                step8.result = setup.direction.toUpperCase() + ' R:R ' + (setup.rr ? setup.rr.toFixed(1) : '--');
+                step8.status = 'pass';
+
+                // Cache as last completed
                 lastCompletedSetups[currentSymbol] = {
-                    direction: setup.direction,
-                    confidence: setup.confidence,
-                    entry: setup.entry,
-                    stop: setup.stop,
-                    target: setup.target,
-                    rr: setup.rr,
-                    source: setup.source,
-                    tags: setup.tags.map(t => ({...t})),
-                    isConfirmed: setup.isConfirmed,
-                    timestamp: new Date().toISOString(),
+                    direction: setup.direction, confidence: setup.confidence, entry: setup.entry,
+                    stop: setup.stop, target: setup.target, rr: setup.rr, source: setup.source,
+                    tags: setup.tags.map(t => ({...t})), isConfirmed: setup.isConfirmed, timestamp: new Date().toISOString(),
                 };
             } else {
-                // No schematic/PO3 candidates — build a forming setup from range + candle analysis
-                const formingSetup = analyzeFormingSetupFromData(rangesData, zonesData, liqData, candles, gateBias);
-                setup.direction = formingSetup.direction;
-                setup.confidence = formingSetup.confidence;
-                setup.entry = formingSetup.entry;
-                setup.stop = formingSetup.stop;
-                setup.target = formingSetup.target;
-                setup.rr = formingSetup.rr;
-                setup.source = formingSetup.source;
-                setup.tags = formingSetup.tags;
-                setup.isConfirmed = false;
-
-                // Attach last completed setup for this symbol (if any)
+                // No model — fallback to MS bias
+                const msDir = msTrend === 'bullish' ? 'long' : msTrend === 'bearish' ? 'short' : 'none';
+                if (msDir !== 'none') { setup.direction = msDir; setup.tags = [{ text: 'No Model', cls: 'warn' }, { text: 'MS: ' + msDir.toUpperCase(), cls: 'warn' }]; }
+                else if (gateBias !== 'none') { setup.direction = gateBias; setup.tags = [{ text: 'No Model', cls: 'warn' }, { text: 'Gate: ' + gateBias.toUpperCase(), cls: 'warn' }]; }
+                else { setup.tags = [{ text: 'No Active Setup', cls: 'warn' }]; }
+                step8.result = 'No model'; step8.status = 'warn';
                 const lastSetup = lastCompletedSetups[currentSymbol];
-                if (lastSetup) {
-                    setup.lastCompleted = lastSetup;
-                }
+                if (lastSetup) setup.lastCompleted = lastSetup;
             }
+            setup.steps.push(step8);
 
+            // Total confidence from all steps
+            setup.confidence = Math.min(100, setup.steps.reduce((sum, s) => sum + Math.max(0, s.score), 0));
             return setup;
         }
 
@@ -8682,22 +8870,42 @@ async def dashboard():
             return result;
         }
 
-        // Render the highest probability setup in sidebar
+        // Render the highest probability setup in sidebar with 8-step pipeline
         function renderSetupPanel(setup) {
             const dirEl = document.getElementById('setupDirection');
             dirEl.textContent = setup.direction === 'long' ? 'LONG' : setup.direction === 'short' ? 'SHORT' : 'NO SETUP';
             dirEl.className = 'setup-direction ' + setup.direction;
 
+            // Render 8-step pipeline
+            const pipelineEl = document.getElementById('hpsPipeline');
+            let pipeHtml = '';
+            const stepLabels = ['1. MS', '2. Ranges', '3. S&D', '4. Liq', '5. TCT', '6. PO3', '7. Exec', '8. HP'];
+            if (setup.steps && setup.steps.length > 0) {
+                setup.steps.forEach((step, i) => {
+                    const label = stepLabels[i] || step.name;
+                    const icon = step.status === 'pass' ? '&#10003;' : step.status === 'warn' ? '&#9679;' : '&#10007;';
+                    const scoreStr = step.score > 0 ? '+' + step.score : step.score < 0 ? '' + step.score : '0';
+                    pipeHtml += '<div class="hps-step ' + step.status + '">';
+                    pipeHtml += '<span class="hps-step-name">' + label + '</span>';
+                    pipeHtml += '<span class="hps-step-result">' + icon + ' ' + step.result + '</span>';
+                    pipeHtml += '<span class="hps-step-score">' + scoreStr + '</span>';
+                    pipeHtml += '</div>';
+                });
+                pipeHtml += '<div class="hps-divider"></div>';
+                pipeHtml += '<div class="hps-total"><span>CONFIDENCE</span><span>' + setup.confidence + '%</span></div>';
+            }
+            pipelineEl.innerHTML = pipeHtml;
+
+            // Render setup details
             const contentEl = document.getElementById('setupContent');
             let html = '';
 
             if (setup.entry && setup.stop && setup.target) {
-                // Status banner (forming vs confirmed)
                 const isConfirmed = setup.isConfirmed;
-                const statusLabel = isConfirmed ? 'CONFIRMED - Active Trade Setup' : 'FORMING - Watch for Confirmation';
+                const statusLabel = isConfirmed ? 'CONFIRMED' : 'FORMING';
                 const statusColor = isConfirmed ? '#00ff88' : '#ffc107';
                 const statusBg = isConfirmed ? 'rgba(0,255,136,0.15)' : 'rgba(255,193,7,0.15)';
-                html += '<div style="text-align:center;padding:4px 8px;border-radius:4px;background:' + statusBg + ';color:' + statusColor + ';font-size:0.7rem;font-weight:600;margin-bottom:8px;">' + statusLabel + '</div>';
+                html += '<div style="text-align:center;padding:3px 8px;border-radius:4px;background:' + statusBg + ';color:' + statusColor + ';font-size:0.65rem;font-weight:600;margin-bottom:6px;">' + statusLabel + '</div>';
 
                 html += '<div class="setup-levels">';
                 html += '<div class="setup-level-box entry"><span class="setup-level-label">ENTRY</span><span class="setup-level-price">' + fmtPrice(setup.entry) + '</span></div>';
@@ -8705,15 +8913,12 @@ async def dashboard():
                 html += '<div class="setup-level-box tp"><span class="setup-level-label">TARGET</span><span class="setup-level-price">' + fmtPrice(setup.target) + '</span></div>';
                 html += '</div>';
 
-                if (setup.rr) {
-                    html += '<div class="metric-row"><span class="label">Risk : Reward</span><span class="value" style="color:#ffc107;font-weight:bold;">' + setup.rr.toFixed(1) + 'R</span></div>';
-                }
                 if (setup.source) {
-                    html += '<div class="metric-row"><span class="label">Source</span><span class="value" style="font-size:0.7rem;">' + setup.source + '</span></div>';
+                    html += '<div class="metric-row"><span class="label">Source</span><span class="value" style="font-size:0.68rem;">' + setup.source + '</span></div>';
                 }
             }
 
-            if (setup.tags.length > 0) {
+            if (setup.tags && setup.tags.length > 0) {
                 html += '<div class="setup-meta">';
                 setup.tags.forEach(tag => {
                     html += '<span class="setup-tag ' + tag.cls + '">' + tag.text + '</span>';
@@ -8721,50 +8926,16 @@ async def dashboard():
                 html += '</div>';
             }
 
-            // Show forming signals when no confirmed setup exists
-            if (!setup.entry && setup.formingSignals && setup.formingSignals.length > 0) {
-                html += '<div style="margin-top:8px;padding:6px 8px;border-radius:4px;background:rgba(255,193,7,0.1);border:1px solid rgba(255,193,7,0.2);">';
-                html += '<div style="font-size:0.65rem;color:#ffc107;font-weight:600;margin-bottom:4px;">SETUPS FORMING</div>';
-                setup.formingSignals.slice(0, 5).forEach(sig => {
-                    const dirColor = sig.direction === 'bullish' ? '#00ff88' : sig.direction === 'bearish' ? '#ff4444' : '#888';
-                    const qualPct = Math.round(sig.quality * 100);
-                    html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:2px 0;font-size:0.65rem;">';
-                    html += '<span style="color:' + dirColor + ';">' + sig.source + ' ' + sig.type + '</span>';
-                    html += '<span style="color:#888;">' + sig.tf + ' ' + qualPct + '%</span>';
-                    html += '</div>';
-                });
-                html += '</div>';
-            }
-
-            // Show last completed setup when no active setup exists
+            // Last completed setup when no active model
             if (!setup.entry && setup.lastCompleted) {
                 const lc = setup.lastCompleted;
                 const ago = timeSince(lc.timestamp);
                 const lcDirColor = lc.direction === 'long' ? '#00ff88' : lc.direction === 'short' ? '#ff4444' : '#888';
-                html += '<div style="margin-top:8px;padding:8px;border-radius:4px;background:rgba(100,100,120,0.15);border:1px solid rgba(100,100,120,0.3);">';
-                html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">';
-                html += '<span style="font-size:0.65rem;color:#888;font-weight:600;">LAST COMPLETED SETUP</span>';
-                html += '<span style="font-size:0.6rem;color:#666;">' + ago + '</span>';
-                html += '</div>';
-                html += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">';
-                html += '<span style="color:' + lcDirColor + ';font-weight:700;font-size:0.75rem;">' + (lc.direction === 'long' ? 'LONG' : 'SHORT') + '</span>';
-                if (lc.source) html += '<span style="color:#888;font-size:0.6rem;">' + lc.source + '</span>';
-                html += '</div>';
-                html += '<div class="setup-levels" style="opacity:0.7;">';
-                html += '<div class="setup-level-box entry"><span class="setup-level-label">ENTRY</span><span class="setup-level-price">' + fmtPrice(lc.entry) + '</span></div>';
-                html += '<div class="setup-level-box sl"><span class="setup-level-label">STOP</span><span class="setup-level-price">' + fmtPrice(lc.stop) + '</span></div>';
-                html += '<div class="setup-level-box tp"><span class="setup-level-label">TARGET</span><span class="setup-level-price">' + fmtPrice(lc.target) + '</span></div>';
-                html += '</div>';
-                if (lc.rr) {
-                    html += '<div class="metric-row" style="opacity:0.7;"><span class="label">R:R</span><span class="value" style="font-size:0.7rem;">' + lc.rr.toFixed(1) + 'R</span></div>';
-                }
-                if (lc.tags && lc.tags.length > 0) {
-                    html += '<div class="setup-meta" style="opacity:0.7;">';
-                    lc.tags.forEach(tag => {
-                        html += '<span class="setup-tag ' + tag.cls + '">' + tag.text + '</span>';
-                    });
-                    html += '</div>';
-                }
+                html += '<div style="margin-top:8px;padding:6px 8px;border-radius:4px;background:rgba(100,100,120,0.12);border:1px solid rgba(100,100,120,0.25);">';
+                html += '<div style="display:flex;justify-content:space-between;font-size:0.6rem;color:#888;margin-bottom:4px;"><span style="font-weight:600;">LAST SETUP</span><span>' + ago + '</span></div>';
+                html += '<span style="color:' + lcDirColor + ';font-weight:700;font-size:0.7rem;">' + (lc.direction === 'long' ? 'LONG' : 'SHORT') + '</span>';
+                if (lc.source) html += ' <span style="color:#666;font-size:0.6rem;">' + lc.source + '</span>';
+                if (lc.rr) html += ' <span style="color:#888;font-size:0.6rem;">' + lc.rr.toFixed(1) + 'R</span>';
                 html += '</div>';
             }
 
