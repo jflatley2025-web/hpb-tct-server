@@ -3647,18 +3647,9 @@ async def get_schematics_5a_data(symbol: str = "BTCUSDT", timeframe: str = "4h")
 
         current_price = float(df.iloc[-1]["close"])
 
-        # Build candle list for range detection & LightweightCharts payload
-        candles_list = []
+        # Build LightweightCharts candle payload
         candles_json = []
         for _, row in df.iterrows():
-            candles_list.append({
-                "open_time": str(row["open_time"]),
-                "open": float(row["open"]),
-                "high": float(row["high"]),
-                "low": float(row["low"]),
-                "close": float(row["close"]),
-                "volume": float(row["volume"]),
-            })
             ts = row["open_time"]
             epoch = int(ts.timestamp()) if hasattr(ts, "timestamp") else int(pd.Timestamp(ts).timestamp())
             candles_json.append({
@@ -3669,14 +3660,13 @@ async def get_schematics_5a_data(symbol: str = "BTCUSDT", timeframe: str = "4h")
                 "close": float(row["close"]),
             })
 
-        detected_range = await detect_best_range(candles_list)
-        range_list = (
-            [detected_range]
-            if detected_range and not isinstance(detected_range, list)
-            else (detected_range or [])
-        )
-
-        schematics_result = detect_tct_schematics(df, range_list)
+        # Pass empty list so TCTSchematicDetector uses its own internal
+        # _find_accumulation_ranges / _find_distribution_ranges which produce
+        # range dicts with the keys the detector actually needs (range_high,
+        # range_low, range_high_idx, range_low_idx, equilibrium, dl_high, dl_low).
+        # detect_best_range() returns {high, low} without _idx fields, causing
+        # _create_tab() to return None and skip every schematic.
+        schematics_result = detect_tct_schematics(df, [])
         all_schematics = (
             schematics_result.get("accumulation_schematics", [])
             + schematics_result.get("distribution_schematics", [])
@@ -3759,7 +3749,6 @@ async def get_schematics_5a_data(symbol: str = "BTCUSDT", timeframe: str = "4h")
             "active": active,
             "in_formation": in_formation,
             "total": len(completed) + len(active) + len(in_formation),
-            "ranges": range_list,
         })
 
     except Exception as e:
@@ -3902,8 +3891,8 @@ body{{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-ser
   <h1>
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#e040fb" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 16l4-8 4 4 6-10"/></svg>
     Schematics 5A
-    <span class="pair">{symbol.replace("USDT","/USDT")}</span>
-    <span class="tf">{timeframe.upper()}</span>
+    <span class="pair" id="headerPair">{symbol.replace("USDT","/USDT")}</span>
+    <span class="tf" id="headerTF">{timeframe.upper()}</span>
   </h1>
   <div class="header-right">
     <span class="live-price" id="livePrice">--</span>
@@ -3917,11 +3906,14 @@ body{{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-ser
   <input id="symInput" value="{symbol}" style="width:100px" />
   <label>Timeframe</label>
   <select id="tfSelect">
-    <option value="1m">1m</option><option value="5m">5m</option>
-    <option value="15m">15m</option><option value="30m">30m</option>
-    <option value="1h">1H</option><option value="2h">2H</option>
+    <option value="1m" {"selected" if timeframe=="1m" else ""}>1m</option>
+    <option value="5m" {"selected" if timeframe=="5m" else ""}>5m</option>
+    <option value="15m" {"selected" if timeframe=="15m" else ""}>15m</option>
+    <option value="30m" {"selected" if timeframe=="30m" else ""}>30m</option>
+    <option value="1h" {"selected" if timeframe=="1h" else ""}>1H</option>
+    <option value="2h" {"selected" if timeframe=="2h" else ""}>2H</option>
     <option value="4h" {"selected" if timeframe=="4h" else ""}>4H</option>
-    <option value="1d">1D</option>
+    <option value="1d" {"selected" if timeframe=="1d" else ""}>1D</option>
   </select>
   <button class="filter-btn active" data-filter="all">All</button>
   <button class="filter-btn" data-filter="active">Active</button>
@@ -4268,10 +4260,13 @@ async function loadData() {{
       ...(data.completed || []),
     ];
 
-    // Update live price
+    // Update live price and header
     if (data.current_price) {{
       document.getElementById('livePrice').textContent = fmt(data.current_price);
     }}
+    document.getElementById('headerPair').textContent = SYMBOL.replace('USDT', '/USDT');
+    document.getElementById('headerTF').textContent = TIMEFRAME.toUpperCase();
+    document.title = 'Schematics 5A — ' + SYMBOL + ' ' + TIMEFRAME.toUpperCase();
 
     // Summary chips
     const chips = document.getElementById('summaryChips');
