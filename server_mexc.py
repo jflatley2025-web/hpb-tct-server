@@ -4378,9 +4378,13 @@ async function loadData() {{
           dbgHtml += '<div>Range: ' + fmt(r.range_low) + ' — ' + fmt(r.range_high) + '</div>';
           dbgHtml += '<div>T1:' + (r.has_tap1 ? '<span class="card-val green">✓</span>' : '<span class="card-val red">✗</span>');
           dbgHtml += ' T2:' + (r.has_tap2 ? '<span class="card-val green">✓</span>' : '<span class="card-val red">✗</span>');
+          if (r.has_tap2) dbgHtml += (r.tap2_came_back ? '<span class="card-val green">↩</span>' : '<span class="card-val red">✗↩</span>');
           dbgHtml += ' T3m1:' + (r.has_tap3_m1 ? '<span class="card-val green">✓</span>' : '<span class="card-val red">✗</span>');
           dbgHtml += ' T3m2:' + (r.has_tap3_m2 ? '<span class="card-val green">✓</span>' : '<span class="card-val red">✗</span>');
-          dbgHtml += '</div></div>';
+          dbgHtml += ' BOS:' + (r.has_bos ? '<span class="card-val green">✓</span>' : '<span class="card-val red">✗</span>');
+          dbgHtml += '</div>';
+          if (r.tap2_price) dbgHtml += '<div style="color:#666">T2:' + fmt(r.tap2_price) + (r.tap3_m1_price ? ' T3m1:' + fmt(r.tap3_m1_price) : '') + (r.tap3_m2_price ? ' T3m2:' + fmt(r.tap3_m2_price) : '') + (r.bos_price ? ' BOS:' + fmt(r.bos_price) : '') + '</div>';
+          dbgHtml += '</div>';
         }});
         dbgHtml += '</div>';
       }}
@@ -4403,7 +4407,7 @@ async function loadData() {{
     renderPanel();
   }} catch (e) {{
     console.error('Failed to load schematics-5A data:', e);
-    document.getElementById('panel').innerHTML = '<div class="empty" style="color:#ff4444">Connection error</div>';
+    document.getElementById('panel').innerHTML = '<div class="empty" style="color:#ff4444">Connection error: ' + (e.message || e) + '</div>';
   }}
 }}
 
@@ -4499,7 +4503,9 @@ async def get_po3_data(symbol: str, timeframe: str = "4h"):
         all_po3 = po3_result.get("bullish_po3", []) + po3_result.get("bearish_po3", [])
 
         # Also get TCT schematics for the manipulation phase overlay
-        tct_result = detect_tct_schematics(df, range_list)
+        # Pass [] to use internal range detection (detect_best_range returns
+        # wrong format without _idx keys)
+        tct_result = detect_tct_schematics(df, [])
         all_tct = (
             tct_result.get("accumulation_schematics", []) +
             tct_result.get("distribution_schematics", [])
