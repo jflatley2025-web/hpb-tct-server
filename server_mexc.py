@@ -2548,51 +2548,81 @@ async def _get_shared_client() -> httpx.AsyncClient:
     global _shared_client
     if _shared_client is None or _shared_client.is_closed:
         _shared_client = httpx.AsyncClient(
-            timeout=15,
+            timeout=25,
             limits=httpx.Limits(max_connections=5, max_keepalive_connections=3),
+            headers={
+                "User-Agent": "Mozilla/5.0 HPB-TCT/21.2",
+                "Accept": "application/json",
+            },
         )
     return _shared_client
 
 async def fetch_mexc_candles(symbol: str, interval: str, limit: int = 200) -> Optional[pd.DataFrame]:
+    """Fetch candles from MEXC, with Binance public API fallback."""
     global _scanner_consecutive_errors
     # Normalize intervals to MEXC-supported values (MEXC spot uses 60m not 1h, etc.)
     _MEXC_INTERVAL_MAP = {"1h": "60m", "2h": "4h"}
-    interval = _MEXC_INTERVAL_MAP.get(interval, interval)
-    url = f"{MEXC_URL_BASE}/api/v3/klines"
-    params = {"symbol": symbol, "interval": interval, "limit": limit}
+    mexc_interval = _MEXC_INTERVAL_MAP.get(interval, interval)
 
+    # ── Try MEXC first ──
     try:
         client = await _get_shared_client()
+        url = f"{MEXC_URL_BASE}/api/v3/klines"
+        params = {"symbol": symbol, "interval": mexc_interval, "limit": limit}
         r = await client.get(url, params=params)
 
         if r.status_code == 429:
-            # Rate limited — back off significantly
             _scanner_consecutive_errors += 1
-            logger.warning(f"[MEXC] Rate limited (429) for {symbol}/{interval}, backing off")
-            await asyncio.sleep(min(5 * _scanner_consecutive_errors, 30))
-            return None
-
-        if r.status_code != 200:
+            logger.warning(f"[MEXC] Rate limited (429) for {symbol}/{mexc_interval}, trying fallback")
+            await asyncio.sleep(min(3 * _scanner_consecutive_errors, 15))
+        elif r.status_code == 200:
+            data = r.json()
+            if data and isinstance(data, list) and len(data) > 0:
+                _scanner_consecutive_errors = max(0, _scanner_consecutive_errors - 1)
+                df = pd.DataFrame(data, columns=[
+                    "open_time", "open", "high", "low", "close", "volume",
+                    "close_time", "quote_vol"
+                ])
+                df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+                for c in ["open", "high", "low", "close", "volume"]:
+                    df[c] = df[c].astype(float)
+                return df
+            else:
+                logger.warning(f"[MEXC] Empty data for {symbol}/{mexc_interval}")
+        else:
             _scanner_consecutive_errors += 1
-            return None
-
-        _scanner_consecutive_errors = max(0, _scanner_consecutive_errors - 1)  # Decay on success
-        data = r.json()
-        if not data or not isinstance(data, list):
-            return None
-
-        df = pd.DataFrame(data, columns=[
-            "open_time", "open", "high", "low", "close", "volume",
-            "close_time", "quote_vol"
-        ])
-        df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
-        for c in ["open", "high", "low", "close", "volume"]:
-            df[c] = df[c].astype(float)
-        return df
+            logger.warning(f"[MEXC] HTTP {r.status_code} for {symbol}/{mexc_interval}: {r.text[:200]}")
     except Exception as e:
         _scanner_consecutive_errors += 1
-        logger.error(f"[MEXC_FETCH_ERROR] {symbol}/{interval}: {e}")
-        return None
+        logger.error(f"[MEXC_FETCH_ERROR] {symbol}/{mexc_interval}: {e}")
+
+    # ── Fallback: Binance public API (no auth needed) ──
+    _BINANCE_INTERVAL_MAP = {"60m": "1h", "4h": "4h", "1d": "1d", "1W": "1w", "1M": "1M",
+                             "1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m", "8h": "8h"}
+    binance_interval = _BINANCE_INTERVAL_MAP.get(mexc_interval, _BINANCE_INTERVAL_MAP.get(interval, interval))
+    try:
+        client = await _get_shared_client()
+        url = "https://api.binance.com/api/v3/klines"
+        params = {"symbol": symbol, "interval": binance_interval, "limit": limit}
+        r = await client.get(url, params=params)
+        if r.status_code == 200:
+            data = r.json()
+            if data and isinstance(data, list) and len(data) > 0:
+                logger.info(f"[BINANCE_FALLBACK] Got {len(data)} candles for {symbol}/{binance_interval}")
+                df = pd.DataFrame(data, columns=[
+                    "open_time", "open", "high", "low", "close", "volume",
+                    "close_time", "quote_vol", "num_trades", "taker_buy_vol", "taker_buy_quote", "ignore"
+                ])
+                df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+                for c in ["open", "high", "low", "close", "volume"]:
+                    df[c] = df[c].astype(float)
+                return df
+        else:
+            logger.warning(f"[BINANCE_FALLBACK] HTTP {r.status_code} for {symbol}/{binance_interval}")
+    except Exception as e:
+        logger.error(f"[BINANCE_FALLBACK_ERROR] {symbol}/{binance_interval}: {e}")
+
+    return None
 
 async def detect_best_range(candles: List) -> Optional[Dict]:
     """Simple range detection from candles"""
@@ -6455,6 +6485,11 @@ async def dashboard():
                     });
                     clearTimeout(timeoutId);
 
+                    // On server error (500), return error JSON directly instead of retrying
+                    // (our own API failed — retrying won't help, it just adds latency)
+                    if (response.status >= 500) {
+                        try { return await response.json(); } catch(_) { return { error: 'Server error ' + response.status }; }
+                    }
                     if (!response.ok) {
                         throw new Error(`HTTP ${response.status}`);
                     }
@@ -6598,7 +6633,7 @@ async def dashboard():
             try {
                 const data = await fetchWithRetry(
                     `/api/candles?interval=${interval}&limit=${limit}&symbol=${sym}`,
-                    {}, 3, 20000
+                    {}, 2, 30000
                 );
                 if (data.error) {
                     console.error('Candles API error:', data.error);
