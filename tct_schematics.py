@@ -1159,7 +1159,7 @@ class TCTSchematicDetector:
 
         # 7. Context-based follow-through prediction
         context_follow_through = self._calculate_context_based_follow_through(
-            range_data, schematic_type, tap3
+            range_data, schematic_type
         )
 
         return {
@@ -1355,7 +1355,7 @@ class TCTSchematicDetector:
 
         # 7. Context-based follow-through prediction
         context_follow_through = self._calculate_context_based_follow_through(
-            range_data, schematic_type, tap3
+            range_data, schematic_type
         )
 
         return {
