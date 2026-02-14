@@ -221,7 +221,7 @@ class TCTSchematicDetector:
                             schematics.append(schematic_m2_to_m1)
 
             except Exception as e:
-                logger.debug(f"Error detecting accumulation schematic: {e}")
+                logger.warning(f"Error detecting accumulation schematic for range {range_data}: {e}", exc_info=True)
                 continue
 
         # Sort by quality and recency
@@ -527,7 +527,7 @@ class TCTSchematicDetector:
                             schematics.append(schematic_m2_to_m1)
 
             except Exception as e:
-                logger.debug(f"Error detecting distribution schematic: {e}")
+                logger.warning(f"Error detecting distribution schematic for range {range_data}: {e}", exc_info=True)
                 continue
 
         # Sort by quality and recency
@@ -826,36 +826,36 @@ class TCTSchematicDetector:
         TCT Lecture 1: BOS is confirmed when candle CLOSE breaks above the
         previous MS high (not wick). Preferably inside original range values.
         """
-        # Track the most recent swing high to break (use lookback=2 for BOS
-        # structure detection — we need to find short-term MS pivots, not
-        # only the strict 6CR pivots)
-        last_swing_high = None
+        # Collect swing highs after Tap3 (use lookback=2 for shorter-term
+        # MS pivots appropriate for BOS detection)
+        swing_highs = []
         for i in range(start_idx + 1, min(start_idx + 25, len(self.candles) - 2)):
             if self._is_swing_high(i, lookback=2):
-                sh_price = float(self.candles.iloc[i]["high"])
-                if last_swing_high is None or sh_price > last_swing_high["price"]:
-                    last_swing_high = {"idx": i, "price": sh_price}
-
-        if last_swing_high is None:
-            # Fallback: find any previous swing high in the region
-            last_swing_high = self._find_previous_swing_high(min(start_idx + 10, len(self.candles) - 3))
-
-        if last_swing_high is None:
-            return None
-
-        # TCT Lecture 1: BOS = candle CLOSE above MS high
-        search_start = last_swing_high["idx"] + 1
-        for i in range(search_start, min(start_idx + 35, len(self.candles))):
-            close_price = float(self.candles.iloc[i]["close"])
-            if close_price > last_swing_high["price"]:
-                is_inside_range = close_price < high_price
-                return {
+                swing_highs.append({
                     "idx": i,
-                    "price": close_price,
-                    "is_inside_range": is_inside_range,
-                    "prev_swing_high": last_swing_high,
-                    "bos_method": "candle_close"
-                }
+                    "price": float(self.candles.iloc[i]["high"])
+                })
+
+        if not swing_highs:
+            # Fallback: find any previous swing high in the region
+            sh = self._find_previous_swing_high(min(start_idx + 10, len(self.candles) - 3))
+            if sh:
+                swing_highs.append(sh)
+
+        # Try each swing high (earliest first) — BOS = first broken MS level
+        for sh in swing_highs:
+            search_start = sh["idx"] + 1
+            for i in range(search_start, min(start_idx + 35, len(self.candles))):
+                close_price = float(self.candles.iloc[i]["close"])
+                if close_price > sh["price"]:
+                    is_inside_range = close_price < high_price
+                    return {
+                        "idx": i,
+                        "price": close_price,
+                        "is_inside_range": is_inside_range,
+                        "prev_swing_high": sh,
+                        "bos_method": "candle_close"
+                    }
 
         return None
 
@@ -866,34 +866,35 @@ class TCTSchematicDetector:
         TCT Lecture 1: BOS is confirmed when candle CLOSE breaks below the
         previous MS low (not wick). Preferably inside original range values.
         """
-        # Track the most recent swing low to break (use lookback=2 for BOS
-        # structure detection — shorter-term MS pivots)
-        last_swing_low = None
+        # Collect swing lows after Tap3 (use lookback=2 for shorter-term
+        # MS pivots appropriate for BOS detection)
+        swing_lows = []
         for i in range(start_idx + 1, min(start_idx + 25, len(self.candles) - 2)):
             if self._is_swing_low(i, lookback=2):
-                sl_price = float(self.candles.iloc[i]["low"])
-                if last_swing_low is None or sl_price < last_swing_low["price"]:
-                    last_swing_low = {"idx": i, "price": sl_price}
-
-        if last_swing_low is None:
-            last_swing_low = self._find_previous_swing_low(min(start_idx + 10, len(self.candles) - 3))
-
-        if last_swing_low is None:
-            return None
-
-        # TCT Lecture 1: BOS = candle CLOSE below MS low
-        search_start = last_swing_low["idx"] + 1
-        for i in range(search_start, min(start_idx + 35, len(self.candles))):
-            close_price = float(self.candles.iloc[i]["close"])
-            if close_price < last_swing_low["price"]:
-                is_inside_range = close_price > low_price
-                return {
+                swing_lows.append({
                     "idx": i,
-                    "price": close_price,
-                    "is_inside_range": is_inside_range,
-                    "prev_swing_low": last_swing_low,
-                    "bos_method": "candle_close"
-                }
+                    "price": float(self.candles.iloc[i]["low"])
+                })
+
+        if not swing_lows:
+            sl = self._find_previous_swing_low(min(start_idx + 10, len(self.candles) - 3))
+            if sl:
+                swing_lows.append(sl)
+
+        # Try each swing low (earliest first) — BOS = first broken MS level
+        for sl in swing_lows:
+            search_start = sl["idx"] + 1
+            for i in range(search_start, min(start_idx + 35, len(self.candles))):
+                close_price = float(self.candles.iloc[i]["close"])
+                if close_price < sl["price"]:
+                    is_inside_range = close_price > low_price
+                    return {
+                        "idx": i,
+                        "price": close_price,
+                        "is_inside_range": is_inside_range,
+                        "prev_swing_low": sl,
+                        "bos_method": "candle_close"
+                    }
 
         return None
 
