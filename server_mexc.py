@@ -2548,81 +2548,51 @@ async def _get_shared_client() -> httpx.AsyncClient:
     global _shared_client
     if _shared_client is None or _shared_client.is_closed:
         _shared_client = httpx.AsyncClient(
-            timeout=25,
+            timeout=15,
             limits=httpx.Limits(max_connections=5, max_keepalive_connections=3),
-            headers={
-                "User-Agent": "Mozilla/5.0 HPB-TCT/21.2",
-                "Accept": "application/json",
-            },
         )
     return _shared_client
 
 async def fetch_mexc_candles(symbol: str, interval: str, limit: int = 200) -> Optional[pd.DataFrame]:
-    """Fetch candles from MEXC, with Binance public API fallback."""
     global _scanner_consecutive_errors
     # Normalize intervals to MEXC-supported values (MEXC spot uses 60m not 1h, etc.)
     _MEXC_INTERVAL_MAP = {"1h": "60m", "2h": "4h"}
-    mexc_interval = _MEXC_INTERVAL_MAP.get(interval, interval)
+    interval = _MEXC_INTERVAL_MAP.get(interval, interval)
+    url = f"{MEXC_URL_BASE}/api/v3/klines"
+    params = {"symbol": symbol, "interval": interval, "limit": limit}
 
-    # ── Try MEXC first ──
     try:
         client = await _get_shared_client()
-        url = f"{MEXC_URL_BASE}/api/v3/klines"
-        params = {"symbol": symbol, "interval": mexc_interval, "limit": limit}
         r = await client.get(url, params=params)
 
         if r.status_code == 429:
+            # Rate limited — back off significantly
             _scanner_consecutive_errors += 1
-            logger.warning(f"[MEXC] Rate limited (429) for {symbol}/{mexc_interval}, trying fallback")
-            await asyncio.sleep(min(3 * _scanner_consecutive_errors, 15))
-        elif r.status_code == 200:
-            data = r.json()
-            if data and isinstance(data, list) and len(data) > 0:
-                _scanner_consecutive_errors = max(0, _scanner_consecutive_errors - 1)
-                df = pd.DataFrame(data, columns=[
-                    "open_time", "open", "high", "low", "close", "volume",
-                    "close_time", "quote_vol"
-                ])
-                df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
-                for c in ["open", "high", "low", "close", "volume"]:
-                    df[c] = df[c].astype(float)
-                return df
-            else:
-                logger.warning(f"[MEXC] Empty data for {symbol}/{mexc_interval}")
-        else:
+            logger.warning(f"[MEXC] Rate limited (429) for {symbol}/{interval}, backing off")
+            await asyncio.sleep(min(5 * _scanner_consecutive_errors, 30))
+            return None
+
+        if r.status_code != 200:
             _scanner_consecutive_errors += 1
-            logger.warning(f"[MEXC] HTTP {r.status_code} for {symbol}/{mexc_interval}: {r.text[:200]}")
+            return None
+
+        _scanner_consecutive_errors = max(0, _scanner_consecutive_errors - 1)  # Decay on success
+        data = r.json()
+        if not data or not isinstance(data, list):
+            return None
+
+        df = pd.DataFrame(data, columns=[
+            "open_time", "open", "high", "low", "close", "volume",
+            "close_time", "quote_vol"
+        ])
+        df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+        for c in ["open", "high", "low", "close", "volume"]:
+            df[c] = df[c].astype(float)
+        return df
     except Exception as e:
         _scanner_consecutive_errors += 1
-        logger.error(f"[MEXC_FETCH_ERROR] {symbol}/{mexc_interval}: {e}")
-
-    # ── Fallback: Binance public API (no auth needed) ──
-    _BINANCE_INTERVAL_MAP = {"60m": "1h", "4h": "4h", "1d": "1d", "1W": "1w", "1M": "1M",
-                             "1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m", "8h": "8h"}
-    binance_interval = _BINANCE_INTERVAL_MAP.get(mexc_interval, _BINANCE_INTERVAL_MAP.get(interval, interval))
-    try:
-        client = await _get_shared_client()
-        url = "https://api.binance.com/api/v3/klines"
-        params = {"symbol": symbol, "interval": binance_interval, "limit": limit}
-        r = await client.get(url, params=params)
-        if r.status_code == 200:
-            data = r.json()
-            if data and isinstance(data, list) and len(data) > 0:
-                logger.info(f"[BINANCE_FALLBACK] Got {len(data)} candles for {symbol}/{binance_interval}")
-                df = pd.DataFrame(data, columns=[
-                    "open_time", "open", "high", "low", "close", "volume",
-                    "close_time", "quote_vol", "num_trades", "taker_buy_vol", "taker_buy_quote", "ignore"
-                ])
-                df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
-                for c in ["open", "high", "low", "close", "volume"]:
-                    df[c] = df[c].astype(float)
-                return df
-        else:
-            logger.warning(f"[BINANCE_FALLBACK] HTTP {r.status_code} for {symbol}/{binance_interval}")
-    except Exception as e:
-        logger.error(f"[BINANCE_FALLBACK_ERROR] {symbol}/{binance_interval}: {e}")
-
-    return None
+        logger.error(f"[MEXC_FETCH_ERROR] {symbol}/{interval}: {e}")
+        return None
 
 async def detect_best_range(candles: List) -> Optional[Dict]:
     """Simple range detection from candles"""
@@ -2851,8 +2821,10 @@ async def scan_pair_for_forming(symbol: str, timeframe: str) -> List[Dict]:
                 'volume': float(row['volume'])
             })
 
-        # Let TCT detector use its own internal range detection
-        schematics_result = detect_tct_schematics(df, None)
+        detected_range = await detect_best_range(candles_list)
+        range_list = [detected_range] if detected_range and not isinstance(detected_range, list) else (detected_range or [])
+
+        schematics_result = detect_tct_schematics(df, range_list)
 
         all_schematics = (
             schematics_result.get("accumulation_schematics", []) +
@@ -3129,10 +3101,12 @@ async def get_schematic_data(symbol: str, timeframe: str = "4h", type: str = "tc
                 'close': float(row['close']),
             })
 
-        # Let detectors use their own internal range detection
+        detected_range = await detect_best_range(candles_list)
+        range_list = [detected_range] if detected_range and not isinstance(detected_range, list) else (detected_range or [])
+
         if type == "po3":
             # PO3 schematic detection
-            po3_result = detect_po3_schematics(df, None)
+            po3_result = detect_po3_schematics(df, range_list)
             all_po3 = po3_result.get("bullish_po3", []) + po3_result.get("bearish_po3", [])
 
             # Convert PO3 range indices to timestamps
@@ -3155,11 +3129,11 @@ async def get_schematic_data(symbol: str, timeframe: str = "4h", type: str = "tc
                 "current_price": current_price,
                 "candles": candles_json,
                 "po3_schematics": po3_with_timestamps,
-                "ranges": [],
+                "ranges": range_list,
             })
         else:
             # TCT schematic detection
-            schematics_result = detect_tct_schematics(df, None)
+            schematics_result = detect_tct_schematics(df, range_list)
 
             all_schematics = (
                 schematics_result.get("accumulation_schematics", []) +
@@ -3194,7 +3168,7 @@ async def get_schematic_data(symbol: str, timeframe: str = "4h", type: str = "tc
                 "current_price": current_price,
                 "candles": candles_json,
                 "schematics": schematics_with_timestamps,
-                "ranges": [],
+                "ranges": range_list,
             })
 
     except Exception as e:
@@ -3313,11 +3287,9 @@ async def schematic_chart_page(symbol: str = "BTCUSDT", timeframe: str = "4h", t
         }
 
         function fmt(p) {
-            if (p == null || isNaN(p)) return '--';
-            if (p >= 10000) return '$' + p.toLocaleString(undefined, {maximumFractionDigits: 0});
-            if (p >= 100)   return '$' + p.toLocaleString(undefined, {maximumFractionDigits: 2});
-            if (p >= 1)     return '$' + p.toFixed(2);
-            if (p >= 0.01)  return '$' + p.toFixed(4);
+            if (p === null || p === undefined) return '--';
+            if (p >= 1000) return '$' + p.toLocaleString(undefined, {maximumFractionDigits: 0});
+            if (p >= 1) return '$' + p.toFixed(2);
             return '$' + p.toPrecision(4);
         }
 
@@ -3690,12 +3662,14 @@ async def get_po3_data(symbol: str, timeframe: str = "4h"):
                 'close': float(row['close']),
             })
 
-        # Let detectors use their own internal range detection
-        po3_result = detect_po3_schematics(df, None)
+        detected_range = await detect_best_range(candles_list)
+        range_list = [detected_range] if detected_range and not isinstance(detected_range, list) else (detected_range or [])
+
+        po3_result = detect_po3_schematics(df, range_list)
         all_po3 = po3_result.get("bullish_po3", []) + po3_result.get("bearish_po3", [])
 
         # Also get TCT schematics for the manipulation phase overlay
-        tct_result = detect_tct_schematics(df, None)
+        tct_result = detect_tct_schematics(df, range_list)
         all_tct = (
             tct_result.get("accumulation_schematics", []) +
             tct_result.get("distribution_schematics", [])
@@ -3727,7 +3701,7 @@ async def get_po3_data(symbol: str, timeframe: str = "4h"):
             "candles": candles_json,
             "po3_schematics": all_po3,
             "tct_schematics": tct_with_timestamps,
-            "ranges": [],
+            "ranges": range_list,
         })
 
     except Exception as e:
@@ -3855,11 +3829,9 @@ async def po3_chart_page(symbol: str = "BTCUSDT", timeframe: str = "4h"):
         }
 
         function fmt(p) {
-            if (p == null || isNaN(p)) return '--';
-            if (p >= 10000) return '$' + p.toLocaleString(undefined, {maximumFractionDigits: 0});
-            if (p >= 100)   return '$' + p.toLocaleString(undefined, {maximumFractionDigits: 2});
-            if (p >= 1)     return '$' + p.toFixed(2);
-            if (p >= 0.01)  return '$' + p.toFixed(4);
+            if (p === null || p === undefined) return '--';
+            if (p >= 1000) return '$' + p.toLocaleString(undefined, {maximumFractionDigits: 0});
+            if (p >= 1) return '$' + p.toFixed(2);
             return '$' + p.toPrecision(4);
         }
 
@@ -4336,9 +4308,7 @@ async def dashboard():
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=5">
-    <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>HPB-TCT Dashboard</title>
     <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
     <style>
@@ -4801,59 +4771,6 @@ async def dashboard():
             display: flex;
             justify-content: space-between;
             align-items: center;
-        }
-        /* 8-Step Pipeline Display */
-        .hps-pipeline { margin-bottom: 10px; }
-        .hps-step {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 3px 6px;
-            border-radius: 4px;
-            margin-bottom: 2px;
-            font-size: 0.68rem;
-            background: rgba(255,255,255,0.02);
-            border-left: 3px solid #2d2d44;
-            transition: all 0.2s;
-        }
-        .hps-step.active { border-left-color: #00d4ff; background: rgba(0,212,255,0.06); }
-        .hps-step.pass { border-left-color: #00ff88; }
-        .hps-step.fail { border-left-color: #ff4444; }
-        .hps-step.warn { border-left-color: #ffc107; }
-        .hps-step-name { color: #aaa; flex: 1; }
-        .hps-step.pass .hps-step-name { color: #ccc; }
-        .hps-step-result {
-            font-weight: 600;
-            font-size: 0.62rem;
-            padding: 1px 5px;
-            border-radius: 3px;
-            margin-left: 4px;
-            white-space: nowrap;
-        }
-        .hps-step.pass .hps-step-result { color: #00ff88; }
-        .hps-step.fail .hps-step-result { color: #ff4444; }
-        .hps-step.warn .hps-step-result { color: #ffc107; }
-        .hps-step-score {
-            font-size: 0.6rem;
-            color: #555;
-            min-width: 28px;
-            text-align: right;
-            margin-left: 4px;
-        }
-        .hps-step.pass .hps-step-score { color: #00ff88; }
-        .hps-step.warn .hps-step-score { color: #ffc107; }
-        .hps-divider {
-            border-top: 1px solid rgba(0,212,255,0.15);
-            margin: 6px 0;
-        }
-        .hps-total {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            font-size: 0.72rem;
-            font-weight: 700;
-            color: #00d4ff;
-            padding: 2px 6px;
         }
         .setup-direction {
             font-size: 0.75rem;
@@ -5491,263 +5408,6 @@ async def dashboard():
             border-radius: 4px; padding: 8px; margin-top: 8px;
             font-size: 0.7rem; color: #80deea;
         }
-
-        /* ===== RESPONSIVE DESIGN ===== */
-
-        /* Tablets landscape + small laptops (iPad Air, Asus PZ13 ProArt ~820-1100px) */
-        @media (max-width: 1100px) {
-            .main-container {
-                grid-template-columns: 1fr 280px;
-                gap: 10px;
-                padding: 10px;
-            }
-            .header { padding: 10px 15px; }
-            .header h1 { font-size: 1.2rem; }
-            .header .price-display { font-size: 1.4rem; }
-            .metric-card { padding: 10px; }
-            .metric-card h3 { font-size: 0.8rem; }
-        }
-
-        /* Tablets portrait + large phones (iPad Air portrait ~820px, Asus PZ13 ProArt portrait) */
-        @media (max-width: 860px) {
-            .main-container {
-                grid-template-columns: 1fr;
-                height: auto;
-                gap: 10px;
-                padding: 10px;
-            }
-            .chart-section {
-                height: 50vh;
-                min-height: 350px;
-            }
-            #chart { height: calc(100% - 36px) !important; }
-            .metrics-panel {
-                max-height: none;
-                overflow-y: visible;
-                padding-right: 0;
-            }
-            .header {
-                flex-direction: column;
-                gap: 10px;
-                align-items: flex-start;
-                padding: 10px 15px;
-            }
-            .header > div {
-                width: 100%;
-                justify-content: space-between;
-                flex-wrap: wrap;
-                gap: 8px;
-            }
-            .timeframe-selector {
-                flex-wrap: wrap;
-                gap: 6px;
-            }
-            .pair-search { min-width: 120px; width: 120px; font-size: 0.8rem; }
-            .pair-dropdown { min-width: 220px; }
-            .header .price-display { font-size: 1.3rem; }
-            /* Stack validation gates 2x2 on tablet */
-            .validation-gates { grid-template-columns: repeat(4, 1fr); }
-            /* Setup levels stay 3-col */
-            .setup-levels { grid-template-columns: 1fr 1fr 1fr; }
-            .schematic-levels { grid-template-columns: repeat(3, 1fr); }
-            .po3-levels { grid-template-columns: repeat(3, 1fr); }
-        }
-
-        /* Phones (iPhone 13 ~390px, Samsung S22 ~360px) */
-        @media (max-width: 480px) {
-            body { font-size: 14px; -webkit-text-size-adjust: 100%; }
-            .header {
-                flex-direction: column;
-                gap: 8px;
-                align-items: stretch;
-                padding: 8px 10px;
-            }
-            .header h1 {
-                font-size: 1rem;
-                justify-content: center;
-                text-align: center;
-            }
-            .header > div {
-                flex-direction: column;
-                align-items: stretch;
-                gap: 6px;
-            }
-            .timeframe-selector {
-                flex-direction: row;
-                flex-wrap: wrap;
-                justify-content: space-between;
-                gap: 6px;
-                width: 100%;
-            }
-            .timeframe-selector > div {
-                flex: 1;
-                min-width: 0;
-            }
-            .pair-search-wrapper { display: block; width: 100%; }
-            .pair-search {
-                width: 100% !important;
-                min-width: unset;
-                font-size: 0.9rem;
-                padding: 8px 12px;
-            }
-            .tf-dropdown {
-                width: 100%;
-                font-size: 0.85rem;
-                padding: 8px 28px 8px 12px;
-            }
-            .pair-dropdown {
-                min-width: unset;
-                width: 100%;
-                max-height: 300px;
-            }
-            .header .price-display {
-                font-size: 1.5rem;
-                text-align: center;
-                width: 100%;
-            }
-            .refresh-btn {
-                width: 100%;
-                padding: 10px 12px;
-                font-size: 0.85rem;
-            }
-            .main-container {
-                grid-template-columns: 1fr;
-                height: auto;
-                gap: 8px;
-                padding: 8px;
-            }
-            .chart-section {
-                height: 45vh;
-                min-height: 280px;
-                border-radius: 6px;
-            }
-            .chart-controls {
-                overflow-x: auto;
-                -webkit-overflow-scrolling: touch;
-                flex-wrap: nowrap;
-                padding: 4px 6px;
-            }
-            .chart-ctrl-btn {
-                padding: 6px 10px;
-                font-size: 0.7rem;
-                white-space: nowrap;
-                flex-shrink: 0;
-            }
-            .metrics-panel {
-                gap: 8px;
-                padding-right: 0;
-                max-height: none;
-                overflow-y: visible;
-            }
-            .metric-card {
-                padding: 10px;
-                border-radius: 6px;
-            }
-            .metric-card h3 { font-size: 0.8rem; }
-            .metric-row { padding: 3px 0; font-size: 0.78rem; }
-            .tct-lecture { font-size: 0.6rem; }
-
-            /* Touch-friendly tap targets */
-            .pair-dropdown-item { padding: 10px 12px; font-size: 0.85rem; }
-            .top5-item { padding: 10px; }
-            .forming-link { padding: 8px 10px; font-size: 0.8rem; }
-            .scan-btn { padding: 8px 12px; font-size: 0.75rem; }
-
-            /* Validation gates: 2 per row on phone */
-            .validation-gates {
-                grid-template-columns: repeat(2, 1fr);
-                gap: 4px;
-            }
-            .gate { padding: 8px 4px; font-size: 0.65rem; }
-
-            /* Setup levels stack on phone */
-            .setup-levels { grid-template-columns: 1fr 1fr 1fr; gap: 4px; }
-            .setup-level-box { padding: 8px 4px; }
-
-            /* Risk input 1-col on phone */
-            .risk-input-group { grid-template-columns: 1fr; }
-            .risk-input.full-width { grid-column: 1; }
-            .risk-input input, .risk-input select { padding: 8px 10px; font-size: 0.85rem; }
-            .calc-btn { padding: 10px 12px; font-size: 0.85rem; }
-
-            /* Risk tabs scrollable */
-            .risk-tabs { flex-wrap: wrap; }
-            .risk-tab { padding: 6px 4px; font-size: 0.6rem; }
-
-            /* Schematic levels stack */
-            .schematic-levels { grid-template-columns: repeat(3, 1fr); gap: 4px; }
-            .po3-levels { grid-template-columns: repeat(3, 1fr); gap: 4px; }
-
-            /* Streak bar smaller */
-            .streak-bar-container { height: 60px; }
-
-            /* Compound table scroll */
-            .compound-table { font-size: 0.65rem; }
-
-            /* Top5 panel */
-            .top5-panel, .forming-panel, .setup-panel {
-                padding: 8px 10px;
-            }
-            .top5-levels { font-size: 0.55rem; }
-            .top5-tags { gap: 3px; }
-            .top5-tag { font-size: 0.5rem; }
-
-            /* Zone items */
-            .zone-item { padding: 8px; font-size: 0.75rem; }
-
-            /* Range bar */
-            .range-bar { height: 36px; }
-        }
-
-        /* Very small phones (under 360px) */
-        @media (max-width: 360px) {
-            .header h1 { font-size: 0.9rem; }
-            .header .price-display { font-size: 1.3rem; }
-            .chart-section { height: 40vh; min-height: 240px; }
-            .setup-levels { grid-template-columns: 1fr; gap: 3px; }
-            .schematic-levels { grid-template-columns: 1fr 1fr; }
-            .po3-levels { grid-template-columns: 1fr 1fr; }
-        }
-
-        /* Desktop large screens (Asus ROG Zephyrus 16", desktop 1920px) */
-        @media (min-width: 1440px) {
-            .main-container {
-                grid-template-columns: 1fr 360px;
-                max-width: 1800px;
-                margin: 0 auto;
-            }
-            .header {
-                max-width: 1800px;
-                margin: 0 auto;
-            }
-        }
-
-        /* Touch device optimizations */
-        @media (hover: none) and (pointer: coarse) {
-            .chart-ctrl-btn { padding: 6px 12px; min-height: 36px; }
-            .pair-dropdown-item { padding: 12px; min-height: 44px; }
-            .tf-btn { padding: 8px 12px; min-height: 36px; }
-            .top5-item { padding: 12px; }
-            .forming-link { padding: 10px 12px; min-height: 44px; }
-            .scan-btn { min-height: 40px; }
-            .refresh-btn { min-height: 40px; }
-            .calc-btn { min-height: 44px; }
-            .risk-tab { min-height: 36px; }
-        }
-
-        /* Safe area insets for iPhone notch / dynamic island */
-        @supports (padding: max(0px)) {
-            .header {
-                padding-left: max(15px, env(safe-area-inset-left));
-                padding-right: max(15px, env(safe-area-inset-right));
-                padding-top: max(10px, env(safe-area-inset-top));
-            }
-            .main-container {
-                padding-left: max(10px, env(safe-area-inset-left));
-                padding-right: max(10px, env(safe-area-inset-right));
-                padding-bottom: max(10px, env(safe-area-inset-bottom));
-            }
-        }
     </style>
 </head>
 <body>
@@ -5833,18 +5493,15 @@ async def dashboard():
                 </div>
                 <div id="msLevelsContent" style="margin-top:6px;"></div>
                 <div class="metric-row">
-                    <span class="label">MS Highs / Lows</span>
-                    <span class="value" id="msPivotCounts">--</span>
+                    <span class="label">HTF Pivots (6CR)</span>
+                    <span class="value" id="htfPivots">--</span>
                 </div>
-                <div id="bosEventsContent" style="margin-top:6px;"></div>
-                <div id="dominoContent" style="margin-top:6px;"></div>
             </div>
 
             <!-- Active Range -->
             <div class="metric-card">
                 <h3>Active Range <span class="badge" id="zoneBadge">--</span></h3>
                 <div class="tct-lecture">TCT Lecture 2 - Ranges</div>
-                <div id="rangeQualityTag" style="margin-bottom:6px;"></div>
                 <div class="metric-row">
                     <span class="label">Range High</span>
                     <span class="value" id="rangeHigh">--</span>
@@ -5856,14 +5513,6 @@ async def dashboard():
                 <div class="metric-row">
                     <span class="label">Range Low</span>
                     <span class="value" id="rangeLow">--</span>
-                </div>
-                <div class="metric-row">
-                    <span class="label">Range Size</span>
-                    <span class="value" id="rangeSize">--</span>
-                </div>
-                <div class="metric-row">
-                    <span class="label">DL+ / DL&minus;</span>
-                    <span class="value" id="rangeDL" style="font-size:0.65rem;">--</span>
                 </div>
                 <div class="range-viz" id="rangeViz" style="display:none;">
                     <div class="range-labels">
@@ -5887,7 +5536,6 @@ async def dashboard():
                     <span class="label">Bias Strength</span>
                     <span class="value" id="biasStrength">--</span>
                 </div>
-                <div id="fibContent"></div>
             </div>
 
             <!-- Deviations -->
@@ -5913,22 +5561,13 @@ async def dashboard():
                 <h3>S&D Zones <span class="badge badge-neutral" id="zoneCount">0</span></h3>
                 <div class="tct-lecture">TCT Lecture 3</div>
                 <div class="metric-row">
-                    <span class="label">Demand OBs</span>
-                    <span class="value bullish" id="demandOBCount">--</span>
+                    <span class="label">HTF Zones</span>
+                    <span class="value" id="htfZones">--</span>
                 </div>
                 <div class="metric-row">
-                    <span class="label">Supply OBs</span>
-                    <span class="value bearish" id="supplyOBCount">--</span>
+                    <span class="label">High Quality</span>
+                    <span class="value bullish" id="hqZones">--</span>
                 </div>
-                <div class="metric-row">
-                    <span class="label">Structure S/D</span>
-                    <span class="value" id="structureSDCount">--</span>
-                </div>
-                <div class="metric-row">
-                    <span class="label">Mitigated</span>
-                    <span class="value" id="mitigatedCount" style="color:#888;">--</span>
-                </div>
-                <div id="topScoredZones" style="margin-top:6px;"></div>
                 <div class="zone-list" id="topZones"></div>
             </div>
 
@@ -5941,27 +5580,17 @@ async def dashboard():
                     <span class="value bearish" id="bslCount">--</span>
                 </div>
                 <div class="metric-row">
-                    <span class="label">&emsp;Primary / Internal</span>
-                    <span class="value" id="bslBreakdown" style="font-size:0.7rem;">--</span>
-                </div>
-                <div class="metric-row">
                     <span class="label">SSL Pools (Below)</span>
                     <span class="value bullish" id="sslCount">--</span>
                 </div>
                 <div class="metric-row">
-                    <span class="label">&emsp;Primary / Internal</span>
-                    <span class="value" id="sslBreakdown" style="font-size:0.7rem;">--</span>
-                </div>
-                <div class="metric-row">
                     <span class="label">Equal Highs</span>
-                    <span class="value" id="eqHighs" style="color:#9c27b0;">--</span>
+                    <span class="value" id="eqHighs">--</span>
                 </div>
                 <div class="metric-row">
                     <span class="label">Equal Lows</span>
-                    <span class="value" id="eqLows" style="color:#9c27b0;">--</span>
+                    <span class="value" id="eqLows">--</span>
                 </div>
-                <div id="liqCurvesContent" style="margin-top:6px;"></div>
-                <div id="liqTargetsContent" style="margin-top:4px;"></div>
                 <div class="zone-list" id="liqPools"></div>
             </div>
 
@@ -6024,10 +5653,9 @@ async def dashboard():
                 </div>
             </div>
 
-            <!-- Highest Probability Setup (derived from all 8 steps) -->
+            <!-- Highest Probability Setup (derived from all sections above) -->
             <div class="setup-panel" id="setupPanel">
                 <h3>Highest Probability Setup <span class="setup-direction none" id="setupDirection">--</span></h3>
-                <div id="hpsPipeline" class="hps-pipeline"></div>
                 <div id="setupContent">
                     <div class="metric-row"><span class="label">Select a pair to analyze...</span></div>
                 </div>
@@ -6455,7 +6083,6 @@ async def dashboard():
         let currentSymbol = 'BTCUSDT';
         let coinList = { categories: {}, all: [] };
         let isLoading = false;
-        let refreshGeneration = 0; // Incremented on each refresh request to abort stale ones
         let lastCandles = []; // Store candles for index-to-time mapping
 
         // HTF context cache: stores fetched HTF data per symbol so timeframe changes reuse it
@@ -6468,9 +6095,6 @@ async def dashboard():
             schematicsData: null,
             po3Data: null,
         };
-
-        // Last completed HPS cache: keyed by symbol, stores the last setup that had valid levels
-        const lastCompletedSetups = {};
 
         // Fetch with retry and timeout
         async function fetchWithRetry(url, options = {}, retries = 3, timeout = 20000) {
@@ -6485,11 +6109,6 @@ async def dashboard():
                     });
                     clearTimeout(timeoutId);
 
-                    // On server error (500), return error JSON directly instead of retrying
-                    // (our own API failed — retrying won't help, it just adds latency)
-                    if (response.status >= 500) {
-                        try { return await response.json(); } catch(_) { return { error: 'Server error ' + response.status }; }
-                    }
                     if (!response.ok) {
                         throw new Error(`HTTP ${response.status}`);
                     }
@@ -6633,7 +6252,7 @@ async def dashboard():
             try {
                 const data = await fetchWithRetry(
                     `/api/candles?interval=${interval}&limit=${limit}&symbol=${sym}`,
-                    {}, 2, 30000
+                    {}, 3, 20000
                 );
                 if (data.error) {
                     console.error('Candles API error:', data.error);
@@ -6644,27 +6263,6 @@ async def dashboard():
                 console.error('Failed to fetch candles:', e);
                 return [];
             }
-        }
-
-        // Smart price formatter: adapts decimal places to price magnitude
-        function fmtPrice(p) {
-            if (p == null || isNaN(p)) return '--';
-            if (p >= 10000) return '$' + p.toLocaleString(undefined, {maximumFractionDigits: 0});
-            if (p >= 100)   return '$' + p.toLocaleString(undefined, {maximumFractionDigits: 2});
-            if (p >= 1)     return '$' + p.toFixed(2);
-            if (p >= 0.01)  return '$' + p.toFixed(4);
-            return '$' + p.toPrecision(4);
-        }
-
-        function timeSince(isoStr) {
-            if (!isoStr) return '';
-            const diff = Date.now() - new Date(isoStr).getTime();
-            const mins = Math.floor(diff / 60000);
-            if (mins < 1) return 'just now';
-            if (mins < 60) return mins + 'm ago';
-            const hrs = Math.floor(mins / 60);
-            if (hrs < 24) return hrs + 'h ago';
-            return Math.floor(hrs / 24) + 'd ago';
         }
 
         // Add horizontal line to chart
@@ -6759,7 +6357,7 @@ async def dashboard():
             }
         }
 
-        // Clear all price lines, additional series, and chart markers
+        // Clear all price lines and additional series
         function clearPriceLines() {
             lineSeries.forEach(line => {
                 try { candleSeries.removePriceLine(line); } catch(e) {}
@@ -6771,23 +6369,13 @@ async def dashboard():
                 try { chart.removeSeries(series); } catch(e) {}
             });
             additionalSeries = [];
-
-            // Clear tap markers
-            try { candleSeries.setMarkers([]); } catch(e) {}
         }
 
         // Fetch and display all TCT data
         async function refreshData() {
-            // Abort-aware refresh: each call gets a generation number.
-            // If a newer refresh starts, stale fetches are discarded.
-            const thisGen = ++refreshGeneration;
-            const isStale = () => refreshGeneration !== thisGen;
-
-            // If another refresh is already running, it will detect staleness
-            // via its own generation check and stop. Allow this one to proceed.
+            if (isLoading) return;
             isLoading = true;
 
-          try {
             // Capture symbol at start to prevent race conditions when user switches
             // pairs during async API calls. All fetches use this snapshot so data
             // stays consistent even if currentSymbol changes mid-refresh.
@@ -6808,55 +6396,30 @@ async def dashboard():
             document.getElementById('setupDirection').textContent = '...';
             document.getElementById('setupDirection').className = 'setup-direction none';
             document.getElementById('setupContent').innerHTML = '<div class="metric-row"><span class="label">Running analysis pipeline...</span></div>';
-            document.getElementById('hpsPipeline').innerHTML = '';
             document.getElementById('setupConfidence').style.width = '0%';
             document.getElementById('formingCount').textContent = '...';
             document.getElementById('formingContent').innerHTML = '<div class="forming-empty">Analyzing pair...</div>';
 
-            // Reset sidebar to clear stale data from previous pair
+            // Reset Active Range sidebar to clear stale data from previous pair
             if (isNewPair) {
-                // Market Structure
+                document.getElementById('rangeHigh').textContent = '--';
+                document.getElementById('rangeEq').textContent = '--';
+                document.getElementById('rangeLow').textContent = '--';
+                document.getElementById('tradingBias').textContent = '--';
+                document.getElementById('tradingBias').className = 'value';
+                document.getElementById('biasStrength').textContent = '--';
+                document.getElementById('rangeViz').style.display = 'none';
+                document.getElementById('rangeHighLabel').textContent = '--';
+                document.getElementById('rangeLowLabel').textContent = '--';
                 document.getElementById('htfTrend').textContent = '--';
                 document.getElementById('ltfTrend').textContent = '--';
                 document.getElementById('htfEOF').textContent = '--';
                 document.getElementById('ltfEOF').textContent = '--';
-                document.getElementById('msPivotCounts').textContent = '--';
-                document.getElementById('msLevelsContent').innerHTML = '';
-                document.getElementById('bosEventsContent').innerHTML = '';
-                document.getElementById('dominoContent').innerHTML = '';
-                // Active Range
-                document.getElementById('rangeHigh').textContent = '--';
-                document.getElementById('rangeEq').textContent = '--';
-                document.getElementById('rangeLow').textContent = '--';
-                document.getElementById('rangeSize').textContent = '--';
-                document.getElementById('rangeDL').textContent = '--';
-                document.getElementById('rangeQualityTag').innerHTML = '';
-                document.getElementById('tradingBias').textContent = '--';
-                document.getElementById('tradingBias').className = 'value';
-                document.getElementById('biasStrength').textContent = '--';
-                document.getElementById('fibContent').innerHTML = '';
-                document.getElementById('rangeViz').style.display = 'none';
-                document.getElementById('rangeHighLabel').textContent = '--';
-                document.getElementById('rangeLowLabel').textContent = '--';
-                // Deviations
+                document.getElementById('htfPivots').textContent = '--';
                 document.getElementById('wickDevs').textContent = '0';
                 document.getElementById('candleDevs').textContent = '0';
                 document.getElementById('dlDevs').textContent = '0';
                 document.getElementById('devBadge').textContent = '0';
-                // S&D Zones
-                document.getElementById('demandOBCount').textContent = '--';
-                document.getElementById('supplyOBCount').textContent = '--';
-                document.getElementById('structureSDCount').textContent = '--';
-                document.getElementById('mitigatedCount').textContent = '--';
-                document.getElementById('topScoredZones').innerHTML = '';
-                document.getElementById('topZones').innerHTML = '';
-                // Liquidity
-                document.getElementById('bslBreakdown').textContent = '--';
-                document.getElementById('sslBreakdown').textContent = '--';
-                document.getElementById('liqCurvesContent').innerHTML = '';
-                document.getElementById('liqTargetsContent').innerHTML = '';
-                document.getElementById('liqPools').innerHTML = '';
-                // Schematics
                 document.getElementById('schematicsContent').innerHTML = '<div class="metric-row"><span class="label">Loading...</span></div>';
                 document.getElementById('po3Content').innerHTML = '<div class="metric-row"><span class="label">Loading...</span></div>';
             }
@@ -6864,8 +6427,12 @@ async def dashboard():
             // ─── STEP 1: Fetch candles and update chart ───
             lastCandles = await fetchCandles(targetTimeframe, getCandleLimit(targetTimeframe), targetSymbol);
 
-            // If a newer refresh has started, abort this stale one
-            if (isStale()) { isLoading = false; return; }
+            // If user switched pairs while candles were loading, discard stale results
+            if (currentSymbol !== targetSymbol) {
+                isLoading = false;
+                refreshData();
+                return;
+            }
 
             if (lastCandles.length > 0) {
                 candleSeries.setData(lastCandles);
@@ -6873,171 +6440,119 @@ async def dashboard():
                 chart.timeScale().fitContent();
                 chart.priceScale('right').applyOptions({ autoScale: true });
                 const lastPrice = lastCandles[lastCandles.length - 1].close;
-                document.getElementById('currentPrice').textContent = fmtPrice(lastPrice);
-            } else {
-                // Candle fetch failed - clear chart and show error price
-                candleSeries.setData([]);
-                document.getElementById('currentPrice').textContent = 'No data';
-                document.getElementById('currentPrice').style.color = '#ff4444';
-                setTimeout(() => { document.getElementById('currentPrice').style.color = ''; }, 3000);
+                document.getElementById('currentPrice').textContent = '$' + lastPrice.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
             }
             clearPriceLines();
 
             // For HTF data: fetch fresh if new pair, reuse cache if just timeframe change
-            let msData = null, rangesData = null, zonesData = null, liqData = null, valData = null, schematicsData = null, po3Data = null;
+            let rangesData = null, zonesData = null, liqData = null, valData = null, schematicsData = null, po3Data = null;
 
             if (isNewPair) {
-                // ─── STEP 1: Market Structure (Lecture 1 — trend, BOS, CHoCH, levels, EOF) ───
-                // ─── STEP 2: Ranges (Lecture 2 — active range, deviations, premium/discount) ───
-                // ─── STEP 3: Supply & Demand (Lecture 3 — OBs, FVGs, zone quality) ───
-                // ─── STEP 4: Liquidity (Lecture 4 — BSL/SSL pools, curves, voids) ───
-                const [msResult, rangesResult, zonesResult, liqResult] = await Promise.allSettled([
-                    fetchWithRetry(`/api/market-structure?symbol=${targetSymbol}&timeframe=4h&limit=300`, {}, 3, 25000),
-                    fetchWithRetry(`/api/ranges?symbol=${targetSymbol}`, {}, 3, 25000),
-                    fetchWithRetry(`/api/zones?symbol=${targetSymbol}`, {}, 3, 25000),
-                    fetchWithRetry(`/api/liquidity?symbol=${targetSymbol}`, {}, 3, 25000),
-                ]);
+                // ─── STEP 2: Market Structure + Active Range + Deviations ───
+                try {
+                    rangesData = await fetchWithRetry(`/api/ranges?symbol=${targetSymbol}`, {}, 3, 25000);
+                    if (rangesData && !rangesData.error) {
+                        updateRangesUI(rangesData, lastCandles);
+                    } else { setError('trendBadge'); setError('zoneBadge'); }
+                } catch (e) { console.error('Ranges error:', e); setError('trendBadge'); setError('zoneBadge'); }
 
-                if (isStale()) { isLoading = false; return; }
+                // ─── STEP 3: S&D Zones ───
+                try {
+                    zonesData = await fetchWithRetry(`/api/zones?symbol=${targetSymbol}`, {}, 3, 25000);
+                    if (zonesData && !zonesData.error) {
+                        updateZonesUI(zonesData);
+                    } else { setError('zoneCount'); }
+                } catch (e) { console.error('Zones error:', e); setError('zoneCount'); }
 
-                // Process market structure
-                msData = msResult.status === 'fulfilled' ? msResult.value : null;
-                if (msData && !msData.error) {
-                    console.log('Market structure loaded:', msData.structure?.trend || 'unknown');
-                }
+                // ─── STEP 4: Liquidity Pools ───
+                try {
+                    liqData = await fetchWithRetry(`/api/liquidity?symbol=${targetSymbol}`, {}, 3, 25000);
+                    if (liqData && !liqData.error) {
+                        updateLiquidityUI(liqData, lastCandles);
+                    } else { setError('liqCount'); }
+                } catch (e) { console.error('Liquidity error:', e); setError('liqCount'); }
 
-                // Process ranges
-                rangesData = rangesResult.status === 'fulfilled' ? rangesResult.value : null;
-                if (rangesData && !rangesData.error) {
-                    try { updateRangesUI(rangesData, lastCandles); } catch(e) { console.error('Ranges render error:', e); }
-                } else { setError('trendBadge'); setError('zoneBadge'); }
+                // ─── STEP 5: TCT Schematics ───
+                try {
+                    schematicsData = await fetchWithRetry(`/api/schematics?symbol=${targetSymbol}&timeframe=${targetTimeframe}`, {}, 3, 30000);
+                    if (schematicsData && !schematicsData.error) {
+                        updateSchematicsUI(schematicsData);
+                    } else { setError('schematicsBadge'); }
+                } catch (e) { console.error('Schematics error:', e); setError('schematicsBadge'); }
 
-                // Process zones
-                zonesData = zonesResult.status === 'fulfilled' ? zonesResult.value : null;
-                if (zonesData && !zonesData.error) {
-                    try { updateZonesUI(zonesData); } catch(e) { console.error('Zones render error:', e); }
-                } else { setError('zoneCount'); }
+                // ─── STEP 6: PO3 Schematics ───
+                try {
+                    po3Data = await fetchWithRetry(`/api/po3?symbol=${targetSymbol}&timeframe=${targetTimeframe}`, {}, 3, 30000);
+                    if (po3Data && !po3Data.error) {
+                        updatePO3UI(po3Data);
+                    } else { setError('po3Badge'); }
+                } catch (e) { console.error('PO3 error:', e); setError('po3Badge'); }
 
-                // Process liquidity
-                liqData = liqResult.status === 'fulfilled' ? liqResult.value : null;
-                if (liqData && !liqData.error) {
-                    try { updateLiquidityUI(liqData, lastCandles); } catch(e) { console.error('Liq render error:', e); }
-                } else { setError('liqCount'); }
+                // ─── STEP 7: 7-Gate Validation ───
+                try {
+                    valData = await fetchWithRetry(`/api/validate?symbol=${targetSymbol}`, {}, 3, 25000);
+                    if (valData) {
+                        updateValidationUI(valData);
+                    } else { setError('actionBadge'); }
+                } catch (e) { console.error('Validation error:', e); setError('actionBadge'); }
 
-                if (isStale()) { isLoading = false; return; }
-
-                // ─── STEP 5: TCT Schematics (Lecture 5/6) ───
-                // ─── STEP 6: PO3 Schematics (Lecture 8) ───
-                // ─── STEP 7: Trade Execution / Validation (Lecture 9 + 7-Gate) ───
-                const [schResult, po3Result, valResult] = await Promise.allSettled([
-                    fetchWithRetry(`/api/schematics?symbol=${targetSymbol}&timeframe=${targetTimeframe}`, {}, 3, 30000),
-                    fetchWithRetry(`/api/po3?symbol=${targetSymbol}&timeframe=${targetTimeframe}`, {}, 3, 30000),
-                    fetchWithRetry(`/api/validate?symbol=${targetSymbol}`, {}, 3, 25000),
-                ]);
-
-                if (isStale()) { isLoading = false; return; }
-
-                // Process schematics
-                schematicsData = schResult.status === 'fulfilled' ? schResult.value : null;
-                if (schematicsData && !schematicsData.error) {
-                    try { updateSchematicsUI(schematicsData); } catch(e) { console.error('Schematics render error:', e); }
-                } else { setError('schematicsBadge'); }
-
-                // Process PO3
-                po3Data = po3Result.status === 'fulfilled' ? po3Result.value : null;
-                if (po3Data && !po3Data.error) {
-                    try { updatePO3UI(po3Data); } catch(e) { console.error('PO3 render error:', e); }
-                } else { setError('po3Badge'); }
-
-                // Process validation
-                valData = valResult.status === 'fulfilled' ? valResult.value : null;
-                if (valData && !valData.error) {
-                    try { updateValidationUI(valData); } catch(e) { console.error('Validation render error:', e); }
-                } else { setError('actionBadge'); }
-
-                // Cache all HTF data for this symbol
-                if (!isStale()) {
-                    htfCache = {
-                        symbol: targetSymbol,
-                        msData, rangesData, zonesData, liqData, valData, schematicsData, po3Data,
-                    };
-                }
+                // Cache all HTF data for this symbol (use targetSymbol, not currentSymbol,
+                // to ensure cache key matches the data that was actually fetched)
+                htfCache = {
+                    symbol: targetSymbol,
+                    rangesData, zonesData, liqData, valData, schematicsData, po3Data,
+                };
 
             } else {
-                // ─── TIMEFRAME CHANGE: Reuse cached HTF data, re-fetch schematics/PO3 ───
-                msData = htfCache.msData;
+                // ─── TIMEFRAME CHANGE: Reuse cached ranges/zones/liq/val, re-fetch schematics/PO3 ───
                 rangesData = htfCache.rangesData;
                 zonesData = htfCache.zonesData;
                 liqData = htfCache.liqData;
                 valData = htfCache.valData;
 
                 // Re-render cached data with new timeframe candles
-                if (rangesData && !rangesData.error) {
-                    try { updateRangesUI(rangesData, lastCandles); } catch(e) { console.error('Ranges render error:', e); }
-                } else { setError('trendBadge'); setError('zoneBadge'); }
-                if (zonesData && !zonesData.error) {
-                    try { updateZonesUI(zonesData); } catch(e) { console.error('Zones render error:', e); }
-                } else { setError('zoneCount'); }
-                if (liqData && !liqData.error) {
-                    try { updateLiquidityUI(liqData, lastCandles); } catch(e) { console.error('Liq render error:', e); }
-                } else { setError('liqCount'); }
-                if (valData && !valData.error) {
-                    try { updateValidationUI(valData); } catch(e) { console.error('Validation render error:', e); }
-                } else { setError('actionBadge'); }
+                if (rangesData && !rangesData.error) updateRangesUI(rangesData, lastCandles);
+                else { setError('trendBadge'); setError('zoneBadge'); }
+                if (zonesData && !zonesData.error) updateZonesUI(zonesData);
+                else setError('zoneCount');
+                if (liqData && !liqData.error) updateLiquidityUI(liqData, lastCandles);
+                else setError('liqCount');
+                if (valData) updateValidationUI(valData);
+                else setError('actionBadge');
 
-                if (isStale()) { isLoading = false; return; }
+                // Re-fetch schematics and PO3 with new timeframe context
+                try {
+                    schematicsData = await fetchWithRetry(`/api/schematics?symbol=${targetSymbol}&timeframe=${targetTimeframe}`, {}, 3, 30000);
+                    if (schematicsData && !schematicsData.error) updateSchematicsUI(schematicsData);
+                    else setError('schematicsBadge');
+                } catch (e) { console.error('Schematics error:', e); setError('schematicsBadge'); }
 
-                // Re-fetch schematics and PO3 with new timeframe context in parallel
-                const [schResult2, po3Result2] = await Promise.allSettled([
-                    fetchWithRetry(`/api/schematics?symbol=${targetSymbol}&timeframe=${targetTimeframe}`, {}, 3, 30000),
-                    fetchWithRetry(`/api/po3?symbol=${targetSymbol}&timeframe=${targetTimeframe}`, {}, 3, 30000),
-                ]);
-
-                if (isStale()) { isLoading = false; return; }
-
-                schematicsData = schResult2.status === 'fulfilled' ? schResult2.value : null;
-                if (schematicsData && !schematicsData.error) {
-                    try { updateSchematicsUI(schematicsData); } catch(e) { console.error('Schematics render error:', e); }
-                } else { setError('schematicsBadge'); }
-
-                po3Data = po3Result2.status === 'fulfilled' ? po3Result2.value : null;
-                if (po3Data && !po3Data.error) {
-                    try { updatePO3UI(po3Data); } catch(e) { console.error('PO3 render error:', e); }
-                } else { setError('po3Badge'); }
+                try {
+                    po3Data = await fetchWithRetry(`/api/po3?symbol=${targetSymbol}&timeframe=${targetTimeframe}`, {}, 3, 30000);
+                    if (po3Data && !po3Data.error) updatePO3UI(po3Data);
+                    else setError('po3Badge');
+                } catch (e) { console.error('PO3 error:', e); setError('po3Badge'); }
 
                 // Update cache with new schematics/PO3 data
-                if (!isStale()) {
-                    htfCache.schematicsData = schematicsData;
-                    htfCache.po3Data = po3Data;
-                }
+                htfCache.schematicsData = schematicsData;
+                htfCache.po3Data = po3Data;
             }
 
-            // If stale at this point, discard final rendering
-            if (isStale()) { isLoading = false; return; }
+            // ─── STEP 8: Forming Models (derived from current pair's schematic data) ───
+            deriveFormingModels(schematicsData, po3Data);
 
-            // ─── Forming Models (derived from current pair's schematic data) ───
-            try { deriveFormingModels(schematicsData, po3Data); }
-            catch(e) { console.error('Forming models error:', e); }
+            // ─── STEP 9: Highest Probability Setup (uses all data from pipeline) ───
+            const bestSetup = analyzeHighestProbabilitySetup(rangesData, zonesData, liqData, schematicsData, po3Data, valData, lastCandles);
+            renderSetupPanel(bestSetup);
+            drawTCTModelOverlays(bestSetup, lastCandles);
 
-            // ─── STEP 8: Highest Probability Setup (8-step pipeline combining all data) ───
-            try {
-                const bestSetup = analyzeHighestProbabilitySetup(msData, rangesData, zonesData, liqData, schematicsData, po3Data, valData, lastCandles);
-                renderSetupPanel(bestSetup);
-                try { drawTCTModelOverlays(bestSetup, lastCandles); }
-                catch(e) { console.error('Overlay draw error:', e); }
-            } catch(e) {
-                console.error('Setup analysis error:', e);
-                document.getElementById('setupDirection').textContent = 'ERR';
-                document.getElementById('setupDirection').className = 'setup-direction none';
-                document.getElementById('setupContent').innerHTML = '<div class="metric-row"><span class="label" style="color:#ff4444;">Analysis error: ' + e.message + '</span></div>';
-                document.getElementById('hpsPipeline').innerHTML = '';
+            isLoading = false;
+
+            // If user switched pairs while we were loading, immediately refresh
+            // with the new pair instead of waiting for the next auto-refresh cycle
+            if (currentSymbol !== targetSymbol || currentTimeframe !== targetTimeframe) {
+                refreshData();
             }
-
-            isLoading = false;
-          } catch (topLevelErr) {
-            console.error('refreshData top-level error:', topLevelErr);
-            isLoading = false;
-          }
         }
 
         // Derive Forming Models from current pair's HTF+LTF schematic data
@@ -7104,71 +6619,7 @@ async def dashboard():
             countEl.textContent = formingOnly.length + ' forming / ' + confirmedOnly.length + ' confirmed';
 
             if (models.length === 0) {
-                // No schematic/PO3 models — derive from range + candle context
-                let emptyHtml = '<div class="forming-empty" style="color:#888;font-size:0.7rem;padding:6px 0;">No TCT/PO3 schematics detected.</div>';
-
-                // Analyze what could be forming from available candle data
-                if (lastCandles && lastCandles.length >= 20) {
-                    const recent = lastCandles.slice(-30);
-                    const rHigh = Math.max(...recent.map(c => c.high));
-                    const rLow = Math.min(...recent.map(c => c.low));
-                    const rSize = rHigh - rLow;
-                    const price = lastCandles[lastCandles.length - 1].close;
-                    const posInRange = rSize > 0 ? (price - rLow) / rSize : 0.5;
-                    const sma10 = recent.slice(-10).reduce((s,c) => s + c.close, 0) / 10;
-                    const sma20 = recent.slice(-20).reduce((s,c) => s + c.close, 0) / Math.min(recent.length, 20);
-                    const trendUp = sma10 > sma20;
-
-                    // Count consolidation (small body candles)
-                    const last10 = recent.slice(-10);
-                    const consolidating = last10.filter(c => Math.abs(c.close - c.open) / (c.high - c.low + 0.0001) < 0.4).length;
-                    const isConsolidating = consolidating >= 5;
-
-                    emptyHtml += '<div style="background:#1a1a2e;border-radius:6px;padding:8px;margin-top:4px;">';
-                    emptyHtml += '<div style="font-size:0.7rem;font-weight:600;color:#00d4ff;margin-bottom:4px;">What\'s Forming</div>';
-
-                    if (isConsolidating) {
-                        const model = trendUp ? 'Re-Accumulation' : 'Re-Distribution';
-                        const modelColor = trendUp ? '#00ff88' : '#ff4444';
-                        emptyHtml += '<div style="display:flex;justify-content:space-between;font-size:0.7rem;padding:2px 0;">';
-                        emptyHtml += '<span style="color:#888;">Pattern</span><span style="color:' + modelColor + ';font-weight:600;">' + model + ' forming</span></div>';
-                        emptyHtml += '<div style="display:flex;justify-content:space-between;font-size:0.65rem;padding:2px 0;">';
-                        emptyHtml += '<span style="color:#888;">Phase</span><span style="color:#ffc107;">Consolidation / Range</span></div>';
-                        emptyHtml += '<div style="display:flex;justify-content:space-between;font-size:0.65rem;padding:2px 0;">';
-                        emptyHtml += '<span style="color:#888;">Look for</span><span style="color:#e0e0e0;">EQ tap → deviation → expansion</span></div>';
-                    } else if (posInRange < 0.3) {
-                        emptyHtml += '<div style="display:flex;justify-content:space-between;font-size:0.7rem;padding:2px 0;">';
-                        emptyHtml += '<span style="color:#888;">Pattern</span><span style="color:#00ff88;font-weight:600;">Accumulation watch</span></div>';
-                        emptyHtml += '<div style="display:flex;justify-content:space-between;font-size:0.65rem;padding:2px 0;">';
-                        emptyHtml += '<span style="color:#888;">Phase</span><span style="color:#ffc107;">Near range low / discount</span></div>';
-                        emptyHtml += '<div style="display:flex;justify-content:space-between;font-size:0.65rem;padding:2px 0;">';
-                        emptyHtml += '<span style="color:#888;">Look for</span><span style="color:#e0e0e0;">Spring / SSL sweep → BOS up</span></div>';
-                    } else if (posInRange > 0.7) {
-                        emptyHtml += '<div style="display:flex;justify-content:space-between;font-size:0.7rem;padding:2px 0;">';
-                        emptyHtml += '<span style="color:#888;">Pattern</span><span style="color:#ff4444;font-weight:600;">Distribution watch</span></div>';
-                        emptyHtml += '<div style="display:flex;justify-content:space-between;font-size:0.65rem;padding:2px 0;">';
-                        emptyHtml += '<span style="color:#888;">Phase</span><span style="color:#ffc107;">Near range high / premium</span></div>';
-                        emptyHtml += '<div style="display:flex;justify-content:space-between;font-size:0.65rem;padding:2px 0;">';
-                        emptyHtml += '<span style="color:#888;">Look for</span><span style="color:#e0e0e0;">UTAD / BSL sweep → BOS down</span></div>';
-                    } else {
-                        emptyHtml += '<div style="display:flex;justify-content:space-between;font-size:0.7rem;padding:2px 0;">';
-                        emptyHtml += '<span style="color:#888;">Pattern</span><span style="color:#ffc107;font-weight:600;">Ranging / EQ test</span></div>';
-                        emptyHtml += '<div style="display:flex;justify-content:space-between;font-size:0.65rem;padding:2px 0;">';
-                        emptyHtml += '<span style="color:#888;">Phase</span><span style="color:#ffc107;">Mid-range / equilibrium</span></div>';
-                        emptyHtml += '<div style="display:flex;justify-content:space-between;font-size:0.65rem;padding:2px 0;">';
-                        emptyHtml += '<span style="color:#888;">Look for</span><span style="color:#e0e0e0;">Directional BOS from EQ</span></div>';
-                    }
-
-                    emptyHtml += '<div style="display:flex;justify-content:space-between;font-size:0.65rem;padding:2px 0;margin-top:2px;">';
-                    emptyHtml += '<span style="color:#888;">Range</span><span style="color:#e0e0e0;">' + fmtPrice(rLow) + ' - ' + fmtPrice(rHigh) + '</span></div>';
-                    emptyHtml += '<div style="display:flex;justify-content:space-between;font-size:0.65rem;padding:2px 0;">';
-                    emptyHtml += '<span style="color:#888;">Pos in range</span><span style="color:#e0e0e0;">' + (posInRange * 100).toFixed(0) + '%</span></div>';
-                    emptyHtml += '</div>';
-
-                    countEl.textContent = '0 (analyzing)';
-                }
-
-                contentEl.innerHTML = emptyHtml;
+                contentEl.innerHTML = '<div class="forming-empty">No forming models detected on this pair</div>';
                 return;
             }
 
@@ -7200,9 +6651,7 @@ async def dashboard():
 
             const ms = data.market_structure || {};
 
-            // ═══ MARKET STRUCTURE CARD ═══
-
-            // HTF / LTF trends
+            // Market structure trends
             const htfTrend = ms.htf_trend || 'neutral';
             const ltfTrend = ms.ltf_trend || 'neutral';
             document.getElementById('htfTrend').textContent = htfTrend.toUpperCase();
@@ -7245,6 +6694,8 @@ async def dashboard():
                 const ld = htfLevels[lvl] || {};
                 const lvlTrend = ld.trend || '--';
                 const bosCount = (ld.bos || []).length;
+                const hiCount = (ld.highs || []).length;
+                const loCount = (ld.lows || []).length;
                 if (lvlTrend && lvlTrend !== '--' && lvlTrend !== 'neutral' && lvlTrend !== '') {
                     lvlHtml += '<div style="display:flex;justify-content:space-between;align-items:center;padding:2px 0;font-size:0.65rem;">';
                     lvlHtml += '<span style="color:' + lvlColors[lvl] + ';font-weight:600;">' + lvlLabels[lvl] + '</span>';
@@ -7254,124 +6705,36 @@ async def dashboard():
                     lvlHtml += '</span></div>';
                 }
             });
-            levelsEl.innerHTML = lvlHtml;
-
-            // MS Highs / Lows count
-            const msHighs = ms.htf_ms_highs || [];
-            const msLows = ms.htf_ms_lows || [];
-            document.getElementById('msPivotCounts').textContent = msHighs.length + ' H / ' + msLows.length + ' L';
-
-            // BOS events on chart + sidebar list
+            // Show BOS events on chart
             const htfBosEvents = ms.htf_bos_events || [];
             htfBosEvents.forEach(bos => {
-                if (bos.broken_level) {
+                if (bos.bos_idx >= 0 && bos.bos_idx < candles.length && candles.length > 0) {
                     const bosColor = bos.type === 'bullish' ? '#00ff88' : '#ff4444';
                     const bosLabel = bos.type === 'bullish' ? 'BOS \u2191' : 'BOS \u2193';
                     lineSeries.push(addPriceLine(bos.broken_level, bosColor, bosLabel, 2, 1));
                 }
             });
+            levelsEl.innerHTML = lvlHtml;
 
-            // BOS events sidebar list (last 5, matching /market-structure page)
-            let bosHtml = '';
-            if (htfBosEvents.length > 0) {
-                bosHtml += '<div style="font-size:0.7rem;font-weight:600;color:#ffc107;margin-bottom:4px;">BOS Events (' + htfBosEvents.length + ')</div>';
-                htfBosEvents.slice(-5).reverse().forEach(b => {
-                    const dir = b.type === 'bullish' ? '\u25B2' : '\u25BC';
-                    const dirColor = b.type === 'bullish' ? '#00ff88' : '#ff4444';
-                    const qualCls = b.quality === 'good' ? 'bullish' : b.quality === 'bad' ? 'bearish' : 'warning';
-                    const qualBg = b.quality === 'good' ? 'rgba(0,255,136,0.15)' : b.quality === 'bad' ? 'rgba(255,68,68,0.15)' : 'rgba(255,193,7,0.15)';
-                    bosHtml += '<div style="display:flex;justify-content:space-between;align-items:center;padding:2px 0;font-size:0.65rem;">';
-                    bosHtml += '<span style="color:' + dirColor + ';">' + dir + ' ' + b.type + '</span>';
-                    bosHtml += '<span>' + fmtPrice(b.broken_level || 0) + '</span>';
-                    if (b.quality) bosHtml += '<span style="padding:1px 5px;border-radius:3px;background:' + qualBg + ';color:' + dirColor + ';font-size:0.6rem;">' + b.quality + '</span>';
-                    bosHtml += '</div>';
-                });
-            }
-            document.getElementById('bosEventsContent').innerHTML = bosHtml;
-
-            // Domino Effect (from /market-structure page logic)
-            // Note: domino data is not in the /api/ranges response, but we can derive from level data
-            let dominoHtml = '';
-            const l1 = htfLevels.level_1 || {};
-            const l2 = htfLevels.level_2 || {};
-            const l3 = htfLevels.level_3 || {};
-            if (l1.trend && l1.trend !== 'neutral') {
-                const l2HasBos = (l2.bos || []).length > 0;
-                const l3HasBos = (l3.bos || []).length > 0;
-                let stage = 'L1 rotation';
-                let conf = 'low';
-                if (l3HasBos) { stage = 'L3 confirmed'; conf = 'high'; }
-                else if (l2HasBos) { stage = 'L2 confirmed, awaiting L3'; conf = 'moderate'; }
-                else { stage = 'Awaiting L2 rotation'; conf = 'low'; }
-                const confColor = conf === 'high' ? '#00ff88' : conf === 'moderate' ? '#ffc107' : '#888';
-                const confBg = conf === 'high' ? 'rgba(0,255,136,0.15)' : conf === 'moderate' ? 'rgba(255,193,7,0.15)' : 'rgba(136,136,136,0.15)';
-                dominoHtml += '<div style="font-size:0.7rem;font-weight:600;color:#00d4ff;margin-bottom:4px;">Domino Effect</div>';
-                dominoHtml += '<div style="display:flex;justify-content:space-between;align-items:center;padding:2px 0;font-size:0.65rem;">';
-                dominoHtml += '<span style="color:#888;">Stage</span><span style="color:#e0e0e0;">' + stage + '</span>';
-                dominoHtml += '</div>';
-                dominoHtml += '<div style="display:flex;justify-content:space-between;align-items:center;padding:2px 0;font-size:0.65rem;">';
-                dominoHtml += '<span style="color:#888;">Confidence</span><span style="padding:1px 5px;border-radius:3px;background:' + confBg + ';color:' + confColor + ';">' + conf + '</span>';
-                dominoHtml += '</div>';
-            }
-            document.getElementById('dominoContent').innerHTML = dominoHtml;
-
-            // ═══ ACTIVE RANGE CARD ═══
-
+            // Active range
             const activeRange = data.htf_ranges?.active_range || data.ltf_ranges?.active_range;
             if (activeRange) {
                 const high = activeRange.range_high || activeRange.high;
                 const low = activeRange.range_low || activeRange.low;
                 const eq = activeRange.equilibrium || ((high + low) / 2);
-                const rangeSize = activeRange.range_size || (high && low ? high - low : 0);
-                const dlHigh = activeRange.deviation_limit_high;
-                const dlLow = activeRange.deviation_limit_low;
-                const isFallback = activeRange.is_fallback;
-                const isConfirmed = activeRange.is_confirmed;
 
-                // Quality tag (matching /ranges page)
-                let qualHtml = '';
-                if (isFallback) {
-                    qualHtml = '<span style="padding:2px 8px;border-radius:3px;background:rgba(136,136,136,0.15);color:#888;font-size:0.65rem;">Fallback (not TCT validated)</span>';
-                } else if (isConfirmed) {
-                    qualHtml = '<span style="padding:2px 8px;border-radius:3px;background:rgba(0,255,136,0.15);color:#00ff88;font-size:0.65rem;">Confirmed</span>';
-                }
-                document.getElementById('rangeQualityTag').innerHTML = qualHtml;
+                document.getElementById('rangeHigh').textContent = '$' + high?.toLocaleString(undefined, {maximumFractionDigits: 2});
+                document.getElementById('rangeEq').textContent = '$' + eq?.toLocaleString(undefined, {maximumFractionDigits: 2});
+                document.getElementById('rangeLow').textContent = '$' + low?.toLocaleString(undefined, {maximumFractionDigits: 2});
 
-                document.getElementById('rangeHigh').textContent = fmtPrice(high);
-                document.getElementById('rangeEq').textContent = fmtPrice(eq);
-                document.getElementById('rangeLow').textContent = fmtPrice(low);
-
-                // Range size
-                document.getElementById('rangeSize').textContent = fmtPrice(rangeSize);
-
-                // DL+ / DL-
-                if (dlHigh && dlLow) {
-                    document.getElementById('rangeDL').textContent = fmtPrice(dlHigh) + ' / ' + fmtPrice(dlLow);
-                }
-
-                // Chart lines — Range High/Low/EQ
-                if (high) lineSeries.push(addPriceLine(high, '#ff4444', 'RANGE HIGH (1.0)', 0, 2));
+                // Add PROMINENT range lines to chart (thicker lines)
+                if (high) lineSeries.push(addPriceLine(high, '#ff4444', 'RANGE HIGH', 0, 2));
                 if (eq) lineSeries.push(addPriceLine(eq, '#ffc107', 'EQ (0.5)', 1, 2));
-                if (low) lineSeries.push(addPriceLine(low, '#00ff88', 'RANGE LOW (0.0)', 0, 2));
+                if (low) lineSeries.push(addPriceLine(low, '#00ff88', 'RANGE LOW', 0, 2));
 
-                // Fibonacci retracement levels on chart
-                if (high && low) {
-                    const fib236 = high - (rangeSize * 0.236);
-                    const fib382 = high - (rangeSize * 0.382);
-                    const fib618 = high - (rangeSize * 0.618);
-                    const fib786 = high - (rangeSize * 0.786);
-                    lineSeries.push(addPriceLine(fib236, '#b388ff', '0.236', 2, 1));
-                    lineSeries.push(addPriceLine(fib382, '#7c4dff', '0.382', 2, 1));
-                    lineSeries.push(addPriceLine(fib618, '#7c4dff', '0.618', 2, 1));
-                    lineSeries.push(addPriceLine(fib786, '#b388ff', '0.786', 2, 1));
-                }
-
-                // DL lines on chart (dotted gray, matching /ranges page)
-                if (dlHigh) lineSeries.push(addPriceLine(dlHigh, '#6c757d', 'DL+', 2, 1));
-                if (dlLow) lineSeries.push(addPriceLine(dlLow, '#6c757d', 'DL-', 2, 1));
-
-                // Shaded range zones on chart
+                // Add Premium/Discount shaded zones
                 if (high && low && candles.length > 0) {
+                    // Premium zone (high to eq) - subtle red
                     const premiumData = candles.map(c => ({ time: c.time, value: high }));
                     const premiumSeries = chart.addLineSeries({
                         color: 'rgba(255, 68, 68, 0.4)',
@@ -7383,6 +6746,7 @@ async def dashboard():
                     premiumSeries.setData(premiumData);
                     additionalSeries.push(premiumSeries);
 
+                    // Discount zone (eq to low) - subtle green
                     const discountData = candles.map(c => ({ time: c.time, value: low }));
                     const discountSeries = chart.addLineSeries({
                         color: 'rgba(0, 255, 136, 0.4)',
@@ -7394,6 +6758,7 @@ async def dashboard():
                     discountSeries.setData(discountData);
                     additionalSeries.push(discountSeries);
 
+                    // Equilibrium line (prominent yellow dashed)
                     const eqData = candles.map(c => ({ time: c.time, value: eq }));
                     const eqSeries = chart.addLineSeries({
                         color: '#ffc107',
@@ -7406,116 +6771,18 @@ async def dashboard():
                     additionalSeries.push(eqSeries);
                 }
 
-                // Range viz sidebar
+                // Range visualization in sidebar
                 document.getElementById('rangeViz').style.display = 'block';
-                document.getElementById('rangeHighLabel').textContent = fmtPrice(high);
-                document.getElementById('rangeLowLabel').textContent = fmtPrice(low);
+                document.getElementById('rangeHighLabel').textContent = '$' + high?.toLocaleString(undefined, {maximumFractionDigits: 0});
+                document.getElementById('rangeLowLabel').textContent = '$' + low?.toLocaleString(undefined, {maximumFractionDigits: 0});
 
+                // Position price marker
                 const currentPrice = data.current_price;
                 if (currentPrice && high && low) {
                     const pct = ((high - currentPrice) / (high - low)) * 100;
                     const marker = document.getElementById('priceMarker');
                     marker.style.top = Math.min(100, Math.max(0, pct)) + '%';
                     marker.style.left = '50%';
-                }
-
-                // === Fibonacci Retracement Sidebar ===
-                if (high && low) {
-                    const fib236 = high - (rangeSize * 0.236);
-                    const fib382 = high - (rangeSize * 0.382);
-                    const fib618 = high - (rangeSize * 0.618);
-                    const fib786 = high - (rangeSize * 0.786);
-                    const fmt = (v) => '$' + v.toLocaleString(undefined, {maximumFractionDigits: 2});
-
-                    let fibHtml = '<div style="font-size:0.7rem;font-weight:600;color:#b388ff;margin-bottom:4px;margin-top:8px;">Fib Retracement</div>';
-                    const fibLevels = [
-                        { label: '1.0 (High)', price: high, color: '#ff4444' },
-                        { label: '0.786', price: fib786, color: '#b388ff' },
-                        { label: '0.618', price: fib618, color: '#7c4dff' },
-                        { label: '0.5 (EQ)', price: eq, color: '#ffc107' },
-                        { label: '0.382', price: fib382, color: '#7c4dff' },
-                        { label: '0.236', price: fib236, color: '#b388ff' },
-                        { label: '0.0 (Low)', price: low, color: '#00ff88' },
-                    ];
-                    fibLevels.forEach(f => {
-                        fibHtml += '<div style="display:flex;justify-content:space-between;padding:1px 0;font-size:0.65rem;">';
-                        fibHtml += '<span style="color:' + f.color + ';">' + f.label + '</span>';
-                        fibHtml += '<span style="color:#e0e0e0;">' + fmt(f.price) + '</span>';
-                        fibHtml += '</div>';
-                    });
-
-                    // Tap detection: count how many times price touched range high/low/EQ
-                    if (candles.length > 0) {
-                        const tolerance = rangeSize * 0.01;
-                        let highTaps = 0, lowTaps = 0, eqTaps = 0;
-                        let highTapTimes = [], lowTapTimes = [], eqTapTimes = [];
-                        let lastHighTap = -3, lastLowTap = -3, lastEqTap = -3;
-                        candles.forEach((c, idx) => {
-                            if (Math.abs(c.high - high) <= tolerance && idx - lastHighTap > 2) {
-                                highTaps++; lastHighTap = idx;
-                                highTapTimes.push(idx);
-                            }
-                            if (Math.abs(c.low - low) <= tolerance && idx - lastLowTap > 2) {
-                                lowTaps++; lastLowTap = idx;
-                                lowTapTimes.push(idx);
-                            }
-                            if ((c.low <= eq + tolerance && c.high >= eq - tolerance) && idx - lastEqTap > 2) {
-                                eqTaps++; lastEqTap = idx;
-                                eqTapTimes.push(idx);
-                            }
-                        });
-
-                        fibHtml += '<div style="font-size:0.7rem;font-weight:600;color:#00d4ff;margin-top:8px;margin-bottom:4px;">Range Taps</div>';
-                        fibHtml += '<div style="display:flex;justify-content:space-between;padding:1px 0;font-size:0.65rem;">';
-                        fibHtml += '<span style="color:#ff4444;">High Taps</span><span style="color:#e0e0e0;">' + highTaps + '</span></div>';
-                        fibHtml += '<div style="display:flex;justify-content:space-between;padding:1px 0;font-size:0.65rem;">';
-                        fibHtml += '<span style="color:#ffc107;">EQ Taps</span><span style="color:#e0e0e0;">' + eqTaps + '</span></div>';
-                        fibHtml += '<div style="display:flex;justify-content:space-between;padding:1px 0;font-size:0.65rem;">';
-                        fibHtml += '<span style="color:#00ff88;">Low Taps</span><span style="color:#e0e0e0;">' + lowTaps + '</span></div>';
-
-                        // Determine model forming based on taps and trend
-                        const htfTrendVal = ms.htf_trend || 'neutral';
-                        let modelType = 'Undetermined';
-                        let modelColor = '#888';
-                        if (highTaps >= 2 && lowTaps >= 1 && eqTaps >= 1) {
-                            if (htfTrendVal === 'bearish') { modelType = 'Distribution'; modelColor = '#ff4444'; }
-                            else if (htfTrendVal === 'bullish') { modelType = 'Re-Accumulation'; modelColor = '#00d4ff'; }
-                            else { modelType = 'Distribution (poss.)'; modelColor = '#ffc107'; }
-                        } else if (lowTaps >= 2 && highTaps >= 1 && eqTaps >= 1) {
-                            if (htfTrendVal === 'bullish') { modelType = 'Accumulation'; modelColor = '#00ff88'; }
-                            else if (htfTrendVal === 'bearish') { modelType = 'Re-Distribution'; modelColor = '#e040fb'; }
-                            else { modelType = 'Accumulation (poss.)'; modelColor = '#ffc107'; }
-                        } else if (eqTaps >= 2) {
-                            modelType = 'Consolidation'; modelColor = '#ffc107';
-                        } else if (highTaps + lowTaps + eqTaps < 3) {
-                            modelType = 'Forming (early)'; modelColor = '#888';
-                        }
-
-                        fibHtml += '<div style="font-size:0.7rem;font-weight:600;color:#e040fb;margin-top:8px;margin-bottom:4px;">Model Forming</div>';
-                        fibHtml += '<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:0.7rem;">';
-                        fibHtml += '<span style="color:#888;">Type</span>';
-                        fibHtml += '<span style="padding:2px 8px;border-radius:3px;background:rgba(255,255,255,0.05);color:' + modelColor + ';font-weight:600;">' + modelType + '</span>';
-                        fibHtml += '</div>';
-
-                        // Add tap markers on chart
-                        const markers = [];
-                        highTapTimes.slice(0, 5).forEach((idx, i) => {
-                            if (idx < candles.length) {
-                                markers.push({ time: candles[idx].time, position: 'aboveBar', color: '#ff4444', shape: 'arrowDown', text: 'T' + (i+1) });
-                            }
-                        });
-                        lowTapTimes.slice(0, 5).forEach((idx, i) => {
-                            if (idx < candles.length) {
-                                markers.push({ time: candles[idx].time, position: 'belowBar', color: '#00ff88', shape: 'arrowUp', text: 'T' + (i+1) });
-                            }
-                        });
-                        if (markers.length > 0) {
-                            markers.sort((a, b) => a.time - b.time);
-                            candleSeries.setMarkers(markers);
-                        }
-                    }
-
-                    document.getElementById('fibContent').innerHTML = fibHtml;
                 }
             }
 
@@ -7530,7 +6797,7 @@ async def dashboard():
             document.getElementById('tradingBias').className = 'value ' + (position.trading_bias === 'SELL' ? 'bearish' : position.trading_bias === 'BUY' ? 'bullish' : '');
             document.getElementById('biasStrength').textContent = position.bias_strength ? (position.bias_strength * 100).toFixed(0) + '%' : '--';
 
-            // ═══ DEVIATIONS CARD ═══
+            // Deviations
             const htfDevs = data.deviations?.htf_deviations || {};
             const ltfDevs = data.deviations?.ltf_deviations || {};
             const totalDevs = (htfDevs.total_deviations || 0) + (ltfDevs.total_deviations || 0);
@@ -7539,71 +6806,42 @@ async def dashboard():
             document.getElementById('wickDevs').textContent = (htfDevs.wick_deviations?.length || 0) + (ltfDevs.wick_deviations?.length || 0);
             document.getElementById('candleDevs').textContent = (htfDevs.candle_close_deviations?.length || 0) + (ltfDevs.candle_close_deviations?.length || 0);
             document.getElementById('dlDevs').textContent = (htfDevs.dl_deviations?.length || 0) + (ltfDevs.dl_deviations?.length || 0);
+
+            document.getElementById('htfPivots').textContent =
+                (data.htf_ranges?.total_ranges || 0) + ' ranges, ' +
+                (data.htf_ranges?.confirmed_ranges || 0) + ' confirmed';
         }
 
         function updateZonesUI(data) {
             if (data.error) return;
 
-            // Count OBs and structure zones separately (matching /supply-demand page)
-            const allOBs = data.htf_zones?.order_blocks || [];
-            const allStructure = data.htf_zones?.structure_zones || [];
-            const demandOBs = allOBs.filter(z => z.type === 'bullish' && !z.mitigated);
-            const supplyOBs = allOBs.filter(z => z.type === 'bearish' && !z.mitigated);
-            const activeStructDemand = allStructure.filter(z => z.type === 'demand' && !z.mitigated);
-            const activeStructSupply = allStructure.filter(z => z.type === 'supply' && !z.mitigated);
-            const mitigatedTotal = allOBs.filter(z => z.mitigated).length + allStructure.filter(z => z.mitigated).length;
-            const totalActive = demandOBs.length + supplyOBs.length + activeStructDemand.length + activeStructSupply.length;
+            const htfTotal = data.htf_zones?.total_zones || 0;
+            const hqCount = data.htf_zones?.high_quality_count || 0;
 
-            document.getElementById('demandOBCount').textContent = demandOBs.length;
-            document.getElementById('supplyOBCount').textContent = supplyOBs.length;
-            document.getElementById('structureSDCount').textContent = (activeStructDemand.length + activeStructSupply.length) + ' (' + activeStructDemand.length + 'D / ' + activeStructSupply.length + 'S)';
-            document.getElementById('mitigatedCount').textContent = mitigatedTotal;
-            document.getElementById('zoneCount').textContent = totalActive;
+            document.getElementById('htfZones').textContent = htfTotal;
+            document.getElementById('hqZones').textContent = hqCount;
+            document.getElementById('zoneCount').textContent = htfTotal;
 
-            // Top scored zones (matching /supply-demand page)
-            const topScored = data.htf_zones?.top_3_high_quality || data.htf_zones?.top_3_all || [];
-            let scoredHtml = '';
-            if (topScored.length > 0) {
-                scoredHtml += '<div style="font-size:0.7rem;font-weight:600;color:#00d4ff;margin-bottom:4px;">Top Scored</div>';
-                topScored.slice(0, 4).forEach(z => {
-                    const zoneType = z.type || (z.top > data.current_price ? 'supply' : 'demand');
-                    const isDemand = zoneType === 'demand' || z.type === 'bullish';
-                    const zClass = z.zone_class || (z.fvg ? 'order_block' : 'structure');
-                    const label = (isDemand ? 'Demand' : 'Supply') + ' ' + (zClass === 'order_block' ? 'OB' : 'SS');
-                    const strength = z.strength || 0;
-                    const strengthColor = strength >= 70 ? '#00ff88' : strength >= 40 ? '#ffc107' : '#ff4444';
-                    const locType = z.location_type || '';
-                    const hasLiqSweep = z.pivot_quality?.has_liquidity_sweep;
-
-                    scoredHtml += '<div style="background:#1a1a2e;border-radius:4px;padding:5px 7px;margin-bottom:3px;border-left:3px solid ' + (isDemand ? '#00ff88' : '#ff4444') + ';font-size:0.65rem;">';
-                    scoredHtml += '<div style="display:flex;justify-content:space-between;align-items:center;">';
-                    scoredHtml += '<span style="font-weight:600;color:' + (isDemand ? '#00ff88' : '#ff4444') + ';">' + label + '</span>';
-                    scoredHtml += '<span style="padding:1px 5px;border-radius:3px;background:rgba(0,255,136,0.15);color:' + strengthColor + ';font-size:0.6rem;">' + strength + '%</span>';
-                    scoredHtml += '</div>';
-                    scoredHtml += '<div style="color:#888;margin-top:2px;">' + fmtPrice(z.top || 0) + ' - ' + fmtPrice(z.bottom || 0) + '</div>';
-                    if (locType || hasLiqSweep) {
-                        scoredHtml += '<div style="display:flex;gap:4px;margin-top:2px;">';
-                        if (locType) scoredHtml += '<span style="padding:1px 4px;border-radius:2px;background:rgba(0,212,255,0.15);color:#00d4ff;font-size:0.55rem;">' + locType + '</span>';
-                        if (hasLiqSweep) scoredHtml += '<span style="padding:1px 4px;border-radius:2px;background:rgba(255,193,7,0.15);color:#ffc107;font-size:0.55rem;">Liq Sweep</span>';
-                        scoredHtml += '</div>';
-                    }
-                    scoredHtml += '</div>';
-                });
-            }
-            document.getElementById('topScoredZones').innerHTML = scoredHtml;
-
-            // Zone list on chart
+            // Display top zones
             const topZonesEl = document.getElementById('topZones');
             topZonesEl.innerHTML = '';
 
             const topZones = data.htf_zones?.top_3_high_quality || data.htf_zones?.top_3_all || [];
             topZones.slice(0, 3).forEach(zone => {
                 const zoneType = zone.type || (zone.top > data.current_price ? 'supply' : 'demand');
-                const isDemand = zoneType === 'demand' || zone.type === 'bullish';
+                const div = document.createElement('div');
+                div.className = 'zone-item ' + zoneType;
+                div.innerHTML = `
+                    <span>${zoneType.toUpperCase()}</span>
+                    <span>$${zone.top?.toLocaleString(undefined, {maximumFractionDigits: 0})} - $${zone.bottom?.toLocaleString(undefined, {maximumFractionDigits: 0})}</span>
+                `;
+                topZonesEl.appendChild(div);
 
                 // Add zone to chart
                 if (zone.top && zone.bottom) {
-                    lineSeries.push(addPriceLine(zone.top, isDemand ? '#00ff88' : '#ff4444', isDemand ? 'D' : 'S', 2));
+                    const color = zoneType === 'demand' ? 'rgba(0, 255, 136, 0.3)' : 'rgba(255, 68, 68, 0.3)';
+                    // Note: Lightweight Charts doesn't support rectangles natively, using price lines
+                    lineSeries.push(addPriceLine(zone.top, zoneType === 'demand' ? '#00ff88' : '#ff4444', zoneType.charAt(0).toUpperCase(), 2));
                 }
             });
         }
@@ -7620,130 +6858,69 @@ async def dashboard():
             document.getElementById('eqLows').textContent = data.htf_liquidity?.equal_lows?.length || 0;
             document.getElementById('liqCount').textContent = bslPools.length + sslPools.length;
 
-            // Primary / Internal breakdown (matching /liquidity page)
-            const bslPrimary = bslPools.filter(p => p.is_primary).length;
-            const bslInternal = bslPools.length - bslPrimary;
-            const sslPrimary = sslPools.filter(p => p.is_primary).length;
-            const sslInternal = sslPools.length - sslPrimary;
-            document.getElementById('bslBreakdown').textContent = bslPrimary + ' / ' + bslInternal;
-            document.getElementById('sslBreakdown').textContent = sslPrimary + ' / ' + sslInternal;
-
-            // Display top liquidity pools with details
+            // Display top liquidity pools
             const liqPoolsEl = document.getElementById('liqPools');
-            let poolHtml = '';
+            liqPoolsEl.innerHTML = '';
 
-            // Top 3 BSL pools with strength + distance
-            bslPools.slice(0, 3).forEach(pool => {
-                const isPrimary = pool.is_primary;
-                const isEqual = pool.is_equal;
-                const strength = pool.strength ? Math.round(pool.strength * 100) : 0;
-                const dist = pool.distance_from_price ? pool.distance_from_price.toFixed(1) : '?';
-                poolHtml += '<div class="zone-item bsl" style="flex-direction:column;align-items:flex-start;gap:2px;">';
-                poolHtml += '<div style="display:flex;justify-content:space-between;width:100%;align-items:center;">';
-                poolHtml += '<span style="font-weight:600;">BSL ' + fmtPrice(pool.price || 0) + '</span>';
-                poolHtml += '<span style="display:flex;gap:3px;">';
-                if (isPrimary) poolHtml += '<span style="padding:1px 4px;border-radius:2px;background:rgba(33,150,243,0.15);color:#2196f3;font-size:0.55rem;">PRIMARY</span>';
-                else poolHtml += '<span style="padding:1px 4px;border-radius:2px;background:rgba(136,136,136,0.15);color:#888;font-size:0.55rem;">INTERNAL</span>';
-                if (isEqual) poolHtml += '<span style="padding:1px 4px;border-radius:2px;background:rgba(156,39,176,0.15);color:#9c27b0;font-size:0.55rem;">EQ</span>';
-                poolHtml += '</span></div>';
-                poolHtml += '<div style="color:#888;font-size:0.6rem;">Str: ' + strength + '% | Dist: ' + dist + '%</div>';
-                poolHtml += '</div>';
+            // Top 2 BSL pools
+            bslPools.slice(0, 2).forEach(pool => {
+                const div = document.createElement('div');
+                div.className = 'zone-item bsl';
+                div.innerHTML = `
+                    <span>BSL ${pool.is_equal ? '(EQ)' : ''}</span>
+                    <span>$${pool.price?.toLocaleString(undefined, {maximumFractionDigits: 0})}</span>
+                `;
+                liqPoolsEl.appendChild(div);
 
+                // Add to chart with thicker line
                 if (pool.price) {
-                    const lineColor = isPrimary ? '#ff6b6b' : 'rgba(255,107,107,0.5)';
-                    const lineStyle = isPrimary ? 0 : 2;
-                    lineSeries.push(addPriceLine(pool.price, lineColor, 'BSL', lineStyle, isPrimary ? 2 : 1));
+                    lineSeries.push(addPriceLine(pool.price, '#ff6b6b', 'BSL', 1, 1));
                 }
             });
 
-            // Top 3 SSL pools with strength + distance
-            sslPools.slice(0, 3).forEach(pool => {
-                const isPrimary = pool.is_primary;
-                const isEqual = pool.is_equal;
-                const strength = pool.strength ? Math.round(pool.strength * 100) : 0;
-                const dist = pool.distance_from_price ? pool.distance_from_price.toFixed(1) : '?';
-                poolHtml += '<div class="zone-item ssl" style="flex-direction:column;align-items:flex-start;gap:2px;">';
-                poolHtml += '<div style="display:flex;justify-content:space-between;width:100%;align-items:center;">';
-                poolHtml += '<span style="font-weight:600;">SSL ' + fmtPrice(pool.price || 0) + '</span>';
-                poolHtml += '<span style="display:flex;gap:3px;">';
-                if (isPrimary) poolHtml += '<span style="padding:1px 4px;border-radius:2px;background:rgba(255,152,0,0.15);color:#ff9800;font-size:0.55rem;">PRIMARY</span>';
-                else poolHtml += '<span style="padding:1px 4px;border-radius:2px;background:rgba(136,136,136,0.15);color:#888;font-size:0.55rem;">INTERNAL</span>';
-                if (isEqual) poolHtml += '<span style="padding:1px 4px;border-radius:2px;background:rgba(156,39,176,0.15);color:#9c27b0;font-size:0.55rem;">EQ</span>';
-                poolHtml += '</span></div>';
-                poolHtml += '<div style="color:#888;font-size:0.6rem;">Str: ' + strength + '% | Dist: ' + dist + '%</div>';
-                poolHtml += '</div>';
+            // Top 2 SSL pools
+            sslPools.slice(0, 2).forEach(pool => {
+                const div = document.createElement('div');
+                div.className = 'zone-item ssl';
+                div.innerHTML = `
+                    <span>SSL ${pool.is_equal ? '(EQ)' : ''}</span>
+                    <span>$${pool.price?.toLocaleString(undefined, {maximumFractionDigits: 0})}</span>
+                `;
+                liqPoolsEl.appendChild(div);
 
+                // Add to chart with thicker line
                 if (pool.price) {
-                    const lineColor = isPrimary ? '#4ecdc4' : 'rgba(78,205,196,0.5)';
-                    const lineStyle = isPrimary ? 0 : 2;
-                    lineSeries.push(addPriceLine(pool.price, lineColor, 'SSL', lineStyle, isPrimary ? 2 : 1));
+                    lineSeries.push(addPriceLine(pool.price, '#4ecdc4', 'SSL', 1, 1));
                 }
             });
-
-            liqPoolsEl.innerHTML = poolHtml;
-
-            // Liquidity curves summary (matching /liquidity page)
-            const sellSideCurves = data.htf_curves?.sell_side_curves || [];
-            const buySideCurves = data.htf_curves?.buy_side_curves || [];
-            let curvesHtml = '';
-            if (sellSideCurves.length > 0 || buySideCurves.length > 0) {
-                curvesHtml += '<div style="font-size:0.7rem;font-weight:600;color:#9c27b0;margin-bottom:4px;">Curves</div>';
-                sellSideCurves.slice(0, 2).forEach((c, i) => {
-                    const q = c.quality || 'WEAK';
-                    const qColor = q === 'EXCELLENT' ? '#00ff88' : q === 'GOOD' ? '#ffc107' : '#888';
-                    curvesHtml += '<div style="display:flex;justify-content:space-between;font-size:0.6rem;padding:1px 0;">';
-                    curvesHtml += '<span style="color:#ff6b6b;">Sell #' + (i + 1) + ' (' + (c.tap_count || 0) + ' taps)</span>';
-                    curvesHtml += '<span style="color:' + qColor + ';">' + q + '</span>';
-                    curvesHtml += '</div>';
-                });
-                buySideCurves.slice(0, 2).forEach((c, i) => {
-                    const q = c.quality || 'WEAK';
-                    const qColor = q === 'EXCELLENT' ? '#00ff88' : q === 'GOOD' ? '#ffc107' : '#888';
-                    curvesHtml += '<div style="display:flex;justify-content:space-between;font-size:0.6rem;padding:1px 0;">';
-                    curvesHtml += '<span style="color:#4ecdc4;">Buy #' + (i + 1) + ' (' + (c.tap_count || 0) + ' taps)</span>';
-                    curvesHtml += '<span style="color:' + qColor + ';">' + q + '</span>';
-                    curvesHtml += '</div>';
-                });
-            }
-            document.getElementById('liqCurvesContent').innerHTML = curvesHtml;
-
-            // Extreme liquidity targets (matching /liquidity page)
-            const sellTargets = data.extreme_targets?.htf?.sell_side_targets || [];
-            const buyTargets = data.extreme_targets?.htf?.buy_side_targets || [];
-            let targetsHtml = '';
-            if (sellTargets.length > 0 || buyTargets.length > 0) {
-                targetsHtml += '<div style="font-size:0.7rem;font-weight:600;color:#4caf50;margin-bottom:4px;">Extreme Targets</div>';
-                [...sellTargets, ...buyTargets].slice(0, 3).forEach(t => {
-                    const isSwept = t.is_swept;
-                    const label = t.type === 'distribution' ? 'Dist' : 'Accum';
-                    const color = isSwept ? '#ff4444' : '#4caf50';
-                    const statusTag = isSwept ? 'SWEPT' : 'ACTIVE';
-                    targetsHtml += '<div style="display:flex;justify-content:space-between;font-size:0.6rem;padding:2px 0;">';
-                    targetsHtml += '<span style="color:' + color + ';">' + label + ': ' + fmtPrice(t.target_price || 0) + '</span>';
-                    targetsHtml += '<span style="padding:1px 4px;border-radius:2px;background:' + (isSwept ? 'rgba(255,68,68,0.15)' : 'rgba(76,175,80,0.15)') + ';color:' + color + ';font-size:0.55rem;' + (isSwept ? 'text-decoration:line-through;' : '') + '">' + statusTag + '</span>';
-                    targetsHtml += '</div>';
-                });
-            }
-            document.getElementById('liqTargetsContent').innerHTML = targetsHtml;
 
             // === DRAW LIQUIDITY CURVES ON CHART ===
-            // Draw best quality sell-side curve
+            const sellSideCurves = data.htf_curves?.sell_side_curves || [];
+            const buySideCurves = data.htf_curves?.buy_side_curves || [];
+
+            // Draw best quality sell-side curve (descending highs - bearish liquidity)
             if (sellSideCurves.length > 0 && candles.length > 0) {
-                const bestSellCurve = [...sellSideCurves].sort((a, b) =>
+                // Sort by quality/tap count to get best curve
+                const bestSellCurve = sellSideCurves.sort((a, b) =>
                     (b.quality || b.tap_count || 0) - (a.quality || a.tap_count || 0)
                 )[0];
+
                 if (bestSellCurve && bestSellCurve.taps && bestSellCurve.taps.length >= 2) {
                     addLiquidityCurve(bestSellCurve, candles, true);
+                    console.log('Drew sell-side liquidity curve with', bestSellCurve.taps.length, 'taps');
                 }
             }
 
-            // Draw best quality buy-side curve
+            // Draw best quality buy-side curve (ascending lows - bullish liquidity)
             if (buySideCurves.length > 0 && candles.length > 0) {
-                const bestBuyCurve = [...buySideCurves].sort((a, b) =>
+                // Sort by quality/tap count to get best curve
+                const bestBuyCurve = buySideCurves.sort((a, b) =>
                     (b.quality || b.tap_count || 0) - (a.quality || a.tap_count || 0)
                 )[0];
+
                 if (bestBuyCurve && bestBuyCurve.taps && bestBuyCurve.taps.length >= 2) {
                     addLiquidityCurve(bestBuyCurve, candles, false);
+                    console.log('Drew buy-side liquidity curve with', bestBuyCurve.taps.length, 'taps');
                 }
             }
         }
@@ -7794,6 +6971,13 @@ async def dashboard():
             const typeClass = isAccum ? 'accumulation' : 'distribution';
             const schType = s.schematic_type || '';
             let typeLabel = schType.replace(/_/g, ' ').toUpperCase() || (isAccum ? 'ACCUMULATION' : 'DISTRIBUTION');
+            // Add accumulation/reaccumulation and distribution/redistribution context
+            if (isAccum && schType.includes('accumulation')) {
+                typeLabel = typeLabel; // Already labeled accumulation
+            }
+            if (!isAccum && schType.includes('distribution')) {
+                typeLabel = typeLabel; // Already labeled distribution
+            }
             const quality = Math.round((s.quality_score || 0) * 100);
             const entry = s.entry?.price;
             const stop = s.stop_loss?.price;
@@ -7801,9 +6985,6 @@ async def dashboard():
             const rr = s.risk_reward;
             const isSafe = s.entry?.is_safe !== false;
             const isConfirmed = s.is_confirmed;
-            const statusLabel = isConfirmed ? 'CONFIRMED' : 'FORMING';
-            const statusColor = isConfirmed ? '#00ff88' : '#ffc107';
-            const statusBg = isConfirmed ? 'rgba(0,255,136,0.2)' : 'rgba(255,193,7,0.2)';
 
             // Lecture 5B enhancements
             const enhancements = s.lecture_5b_enhancements || {};
@@ -7819,44 +7000,27 @@ async def dashboard():
             const followBias = l6.follow_through_bias;
             const enhancedTarget = l6.enhanced_target;
 
-            // Tap status
-            const tap1 = s.tap1;
-            const tap2 = s.tap2;
-            const tap3 = s.tap3;
-            let tapStatus = '';
-            if (tap3) tapStatus = 'Tap3 ' + (isConfirmed ? 'confirmed' : 'forming');
-            else if (tap2) tapStatus = 'Tap2 hit, awaiting Tap3';
-            else if (tap1) tapStatus = 'Tap1 hit';
-
             const chartUrl = '/schematic-chart?symbol=' + currentSymbol + '&timeframe=' + tf;
 
             let html = '<a href="' + chartUrl + '" target="_blank" rel="noopener" class="schematic-link" title="Open schematic chart in new tab">';
             html += '<div class="schematic-item ' + typeClass + '">';
             html += '<div class="schematic-header">';
             html += '<span class="schematic-type">' + typeLabel + '</span>';
-            html += '<span style="display:flex;gap:4px;align-items:center;">';
-            html += '<span style="padding:2px 6px;border-radius:3px;background:' + statusBg + ';color:' + statusColor + ';font-size:0.6rem;font-weight:600;">' + statusLabel + '</span>';
             html += '<span class="schematic-quality">' + quality + '%</span>';
-            html += '</span>';
-            html += '</div>';
-
-            // Direction badge
-            html += '<div style="display:flex;justify-content:space-between;align-items:center;margin:4px 0;font-size:0.65rem;">';
-            html += '<span style="color:' + (isAccum ? '#00ff88' : '#ff4444') + ';font-weight:600;">' + (isAccum ? 'LONG' : 'SHORT') + '</span>';
-            if (tapStatus) html += '<span style="color:#888;">' + tapStatus + '</span>';
             html += '</div>';
 
             if (entry && stop && target) {
                 html += '<div class="schematic-levels">';
-                html += '<div class="level-box entry"><span class="level-label">ENTRY</span><span class="level-price">' + fmtPrice(entry) + '</span></div>';
-                html += '<div class="level-box stop"><span class="level-label">STOP</span><span class="level-price">' + fmtPrice(stop) + '</span></div>';
-                html += '<div class="level-box target"><span class="level-label">TARGET</span><span class="level-price">' + fmtPrice(target) + '</span></div>';
+                html += '<div class="level-box entry"><span class="level-label">ENTRY</span><span class="level-price">$' + entry.toLocaleString(undefined, {maximumFractionDigits: 0}) + '</span></div>';
+                html += '<div class="level-box stop"><span class="level-label">STOP</span><span class="level-price">$' + stop.toLocaleString(undefined, {maximumFractionDigits: 0}) + '</span></div>';
+                html += '<div class="level-box target"><span class="level-label">TARGET</span><span class="level-price">$' + target.toLocaleString(undefined, {maximumFractionDigits: 0}) + '</span></div>';
                 html += '</div>';
             }
 
             html += '<div class="schematic-meta">';
             if (rr) html += '<span class="rr">R:R ' + rr.toFixed(1) + '</span>';
             html += '<span class="' + (isSafe ? 'safe' : 'unsafe') + '">' + (isSafe ? 'Safe Entry' : 'Caution: S/D Zone') + '</span>';
+            if (isConfirmed) html += '<span class="safe">Confirmed</span>';
             if (has6CR) html += '<span class="safe">6CR Valid</span>';
             if (hasTrendline) html += '<span class="safe">TL Confluence</span>';
             html += '</div>';
@@ -7869,7 +7033,7 @@ async def dashboard():
                 if (hasWOV) html += '<span style="color:#00bcd4;">WOV Entry</span>';
                 if (hasM1toM2) html += '<span style="color:#9c27b0;">M1&rarr;M2</span>';
                 if (followBias && followBias !== 'neutral') html += '<span style="color:#8bc34a;">' + followBias + '</span>';
-                if (enhancedTarget) html += '<span style="color:#ffc107;">Ext: ' + fmtPrice(enhancedTarget) + '</span>';
+                if (enhancedTarget) html += '<span style="color:#ffc107;">Ext: $' + enhancedTarget.toLocaleString(undefined, {maximumFractionDigits: 0}) + '</span>';
                 html += '</div>';
             }
             html += '<div class="view-chart-hint">View chart &rarr;</div>';
@@ -8423,559 +7587,192 @@ async def dashboard():
 
         // ===== HIGHEST PROBABILITY SETUP ANALYSIS =====
 
-        function analyzeHighestProbabilitySetup(msData, rangesData, zonesData, liqData, schematicsData, po3Data, valData, candles) {
+        function analyzeHighestProbabilitySetup(rangesData, zonesData, liqData, schematicsData, po3Data, valData, candles) {
             const setup = {
-                direction: 'none', confidence: 0, entry: null, stop: null, target: null,
-                rr: null, source: null, tags: [], resistanceZones: [], supportZones: [],
-                keyLevels: [], slTrail: null, steps: [],
+                direction: 'none',
+                confidence: 0,
+                entry: null,
+                stop: null,
+                target: null,
+                rr: null,
+                source: null,
+                tags: [],
+                resistanceZones: [],
+                supportZones: [],
+                keyLevels: [],
+                slTrail: null,
             };
 
-            // ═══ STEP 1: Market Structure (Lecture 1) ═══
-            const step1 = { name: 'Market Structure', score: 0, result: '', status: 'fail' };
-            let msTrend = 'neutral', msEOFBias = 'neutral', msBosQuality = 'none';
+            // Collect all candidate setups with scores
+            const candidates = [];
 
-            if (msData && msData.structure) {
-                const st = msData.structure;
-                msTrend = st.trend || 'neutral';
-                if (st.eof) { msEOFBias = st.eof.bias || 'neutral'; if (st.eof.trend_shift) step1.score += 5; }
-                const bosEvents = st.bos_events || [];
-                if (bosEvents.length > 0) {
-                    msBosQuality = bosEvents[bosEvents.length - 1].quality || 'moderate';
-                    if (msBosQuality === 'good') step1.score += 15;
-                    else if (msBosQuality === 'moderate') step1.score += 8;
-                }
-                if ((st.choch_events || []).length > 0) step1.score += 10;
-                if (st.domino_effect) {
-                    const dc = st.domino_effect.confidence || 'low';
-                    if (dc === 'high') step1.score += 20; else if (dc === 'moderate') step1.score += 10;
-                }
-                if (st.rtz && st.rtz.valid && st.rtz.clean) step1.score += 10;
-                if (msTrend === 'bullish' || msTrend === 'bearish') step1.score += 5;
-                step1.result = msTrend.toUpperCase() + (msBosQuality === 'good' ? ' (Good BOS)' : msBosQuality === 'moderate' ? ' (Mod BOS)' : '');
-                step1.status = step1.score >= 15 ? 'pass' : step1.score >= 5 ? 'warn' : 'fail';
-            } else if (rangesData?.market_structure) {
-                msTrend = rangesData.market_structure.htf_trend || 'neutral';
-                if (msTrend !== 'neutral') { step1.score += 5; step1.result = msTrend.toUpperCase() + ' (from ranges)'; step1.status = 'warn'; }
-                else { step1.result = 'Fallback'; }
-            } else { step1.result = 'No data'; }
-            setup.steps.push(step1);
+            // 1. Check TCT Schematics (highest priority - Lecture 5/6)
+            if (schematicsData) {
+                const htfS = schematicsData.htf_schematics?.schematics || [];
+                const mtfS = schematicsData.mtf_schematics?.schematics || [];
+                const ltfS = schematicsData.ltf_schematics?.schematics || [];
+                [...htfS, ...mtfS, ...ltfS].forEach(s => {
+                    if (s.entry?.price && s.stop_loss?.price && s.target?.price) {
+                        const quality = s.quality_score || 0;
+                        const rr = s.risk_reward || 0;
+                        const isConfirmed = s.is_confirmed ? 1 : 0;
+                        const has6CR = s.lecture_5b_enhancements?.htf_validation?.all_taps_valid_6cr ? 1 : 0;
+                        const hasTL = s.lecture_5b_enhancements?.has_trendline_confluence ? 1 : 0;
+                        const l6Score = (s.lecture_6_enhancements?.has_conversion ? 0.1 : 0) +
+                                       (s.lecture_6_enhancements?.has_dual_deviation ? 0.1 : 0) +
+                                       (s.lecture_6_enhancements?.has_wov_opportunity ? 0.05 : 0);
 
-            // ═══ STEP 2: Ranges (Lecture 2) ═══
-            const step2 = { name: 'Ranges', score: 0, result: '', status: 'fail' };
-            let activeRange = null, rangeZone = 'unknown', rangeBias = 'neutral', hasDeviation = false;
+                        const score = (quality * 40) + (Math.min(rr, 5) * 8) + (isConfirmed * 15) + (has6CR * 10) + (hasTL * 5) + (l6Score * 100);
 
+                        candidates.push({
+                            score,
+                            direction: s.direction === 'bullish' ? 'long' : 'short',
+                            entry: s.entry.price,
+                            stop: s.stop_loss.price,
+                            target: s.lecture_6_enhancements?.enhanced_target || s.target.price,
+                            rr: rr,
+                            source: 'TCT Schematic (' + (s.schematic_type || 'unknown').replace(/_/g, ' ') + ')',
+                            tags: [
+                                quality >= 0.7 ? { text: 'HQ ' + Math.round(quality * 100) + '%', cls: 'good' } : { text: 'Q ' + Math.round(quality * 100) + '%', cls: 'warn' },
+                                isConfirmed ? { text: 'Confirmed', cls: 'good' } : null,
+                                has6CR ? { text: '6CR Valid', cls: 'good' } : null,
+                                hasTL ? { text: 'TL Confluence', cls: 'good' } : null,
+                                s.lecture_6_enhancements?.has_conversion ? { text: 'Converted', cls: 'good' } : null,
+                                rr >= 3 ? { text: 'R:R ' + rr.toFixed(1), cls: 'good' } : { text: 'R:R ' + rr.toFixed(1), cls: 'warn' },
+                            ].filter(Boolean),
+                        });
+                    }
+                });
+            }
+
+            // 2. Check PO3 Schematics (Lecture 8)
+            if (po3Data) {
+                const htfP = po3Data.htf_po3?.schematics || [];
+                const mtfP = po3Data.mtf_po3?.schematics || [];
+                const ltfP = po3Data.ltf_po3?.schematics || [];
+                [...htfP, ...mtfP, ...ltfP].forEach(p => {
+                    if (p.entry?.price && p.stop_loss?.price && p.target?.price) {
+                        const quality = p.quality_score || 0;
+                        const rr = p.risk_reward || 0;
+                        const hasExpansion = p.has_expansion ? 1 : 0;
+                        const hasTCTModel = p.tct_model?.detected ? 1 : 0;
+
+                        const score = (quality * 35) + (Math.min(rr, 5) * 7) + (hasExpansion * 12) + (hasTCTModel * 10);
+
+                        candidates.push({
+                            score,
+                            direction: p.direction === 'bullish' ? 'long' : 'short',
+                            entry: p.entry.price,
+                            stop: p.stop_loss.price,
+                            target: p.target.price,
+                            rr: rr,
+                            source: 'PO3 (' + (p.phase || 'range').replace(/_/g, ' ') + ')',
+                            tags: [
+                                { text: 'PO3', cls: 'good' },
+                                quality >= 0.6 ? { text: Math.round(quality * 100) + '%', cls: 'good' } : { text: Math.round(quality * 100) + '%', cls: 'warn' },
+                                hasExpansion ? { text: 'Expanding', cls: 'good' } : null,
+                                hasTCTModel ? { text: 'TCT Model', cls: 'good' } : null,
+                                rr >= 3 ? { text: 'R:R ' + rr.toFixed(1), cls: 'good' } : { text: 'R:R ' + rr.toFixed(1), cls: 'warn' },
+                            ].filter(Boolean),
+                        });
+                    }
+                });
+            }
+
+            // 3. Check gate validation for directional bias
+            let gateBias = 'none';
+            if (valData && valData.gates) {
+                const action = valData.Action || '';
+                if (action.includes('LONG') || action.includes('VALID')) gateBias = 'long';
+                else if (action.includes('SHORT')) gateBias = 'short';
+            }
+
+            // 4. Use range data for S/R zones overlay
             if (rangesData) {
-                activeRange = rangesData.htf_ranges?.active_range || rangesData.ltf_ranges?.active_range;
+                const activeRange = rangesData.htf_ranges?.active_range || rangesData.ltf_ranges?.active_range;
                 if (activeRange) {
                     const high = activeRange.range_high || activeRange.high;
                     const low = activeRange.range_low || activeRange.low;
                     if (high) setup.keyLevels.push({ price: high, label: 'Range High', color: '#ff4444' });
                     if (low) setup.keyLevels.push({ price: low, label: 'Range Low', color: '#00ff88' });
-                    if (activeRange.is_confirmed) step2.score += 10;
-                    const ql = activeRange.quality?.quality_label || '';
-                    if (ql === 'EXCELLENT') step2.score += 10; else if (ql === 'GOOD') step2.score += 7; else if (ql === 'MODERATE') step2.score += 4;
-                    // HP variable: range duration >= 1 day (~6 candles on 4h)
-                    const span = Math.abs((activeRange.high_idx || 0) - (activeRange.low_idx || 0));
-                    if (span >= 7) step2.score += 10; else if (span >= 4) step2.score += 5;
                 }
-                if (rangesData.current_position) {
-                    rangeZone = rangesData.current_position.zone || 'unknown';
-                    rangeBias = rangesData.current_position.trading_bias || 'neutral';
-                    if (rangeZone === 'DISCOUNT' || rangeZone === 'PREMIUM') step2.score += 5;
-                }
-                const devs = rangesData.deviations;
-                if (devs) {
-                    hasDeviation = ((devs.total_htf_deviations || 0) + (devs.total_ltf_deviations || 0)) > 0;
-                    if (hasDeviation) step2.score += 15;
-                }
-                step2.result = activeRange ? (rangeZone !== 'unknown' ? rangeZone : 'Active') + (hasDeviation ? ' +Dev' : '') : 'No range';
-                step2.status = step2.score >= 15 ? 'pass' : step2.score >= 5 ? 'warn' : 'fail';
-            } else { step2.result = 'No data'; }
-            setup.steps.push(step2);
+            }
 
-            // ═══ STEP 3: Supply & Demand (Lecture 3) ═══
-            const step3 = { name: 'Supply & Demand', score: 0, result: '', status: 'fail' };
-            let nearestDemand = null, nearestSupply = null;
-
+            // 5. Collect zone data for overlays
             if (zonesData) {
-                const htfZ = zonesData.htf_zones || {};
-                const unmitigated = [...(htfZ.order_blocks || []), ...(htfZ.structure_zones || [])].filter(z => !z.mitigated);
-                const currentPrice = rangesData?.current_price || (candles?.length > 0 ? candles[candles.length - 1].close : 0);
-                if (unmitigated.length > 0) step3.score += 5;
-
-                unmitigated.forEach(z => {
-                    const top = z.top || z.high || 0, bottom = z.bottom || z.low || 0, mid = (top + bottom) / 2;
-                    if ((z.type === 'bullish' || z.type === 'demand') && mid < currentPrice) {
-                        if (!nearestDemand || mid > nearestDemand.mid) nearestDemand = { top, bottom, mid, quality: z.quality_score || 0 };
-                    }
-                    if ((z.type === 'bearish' || z.type === 'supply') && mid > currentPrice) {
-                        if (!nearestSupply || mid < nearestSupply.mid) nearestSupply = { top, bottom, mid, quality: z.quality_score || 0 };
+                const topZones = zonesData.htf_zones?.top_3_high_quality || zonesData.htf_zones?.top_3_all || [];
+                topZones.forEach(z => {
+                    if (z.type === 'supply' || z.top > (rangesData?.current_price || 0)) {
+                        setup.resistanceZones.push({ high: z.top, low: z.bottom });
+                    } else {
+                        setup.supportZones.push({ high: z.top, low: z.bottom });
                     }
                 });
-
-                // HP POI quality scoring
-                if (nearestDemand?.quality >= 0.7) step3.score += 15; else if (nearestDemand?.quality >= 0.4) step3.score += 8;
-                if (nearestSupply?.quality >= 0.7) step3.score += 15; else if (nearestSupply?.quality >= 0.4) step3.score += 8;
-                step3.score = Math.min(step3.score, 25);
-
-                // Overlay zones
-                (htfZ.top_3_high_quality || htfZ.top_3_all || []).forEach(z => {
-                    if (z.type === 'supply' || (z.top || 0) > currentPrice) setup.resistanceZones.push({ high: z.top, low: z.bottom });
-                    else setup.supportZones.push({ high: z.top, low: z.bottom });
-                });
-
-                step3.result = unmitigated.length + ' zones' + (nearestDemand ? ' (D)' : '') + (nearestSupply ? ' (S)' : '');
-                step3.status = step3.score >= 10 ? 'pass' : step3.score >= 5 ? 'warn' : 'fail';
-            } else { step3.result = 'No data'; }
-            setup.steps.push(step3);
-
-            // ═══ STEP 4: Liquidity (Lecture 4) ═══
-            const step4 = { name: 'Liquidity', score: 0, result: '', status: 'fail' };
-            let hasLiqCurve = false;
-
-            if (liqData) {
-                const htfLiq = liqData.htf_liquidity || {};
-                const bsl = htfLiq.bsl_pools || [], ssl = htfLiq.ssl_pools || [];
-                const curves = htfLiq.liquidity_curves || [];
-                if (bsl.length > 0) step4.score += 5;
-                if (ssl.length > 0) step4.score += 5;
-                hasLiqCurve = curves.length > 0;
-                if (hasLiqCurve) step4.score += 15; // RTZ present — HP variable
-                if ((htfLiq.sweeps || []).length > 0) step4.score += 5;
-                const parts = [];
-                if (bsl.length > 0) parts.push(bsl.length + ' BSL');
-                if (ssl.length > 0) parts.push(ssl.length + ' SSL');
-                if (hasLiqCurve) parts.push('RTZ');
-                step4.result = parts.length > 0 ? parts.join(', ') : 'None';
-                step4.status = step4.score >= 10 ? 'pass' : step4.score >= 5 ? 'warn' : 'fail';
-            } else { step4.result = 'No data'; }
-            setup.steps.push(step4);
-
-            // ═══ STEP 5: TCT Schematics (Lecture 5/6) ═══
-            const step5 = { name: 'TCT Schematics', score: 0, result: '', status: 'fail' };
-            let bestSchematic = null;
-
-            if (schematicsData) {
-                const all = [...(schematicsData.htf_schematics?.schematics || []),
-                             ...(schematicsData.mtf_schematics?.schematics || []),
-                             ...(schematicsData.ltf_schematics?.schematics || [])];
-                let bestScore = -1;
-                all.forEach(s => {
-                    if (!s.entry?.price || !s.stop_loss?.price || !s.target?.price) return;
-                    const quality = s.quality_score || 0, rr = s.risk_reward || 0;
-                    const isConf = s.is_confirmed ? 1 : 0;
-                    const has6CR = s.lecture_5b_enhancements?.htf_validation?.all_taps_valid_6cr ? 1 : 0;
-                    const hasTL = s.lecture_5b_enhancements?.has_trendline_confluence ? 1 : 0;
-                    const l6 = s.lecture_6_enhancements || {};
-                    let score = (quality * 40) + (Math.min(rr, 5) * 8) + (isConf * 15) + (has6CR * 10) + (hasTL * 5)
-                              + ((l6.has_conversion ? 1 : 0) * 10) + ((l6.has_dual_deviation ? 1 : 0) * 10) + ((l6.has_wov_opportunity ? 1 : 0) * 5);
-                    // HP variable: 3rd tap deviation of tap1
-                    if (s.tap3_is_deviation || s.deviation_of_tap1) score += 20;
-                    else if (s.tap3_near_tap1) score += 15;
-                    if (score > bestScore) {
-                        bestScore = score;
-                        bestSchematic = { raw: s, compositeScore: score,
-                            direction: s.direction === 'bullish' ? 'long' : 'short',
-                            entryPrice: s.entry.price, stopPrice: s.stop_loss.price,
-                            targetPrice: l6.enhanced_target || s.target.price, rrVal: rr,
-                            schematicSource: 'TCT ' + (s.schematic_type || 'schematic').replace(/_/g, ' '),
-                            isConfirmed: !!isConf,
-                            tags: [
-                                isConf ? { text: 'CONFIRMED', cls: 'good' } : { text: 'FORMING', cls: 'warn' },
-                                quality >= 0.7 ? { text: 'HQ ' + Math.round(quality * 100) + '%', cls: 'good' } : { text: 'Q ' + Math.round(quality * 100) + '%', cls: 'warn' },
-                                has6CR ? { text: '6CR', cls: 'good' } : null,
-                                hasTL ? { text: 'TL', cls: 'good' } : null,
-                                l6.has_conversion ? { text: 'Conv', cls: 'good' } : null,
-                            ].filter(Boolean),
-                        };
-                    }
-                });
-                if (bestSchematic) {
-                    step5.score = Math.min(Math.round(bestSchematic.compositeScore * 0.5), 50);
-                    step5.result = bestSchematic.schematicSource;
-                    step5.status = bestSchematic.compositeScore >= 30 ? 'pass' : 'warn';
-                } else { step5.result = 'None detected'; }
-            } else { step5.result = 'No data'; }
-            setup.steps.push(step5);
-
-            // ═══ STEP 6: PO3 Schematics (Lecture 8) ═══
-            const step6 = { name: 'PO3 Schematics', score: 0, result: '', status: 'fail' };
-            let bestPO3 = null;
-
-            if (po3Data) {
-                const all = [...(po3Data.htf_po3?.schematics || []),
-                             ...(po3Data.mtf_po3?.schematics || []),
-                             ...(po3Data.ltf_po3?.schematics || [])];
-                let bestScore = -1;
-                all.forEach(p => {
-                    if (!p.entry?.price || !p.stop_loss?.price || !p.target?.price) return;
-                    const quality = p.quality_score || 0, rr = p.risk_reward || 0;
-                    const score = (quality * 35) + (Math.min(rr, 5) * 7) + ((p.has_expansion ? 1 : 0) * 12) + ((p.tct_model?.detected ? 1 : 0) * 10);
-                    if (score > bestScore) {
-                        bestScore = score;
-                        bestPO3 = { raw: p, compositeScore: score,
-                            direction: p.direction === 'bullish' ? 'long' : 'short',
-                            entryPrice: p.entry.price, stopPrice: p.stop_loss.price,
-                            targetPrice: p.target.price, rrVal: rr, phase: p.phase || 'range',
-                            tags: [{ text: 'PO3', cls: 'good' },
-                                   p.has_expansion ? { text: 'Expanding', cls: 'good' } : null,
-                                   p.tct_model?.detected ? { text: 'TCT Model', cls: 'good' } : null].filter(Boolean),
-                        };
-                    }
-                });
-                if (bestPO3) {
-                    step6.score = Math.min(Math.round(bestPO3.compositeScore * 0.4), 30);
-                    step6.result = 'PO3 ' + bestPO3.phase;
-                    step6.status = bestPO3.compositeScore >= 25 ? 'pass' : 'warn';
-                } else { step6.result = 'None detected'; }
-            } else { step6.result = 'No data'; }
-            setup.steps.push(step6);
-
-            // ═══ STEP 7: Trade Execution (Lecture 9 + Section D PDFs) ═══
-            const step7 = { name: 'Trade Execution', score: 0, result: '', status: 'fail' };
-            let gateBias = 'none', qualityBOS = false;
-
-            if (valData) {
-                const action = valData.Action || '';
-                if (action.includes('LONG') || action.includes('VALID')) gateBias = 'long';
-                else if (action.includes('SHORT')) gateBias = 'short';
-                const msDir = msTrend === 'bullish' ? 'long' : msTrend === 'bearish' ? 'short' : 'none';
-                if (gateBias !== 'none' && gateBias === msDir) step7.score += 10;
             }
-            // Quality BOS: V-shape aggressive displacement (from PDF)
-            if (msBosQuality === 'good') { qualityBOS = true; step7.score += 15; }
-            else if (msBosQuality === 'moderate') step7.score += 5;
-            if (msBosQuality === 'bad') step7.score -= 5;
 
-            // Clean path: no opposing S&D between entry and target
-            const primaryCandidate = bestSchematic || bestPO3;
-            if (primaryCandidate && zonesData) {
-                const entry = primaryCandidate.entryPrice, target = primaryCandidate.targetPrice;
-                const isLong = primaryCandidate.direction === 'long';
-                let blocking = 0;
-                [...(zonesData.htf_zones?.order_blocks || []), ...(zonesData.htf_zones?.structure_zones || [])]
-                    .filter(z => !z.mitigated).forEach(z => {
-                        const zMid = ((z.top || z.high || 0) + (z.bottom || z.low || 0)) / 2;
-                        if (isLong && (z.type === 'bearish' || z.type === 'supply') && zMid > entry && zMid < target) blocking++;
-                        if (!isLong && (z.type === 'bullish' || z.type === 'demand') && zMid < entry && zMid > target) blocking++;
-                    });
-                if (blocking === 0) step7.score += 10;
-                else if (blocking === 1) step7.score += 3;
-            }
-            step7.result = (gateBias !== 'none' ? gateBias.toUpperCase() : 'No gate') + (qualityBOS ? ' + Q-BOS' : '');
-            step7.status = step7.score >= 15 ? 'pass' : step7.score >= 5 ? 'warn' : 'fail';
-            setup.steps.push(step7);
-
-            // ═══ STEP 8: Composite HP Setup ═══
-            const step8 = { name: 'HP Setup', score: 0, result: '', status: 'fail' };
-
-            if (primaryCandidate) {
-                setup.direction = primaryCandidate.direction;
-                setup.entry = primaryCandidate.entryPrice;
-                setup.stop = primaryCandidate.stopPrice;
-                setup.target = primaryCandidate.targetPrice;
-                setup.rr = primaryCandidate.rrVal;
-                setup.source = primaryCandidate.schematicSource || ('PO3 ' + (primaryCandidate.phase || 'range'));
-                setup.tags = primaryCandidate.tags || [];
-                setup.isConfirmed = primaryCandidate.isConfirmed || false;
-
-                // PO3 target extension: easy liquidity grab beyond TCT target (from PDF)
-                if (bestSchematic && bestPO3 && bestSchematic.direction === bestPO3.direction) {
-                    const isLong = bestSchematic.direction === 'long';
-                    if ((isLong && bestPO3.targetPrice > bestSchematic.targetPrice) || (!isLong && bestPO3.targetPrice < bestSchematic.targetPrice)) {
-                        setup.target = bestPO3.targetPrice;
-                        const risk = Math.abs(setup.entry - setup.stop);
-                        if (risk > 0) setup.rr = Math.abs(setup.target - setup.entry) / risk;
-                        setup.tags.push({ text: 'PO3 Ext', cls: 'good' });
+            // Pick best candidate
+            if (candidates.length > 0) {
+                // Boost candidates that match gate bias
+                candidates.forEach(c => {
+                    if (gateBias !== 'none' && c.direction === gateBias) {
+                        c.score *= 1.3;
                     }
-                    step8.score += 10;
+                });
+
+                candidates.sort((a, b) => b.score - a.score);
+                const best = candidates[0];
+
+                setup.direction = best.direction;
+                setup.confidence = Math.min(100, Math.round(best.score));
+                setup.entry = best.entry;
+                setup.stop = best.stop;
+                setup.target = best.target;
+                setup.rr = best.rr;
+                setup.source = best.source;
+                setup.tags = best.tags;
+
+                // Calculate SL trail (midpoint between entry and target)
+                if (setup.entry && setup.target) {
+                    setup.slTrail = setup.entry + (setup.target - setup.entry) * 0.33;
                 }
-
-                // SL trail at 33% of range toward target (trail rules from PDF)
-                if (setup.entry && setup.target) setup.slTrail = setup.entry + (setup.target - setup.entry) * 0.33;
-
-                // Direction alignment across pipeline
-                const msDir = msTrend === 'bullish' ? 'long' : msTrend === 'bearish' ? 'short' : 'none';
-                if (msDir === setup.direction) step8.score += 10;
-                if ((rangeZone === 'DISCOUNT' && setup.direction === 'long') || (rangeZone === 'PREMIUM' && setup.direction === 'short')) step8.score += 5;
-                if (gateBias === setup.direction) step8.score += 5;
-                if (setup.rr >= 4) step8.score += 10; else if (setup.rr >= 3) step8.score += 7; else if (setup.rr >= 2) step8.score += 3;
-
-                // R:R tag
-                if (setup.rr) setup.tags.push(setup.rr >= 3 ? { text: 'R:R ' + setup.rr.toFixed(1), cls: 'good' } : { text: 'R:R ' + setup.rr.toFixed(1), cls: 'warn' });
-
-                step8.result = setup.direction.toUpperCase() + ' R:R ' + (setup.rr ? setup.rr.toFixed(1) : '--');
-                step8.status = 'pass';
-
-                // Cache as last completed
-                lastCompletedSetups[currentSymbol] = {
-                    direction: setup.direction, confidence: setup.confidence, entry: setup.entry,
-                    stop: setup.stop, target: setup.target, rr: setup.rr, source: setup.source,
-                    tags: setup.tags.map(t => ({...t})), isConfirmed: setup.isConfirmed, timestamp: new Date().toISOString(),
-                };
             } else {
-                // No model — fallback to MS bias
-                const msDir = msTrend === 'bullish' ? 'long' : msTrend === 'bearish' ? 'short' : 'none';
-                if (msDir !== 'none') { setup.direction = msDir; setup.tags = [{ text: 'No Model', cls: 'warn' }, { text: 'MS: ' + msDir.toUpperCase(), cls: 'warn' }]; }
-                else if (gateBias !== 'none') { setup.direction = gateBias; setup.tags = [{ text: 'No Model', cls: 'warn' }, { text: 'Gate: ' + gateBias.toUpperCase(), cls: 'warn' }]; }
-                else { setup.tags = [{ text: 'No Active Setup', cls: 'warn' }]; }
-                step8.result = 'No model'; step8.status = 'warn';
-                const lastSetup = lastCompletedSetups[currentSymbol];
-                if (lastSetup) setup.lastCompleted = lastSetup;
+                // No active setup
+                setup.tags = [{ text: 'No Active Setup', cls: 'warn' }];
+                if (gateBias !== 'none') {
+                    setup.direction = gateBias;
+                    setup.tags.push({ text: 'Gate Bias: ' + gateBias.toUpperCase(), cls: 'warn' });
+                }
             }
-            setup.steps.push(step8);
 
-            // Total confidence from all steps
-            setup.confidence = Math.min(100, setup.steps.reduce((sum, s) => sum + Math.max(0, s.score), 0));
             return setup;
         }
 
-        // Fallback: analyze forming setups from range/zone/candle data when no schematics exist
-        function analyzeFormingSetupFromData(rangesData, zonesData, liqData, candles, gateBias) {
-            const result = { direction: 'none', confidence: 0, entry: null, stop: null, target: null, rr: null, source: null, tags: [] };
-
-            if (!candles || candles.length < 20) {
-                result.tags = [{ text: 'Insufficient Data', cls: 'warn' }];
-                return result;
-            }
-
-            const lastPrice = candles[candles.length - 1].close;
-            const recent20 = candles.slice(-20);
-            const recent50 = candles.slice(-50);
-            const recentHigh = Math.max(...recent50.map(c => c.high));
-            const recentLow = Math.min(...recent50.map(c => c.low));
-            const rangeSize = recentHigh - recentLow;
-            const eq = (recentHigh + recentLow) / 2;
-
-            // Determine trend from candle data
-            const sma20 = recent20.reduce((s, c) => s + c.close, 0) / recent20.length;
-            const firstHalf = recent20.slice(0, 10);
-            const secondHalf = recent20.slice(-10);
-            const smaFirst = firstHalf.reduce((s, c) => s + c.close, 0) / firstHalf.length;
-            const smaSecond = secondHalf.reduce((s, c) => s + c.close, 0) / secondHalf.length;
-            const trendUp = smaSecond > smaFirst;
-            const trendStrength = Math.abs(smaSecond - smaFirst) / smaFirst * 100;
-
-            // Check premium vs discount
-            const inPremium = lastPrice > eq;
-            const inDiscount = lastPrice < eq;
-            const posInRange = (lastPrice - recentLow) / rangeSize;
-
-            // Use range data if available
-            let activeRange = null;
-            if (rangesData) {
-                activeRange = rangesData.htf_ranges?.active_range || rangesData.ltf_ranges?.active_range;
-            }
-
-            // Look at market structure from range data
-            const msTrend = rangesData?.market_structure?.htf_trend || (trendUp ? 'bullish' : 'bearish');
-
-            // Find nearest demand/supply zones
-            let nearestDemand = null, nearestSupply = null;
-            if (zonesData) {
-                const allOBs = zonesData.htf_zones?.order_blocks || [];
-                const allStruct = zonesData.htf_zones?.structure_zones || [];
-                const allZones = [...allOBs, ...allStruct].filter(z => !z.mitigated);
-                const demandZones = allZones.filter(z => z.type === 'bullish' || z.type === 'demand');
-                const supplyZones = allZones.filter(z => z.type === 'bearish' || z.type === 'supply');
-
-                demandZones.forEach(z => {
-                    const mid = ((z.top || z.high || 0) + (z.bottom || z.low || 0)) / 2;
-                    if (mid < lastPrice && (!nearestDemand || mid > nearestDemand.mid)) {
-                        nearestDemand = { top: z.top || z.high, bottom: z.bottom || z.low, mid };
-                    }
-                });
-                supplyZones.forEach(z => {
-                    const mid = ((z.top || z.high || 0) + (z.bottom || z.low || 0)) / 2;
-                    if (mid > lastPrice && (!nearestSupply || mid < nearestSupply.mid)) {
-                        nearestSupply = { top: z.top || z.high, bottom: z.bottom || z.low, mid };
-                    }
-                });
-            }
-
-            // Find nearest liquidity
-            let nearestBSL = null, nearestSSL = null;
-            if (liqData) {
-                const bslPools = liqData.htf_liquidity?.bsl_pools || [];
-                const sslPools = liqData.htf_liquidity?.ssl_pools || [];
-                if (bslPools.length > 0) nearestBSL = bslPools[0].price;
-                if (sslPools.length > 0) nearestSSL = sslPools[0].price;
-            }
-
-            // Build forming setup
-            let score = 0;
-            const tags = [];
-
-            if (activeRange) {
-                const rHigh = activeRange.range_high || activeRange.high;
-                const rLow = activeRange.range_low || activeRange.low;
-                const rEq = activeRange.equilibrium || (rHigh + rLow) / 2;
-                const rSize = rHigh - rLow;
-
-                if (inDiscount && msTrend === 'bullish') {
-                    // Bullish forming: in discount of range with bullish trend
-                    result.direction = 'long';
-                    result.entry = nearestDemand ? nearestDemand.top : rLow + rSize * 0.236;
-                    result.stop = nearestDemand ? nearestDemand.bottom - rSize * 0.02 : rLow - rSize * 0.05;
-                    result.target = nearestSupply ? nearestSupply.bottom : rHigh;
-                    result.source = 'Range Discount + ' + msTrend + ' trend';
-                    score = 35;
-                    tags.push({ text: 'FORMING', cls: 'warn' });
-                    tags.push({ text: 'Discount Zone', cls: 'good' });
-                    tags.push({ text: 'Bullish Trend', cls: 'good' });
-                    if (nearestDemand) { tags.push({ text: 'Near Demand OB', cls: 'good' }); score += 15; }
-                    if (nearestSSL && nearestSSL < lastPrice) { tags.push({ text: 'SSL Below', cls: 'good' }); score += 10; }
-                } else if (inPremium && msTrend === 'bearish') {
-                    // Bearish forming: in premium of range with bearish trend
-                    result.direction = 'short';
-                    result.entry = nearestSupply ? nearestSupply.bottom : rHigh - rSize * 0.236;
-                    result.stop = nearestSupply ? nearestSupply.top + rSize * 0.02 : rHigh + rSize * 0.05;
-                    result.target = nearestDemand ? nearestDemand.top : rLow;
-                    result.source = 'Range Premium + ' + msTrend + ' trend';
-                    score = 35;
-                    tags.push({ text: 'FORMING', cls: 'warn' });
-                    tags.push({ text: 'Premium Zone', cls: 'good' });
-                    tags.push({ text: 'Bearish Trend', cls: 'good' });
-                    if (nearestSupply) { tags.push({ text: 'Near Supply OB', cls: 'good' }); score += 15; }
-                    if (nearestBSL && nearestBSL > lastPrice) { tags.push({ text: 'BSL Above', cls: 'good' }); score += 10; }
-                } else if (inDiscount) {
-                    // In discount but trend unclear — watch for bullish reversal
-                    result.direction = 'long';
-                    result.entry = rLow + rSize * 0.236;
-                    result.stop = rLow - rSize * 0.05;
-                    result.target = rEq;
-                    result.source = 'Discount bounce watch';
-                    score = 20;
-                    tags.push({ text: 'FORMING', cls: 'warn' });
-                    tags.push({ text: 'Discount Zone', cls: 'good' });
-                    tags.push({ text: 'Watch for HL', cls: 'warn' });
-                } else if (inPremium) {
-                    // In premium but trend unclear — watch for bearish reversal
-                    result.direction = 'short';
-                    result.entry = rHigh - rSize * 0.236;
-                    result.stop = rHigh + rSize * 0.05;
-                    result.target = rEq;
-                    result.source = 'Premium rejection watch';
-                    score = 20;
-                    tags.push({ text: 'FORMING', cls: 'warn' });
-                    tags.push({ text: 'Premium Zone', cls: 'warn' });
-                    tags.push({ text: 'Watch for LH', cls: 'warn' });
-                }
-            } else {
-                // No range data — use pure candle analysis
-                if (trendUp && posInRange < 0.5) {
-                    result.direction = 'long';
-                    result.entry = recentLow + rangeSize * 0.382;
-                    result.stop = recentLow - rangeSize * 0.05;
-                    result.target = recentHigh;
-                    result.source = 'Candle trend analysis';
-                    score = 15;
-                    tags.push({ text: 'FORMING', cls: 'warn' });
-                    tags.push({ text: 'Uptrend', cls: 'good' });
-                } else if (!trendUp && posInRange > 0.5) {
-                    result.direction = 'short';
-                    result.entry = recentHigh - rangeSize * 0.382;
-                    result.stop = recentHigh + rangeSize * 0.05;
-                    result.target = recentLow;
-                    result.source = 'Candle trend analysis';
-                    score = 15;
-                    tags.push({ text: 'FORMING', cls: 'warn' });
-                    tags.push({ text: 'Downtrend', cls: 'warn' });
-                } else {
-                    result.source = 'Awaiting structure';
-                    tags.push({ text: 'NO SETUP', cls: 'warn' });
-                    tags.push({ text: 'Range: ' + fmtPrice(recentLow) + ' - ' + fmtPrice(recentHigh), cls: '' });
-                    tags.push({ text: trendUp ? 'Bias: Bullish' : 'Bias: Bearish', cls: 'warn' });
-                }
-            }
-
-            // Apply gate bias boost
-            if (gateBias !== 'none' && result.direction === gateBias) {
-                score += 10;
-                tags.push({ text: 'Gate Aligned', cls: 'good' });
-            } else if (gateBias !== 'none') {
-                tags.push({ text: 'Gate: ' + gateBias.toUpperCase(), cls: 'warn' });
-            }
-
-            // Calculate R:R
-            if (result.entry && result.stop && result.target) {
-                const risk = Math.abs(result.entry - result.stop);
-                const reward = Math.abs(result.target - result.entry);
-                result.rr = risk > 0 ? reward / risk : 0;
-                if (result.rr >= 3) score += 10;
-            }
-
-            result.confidence = Math.min(100, score);
-            result.tags = tags;
-            return result;
-        }
-
-        // Render the highest probability setup in sidebar with 8-step pipeline
+        // Render the highest probability setup in sidebar
         function renderSetupPanel(setup) {
             const dirEl = document.getElementById('setupDirection');
             dirEl.textContent = setup.direction === 'long' ? 'LONG' : setup.direction === 'short' ? 'SHORT' : 'NO SETUP';
             dirEl.className = 'setup-direction ' + setup.direction;
 
-            // Render 8-step pipeline
-            const pipelineEl = document.getElementById('hpsPipeline');
-            let pipeHtml = '';
-            const stepLabels = ['1. MS', '2. Ranges', '3. S&D', '4. Liq', '5. TCT', '6. PO3', '7. Exec', '8. HP'];
-            if (setup.steps && setup.steps.length > 0) {
-                setup.steps.forEach((step, i) => {
-                    const label = stepLabels[i] || step.name;
-                    const icon = step.status === 'pass' ? '&#10003;' : step.status === 'warn' ? '&#9679;' : '&#10007;';
-                    const scoreStr = step.score > 0 ? '+' + step.score : step.score < 0 ? '' + step.score : '0';
-                    pipeHtml += '<div class="hps-step ' + step.status + '">';
-                    pipeHtml += '<span class="hps-step-name">' + label + '</span>';
-                    pipeHtml += '<span class="hps-step-result">' + icon + ' ' + step.result + '</span>';
-                    pipeHtml += '<span class="hps-step-score">' + scoreStr + '</span>';
-                    pipeHtml += '</div>';
-                });
-                pipeHtml += '<div class="hps-divider"></div>';
-                pipeHtml += '<div class="hps-total"><span>CONFIDENCE</span><span>' + setup.confidence + '%</span></div>';
-            }
-            pipelineEl.innerHTML = pipeHtml;
-
-            // Render setup details
             const contentEl = document.getElementById('setupContent');
             let html = '';
 
             if (setup.entry && setup.stop && setup.target) {
-                const isConfirmed = setup.isConfirmed;
-                const statusLabel = isConfirmed ? 'CONFIRMED' : 'FORMING';
-                const statusColor = isConfirmed ? '#00ff88' : '#ffc107';
-                const statusBg = isConfirmed ? 'rgba(0,255,136,0.15)' : 'rgba(255,193,7,0.15)';
-                html += '<div style="text-align:center;padding:3px 8px;border-radius:4px;background:' + statusBg + ';color:' + statusColor + ';font-size:0.65rem;font-weight:600;margin-bottom:6px;">' + statusLabel + '</div>';
-
                 html += '<div class="setup-levels">';
-                html += '<div class="setup-level-box entry"><span class="setup-level-label">ENTRY</span><span class="setup-level-price">' + fmtPrice(setup.entry) + '</span></div>';
-                html += '<div class="setup-level-box sl"><span class="setup-level-label">STOP</span><span class="setup-level-price">' + fmtPrice(setup.stop) + '</span></div>';
-                html += '<div class="setup-level-box tp"><span class="setup-level-label">TARGET</span><span class="setup-level-price">' + fmtPrice(setup.target) + '</span></div>';
+                html += '<div class="setup-level-box entry"><span class="setup-level-label">ENTRY</span><span class="setup-level-price">$' + setup.entry.toLocaleString(undefined, {maximumFractionDigits: 2}) + '</span></div>';
+                html += '<div class="setup-level-box sl"><span class="setup-level-label">STOP</span><span class="setup-level-price">$' + setup.stop.toLocaleString(undefined, {maximumFractionDigits: 2}) + '</span></div>';
+                html += '<div class="setup-level-box tp"><span class="setup-level-label">TARGET</span><span class="setup-level-price">$' + setup.target.toLocaleString(undefined, {maximumFractionDigits: 2}) + '</span></div>';
                 html += '</div>';
 
                 if (setup.source) {
-                    html += '<div class="metric-row"><span class="label">Source</span><span class="value" style="font-size:0.68rem;">' + setup.source + '</span></div>';
+                    html += '<div class="metric-row"><span class="label">Source</span><span class="value" style="font-size:0.7rem;">' + setup.source + '</span></div>';
                 }
             }
 
-            if (setup.tags && setup.tags.length > 0) {
+            if (setup.tags.length > 0) {
                 html += '<div class="setup-meta">';
                 setup.tags.forEach(tag => {
                     html += '<span class="setup-tag ' + tag.cls + '">' + tag.text + '</span>';
                 });
-                html += '</div>';
-            }
-
-            // Last completed setup when no active model
-            if (!setup.entry && setup.lastCompleted) {
-                const lc = setup.lastCompleted;
-                const ago = timeSince(lc.timestamp);
-                const lcDirColor = lc.direction === 'long' ? '#00ff88' : lc.direction === 'short' ? '#ff4444' : '#888';
-                html += '<div style="margin-top:8px;padding:6px 8px;border-radius:4px;background:rgba(100,100,120,0.12);border:1px solid rgba(100,100,120,0.25);">';
-                html += '<div style="display:flex;justify-content:space-between;font-size:0.6rem;color:#888;margin-bottom:4px;"><span style="font-weight:600;">LAST SETUP</span><span>' + ago + '</span></div>';
-                html += '<span style="color:' + lcDirColor + ';font-weight:700;font-size:0.7rem;">' + (lc.direction === 'long' ? 'LONG' : 'SHORT') + '</span>';
-                if (lc.source) html += ' <span style="color:#666;font-size:0.6rem;">' + lc.source + '</span>';
-                if (lc.rr) html += ' <span style="color:#888;font-size:0.6rem;">' + lc.rr.toFixed(1) + 'R</span>';
                 html += '</div>';
             }
 
@@ -9021,17 +7818,10 @@ async def dashboard():
 
             // 5. Draw entry/stop/target on chart if we have a setup
             if (setup.entry && setup.stop && setup.target) {
-                const isForming = !setup.isConfirmed;
-                const entryLabel = (isForming ? 'Entry (forming)' : 'Entry') + ' ' + fmtPrice(setup.entry);
-                const slLabel = 'Stop ' + fmtPrice(setup.stop);
-                const tpLabel = 'Target ' + fmtPrice(setup.target);
-
-                // Entry level (cyan, prominent)
-                lineSeries.push(addPriceLine(setup.entry, '#00d4ff', entryLabel, 0, 2));
-                drawKeyLevel(setup.entry, candles, '#00d4ff', '', 2);
+                // Entry level (cyan)
+                drawKeyLevel(setup.entry, candles, '#00d4ff', 'Entry', 1);
 
                 // Stop level (red dashed)
-                lineSeries.push(addPriceLine(setup.stop, '#ff4444', slLabel, 2, 1));
                 const slData = candles.map(c => ({ time: c.time, value: setup.stop }));
                 const slSeries = chart.addLineSeries({
                     color: 'rgba(255, 68, 68, 0.8)',
@@ -9044,9 +7834,6 @@ async def dashboard():
                 });
                 slSeries.setData(slData);
                 additionalSeries.push(slSeries);
-
-                // Target level (green, prominent)
-                lineSeries.push(addPriceLine(setup.target, '#00ff88', tpLabel, 0, 2));
 
                 // Target zone (shaded blue/purple area around target)
                 const targetRange = Math.abs(setup.target - setup.entry) * 0.05;
@@ -9090,9 +7877,9 @@ async def dashboard():
             // Entry/Stop/Target levels
             if (entry && stop && target) {
                 html += '<div class="po3-levels">';
-                html += '<div class="po3-level-box entry"><span class="po3-level-label">ENTRY</span><span class="po3-level-price">' + fmtPrice(entry) + '</span></div>';
-                html += '<div class="po3-level-box stop"><span class="po3-level-label">STOP</span><span class="po3-level-price">' + fmtPrice(stop) + '</span></div>';
-                html += '<div class="po3-level-box target"><span class="po3-level-label">TARGET</span><span class="po3-level-price">' + fmtPrice(target) + '</span></div>';
+                html += '<div class="po3-level-box entry"><span class="po3-level-label">ENTRY</span><span class="po3-level-price">$' + entry.toLocaleString(undefined, {maximumFractionDigits: 0}) + '</span></div>';
+                html += '<div class="po3-level-box stop"><span class="po3-level-label">STOP</span><span class="po3-level-price">$' + stop.toLocaleString(undefined, {maximumFractionDigits: 0}) + '</span></div>';
+                html += '<div class="po3-level-box target"><span class="po3-level-label">TARGET</span><span class="po3-level-price">$' + target.toLocaleString(undefined, {maximumFractionDigits: 0}) + '</span></div>';
                 html += '</div>';
             }
 
@@ -9128,8 +7915,8 @@ async def dashboard():
             // Range info
             if (p.range) {
                 html += '<div style="margin-top:4px;font-size:0.6rem;color:#555;">';
-                html += 'Range: ' + fmtPrice(p.range.low || 0);
-                html += ' &mdash; ' + fmtPrice(p.range.high || 0);
+                html += 'Range: $' + (p.range.low || 0).toLocaleString(undefined, {maximumFractionDigits: 0});
+                html += ' &mdash; $' + (p.range.high || 0).toLocaleString(undefined, {maximumFractionDigits: 0});
                 html += ' (' + (p.range.size_pct || 0) + '%)';
                 html += '</div>';
             }
@@ -9640,11 +8427,8 @@ async def dashboard():
 
                 // Format prices compactly
                 const fmt = (p) => {
-                    if (p == null || isNaN(p)) return '--';
-                    if (p >= 10000) return '$' + p.toLocaleString(undefined, {maximumFractionDigits: 0});
-                    if (p >= 100)   return '$' + p.toLocaleString(undefined, {maximumFractionDigits: 2});
-                    if (p >= 1)     return '$' + p.toFixed(2);
-                    if (p >= 0.01)  return '$' + p.toFixed(4);
+                    if (p >= 1000) return '$' + p.toLocaleString(undefined, {maximumFractionDigits: 0});
+                    if (p >= 1) return '$' + p.toFixed(2);
                     return '$' + p.toPrecision(4);
                 };
 
@@ -9734,21 +8518,7 @@ async def dashboard():
 
         // Initialize
         initChart();
-
-        // Initial data load with retry for Render cold-start
-        (async function initialLoad() {
-            for (let attempt = 1; attempt <= 3; attempt++) {
-                try {
-                    await refreshData();
-                    // If candles loaded, we're good
-                    if (lastCandles && lastCandles.length > 0) break;
-                    console.warn('Initial load attempt ' + attempt + ': no candle data, retrying in 5s...');
-                } catch (e) {
-                    console.warn('Initial load attempt ' + attempt + ' error:', e.message);
-                }
-                if (attempt < 3) await new Promise(r => setTimeout(r, 5000));
-            }
-        })();
+        refreshData();
         fetchTop5Setups();
 
         // Auto-refresh every 30 seconds (forming models derived within refreshData)
@@ -10531,10 +9301,11 @@ async def get_tct_schematics(symbol: Optional[str] = None, timeframe: Optional[s
                 continue
 
             df = dfs[tf_key]
+            candles_list = df_to_candles(df)
+            detected_range = await detect_best_range(candles_list)
+            range_list = [detected_range] if detected_range and not isinstance(detected_range, list) else (detected_range or [])
 
-            # Let TCT detector use its own internal range detection
-            # (detect_best_range returns incompatible keys)
-            schematics_result = detect_tct_schematics(df, None)
+            schematics_result = detect_tct_schematics(df, range_list)
             all_schematics = (
                 schematics_result.get("accumulation_schematics", []) +
                 schematics_result.get("distribution_schematics", [])
@@ -10683,10 +9454,11 @@ async def get_po3_schematics(symbol: Optional[str] = None, timeframe: Optional[s
                 continue
 
             df = dfs[tf_key]
+            candles_list = df_to_candles(df)
+            detected_range = await detect_best_range(candles_list)
+            range_list = [detected_range] if detected_range and not isinstance(detected_range, list) else (detected_range or [])
 
-            # Let PO3 detector use its own internal range detection
-            # (detect_best_range returns incompatible keys)
-            po3_result = detect_po3_schematics(df, None)
+            po3_result = detect_po3_schematics(df, range_list)
             all_po3 = po3_result.get("bullish_po3", []) + po3_result.get("bearish_po3", [])
 
             # Tag each PO3 with its timeframe
