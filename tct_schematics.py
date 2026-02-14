@@ -236,7 +236,7 @@ class TCTSchematicDetector:
         """
         ranges = []
 
-        for i in range(10, len(self.candles) - 30):
+        for i in range(10, len(self.candles) - 15):
             # Find potential range low (significant swing low)
             if not self._is_swing_low(i):
                 continue
@@ -245,7 +245,7 @@ class TCTSchematicDetector:
             range_low_idx = i
 
             # Find potential range high after range low
-            for j in range(i + 5, min(i + 40, len(self.candles) - 10)):
+            for j in range(i + 5, min(i + 50, len(self.candles) - 5)):
                 if not self._is_swing_high(j):
                     continue
 
@@ -294,7 +294,7 @@ class TCTSchematicDetector:
         # Search for deviation after range formation
         start_idx = range_high_idx + 1
 
-        for i in range(start_idx, min(start_idx + 30, len(self.candles) - 5)):
+        for i in range(start_idx, min(start_idx + 40, len(self.candles) - 3)):
             candle = self.candles.iloc[i]
 
             # Check if this candle goes below range low (potential deviation)
@@ -342,7 +342,7 @@ class TCTSchematicDetector:
         # Search for second deviation after Tap2
         start_idx = tap2_idx + 3
 
-        for i in range(start_idx, min(start_idx + 25, len(self.candles) - 5)):
+        for i in range(start_idx, min(start_idx + 35, len(self.candles) - 3)):
             candle = self.candles.iloc[i]
 
             # TCT: Tap3 must go lower than Tap2 (deviation of deviation)
@@ -403,7 +403,7 @@ class TCTSchematicDetector:
         # Search for higher low that meets Model 2 requirements
         start_idx = tap2_idx + 3
 
-        for i in range(start_idx, min(start_idx + 25, len(self.candles) - 5)):
+        for i in range(start_idx, min(start_idx + 35, len(self.candles) - 3)):
             if not self._is_swing_low(i):
                 continue
 
@@ -542,7 +542,7 @@ class TCTSchematicDetector:
         """
         ranges = []
 
-        for i in range(10, len(self.candles) - 30):
+        for i in range(10, len(self.candles) - 15):
             # Find potential range high (significant swing high)
             if not self._is_swing_high(i):
                 continue
@@ -551,7 +551,7 @@ class TCTSchematicDetector:
             range_high_idx = i
 
             # Find potential range low after range high
-            for j in range(i + 5, min(i + 40, len(self.candles) - 10)):
+            for j in range(i + 5, min(i + 50, len(self.candles) - 5)):
                 if not self._is_swing_low(j):
                     continue
 
@@ -599,7 +599,7 @@ class TCTSchematicDetector:
         # Search for deviation after range formation
         start_idx = range_low_idx + 1
 
-        for i in range(start_idx, min(start_idx + 30, len(self.candles) - 5)):
+        for i in range(start_idx, min(start_idx + 40, len(self.candles) - 3)):
             candle = self.candles.iloc[i]
 
             # Check if this candle goes above range high (potential deviation)
@@ -645,7 +645,7 @@ class TCTSchematicDetector:
         # Search for second deviation after Tap2
         start_idx = tap2_idx + 3
 
-        for i in range(start_idx, min(start_idx + 25, len(self.candles) - 5)):
+        for i in range(start_idx, min(start_idx + 35, len(self.candles) - 3)):
             candle = self.candles.iloc[i]
 
             # TCT: Tap3 must go higher than Tap2 (deviation of deviation)
@@ -704,7 +704,7 @@ class TCTSchematicDetector:
         # Search for lower high that meets Model 2 requirements
         start_idx = tap2_idx + 3
 
-        for i in range(start_idx, min(start_idx + 25, len(self.candles) - 5)):
+        for i in range(start_idx, min(start_idx + 35, len(self.candles) - 3)):
             if not self._is_swing_high(i):
                 continue
 
@@ -771,7 +771,7 @@ class TCTSchematicDetector:
         if tap3_idx >= len(self.candles) - 3:
             return None
 
-        if schematic_type in ["Model_1_Accumulation", "Model_2_Accumulation"]:
+        if "Accumulation" in schematic_type:
             # Find highest point between Tap2 and Tap3
             range_candles = self.candles.iloc[tap2_idx:tap3_idx + 1]
             highest_point_idx = range_candles["high"].idxmax()
@@ -794,7 +794,7 @@ class TCTSchematicDetector:
                     "confirmed": True
                 }
 
-        elif schematic_type in ["Model_1_Distribution", "Model_2_Distribution"]:
+        elif "Distribution" in schematic_type:
             # Find lowest point between Tap2 and Tap3
             range_candles = self.candles.iloc[tap2_idx:tap3_idx + 1]
             lowest_point_idx = range_candles["low"].idxmin()
@@ -826,10 +826,12 @@ class TCTSchematicDetector:
         TCT Lecture 1: BOS is confirmed when candle CLOSE breaks above the
         previous MS high (not wick). Preferably inside original range values.
         """
-        # Track the most recent swing high to break
+        # Track the most recent swing high to break (use lookback=2 for BOS
+        # structure detection — we need to find short-term MS pivots, not
+        # only the strict 6CR pivots)
         last_swing_high = None
-        for i in range(start_idx + 1, min(start_idx + 20, len(self.candles) - 2)):
-            if self._is_swing_high(i):
+        for i in range(start_idx + 1, min(start_idx + 25, len(self.candles) - 2)):
+            if self._is_swing_high(i, lookback=2):
                 sh_price = float(self.candles.iloc[i]["high"])
                 if last_swing_high is None or sh_price > last_swing_high["price"]:
                     last_swing_high = {"idx": i, "price": sh_price}
@@ -843,7 +845,7 @@ class TCTSchematicDetector:
 
         # TCT Lecture 1: BOS = candle CLOSE above MS high
         search_start = last_swing_high["idx"] + 1
-        for i in range(search_start, min(start_idx + 25, len(self.candles))):
+        for i in range(search_start, min(start_idx + 35, len(self.candles))):
             close_price = float(self.candles.iloc[i]["close"])
             if close_price > last_swing_high["price"]:
                 is_inside_range = close_price < high_price
@@ -864,10 +866,11 @@ class TCTSchematicDetector:
         TCT Lecture 1: BOS is confirmed when candle CLOSE breaks below the
         previous MS low (not wick). Preferably inside original range values.
         """
-        # Track the most recent swing low to break
+        # Track the most recent swing low to break (use lookback=2 for BOS
+        # structure detection — shorter-term MS pivots)
         last_swing_low = None
-        for i in range(start_idx + 1, min(start_idx + 20, len(self.candles) - 2)):
-            if self._is_swing_low(i):
+        for i in range(start_idx + 1, min(start_idx + 25, len(self.candles) - 2)):
+            if self._is_swing_low(i, lookback=2):
                 sl_price = float(self.candles.iloc[i]["low"])
                 if last_swing_low is None or sl_price < last_swing_low["price"]:
                     last_swing_low = {"idx": i, "price": sl_price}
@@ -880,7 +883,7 @@ class TCTSchematicDetector:
 
         # TCT Lecture 1: BOS = candle CLOSE below MS low
         search_start = last_swing_low["idx"] + 1
-        for i in range(search_start, min(start_idx + 25, len(self.candles))):
+        for i in range(search_start, min(start_idx + 35, len(self.candles))):
             close_price = float(self.candles.iloc[i]["close"])
             if close_price < last_swing_low["price"]:
                 is_inside_range = close_price > low_price
@@ -3341,13 +3344,22 @@ class TCTSchematicDetector:
         Check if price touched equilibrium to confirm range.
 
         TCT: "When we have a move back to the equilibrium, that's when the range is confirmed"
+
+        Checks both during range formation (between pivots) and after the
+        range is fully formed.
         """
         start = min(idx1, idx2)
         end = max(idx1, idx2)
 
-        # Check candles after the range formation
+        # Check between the two pivots (during range formation)
+        for i in range(start + 1, end):
+            candle = self.candles.iloc[i]
+            if candle["low"] <= equilibrium <= candle["high"]:
+                return True
+
+        # Check candles after the range formation (confirmation bounce)
         check_start = end + 1
-        check_end = min(check_start + 20, len(self.candles))
+        check_end = min(check_start + 30, len(self.candles))
 
         for i in range(check_start, check_end):
             candle = self.candles.iloc[i]
@@ -3366,7 +3378,7 @@ class TCTSchematicDetector:
         range_level = range_data["range_low"] if direction == "low" else range_data["range_high"]
 
         # Check next few candles for price coming back inside
-        for i in range(tab_idx + 1, min(tab_idx + 10, len(self.candles))):
+        for i in range(tab_idx + 1, min(tab_idx + 15, len(self.candles))):
             candle = self.candles.iloc[i]
             if direction == "low" and candle["close"] > range_level:
                 return True
@@ -3377,7 +3389,7 @@ class TCTSchematicDetector:
 
     def _validate_deviation_came_back_inside_from_idx(self, idx: int, level: float, direction: str) -> bool:
         """Validate deviation came back inside from a specific index."""
-        for i in range(idx + 1, min(idx + 10, len(self.candles))):
+        for i in range(idx + 1, min(idx + 15, len(self.candles))):
             candle = self.candles.iloc[i]
             if direction == "low" and candle["close"] > level:
                 return True
