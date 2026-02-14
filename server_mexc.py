@@ -3667,6 +3667,58 @@ async def get_schematics_5a_data(symbol: str = "BTCUSDT", timeframe: str = "4h")
         # detect_best_range() returns {high, low} without _idx fields, causing
         # _create_tab() to return None and skip every schematic.
         schematics_result = detect_tct_schematics(df, [])
+
+        # --- Debug diagnostics: expose internal detection details ---
+        debug_info = {
+            "candles_count": len(df),
+            "detector_error": schematics_result.get("error"),
+            "acc_count": len(schematics_result.get("accumulation_schematics", [])),
+            "dist_count": len(schematics_result.get("distribution_schematics", [])),
+        }
+        try:
+            from tct_schematics import TCTSchematicDetector
+            _dbg_det = TCTSchematicDetector(df)
+            _acc_ranges = _dbg_det._find_accumulation_ranges()
+            _dist_ranges = _dbg_det._find_distribution_ranges()
+            debug_info["acc_ranges_found"] = len(_acc_ranges)
+            debug_info["dist_ranges_found"] = len(_dist_ranges)
+
+            # For each range, try creating Tap1 and Tap2 to see where detection fails
+            _range_details = []
+            for rd in (_acc_ranges[:3] + _dist_ranges[:3]):
+                rtype = rd.get("direction", "unknown")
+                tap_key = "range_low" if rtype == "accumulation" else "range_high"
+                t1 = _dbg_det._create_tab(rd, tap_key, "tap1")
+                t2 = None
+                t3_m1 = None
+                t3_m2 = None
+                if t1 and rtype == "accumulation":
+                    t2 = _dbg_det._find_accumulation_tap2(rd, t1)
+                    if t2:
+                        t3_m1 = _dbg_det._find_accumulation_tap3_model1(rd, t1, t2)
+                        t3_m2 = _dbg_det._find_accumulation_tap3_model2(rd, t1, t2)
+                elif t1 and rtype == "distribution":
+                    t2 = _dbg_det._find_distribution_tap2(rd, t1)
+                    if t2:
+                        t3_m1 = _dbg_det._find_distribution_tap3_model1(rd, t1, t2)
+                        t3_m2 = _dbg_det._find_distribution_tap3_model2(rd, t1, t2)
+                _range_details.append({
+                    "type": rtype,
+                    "range_high": rd.get("range_high"),
+                    "range_low": rd.get("range_low"),
+                    "range_high_idx": rd.get("range_high_idx"),
+                    "range_low_idx": rd.get("range_low_idx"),
+                    "has_tap1": t1 is not None,
+                    "has_tap2": t2 is not None,
+                    "has_tap3_m1": t3_m1 is not None,
+                    "has_tap3_m2": t3_m2 is not None,
+                    "tap1_price": t1["price"] if t1 else None,
+                    "tap2_price": t2["price"] if t2 else None,
+                })
+            debug_info["range_details"] = _range_details
+        except Exception as dbg_e:
+            debug_info["debug_error"] = str(dbg_e)
+
         all_schematics = (
             schematics_result.get("accumulation_schematics", [])
             + schematics_result.get("distribution_schematics", [])
@@ -3749,6 +3801,7 @@ async def get_schematics_5a_data(symbol: str = "BTCUSDT", timeframe: str = "4h")
             "active": active,
             "in_formation": in_formation,
             "total": len(completed) + len(active) + len(in_formation),
+            "debug": debug_info,
         })
 
     except Exception as e:
@@ -3938,8 +3991,11 @@ body{{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-ser
       <div class="legend-item"><div class="ldot" style="background:#ff9800"></div>Structure H/L</div>
     </div>
   </div>
-  <div class="panel" id="panel">
-    <div class="empty">Loading schematics&hellip;</div>
+  <div class="panel">
+    <div id="debugPanel"></div>
+    <div id="panel">
+      <div class="empty">Loading schematics&hellip;</div>
+    </div>
   </div>
 </div>
 
@@ -4274,6 +4330,40 @@ async function loadData() {{
       '<span class="chip active-chip">Active: ' + (data.active?.length || 0) + '</span>' +
       '<span class="chip forming">Forming: ' + (data.in_formation?.length || 0) + '</span>' +
       '<span class="chip completed">Done: ' + (data.completed?.length || 0) + '</span>';
+
+    // Debug info in panel header
+    if (data.debug) {{
+      const d = data.debug;
+      let dbgHtml = '<div class="card" style="border-left:3px solid #e040fb;font-size:.65rem">';
+      dbgHtml += '<div class="card-header"><span class="card-title" style="color:#e040fb">Debug Diagnostics</span></div>';
+      dbgHtml += '<div class="card-grid">';
+      dbgHtml += '<div class="card-row"><span class="card-label">Candles</span><span class="card-val">' + d.candles_count + '</span></div>';
+      dbgHtml += '<div class="card-row"><span class="card-label">Acc Ranges</span><span class="card-val">' + (d.acc_ranges_found ?? '?') + '</span></div>';
+      dbgHtml += '<div class="card-row"><span class="card-label">Dist Ranges</span><span class="card-val">' + (d.dist_ranges_found ?? '?') + '</span></div>';
+      dbgHtml += '<div class="card-row"><span class="card-label">Acc Schematics</span><span class="card-val">' + d.acc_count + '</span></div>';
+      dbgHtml += '<div class="card-row"><span class="card-label">Dist Schematics</span><span class="card-val">' + d.dist_count + '</span></div>';
+      if (d.detector_error) dbgHtml += '<div class="card-row"><span class="card-label">Det Error</span><span class="card-val red">' + d.detector_error + '</span></div>';
+      if (d.debug_error) dbgHtml += '<div class="card-row"><span class="card-label">Dbg Error</span><span class="card-val red">' + d.debug_error + '</span></div>';
+      dbgHtml += '</div>';
+      // Range details
+      if (d.range_details && d.range_details.length > 0) {{
+        dbgHtml += '<div style="margin-top:6px;border-top:1px solid #222;padding-top:4px">';
+        d.range_details.forEach((r, i) => {{
+          const icon = r.type === 'accumulation' ? '▲' : '▼';
+          dbgHtml += '<div style="margin:3px 0;padding:3px;background:rgba(255,255,255,.02);border-radius:3px">';
+          dbgHtml += '<div style="color:#aaa">' + icon + ' ' + r.type + ' [' + (r.range_low_idx||'?') + '-' + (r.range_high_idx||'?') + ']</div>';
+          dbgHtml += '<div>Range: ' + fmt(r.range_low) + ' — ' + fmt(r.range_high) + '</div>';
+          dbgHtml += '<div>T1:' + (r.has_tap1 ? '<span class="card-val green">✓</span>' : '<span class="card-val red">✗</span>');
+          dbgHtml += ' T2:' + (r.has_tap2 ? '<span class="card-val green">✓</span>' : '<span class="card-val red">✗</span>');
+          dbgHtml += ' T3m1:' + (r.has_tap3_m1 ? '<span class="card-val green">✓</span>' : '<span class="card-val red">✗</span>');
+          dbgHtml += ' T3m2:' + (r.has_tap3_m2 ? '<span class="card-val green">✓</span>' : '<span class="card-val red">✗</span>');
+          dbgHtml += '</div></div>';
+        }});
+        dbgHtml += '</div>';
+      }}
+      dbgHtml += '</div>';
+      document.getElementById('debugPanel').innerHTML = dbgHtml;
+    }}
 
     // Set candle data
     if (data.candles && data.candles.length > 0) {{
