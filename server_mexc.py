@@ -3624,6 +3624,728 @@ async def schematic_chart_page(symbol: str = "BTCUSDT", timeframe: str = "4h", t
     return HTMLResponse(content=html)
 
 
+# ---------------------------------------------------------------------------
+# Schematics-5A  –  Standalone TCT Schematic Debug Page (Lecture 5A)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/schematics-5a-data")
+async def get_schematics_5a_data(symbol: str = "BTCUSDT", timeframe: str = "4h"):
+    """
+    Return TCT schematic data categorised by lifecycle state for the
+    schematics-5A debug page.
+
+    States:
+      - completed   : BOS confirmed AND current price has reached the target
+      - active       : BOS confirmed, entry set, trade still in play
+      - in_formation : Taps forming but BOS not yet confirmed
+    """
+    try:
+        resolved = resolve_symbol(symbol)
+        df = await fetch_mexc_candles(resolved, timeframe, 200)
+        if df is None or len(df) < 30:
+            return {"error": "Insufficient candle data", "symbol": resolved}
+
+        current_price = float(df.iloc[-1]["close"])
+
+        # Build candle list for range detection & LightweightCharts payload
+        candles_list = []
+        candles_json = []
+        for _, row in df.iterrows():
+            candles_list.append({
+                "open_time": str(row["open_time"]),
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "volume": float(row["volume"]),
+            })
+            ts = row["open_time"]
+            epoch = int(ts.timestamp()) if hasattr(ts, "timestamp") else int(pd.Timestamp(ts).timestamp())
+            candles_json.append({
+                "time": epoch,
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+            })
+
+        detected_range = await detect_best_range(candles_list)
+        range_list = (
+            [detected_range]
+            if detected_range and not isinstance(detected_range, list)
+            else (detected_range or [])
+        )
+
+        schematics_result = detect_tct_schematics(df, range_list)
+        all_schematics = (
+            schematics_result.get("accumulation_schematics", [])
+            + schematics_result.get("distribution_schematics", [])
+        )
+
+        completed = []
+        active = []
+        in_formation = []
+
+        for s in all_schematics:
+            if not isinstance(s, dict):
+                continue
+            sch = dict(s)
+
+            # Map tap indices → epoch timestamps for chart overlays
+            for tap_key in ("tap1", "tap2", "tap3"):
+                tap = sch.get(tap_key)
+                if tap and isinstance(tap, dict) and "idx" in tap:
+                    idx = int(tap["idx"])
+                    if 0 <= idx < len(candles_json):
+                        tap["time"] = candles_json[idx]["time"]
+
+            # Map BOS index → epoch timestamp
+            bos = sch.get("bos_confirmation")
+            if bos and isinstance(bos, dict) and "bos_idx" in bos:
+                idx = int(bos["bos_idx"])
+                if 0 <= idx < len(candles_json):
+                    bos["bos_time"] = candles_json[idx]["time"]
+
+            # --- highest point between tap2-tap3 timestamp ---
+            if bos and isinstance(bos, dict):
+                for pt_key in ("highest_point_between_tabs", "lowest_point_between_tabs"):
+                    pt = bos.get(pt_key)
+                    if pt and isinstance(pt, dict) and "idx" in pt:
+                        pidx = int(pt["idx"])
+                        if 0 <= pidx < len(candles_json):
+                            pt["time"] = candles_json[pidx]["time"]
+
+            # Compute P&L for active schematics
+            entry_price = (sch.get("entry") or {}).get("price")
+            stop_price = (sch.get("stop_loss") or {}).get("price")
+            target_price = (sch.get("target") or {}).get("price")
+            direction = sch.get("direction", "bullish")
+
+            if entry_price and target_price:
+                if direction == "bullish":
+                    pnl_pct = ((current_price - entry_price) / entry_price) * 100
+                    target_reached = current_price >= target_price
+                    stop_hit = current_price <= stop_price if stop_price else False
+                else:
+                    pnl_pct = ((entry_price - current_price) / entry_price) * 100
+                    target_reached = current_price <= target_price
+                    stop_hit = current_price >= stop_price if stop_price else False
+                sch["live_pnl_pct"] = round(pnl_pct, 2)
+                sch["target_reached"] = target_reached
+                sch["stop_hit"] = stop_hit
+            else:
+                sch["live_pnl_pct"] = None
+                sch["target_reached"] = False
+                sch["stop_hit"] = False
+
+            # Classify state
+            is_confirmed = sch.get("is_confirmed", False)
+            if is_confirmed and sch.get("target_reached"):
+                sch["state"] = "completed"
+                completed.append(sch)
+            elif is_confirmed:
+                sch["state"] = "active"
+                active.append(sch)
+            else:
+                sch["state"] = "in_formation"
+                in_formation.append(sch)
+
+        return convert_numpy_types({
+            "symbol": resolved,
+            "timeframe": timeframe,
+            "current_price": current_price,
+            "candles": candles_json,
+            "completed": completed,
+            "active": active,
+            "in_formation": in_formation,
+            "total": len(completed) + len(active) + len(in_formation),
+            "ranges": range_list,
+        })
+
+    except Exception as e:
+        logger.error(f"[SCHEMATICS-5A] Error for {symbol}/{timeframe}: {e}")
+        return {"error": str(e), "symbol": symbol}
+
+
+@app.get("/schematics-5A", response_class=HTMLResponse)
+async def schematics_5a_page(symbol: str = "BTCUSDT", timeframe: str = "4h"):
+    """
+    Standalone TCT Schematics debug page – Lecture 5A methodology.
+    Shows completed, active (ready-to-trade), and in-formation models
+    with full chart overlays mirroring the lecture PDF schematics.
+    """
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Schematics 5A — {symbol} {timeframe.upper()}</title>
+<script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-serif;overflow:hidden}}
+
+/* ---- header ---- */
+.header{{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:8px 20px;background:#101018;border-bottom:1px solid #1e1e2d;
+}}
+.header h1{{font-size:1rem;color:#e040fb;display:flex;align-items:center;gap:8px}}
+.header .pair{{color:#00d4ff}}.header .tf{{color:#666;font-weight:400;font-size:.85rem}}
+.header-right{{display:flex;align-items:center;gap:12px}}
+.back-link{{color:#888;text-decoration:none;font-size:.75rem;padding:4px 10px;border:1px solid #333;border-radius:4px}}
+.back-link:hover{{color:#e0e0e0;border-color:#555}}
+.live-price{{font-size:.85rem;color:#00d4ff;font-weight:600}}
+
+/* ---- controls bar ---- */
+.controls{{
+  display:flex;align-items:center;gap:10px;padding:6px 20px;background:#101018;
+  border-bottom:1px solid #1a1a28;flex-wrap:wrap;
+}}
+.controls label{{color:#666;font-size:.7rem;text-transform:uppercase;letter-spacing:.5px}}
+.controls select,.controls input{{
+  background:#181824;color:#e0e0e0;border:1px solid #2d2d44;border-radius:4px;
+  padding:4px 8px;font-size:.75rem;outline:none;
+}}
+.controls select:focus,.controls input:focus{{border-color:#e040fb}}
+.filter-btn{{
+  padding:4px 10px;font-size:.7rem;border-radius:4px;cursor:pointer;
+  border:1px solid #333;background:transparent;color:#888;transition:all .15s;
+}}
+.filter-btn:hover{{border-color:#e040fb;color:#e040fb}}
+.filter-btn.active{{background:#e040fb;color:#fff;border-color:#e040fb}}
+.summary-chips{{display:flex;gap:8px;margin-left:auto}}
+.chip{{font-size:.65rem;padding:3px 8px;border-radius:10px;font-weight:600}}
+.chip.completed{{background:rgba(0,212,255,.12);color:#00d4ff}}
+.chip.active-chip{{background:rgba(0,255,136,.12);color:#00ff88}}
+.chip.forming{{background:rgba(255,193,7,.12);color:#ffc107}}
+
+/* ---- layout ---- */
+.main{{display:grid;grid-template-columns:1fr 320px;height:calc(100vh - 86px)}}
+.chart-area{{position:relative;overflow:hidden}}
+#chartContainer{{width:100%;height:100%}}
+.panel{{
+  background:#101018;border-left:1px solid #1e1e2d;overflow-y:auto;
+  padding:8px;display:flex;flex-direction:column;gap:6px;
+}}
+
+/* ---- schematic cards ---- */
+.card{{
+  background:#14141f;border:1px solid #22223a;border-radius:8px;
+  padding:10px 12px;font-size:.72rem;transition:border-color .15s;cursor:pointer;
+}}
+.card:hover{{border-color:#555}}
+.card.state-completed{{border-left:3px solid #00d4ff}}
+.card.state-active{{border-left:3px solid #00ff88}}
+.card.state-in_formation{{border-left:3px solid #ffc107}}
+.card.selected{{border-color:#e040fb;box-shadow:0 0 8px rgba(224,64,251,.25)}}
+
+.card-header{{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}}
+.card-title{{font-weight:700;font-size:.78rem}}
+.card-title.bullish{{color:#00ff88}}
+.card-title.bearish{{color:#ff4444}}
+.state-badge{{
+  font-size:.6rem;padding:2px 7px;border-radius:3px;font-weight:600;text-transform:uppercase;letter-spacing:.3px;
+}}
+.state-badge.completed{{background:rgba(0,212,255,.15);color:#00d4ff}}
+.state-badge.active{{background:rgba(0,255,136,.15);color:#00ff88}}
+.state-badge.in_formation{{background:rgba(255,193,7,.15);color:#ffc107}}
+
+.card-grid{{display:grid;grid-template-columns:1fr 1fr;gap:3px 12px}}
+.card-row{{display:flex;justify-content:space-between}}
+.card-label{{color:#666}}.card-val{{color:#e0e0e0;font-weight:600}}
+.card-val.green{{color:#00ff88}}.card-val.red{{color:#ff4444}}.card-val.cyan{{color:#00d4ff}}
+
+.tap-row{{display:flex;gap:5px;margin-top:6px;flex-wrap:wrap}}
+.tap-chip{{
+  font-size:.6rem;padding:2px 6px;border-radius:3px;
+  background:rgba(255,255,255,.04);color:#aaa;
+}}
+.tap-chip.dev{{background:rgba(224,64,251,.12);color:#e040fb}}
+
+.pnl-bar{{
+  margin-top:6px;padding:5px 8px;border-radius:4px;text-align:center;
+  font-weight:700;font-size:.8rem;
+}}
+.pnl-bar.positive{{background:rgba(0,255,136,.1);color:#00ff88}}
+.pnl-bar.negative{{background:rgba(255,68,68,.1);color:#ff4444}}
+
+.formation-progress{{
+  margin-top:6px;display:flex;gap:4px;align-items:center;
+}}
+.formation-step{{
+  flex:1;height:4px;border-radius:2px;background:#222;
+}}
+.formation-step.done{{background:#ffc107}}
+.formation-step.pending{{background:#333}}
+.formation-label{{font-size:.58rem;color:#888;margin-left:6px}}
+
+/* ---- legend bar ---- */
+.legend{{
+  position:absolute;bottom:6px;left:10px;display:flex;gap:12px;
+  padding:4px 10px;background:rgba(16,16,24,.92);border-radius:6px;
+  font-size:.62rem;color:#777;z-index:5;backdrop-filter:blur(6px);
+  border:1px solid #1e1e2d;flex-wrap:wrap;
+}}
+.legend-item{{display:flex;align-items:center;gap:3px}}
+.ldot{{width:8px;height:8px;border-radius:50%}}
+.lline{{width:14px;height:2px;border-radius:1px}}
+.lbox{{width:12px;height:8px;border-radius:2px}}
+
+/* ---- no-data ---- */
+.empty{{color:#555;text-align:center;padding:40px 20px;font-size:.8rem}}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#e040fb" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 16l4-8 4 4 6-10"/></svg>
+    Schematics 5A
+    <span class="pair">{symbol.replace("USDT","/USDT")}</span>
+    <span class="tf">{timeframe.upper()}</span>
+  </h1>
+  <div class="header-right">
+    <span class="live-price" id="livePrice">--</span>
+    <a href="/dashboard?symbol={symbol}" class="back-link">Dashboard</a>
+    <a href="/schematic-chart?symbol={symbol}&timeframe={timeframe}" class="back-link">Schematic Chart</a>
+  </div>
+</div>
+
+<div class="controls" id="controlsBar">
+  <label>Symbol</label>
+  <input id="symInput" value="{symbol}" style="width:100px" />
+  <label>Timeframe</label>
+  <select id="tfSelect">
+    <option value="1m">1m</option><option value="5m">5m</option>
+    <option value="15m">15m</option><option value="30m">30m</option>
+    <option value="1h">1H</option><option value="2h">2H</option>
+    <option value="4h" {"selected" if timeframe=="4h" else ""}>4H</option>
+    <option value="1d">1D</option>
+  </select>
+  <button class="filter-btn active" data-filter="all">All</button>
+  <button class="filter-btn" data-filter="active">Active</button>
+  <button class="filter-btn" data-filter="in_formation">Forming</button>
+  <button class="filter-btn" data-filter="completed">Completed</button>
+  <div class="summary-chips" id="summaryChips"></div>
+</div>
+
+<div class="main">
+  <div class="chart-area">
+    <div id="chartContainer"></div>
+    <div class="legend">
+      <div class="legend-item"><div class="lbox" style="background:rgba(128,128,128,.18);border:1px solid rgba(128,128,128,.5)"></div>Range</div>
+      <div class="legend-item"><div class="ldot" style="background:#00d4ff"></div>Tap (Range)</div>
+      <div class="legend-item"><div class="ldot" style="background:#e040fb"></div>Tap (Deviation)</div>
+      <div class="legend-item"><div class="lline" style="background:#ffc107"></div>DL2 Limit</div>
+      <div class="legend-item"><div class="lline" style="background:#888"></div>Equilibrium</div>
+      <div class="legend-item"><div class="ldot" style="background:#00ff88"></div>BOS Confirm</div>
+      <div class="legend-item"><div class="lline" style="background:#00d4ff"></div>Entry</div>
+      <div class="legend-item"><div class="lline" style="background:#ff4444"></div>Stop Loss</div>
+      <div class="legend-item"><div class="lline" style="background:#00ff88"></div>Target</div>
+      <div class="legend-item"><div class="ldot" style="background:#ff9800"></div>Structure H/L</div>
+    </div>
+  </div>
+  <div class="panel" id="panel">
+    <div class="empty">Loading schematics&hellip;</div>
+  </div>
+</div>
+
+<script>
+/* ===== constants ===== */
+const STATE_COLORS = {{
+  completed: '#00d4ff',
+  active:    '#00ff88',
+  in_formation: '#ffc107',
+}};
+let SYMBOL   = '{symbol}';
+let TIMEFRAME = '{timeframe}';
+let currentFilter = 'all';
+let selectedIdx = -1;
+let allSchematics = [];   // merged list
+let chartData = null;
+
+/* ===== chart ===== */
+let chart, candleSeries;
+const overlaySeriesList = [];
+const priceLines = [];
+
+function initChart() {{
+  const el = document.getElementById('chartContainer');
+  chart = LightweightCharts.createChart(el, {{
+    width: el.clientWidth, height: el.clientHeight,
+    layout: {{ background: {{ color: '#0a0a0f' }}, textColor: '#888' }},
+    grid: {{ vertLines: {{ color: '#141420' }}, horzLines: {{ color: '#141420' }} }},
+    crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal }},
+    rightPriceScale: {{ borderColor: '#1e1e2d' }},
+    timeScale: {{ borderColor: '#1e1e2d', timeVisible: true }},
+  }});
+  candleSeries = chart.addCandlestickSeries({{
+    upColor: '#00ff88', downColor: '#ff4444',
+    borderUpColor: '#00ff88', borderDownColor: '#ff4444',
+    wickUpColor: '#00ff88', wickDownColor: '#ff4444',
+  }});
+  window.addEventListener('resize', () => {{
+    chart.applyOptions({{ width: el.clientWidth, height: el.clientHeight }});
+  }});
+}}
+
+/* ===== formatting ===== */
+function fmt(p) {{
+  if (p == null) return '--';
+  if (Math.abs(p) >= 1000) return '$' + p.toLocaleString(undefined, {{maximumFractionDigits:0}});
+  if (Math.abs(p) >= 1) return '$' + p.toFixed(2);
+  return '$' + p.toPrecision(4);
+}}
+
+/* ===== clear overlays ===== */
+function clearOverlays() {{
+  priceLines.forEach(pl => {{ try {{ candleSeries.removePriceLine(pl); }} catch(_) {{}} }});
+  priceLines.length = 0;
+  overlaySeriesList.forEach(s => {{ try {{ chart.removeSeries(s); }} catch(_) {{}} }});
+  overlaySeriesList.length = 0;
+  candleSeries.setMarkers([]);
+}}
+
+/* ===== draw helpers ===== */
+function addPriceLine(price, color, title, style, width) {{
+  const pl = candleSeries.createPriceLine({{
+    price, color, lineWidth: width || 1,
+    lineStyle: style ?? LightweightCharts.LineStyle.Solid,
+    axisLabelVisible: true, title: title || '',
+  }});
+  priceLines.push(pl);
+}}
+
+function drawZoneBox(high, low, candles, color, startIdx) {{
+  if (!candles || candles.length < 2) return;
+  const si = Math.max(0, startIdx || 0);
+  const startTime = candles[Math.min(si, candles.length-1)].time;
+  const lastInterval = candles.length > 1 ? candles[candles.length-1].time - candles[candles.length-2].time : 3600;
+  const futureTime = candles[candles.length-1].time + lastInterval * 30;
+  const rgba = (a) => color.replace(')', ',' + a + ')').replace('rgb', 'rgba');
+
+  const top = chart.addAreaSeries({{
+    topColor: rgba(0.18), bottomColor: rgba(0.06),
+    lineColor: rgba(0.35), lineWidth: 1, priceScaleId: 'right',
+    lastValueVisible: false, crosshairMarkerVisible: false,
+  }});
+  top.setData([{{ time: startTime, value: high }}, {{ time: futureTime, value: high }}]);
+  overlaySeriesList.push(top);
+
+  const bot = chart.addAreaSeries({{
+    topColor: rgba(0.06), bottomColor: rgba(0.01),
+    lineColor: rgba(0.35), lineWidth: 1, priceScaleId: 'right',
+    lastValueVisible: false, crosshairMarkerVisible: false,
+  }});
+  bot.setData([{{ time: startTime, value: low }}, {{ time: futureTime, value: low }}]);
+  overlaySeriesList.push(bot);
+}}
+
+/* ===== draw a single schematic on the chart ===== */
+function drawSchematic(s, candles, isPrimary) {{
+  const range = s.range;
+  const dir = s.direction || 'bullish';
+  const isLow = dir === 'bullish';      // taps on low side
+  const stateColor = STATE_COLORS[s.state] || '#888';
+
+  // Range box
+  if (range && range.high && range.low) {{
+    const rangeStart = Math.max(0, (s.tap1?.idx || 0) - 3);
+    drawZoneBox(range.high, range.low, candles, 'rgb(128,128,128)', rangeStart);
+
+    // DL lines
+    if (range.dl_high) addPriceLine(range.dl_high, 'rgba(255,193,7,0.45)', 'DL2 High', LightweightCharts.LineStyle.Dotted, 1);
+    if (range.dl_low)  addPriceLine(range.dl_low,  'rgba(255,193,7,0.45)', 'DL2 Low',  LightweightCharts.LineStyle.Dotted, 1);
+    // Equilibrium
+    if (range.equilibrium) addPriceLine(range.equilibrium, 'rgba(128,128,128,0.35)', 'EQ', LightweightCharts.LineStyle.Dotted, 1);
+    // Range High / Low labels
+    addPriceLine(range.high, 'rgba(128,128,128,0.5)', 'Range High', LightweightCharts.LineStyle.Solid, 1);
+    addPriceLine(range.low,  'rgba(128,128,128,0.5)', 'Range Low',  LightweightCharts.LineStyle.Solid, 1);
+  }}
+
+  // Markers for taps, BOS, structure points
+  const markers = [];
+  const taps = [s.tap1, s.tap2, s.tap3];
+  taps.forEach((tap, ti) => {{
+    if (!tap || !tap.time) return;
+    const isDev = tap.is_deviation;
+    markers.push({{
+      time: tap.time,
+      position: isLow ? 'belowBar' : 'aboveBar',
+      color: isDev ? '#e040fb' : '#00d4ff',
+      shape: 'circle',
+      text: 'Tap ' + (ti + 1) + (isDev ? ' (Dev)' : ''),
+    }});
+  }});
+
+  // Highest / lowest point between tap2-tap3 (structure watch point)
+  const bos = s.bos_confirmation;
+  if (bos) {{
+    const hp = bos.highest_point_between_tabs || bos.lowest_point_between_tabs;
+    if (hp && hp.time) {{
+      markers.push({{
+        time: hp.time,
+        position: isLow ? 'aboveBar' : 'belowBar',
+        color: '#ff9800',
+        shape: 'square',
+        text: isLow ? 'Struct High' : 'Struct Low',
+      }});
+    }}
+    // BOS confirmation marker
+    if (bos.bos_time) {{
+      markers.push({{
+        time: bos.bos_time,
+        position: isLow ? 'aboveBar' : 'belowBar',
+        color: '#00ff88',
+        shape: isLow ? 'arrowUp' : 'arrowDown',
+        text: 'BOS ✓',
+      }});
+    }}
+  }}
+
+  if (markers.length > 0) {{
+    markers.sort((a, b) => a.time - b.time);
+    candleSeries.setMarkers(markers);
+  }}
+
+  // Entry / Stop / Target lines
+  const entry  = s.entry?.price;
+  const stop   = s.stop_loss?.price;
+  const target = s.target?.price;
+
+  if (entry)  addPriceLine(entry,  '#00d4ff', 'Entry',     LightweightCharts.LineStyle.Solid,  2);
+  if (stop)   addPriceLine(stop,   '#ff4444', 'Stop Loss', LightweightCharts.LineStyle.Dashed, 1);
+  if (target) addPriceLine(target, '#00ff88', 'Target',    LightweightCharts.LineStyle.Dashed, 2);
+
+  // Wyckoff high/low if different from range
+  const wyHi = s.wyckoff_high;
+  const wyLo = s.wyckoff_low;
+  if (wyHi && range && Math.abs(wyHi - range.high) > (range.high - range.low) * 0.02) {{
+    addPriceLine(wyHi, 'rgba(224,64,251,0.4)', 'Wyckoff High', LightweightCharts.LineStyle.Dotted, 1);
+  }}
+  if (wyLo && range && Math.abs(wyLo - range.low) > (range.high - range.low) * 0.02) {{
+    addPriceLine(wyLo, 'rgba(224,64,251,0.4)', 'Wyckoff Low', LightweightCharts.LineStyle.Dotted, 1);
+  }}
+
+  // Current price line
+  if (chartData && chartData.current_price) {{
+    addPriceLine(chartData.current_price, 'rgba(255,255,255,0.35)', 'Price', LightweightCharts.LineStyle.Dotted, 1);
+  }}
+}}
+
+/* ===== build card HTML ===== */
+function buildCard(s, idx) {{
+  const dir = s.direction || 'bullish';
+  const dirCls = dir === 'bullish' ? 'bullish' : 'bearish';
+  const typeLabel = (s.schematic_type || '').replace(/_/g, ' ');
+  const model = s.model || '';
+  const state = s.state;
+  const entry  = s.entry?.price;
+  const stop   = s.stop_loss?.price;
+  const target = s.target?.price;
+  const rr     = s.risk_reward;
+  const quality = s.quality_score;
+  const pnl    = s.live_pnl_pct;
+  const sel    = idx === selectedIdx ? ' selected' : '';
+
+  let h = '<div class="card state-' + state + sel + '" data-idx="' + idx + '" onclick="selectCard(' + idx + ')">';
+
+  // header
+  h += '<div class="card-header">';
+  h += '<span class="card-title ' + dirCls + '">' + typeLabel + '</span>';
+  let badgeLabel = state === 'in_formation' ? 'FORMING' : state === 'active' ? 'READY TO TRADE' : 'COMPLETED';
+  h += '<span class="state-badge ' + state + '">' + badgeLabel + '</span>';
+  h += '</div>';
+
+  // body grid
+  h += '<div class="card-grid">';
+  if (entry)   h += '<div class="card-row"><span class="card-label">Entry</span><span class="card-val cyan">' + fmt(entry) + '</span></div>';
+  if (stop)    h += '<div class="card-row"><span class="card-label">Stop</span><span class="card-val red">' + fmt(stop) + '</span></div>';
+  if (target)  h += '<div class="card-row"><span class="card-label">Target</span><span class="card-val green">' + fmt(target) + '</span></div>';
+  if (rr != null) h += '<div class="card-row"><span class="card-label">R:R</span><span class="card-val">' + rr.toFixed(1) + ':1</span></div>';
+  if (quality != null) h += '<div class="card-row"><span class="card-label">Quality</span><span class="card-val">' + Math.round(quality * 100) + '%</span></div>';
+  const sixCR = s.six_candle_valid;
+  if (sixCR != null) h += '<div class="card-row"><span class="card-label">6CR Valid</span><span class="card-val ' + (sixCR ? 'green' : 'red') + '">' + (sixCR ? 'Yes' : 'No') + '</span></div>';
+  // BOS inside range?
+  const bosInside = s.bos_confirmation?.is_inside_range;
+  if (bosInside != null) h += '<div class="card-row"><span class="card-label">BOS in Range</span><span class="card-val ' + (bosInside ? 'green' : 'red') + '">' + (bosInside ? 'Yes' : 'No') + '</span></div>';
+  h += '</div>';
+
+  // Tap chips
+  h += '<div class="tap-row">';
+  ['tap1','tap2','tap3'].forEach((k, ti) => {{
+    const tap = s[k];
+    if (!tap) return;
+    const cls = tap.is_deviation ? ' dev' : '';
+    h += '<span class="tap-chip' + cls + '">T' + (ti+1) + ': ' + fmt(tap.price) + '</span>';
+  }});
+  h += '</div>';
+
+  // P&L bar for active
+  if (state === 'active' && pnl != null) {{
+    const cls = pnl >= 0 ? 'positive' : 'negative';
+    const sign = pnl >= 0 ? '+' : '';
+    h += '<div class="pnl-bar ' + cls + '">P&L: ' + sign + pnl.toFixed(2) + '%</div>';
+  }}
+
+  // Formation progress for in_formation
+  if (state === 'in_formation') {{
+    const hasTap1 = !!s.tap1;
+    const hasTap2 = !!s.tap2;
+    const hasTap3 = !!s.tap3;
+    const hasBOS  = s.is_confirmed;
+    h += '<div class="formation-progress">';
+    h += '<div class="formation-step ' + (hasTap1 ? 'done' : 'pending') + '" title="Tap 1"></div>';
+    h += '<div class="formation-step ' + (hasTap2 ? 'done' : 'pending') + '" title="Tap 2 (Deviation)"></div>';
+    h += '<div class="formation-step ' + (hasTap3 ? 'done' : 'pending') + '" title="Tap 3"></div>';
+    h += '<div class="formation-step ' + (hasBOS  ? 'done' : 'pending') + '" title="BOS Confirmation"></div>';
+    h += '<span class="formation-label">Tap1 → Tap2 → Tap3 → BOS</span>';
+    h += '</div>';
+  }}
+
+  h += '</div>';
+  return h;
+}}
+
+/* ===== card click → focus on that schematic ===== */
+function selectCard(idx) {{
+  selectedIdx = idx;
+  renderPanel();
+  clearOverlays();
+  if (chartData && allSchematics[idx]) {{
+    drawSchematic(allSchematics[idx], chartData.candles, true);
+    // scroll chart to schematic region
+    const s = allSchematics[idx];
+    const tap1Time = s.tap1?.time;
+    if (tap1Time && chartData.candles.length > 0) {{
+      const lastTime = chartData.candles[chartData.candles.length - 1].time;
+      chart.timeScale().setVisibleRange({{
+        from: tap1Time - 3600 * 4,
+        to: lastTime + 3600 * 4,
+      }});
+    }}
+  }}
+}}
+
+/* ===== render the panel cards ===== */
+function renderPanel() {{
+  const panel = document.getElementById('panel');
+  const filtered = allSchematics.filter(s => currentFilter === 'all' || s.state === currentFilter);
+
+  if (filtered.length === 0) {{
+    panel.innerHTML = '<div class="empty">No ' + (currentFilter === 'all' ? '' : currentFilter.replace('_',' ') + ' ') + 'schematics detected on ' + TIMEFRAME.toUpperCase() + '</div>';
+    return;
+  }}
+
+  // Sort: active first, then in_formation, then completed
+  const order = {{ active: 0, in_formation: 1, completed: 2 }};
+  const sorted = [...filtered].sort((a, b) => (order[a.state] ?? 9) - (order[b.state] ?? 9));
+  let html = '';
+  sorted.forEach(s => {{
+    const realIdx = allSchematics.indexOf(s);
+    html += buildCard(s, realIdx);
+  }});
+  panel.innerHTML = html;
+}}
+
+/* ===== fetch data and render ===== */
+async function loadData() {{
+  try {{
+    const url = '/api/schematics-5a-data?symbol=' + encodeURIComponent(SYMBOL) + '&timeframe=' + TIMEFRAME;
+    const resp = await fetch(url);
+    const data = await resp.json();
+
+    if (data.error) {{
+      document.getElementById('panel').innerHTML = '<div class="empty" style="color:#ff4444">Error: ' + data.error + '</div>';
+      return;
+    }}
+
+    chartData = data;
+    allSchematics = [
+      ...(data.active || []),
+      ...(data.in_formation || []),
+      ...(data.completed || []),
+    ];
+
+    // Update live price
+    if (data.current_price) {{
+      document.getElementById('livePrice').textContent = fmt(data.current_price);
+    }}
+
+    // Summary chips
+    const chips = document.getElementById('summaryChips');
+    chips.innerHTML =
+      '<span class="chip active-chip">Active: ' + (data.active?.length || 0) + '</span>' +
+      '<span class="chip forming">Forming: ' + (data.in_formation?.length || 0) + '</span>' +
+      '<span class="chip completed">Done: ' + (data.completed?.length || 0) + '</span>';
+
+    // Set candle data
+    if (data.candles && data.candles.length > 0) {{
+      candleSeries.setData(data.candles);
+    }}
+
+    // Draw first schematic (or selected)
+    clearOverlays();
+    if (allSchematics.length > 0) {{
+      if (selectedIdx < 0 || selectedIdx >= allSchematics.length) selectedIdx = 0;
+      drawSchematic(allSchematics[selectedIdx], data.candles, true);
+    }}
+
+    renderPanel();
+  }} catch (e) {{
+    console.error('Failed to load schematics-5A data:', e);
+    document.getElementById('panel').innerHTML = '<div class="empty" style="color:#ff4444">Connection error</div>';
+  }}
+}}
+
+/* ===== controls wiring ===== */
+document.querySelectorAll('.filter-btn').forEach(btn => {{
+  btn.addEventListener('click', () => {{
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentFilter = btn.dataset.filter;
+    selectedIdx = -1;
+    renderPanel();
+    // Redraw first matching
+    clearOverlays();
+    const filtered = allSchematics.filter(s => currentFilter === 'all' || s.state === currentFilter);
+    if (filtered.length > 0) {{
+      selectedIdx = allSchematics.indexOf(filtered[0]);
+      drawSchematic(filtered[0], chartData?.candles || [], true);
+      renderPanel();
+    }}
+  }});
+}});
+
+document.getElementById('tfSelect').addEventListener('change', (e) => {{
+  TIMEFRAME = e.target.value;
+  selectedIdx = -1;
+  loadData();
+}});
+
+document.getElementById('symInput').addEventListener('keydown', (e) => {{
+  if (e.key === 'Enter') {{
+    let val = e.target.value.trim().toUpperCase();
+    if (!val.endsWith('USDT')) val += 'USDT';
+    SYMBOL = val;
+    selectedIdx = -1;
+    loadData();
+  }}
+}});
+
+/* ===== init ===== */
+initChart();
+loadData();
+
+// Auto-refresh every 60s
+setInterval(loadData, 60000);
+</script>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
+
+
 @app.get("/api/po3-data")
 async def get_po3_data(symbol: str, timeframe: str = "4h"):
     """
