@@ -3132,8 +3132,12 @@ async def get_schematic_data(symbol: str, timeframe: str = "4h", type: str = "tc
                 "ranges": range_list,
             })
         else:
-            # TCT schematic detection
-            schematics_result = detect_tct_schematics(df, range_list)
+            # TCT schematic detection — pass empty list so the detector uses
+            # its own _find_*_ranges() which produce dicts with the _idx keys
+            # that _create_tab() requires.  detect_best_range() returns
+            # {high, low} without _idx fields, causing every schematic to be
+            # silently skipped.
+            schematics_result = detect_tct_schematics(df, [])
 
             all_schematics = (
                 schematics_result.get("accumulation_schematics", []) +
@@ -3683,25 +3687,39 @@ async def get_schematics_5a_data(symbol: str = "BTCUSDT", timeframe: str = "4h")
             debug_info["acc_ranges_found"] = len(_acc_ranges)
             debug_info["dist_ranges_found"] = len(_dist_ranges)
 
-            # For each range, try creating Tap1 and Tap2 to see where detection fails
+            # For each range, try creating Tap1/Tap2/Tap3 and BOS to trace failures
             _range_details = []
-            for rd in (_acc_ranges[:3] + _dist_ranges[:3]):
+            for rd in (_acc_ranges[:5] + _dist_ranges[:5]):
                 rtype = rd.get("direction", "unknown")
                 tap_key = "range_low" if rtype == "accumulation" else "range_high"
                 t1 = _dbg_det._create_tab(rd, tap_key, "tap1")
                 t2 = None
                 t3_m1 = None
                 t3_m2 = None
+                t2_came_back = False
+                bos_info = None
                 if t1 and rtype == "accumulation":
                     t2 = _dbg_det._find_accumulation_tap2(rd, t1)
                     if t2:
-                        t3_m1 = _dbg_det._find_accumulation_tap3_model1(rd, t1, t2)
-                        t3_m2 = _dbg_det._find_accumulation_tap3_model2(rd, t1, t2)
+                        t2_came_back = _dbg_det._validate_deviation_came_back_inside(t2, rd, "low")
+                        if t2_came_back:
+                            t3_m1 = _dbg_det._find_accumulation_tap3_model1(rd, t1, t2)
+                            t3_m2 = _dbg_det._find_accumulation_tap3_model2(rd, t1, t2)
+                            tap3 = t3_m1 or t3_m2
+                            if tap3:
+                                model = "Model_1_Accumulation" if t3_m1 else "Model_2_Accumulation"
+                                bos_info = _dbg_det._detect_bos_confirmation(t2, tap3, model)
                 elif t1 and rtype == "distribution":
                     t2 = _dbg_det._find_distribution_tap2(rd, t1)
                     if t2:
-                        t3_m1 = _dbg_det._find_distribution_tap3_model1(rd, t1, t2)
-                        t3_m2 = _dbg_det._find_distribution_tap3_model2(rd, t1, t2)
+                        t2_came_back = _dbg_det._validate_deviation_came_back_inside(t2, rd, "high")
+                        if t2_came_back:
+                            t3_m1 = _dbg_det._find_distribution_tap3_model1(rd, t1, t2)
+                            t3_m2 = _dbg_det._find_distribution_tap3_model2(rd, t1, t2)
+                            tap3 = t3_m1 or t3_m2
+                            if tap3:
+                                model = "Model_1_Distribution" if t3_m1 else "Model_2_Distribution"
+                                bos_info = _dbg_det._detect_bos_confirmation(t2, tap3, model)
                 _range_details.append({
                     "type": rtype,
                     "range_high": rd.get("range_high"),
@@ -3710,10 +3728,15 @@ async def get_schematics_5a_data(symbol: str = "BTCUSDT", timeframe: str = "4h")
                     "range_low_idx": rd.get("range_low_idx"),
                     "has_tap1": t1 is not None,
                     "has_tap2": t2 is not None,
+                    "tap2_came_back": t2_came_back,
                     "has_tap3_m1": t3_m1 is not None,
                     "has_tap3_m2": t3_m2 is not None,
+                    "has_bos": bos_info is not None,
                     "tap1_price": t1["price"] if t1 else None,
                     "tap2_price": t2["price"] if t2 else None,
+                    "tap3_m1_price": t3_m1["price"] if t3_m1 else None,
+                    "tap3_m2_price": t3_m2["price"] if t3_m2 else None,
+                    "bos_price": bos_info.get("bos_price") if bos_info else None,
                 })
             debug_info["range_details"] = _range_details
         except Exception as dbg_e:
