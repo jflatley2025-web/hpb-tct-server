@@ -884,10 +884,13 @@ class TCTSchematicDetector:
             for i in range(search_start, min(start_idx + 35, len(self.candles))):
                 close_price = float(self.candles.iloc[i]["close"])
                 if close_price > sh["price"]:
-                    is_inside_range = close_price < high_price
+                    # Entry is at the broken swing level, not the candle close.
+                    # TCT: "enter on the break" = the MS level that was broken.
+                    is_inside_range = sh["price"] < high_price
                     return {
                         "idx": i,
-                        "price": close_price,
+                        "price": sh["price"],
+                        "confirmation_close": close_price,
                         "is_inside_range": is_inside_range,
                         "prev_swing_high": sh,
                         "bos_method": "candle_close"
@@ -951,10 +954,13 @@ class TCTSchematicDetector:
             for i in range(search_start, min(start_idx + 35, len(self.candles))):
                 close_price = float(self.candles.iloc[i]["close"])
                 if close_price < sl["price"]:
-                    is_inside_range = close_price > low_price
+                    # Entry is at the broken swing level, not the candle close.
+                    # TCT: "enter on the break" = the MS level that was broken.
+                    is_inside_range = sl["price"] > low_price
                     return {
                         "idx": i,
-                        "price": close_price,
+                        "price": sl["price"],
+                        "confirmation_close": close_price,
                         "is_inside_range": is_inside_range,
                         "prev_swing_low": sl,
                         "bos_method": "candle_close"
@@ -1119,7 +1125,9 @@ class TCTSchematicDetector:
 
         # Calculate entry, stop loss, target
         entry_price = bos["bos_price"] if bos else None
-        stop_loss = tap3["price"]  # TCT: "Stop loss below your third tap low"
+        # TCT: "Stop loss below your third tap low" — add 2% of range as buffer
+        stop_buffer = range_data["range_size"] * 0.02
+        stop_loss = tap3["price"] - stop_buffer
         target = range_data["range_high"]  # TCT: "Target the Range High"
 
         # ============================================================
@@ -1315,7 +1323,9 @@ class TCTSchematicDetector:
 
         # Calculate entry, stop loss, target
         entry_price = bos["bos_price"] if bos else None
-        stop_loss = tap3["price"]  # TCT: "Stop loss above your third tap high"
+        # TCT: "Stop loss above your third tap high" — add 2% of range as buffer
+        stop_buffer = range_data["range_size"] * 0.02
+        stop_loss = tap3["price"] + stop_buffer
         target = range_data["range_low"]  # TCT: "Target the Range Low"
 
         # ============================================================

@@ -5,6 +5,7 @@
 import os
 import asyncio
 import logging
+import time
 import httpx
 import pandas as pd
 import numpy as np
@@ -104,7 +105,8 @@ scanner_status = {
     "is_scanning": False,
     "scan_duration_sec": 0,
 }
-SCANNER_INTERVAL_SEC = 4 * 60 * 60  # 4 hours
+SCANNER_INTERVAL_SEC = 12 * 60 * 60  # 12 hours (reduced from 4h to cut server load)
+ENABLE_SCANNER = os.environ.get("ENABLE_SCANNER", "true").lower() in ("true", "1", "yes")
 # Range scanner config (rebuilt using /ranges page detect_ranges logic)
 RANGE_MIN_RPS = 6.5                  # minimum quality score to qualify (0-10)
 
@@ -2544,12 +2546,29 @@ def validate_gates(context: Dict) -> Dict:
 _shared_client: Optional[httpx.AsyncClient] = None
 _scanner_consecutive_errors = 0  # Track consecutive fetch errors for adaptive backoff
 
+# Candle cache: keyed by (symbol, interval, limit), value is (timestamp, DataFrame)
+_candle_cache: Dict[tuple, tuple] = {}
+CANDLE_CACHE_TTL_SEC = 3600  # Cache candles for 1 hour
+
+# Invalid symbols: 400 errors → never retry during this process lifetime
+_invalid_symbols: set = set()
+
+# Concurrency limiter: cap parallel requests (free tier friendly)
+_fetch_semaphore: Optional[asyncio.Semaphore] = None
+MAX_CONCURRENT_REQUESTS = 8
+
+async def _get_fetch_semaphore() -> asyncio.Semaphore:
+    global _fetch_semaphore
+    if _fetch_semaphore is None:
+        _fetch_semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+    return _fetch_semaphore
+
 async def _get_shared_client() -> httpx.AsyncClient:
     global _shared_client
     if _shared_client is None or _shared_client.is_closed:
         _shared_client = httpx.AsyncClient(
-            timeout=15,
-            limits=httpx.Limits(max_connections=5, max_keepalive_connections=3),
+            timeout=10,
+            limits=httpx.Limits(max_connections=MAX_CONCURRENT_REQUESTS, max_keepalive_connections=5),
         )
     return _shared_client
 
@@ -2558,41 +2577,78 @@ async def fetch_mexc_candles(symbol: str, interval: str, limit: int = 200) -> Op
     # Normalize intervals to MEXC-supported values (MEXC spot uses 60m not 1h, etc.)
     _MEXC_INTERVAL_MAP = {"1h": "60m", "2h": "4h"}
     interval = _MEXC_INTERVAL_MAP.get(interval, interval)
+
+    # Skip symbols permanently marked invalid (400 errors)
+    if symbol in _invalid_symbols:
+        return None
+
+    # Check cache first
+    cache_key = (symbol, interval, limit)
+    now = time.time()
+    cached = _candle_cache.get(cache_key)
+    if cached and (now - cached[0]) < CANDLE_CACHE_TTL_SEC:
+        return cached[1]
+
     url = f"{MEXC_URL_BASE}/api/v3/klines"
     params = {"symbol": symbol, "interval": interval, "limit": limit}
 
-    try:
-        client = await _get_shared_client()
-        r = await client.get(url, params=params)
+    sem = await _get_fetch_semaphore()
+    async with sem:
+        try:
+            client = await _get_shared_client()
+            r = await client.get(url, params=params)
 
-        if r.status_code == 429:
-            # Rate limited — back off significantly
+            if r.status_code == 429:
+                # Rate limited — back off significantly
+                _scanner_consecutive_errors += 1
+                logger.warning(f"[MEXC] Rate limited (429) for {symbol}/{interval}, backing off")
+                await asyncio.sleep(min(5 * _scanner_consecutive_errors, 30))
+                return None
+
+            if r.status_code == 400:
+                # Mark symbol as invalid — never retry
+                _invalid_symbols.add(symbol)
+                logger.info(f"[MEXC] 400 for {symbol} — marked invalid, won't retry")
+                return None
+
+            if r.status_code != 200:
+                _scanner_consecutive_errors += 1
+                # Exponential backoff on non-200
+                backoff = min(2 ** _scanner_consecutive_errors, 30)
+                await asyncio.sleep(backoff)
+                return None
+
+            _scanner_consecutive_errors = max(0, _scanner_consecutive_errors - 1)  # Decay on success
+            data = r.json()
+            if not data or not isinstance(data, list):
+                return None
+
+            df = pd.DataFrame(data, columns=[
+                "open_time", "open", "high", "low", "close", "volume",
+                "close_time", "quote_vol"
+            ])
+            df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+            for c in ["open", "high", "low", "close", "volume"]:
+                df[c] = df[c].astype(float)
+
+            # Store in cache
+            _candle_cache[cache_key] = (now, df)
+            return df
+        except Exception as e:
             _scanner_consecutive_errors += 1
-            logger.warning(f"[MEXC] Rate limited (429) for {symbol}/{interval}, backing off")
-            await asyncio.sleep(min(5 * _scanner_consecutive_errors, 30))
+            logger.error(f"[MEXC_FETCH_ERROR] {symbol}/{interval}: {e}")
             return None
 
-        if r.status_code != 200:
-            _scanner_consecutive_errors += 1
-            return None
 
-        _scanner_consecutive_errors = max(0, _scanner_consecutive_errors - 1)  # Decay on success
-        data = r.json()
-        if not data or not isinstance(data, list):
-            return None
+def _evict_stale_cache():
+    """Remove expired entries from the candle cache to prevent memory bloat."""
+    now = time.time()
+    stale_keys = [k for k, (ts, _) in _candle_cache.items() if (now - ts) > CANDLE_CACHE_TTL_SEC]
+    for k in stale_keys:
+        del _candle_cache[k]
+    if stale_keys:
+        logger.info(f"[CACHE] Evicted {len(stale_keys)} stale cache entries")
 
-        df = pd.DataFrame(data, columns=[
-            "open_time", "open", "high", "low", "close", "volume",
-            "close_time", "quote_vol"
-        ])
-        df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
-        for c in ["open", "high", "low", "close", "volume"]:
-            df[c] = df[c].astype(float)
-        return df
-    except Exception as e:
-        _scanner_consecutive_errors += 1
-        logger.error(f"[MEXC_FETCH_ERROR] {symbol}/{interval}: {e}")
-        return None
 
 async def detect_best_range(candles: List) -> Optional[Dict]:
     """Simple range detection from candles"""
@@ -2668,16 +2724,17 @@ async def scan_pair_range(symbol: str) -> Optional[Dict]:
     Returns a setup dict if score qualifies, or None.
     """
     try:
-        # Fetch 1D candles — request 400 to check pair age (365+ days)
-        df = await fetch_mexc_candles(symbol, "1d", 400)
+        # Fetch 1D candles — request 200 (reduced from 400 to cut server load)
+        df = await fetch_mexc_candles(symbol, "1d", 200)
         if df is None or len(df) < 30:
             return None
 
-        # Pair age filter: earliest candle must be >= 365 days ago
+        # Pair age filter: earliest candle must be >= 180 days ago
+        # (200 daily candles ≈ ~7 months of history)
         earliest_candle = df["open_time"].iloc[0]
         latest_candle = df["open_time"].iloc[-1]
         pair_age_days = (latest_candle - earliest_candle).total_seconds() / 86400
-        if pair_age_days < PAIR_MIN_AGE_DAYS:
+        if pair_age_days < 180:
             return None
 
         current_price = float(df.iloc[-1]["close"])
@@ -2729,7 +2786,7 @@ async def run_full_scan():
     Scan all pairs for high-probability ranges using the /ranges page detect_ranges logic.
     Fetches 1D candles, runs sliding-window range detection, scores best range per pair.
     Excludes BNB-exchange pairs and pairs under 1 year old.
-    Runs as a background task every 4 hours.
+    Runs as a background task every 12 hours.
     """
     global top_5_setups
 
@@ -2741,6 +2798,9 @@ async def run_full_scan():
     scanner_status["total_pairs"] = len(COIN_LIST)
     scanner_status["pairs_scanned"] = 0
     start_time = datetime.utcnow()
+
+    # Evict stale cache entries before a new scan
+    _evict_stale_cache()
 
     logger.info(f"[RANGE_SCANNER] Starting range scan of {len(COIN_LIST)} pairs (1D timeframe, detect_ranges logic, score >= {RANGE_MIN_RPS})")
 
@@ -2928,7 +2988,7 @@ async def scan_forming_setups():
 
 
 async def scanner_loop():
-    """Background loop that runs the scanner every 4 hours."""
+    """Background loop that runs the scanner every 12 hours."""
     # Initial scan after a short delay to let the server start
     await asyncio.sleep(10)
     await run_full_scan()
@@ -2940,9 +3000,12 @@ async def scanner_loop():
 
 @app.on_event("startup")
 async def startup_event():
-    """Start the background scanner on server startup."""
-    asyncio.create_task(scanner_loop())
-    logger.info(f"[SCANNER] Background scanner started — interval: {SCANNER_INTERVAL_SEC}s ({SCANNER_INTERVAL_SEC // 3600}h)")
+    """Start the background scanner on server startup (if enabled)."""
+    if ENABLE_SCANNER:
+        asyncio.create_task(scanner_loop())
+        logger.info(f"[SCANNER] Background scanner started — interval: {SCANNER_INTERVAL_SEC}s ({SCANNER_INTERVAL_SEC // 3600}h)")
+    else:
+        logger.info("[SCANNER] Scanner DISABLED via ENABLE_SCANNER env var — web-only mode")
 
 
 @app.on_event("shutdown")
