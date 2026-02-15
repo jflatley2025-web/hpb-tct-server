@@ -5,6 +5,7 @@
 import os
 import asyncio
 import logging
+import time
 import httpx
 import pandas as pd
 import numpy as np
@@ -19,6 +20,7 @@ from tct_schematics import detect_tct_schematics
 from po3_schematics import detect_po3_schematics
 from trade_execution import generate_execution_plan, calculate_leverage_comparison, calculate_capital_allocation
 from market_structure import MarketStructure, evaluate_rtz
+from tensor_tct_trader import get_trader
 
 
 # ================================================================
@@ -104,7 +106,8 @@ scanner_status = {
     "is_scanning": False,
     "scan_duration_sec": 0,
 }
-SCANNER_INTERVAL_SEC = 4 * 60 * 60  # 4 hours
+SCANNER_INTERVAL_SEC = 12 * 60 * 60  # 12 hours (reduced from 4h to cut server load)
+ENABLE_SCANNER = os.environ.get("ENABLE_SCANNER", "true").lower() in ("true", "1", "yes")
 # Range scanner config (rebuilt using /ranges page detect_ranges logic)
 RANGE_MIN_RPS = 6.5                  # minimum quality score to qualify (0-10)
 
@@ -2544,12 +2547,29 @@ def validate_gates(context: Dict) -> Dict:
 _shared_client: Optional[httpx.AsyncClient] = None
 _scanner_consecutive_errors = 0  # Track consecutive fetch errors for adaptive backoff
 
+# Candle cache: keyed by (symbol, interval, limit), value is (timestamp, DataFrame)
+_candle_cache: Dict[tuple, tuple] = {}
+CANDLE_CACHE_TTL_SEC = 3600  # Cache candles for 1 hour
+
+# Invalid symbols: 400 errors → never retry during this process lifetime
+_invalid_symbols: set = set()
+
+# Concurrency limiter: cap parallel requests (free tier friendly)
+_fetch_semaphore: Optional[asyncio.Semaphore] = None
+MAX_CONCURRENT_REQUESTS = 8
+
+async def _get_fetch_semaphore() -> asyncio.Semaphore:
+    global _fetch_semaphore
+    if _fetch_semaphore is None:
+        _fetch_semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+    return _fetch_semaphore
+
 async def _get_shared_client() -> httpx.AsyncClient:
     global _shared_client
     if _shared_client is None or _shared_client.is_closed:
         _shared_client = httpx.AsyncClient(
-            timeout=15,
-            limits=httpx.Limits(max_connections=5, max_keepalive_connections=3),
+            timeout=10,
+            limits=httpx.Limits(max_connections=MAX_CONCURRENT_REQUESTS, max_keepalive_connections=5),
         )
     return _shared_client
 
@@ -2558,41 +2578,78 @@ async def fetch_mexc_candles(symbol: str, interval: str, limit: int = 200) -> Op
     # Normalize intervals to MEXC-supported values (MEXC spot uses 60m not 1h, etc.)
     _MEXC_INTERVAL_MAP = {"1h": "60m", "2h": "4h"}
     interval = _MEXC_INTERVAL_MAP.get(interval, interval)
+
+    # Skip symbols permanently marked invalid (400 errors)
+    if symbol in _invalid_symbols:
+        return None
+
+    # Check cache first
+    cache_key = (symbol, interval, limit)
+    now = time.time()
+    cached = _candle_cache.get(cache_key)
+    if cached and (now - cached[0]) < CANDLE_CACHE_TTL_SEC:
+        return cached[1]
+
     url = f"{MEXC_URL_BASE}/api/v3/klines"
     params = {"symbol": symbol, "interval": interval, "limit": limit}
 
-    try:
-        client = await _get_shared_client()
-        r = await client.get(url, params=params)
+    sem = await _get_fetch_semaphore()
+    async with sem:
+        try:
+            client = await _get_shared_client()
+            r = await client.get(url, params=params)
 
-        if r.status_code == 429:
-            # Rate limited — back off significantly
+            if r.status_code == 429:
+                # Rate limited — back off significantly
+                _scanner_consecutive_errors += 1
+                logger.warning(f"[MEXC] Rate limited (429) for {symbol}/{interval}, backing off")
+                await asyncio.sleep(min(5 * _scanner_consecutive_errors, 30))
+                return None
+
+            if r.status_code == 400:
+                # Mark symbol as invalid — never retry
+                _invalid_symbols.add(symbol)
+                logger.info(f"[MEXC] 400 for {symbol} — marked invalid, won't retry")
+                return None
+
+            if r.status_code != 200:
+                _scanner_consecutive_errors += 1
+                # Exponential backoff on non-200
+                backoff = min(2 ** _scanner_consecutive_errors, 30)
+                await asyncio.sleep(backoff)
+                return None
+
+            _scanner_consecutive_errors = max(0, _scanner_consecutive_errors - 1)  # Decay on success
+            data = r.json()
+            if not data or not isinstance(data, list):
+                return None
+
+            df = pd.DataFrame(data, columns=[
+                "open_time", "open", "high", "low", "close", "volume",
+                "close_time", "quote_vol"
+            ])
+            df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+            for c in ["open", "high", "low", "close", "volume"]:
+                df[c] = df[c].astype(float)
+
+            # Store in cache
+            _candle_cache[cache_key] = (now, df)
+            return df
+        except Exception as e:
             _scanner_consecutive_errors += 1
-            logger.warning(f"[MEXC] Rate limited (429) for {symbol}/{interval}, backing off")
-            await asyncio.sleep(min(5 * _scanner_consecutive_errors, 30))
+            logger.error(f"[MEXC_FETCH_ERROR] {symbol}/{interval}: {e}")
             return None
 
-        if r.status_code != 200:
-            _scanner_consecutive_errors += 1
-            return None
 
-        _scanner_consecutive_errors = max(0, _scanner_consecutive_errors - 1)  # Decay on success
-        data = r.json()
-        if not data or not isinstance(data, list):
-            return None
+def _evict_stale_cache():
+    """Remove expired entries from the candle cache to prevent memory bloat."""
+    now = time.time()
+    stale_keys = [k for k, (ts, _) in _candle_cache.items() if (now - ts) > CANDLE_CACHE_TTL_SEC]
+    for k in stale_keys:
+        del _candle_cache[k]
+    if stale_keys:
+        logger.info(f"[CACHE] Evicted {len(stale_keys)} stale cache entries")
 
-        df = pd.DataFrame(data, columns=[
-            "open_time", "open", "high", "low", "close", "volume",
-            "close_time", "quote_vol"
-        ])
-        df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
-        for c in ["open", "high", "low", "close", "volume"]:
-            df[c] = df[c].astype(float)
-        return df
-    except Exception as e:
-        _scanner_consecutive_errors += 1
-        logger.error(f"[MEXC_FETCH_ERROR] {symbol}/{interval}: {e}")
-        return None
 
 async def detect_best_range(candles: List) -> Optional[Dict]:
     """Simple range detection from candles"""
@@ -2668,16 +2725,17 @@ async def scan_pair_range(symbol: str) -> Optional[Dict]:
     Returns a setup dict if score qualifies, or None.
     """
     try:
-        # Fetch 1D candles — request 400 to check pair age (365+ days)
-        df = await fetch_mexc_candles(symbol, "1d", 400)
+        # Fetch 1D candles — request 200 (reduced from 400 to cut server load)
+        df = await fetch_mexc_candles(symbol, "1d", 200)
         if df is None or len(df) < 30:
             return None
 
-        # Pair age filter: earliest candle must be >= 365 days ago
+        # Pair age filter: earliest candle must be >= 180 days ago
+        # (200 daily candles ≈ ~7 months of history)
         earliest_candle = df["open_time"].iloc[0]
         latest_candle = df["open_time"].iloc[-1]
         pair_age_days = (latest_candle - earliest_candle).total_seconds() / 86400
-        if pair_age_days < PAIR_MIN_AGE_DAYS:
+        if pair_age_days < 180:
             return None
 
         current_price = float(df.iloc[-1]["close"])
@@ -2729,7 +2787,7 @@ async def run_full_scan():
     Scan all pairs for high-probability ranges using the /ranges page detect_ranges logic.
     Fetches 1D candles, runs sliding-window range detection, scores best range per pair.
     Excludes BNB-exchange pairs and pairs under 1 year old.
-    Runs as a background task every 4 hours.
+    Runs as a background task every 12 hours.
     """
     global top_5_setups
 
@@ -2741,6 +2799,9 @@ async def run_full_scan():
     scanner_status["total_pairs"] = len(COIN_LIST)
     scanner_status["pairs_scanned"] = 0
     start_time = datetime.utcnow()
+
+    # Evict stale cache entries before a new scan
+    _evict_stale_cache()
 
     logger.info(f"[RANGE_SCANNER] Starting range scan of {len(COIN_LIST)} pairs (1D timeframe, detect_ranges logic, score >= {RANGE_MIN_RPS})")
 
@@ -2928,7 +2989,7 @@ async def scan_forming_setups():
 
 
 async def scanner_loop():
-    """Background loop that runs the scanner every 4 hours."""
+    """Background loop that runs the scanner every 12 hours."""
     # Initial scan after a short delay to let the server start
     await asyncio.sleep(10)
     await run_full_scan()
@@ -2940,9 +3001,16 @@ async def scanner_loop():
 
 @app.on_event("startup")
 async def startup_event():
-    """Start the background scanner on server startup."""
-    asyncio.create_task(scanner_loop())
-    logger.info(f"[SCANNER] Background scanner started — interval: {SCANNER_INTERVAL_SEC}s ({SCANNER_INTERVAL_SEC // 3600}h)")
+    """Start background scanners on server startup."""
+    if ENABLE_SCANNER:
+        asyncio.create_task(scanner_loop())
+        logger.info(f"[SCANNER] Background scanner started — interval: {SCANNER_INTERVAL_SEC}s ({SCANNER_INTERVAL_SEC // 3600}h)")
+    else:
+        logger.info("[SCANNER] Scanner DISABLED via ENABLE_SCANNER env var — web-only mode")
+
+    # Always start the tensor-trade auto-scan loop (hands-free trading)
+    asyncio.create_task(tensor_trade_auto_scan_loop())
+    logger.info("[TENSOR-TRADE] Background auto-scan loop launched")
 
 
 @app.on_event("shutdown")
@@ -3877,6 +3945,51 @@ body{{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-ser
   padding:4px 8px;font-size:.75rem;outline:none;
 }}
 .controls select:focus,.controls input:focus{{border-color:#e040fb}}
+
+/* ---- pair dropdown with search ---- */
+.pair-dropdown-wrap{{position:relative;display:inline-block}}
+.pair-search{{width:140px;background:#181824;color:#e0e0e0;border:1px solid #2d2d44;border-radius:4px;padding:4px 8px;font-size:.75rem;outline:none}}
+.pair-search:focus{{border-color:#e040fb}}
+.pair-menu{{
+  position:absolute;top:100%;left:0;width:220px;max-height:260px;overflow-y:auto;
+  background:#181824;border:1px solid #2d2d44;border-radius:0 0 6px 6px;
+  z-index:100;display:none;
+}}
+.pair-menu.open{{display:block}}
+.pair-cat{{color:#666;font-size:.6rem;padding:6px 8px 2px;text-transform:uppercase;letter-spacing:.5px}}
+.pair-opt{{
+  padding:5px 10px;font-size:.73rem;color:#ccc;cursor:pointer;
+}}
+.pair-opt:hover,.pair-opt.highlighted{{background:#252540;color:#fff}}
+.pair-opt.selected-pair{{color:#e040fb;font-weight:600}}
+
+/* ---- scan button ---- */
+.scan-btn{{
+  padding:4px 14px;font-size:.72rem;border-radius:4px;cursor:pointer;
+  border:1px solid #e040fb;background:rgba(224,64,251,.12);color:#e040fb;
+  font-weight:600;transition:all .15s;
+}}
+.scan-btn:hover{{background:#e040fb;color:#fff}}
+.scan-btn:disabled{{opacity:.4;cursor:not-allowed}}
+
+/* ---- debug toggle ---- */
+.debug-toggle{{
+  display:flex;align-items:center;gap:6px;padding:6px 10px;cursor:pointer;
+  color:#e040fb;font-size:.68rem;font-weight:600;border:1px solid #22223a;
+  border-radius:6px;background:#14141f;margin-bottom:2px;user-select:none;
+}}
+.debug-toggle:hover{{border-color:#e040fb;background:#1a1a2e}}
+.debug-toggle .arrow{{transition:transform .15s}}
+.debug-toggle .arrow.open{{transform:rotate(90deg)}}
+.debug-body{{display:none}}
+.debug-body.open{{display:block}}
+
+/* ---- panel section label ---- */
+.panel-section-label{{
+  color:#888;font-size:.62rem;text-transform:uppercase;letter-spacing:.6px;
+  padding:6px 4px 3px;border-bottom:1px solid #1e1e2d;margin-bottom:4px;
+}}
+
 .filter-btn{{
   padding:4px 10px;font-size:.7rem;border-radius:4px;cursor:pointer;
   border:1px solid #333;background:transparent;color:#888;transition:all .15s;
@@ -4015,9 +4128,12 @@ body{{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-ser
 </div>
 
 <div class="controls" id="controlsBar">
-  <label>Symbol</label>
-  <input id="symInput" value="{symbol}" style="width:100px" />
-  <label>Timeframe</label>
+  <label>1. Pair</label>
+  <div class="pair-dropdown-wrap" id="pairDropdown">
+    <input class="pair-search" id="pairSearch" value="{symbol}" placeholder="Search pair…" autocomplete="off" />
+    <div class="pair-menu" id="pairMenu"></div>
+  </div>
+  <label>2. Timeframe</label>
   <select id="tfSelect">
     <option value="1m" {"selected" if timeframe=="1m" else ""}>1m</option>
     <option value="5m" {"selected" if timeframe=="5m" else ""}>5m</option>
@@ -4028,6 +4144,8 @@ body{{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-ser
     <option value="4h" {"selected" if timeframe=="4h" else ""}>4H</option>
     <option value="1d" {"selected" if timeframe=="1d" else ""}>1D</option>
   </select>
+  <button class="scan-btn" id="scanBtn" onclick="runScan()">3. Scan Schematics</button>
+  <span style="color:#333;font-size:.6rem;margin:0 4px">|</span>
   <button class="filter-btn active" data-filter="all">All</button>
   <button class="filter-btn" data-filter="active">Active</button>
   <button class="filter-btn" data-filter="in_formation">Forming</button>
@@ -4052,9 +4170,19 @@ body{{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-ser
     </div>
   </div>
   <div class="panel">
-    <div id="debugPanel"></div>
+    <div class="panel-section-label">TCT Schematic Models</div>
     <div id="panel">
-      <div class="empty">Loading schematics&hellip;</div>
+      <div class="empty">Select a pair and timeframe, then click <b>Scan Schematics</b></div>
+    </div>
+    <div style="margin-top:auto">
+      <div class="debug-toggle" id="debugToggle" onclick="toggleDebug()">
+        <span class="arrow" id="debugArrow">&#9654;</span>
+        Debug Diagnostics
+        <span id="debugBadge" style="margin-left:auto;color:#666;font-size:.6rem"></span>
+      </div>
+      <div class="debug-body" id="debugBody">
+        <div id="debugPanel"></div>
+      </div>
     </div>
   </div>
 </div>
@@ -4072,6 +4200,16 @@ let currentFilter = 'all';
 let selectedIdx = -1;
 let allSchematics = [];   // merged list
 let chartData = null;
+let coinListData = null;  // cached coin list
+let hasScanRun = false;   // track whether user has triggered a scan
+
+/* ===== debug toggle ===== */
+function toggleDebug() {{
+  const body = document.getElementById('debugBody');
+  const arrow = document.getElementById('debugArrow');
+  body.classList.toggle('open');
+  arrow.classList.toggle('open');
+}}
 
 /* ===== chart ===== */
 let chart, candleSeries;
@@ -4409,6 +4547,12 @@ async function loadData() {{
       ...(data.completed || []),
     ];
 
+    // Use the resolved symbol from API response to ensure chart matches
+    if (data.symbol) {{
+      SYMBOL = data.symbol;
+      document.getElementById('pairSearch').value = data.symbol;
+    }}
+
     // Update live price and header
     if (data.current_price) {{
       document.getElementById('livePrice').textContent = fmt(data.current_price);
@@ -4417,6 +4561,12 @@ async function loadData() {{
     document.getElementById('headerTF').textContent = TIMEFRAME.toUpperCase();
     document.title = 'Schematics 5A — ' + SYMBOL + ' ' + TIMEFRAME.toUpperCase();
 
+    // Update URL to reflect current pair + timeframe
+    const curUrl = new URL(window.location);
+    curUrl.searchParams.set('symbol', SYMBOL);
+    curUrl.searchParams.set('timeframe', TIMEFRAME);
+    window.history.replaceState(null, '', curUrl);
+
     // Summary chips
     const chips = document.getElementById('summaryChips');
     chips.innerHTML =
@@ -4424,11 +4574,12 @@ async function loadData() {{
       '<span class="chip forming">Forming: ' + (data.in_formation?.length || 0) + '</span>' +
       '<span class="chip completed">Done: ' + (data.completed?.length || 0) + '</span>';
 
-    // Debug info in panel header
+    // Debug info — collapsed section
     if (data.debug) {{
       const d = data.debug;
+      const rangeCount = (d.acc_ranges_found ?? 0) + (d.dist_ranges_found ?? 0);
+      document.getElementById('debugBadge').textContent = d.candles_count + ' candles, ' + rangeCount + ' ranges';
       let dbgHtml = '<div class="card" style="border-left:3px solid #e040fb;font-size:.65rem">';
-      dbgHtml += '<div class="card-header"><span class="card-title" style="color:#e040fb">Debug Diagnostics</span></div>';
       dbgHtml += '<div class="card-grid">';
       dbgHtml += '<div class="card-row"><span class="card-label">Candles</span><span class="card-val">' + d.candles_count + '</span></div>';
       dbgHtml += '<div class="card-row"><span class="card-label">Acc Ranges</span><span class="card-val">' + (d.acc_ranges_found ?? '?') + '</span></div>';
@@ -4438,7 +4589,6 @@ async function loadData() {{
       if (d.detector_error) dbgHtml += '<div class="card-row"><span class="card-label">Det Error</span><span class="card-val red">' + d.detector_error + '</span></div>';
       if (d.debug_error) dbgHtml += '<div class="card-row"><span class="card-label">Dbg Error</span><span class="card-val red">' + d.debug_error + '</span></div>';
       dbgHtml += '</div>';
-      // Range details
       if (d.range_details && d.range_details.length > 0) {{
         dbgHtml += '<div style="margin-top:6px;border-top:1px solid #222;padding-top:4px">';
         d.range_details.forEach((r, i) => {{
@@ -4495,7 +4645,6 @@ document.querySelectorAll('.filter-btn').forEach(btn => {{
     currentFilter = btn.dataset.filter;
     selectedIdx = -1;
     renderPanel();
-    // Redraw first matching
     clearOverlays();
     const filtered = allSchematics.filter(s => currentFilter === 'all' || s.state === currentFilter);
     if (filtered.length > 0) {{
@@ -4506,32 +4655,149 @@ document.querySelectorAll('.filter-btn').forEach(btn => {{
   }});
 }});
 
-document.getElementById('tfSelect').addEventListener('change', (e) => {{
-  TIMEFRAME = e.target.value;
-  selectedIdx = -1;
-  _consecutiveErrors = 0;
-  loadData();
-}});
+/* ===== pair dropdown ===== */
+const pairSearch = document.getElementById('pairSearch');
+const pairMenu   = document.getElementById('pairMenu');
+let pairHighlightIdx = -1;
 
-document.getElementById('symInput').addEventListener('keydown', (e) => {{
+async function loadCoinList() {{
+  try {{
+    const resp = await fetch('/api/coin-list');
+    coinListData = await resp.json();
+    renderPairMenu('');
+  }} catch(e) {{ console.error('coin-list load error', e); }}
+}}
+
+function renderPairMenu(filter) {{
+  if (!coinListData) return;
+  const q = filter.toUpperCase();
+  let html = '';
+  const cats = coinListData.categories || {{}};
+  const catNames = {{ majors: 'Majors', defi: 'DeFi', layer_1_2: 'Layer 1/2', meme: 'Meme', ai: 'AI' }};
+  let count = 0;
+  for (const [key, label] of Object.entries(catNames)) {{
+    const pairs = (cats[key] || []).filter(p => !q || p.includes(q));
+    if (pairs.length === 0) continue;
+    html += '<div class="pair-cat">' + label + '</div>';
+    pairs.forEach(p => {{
+      const sel = p === SYMBOL ? ' selected-pair' : '';
+      html += '<div class="pair-opt' + sel + '" data-pair="' + p + '">' + p.replace('USDT', '/USDT') + '</div>';
+      count++;
+    }});
+  }}
+  // Also show from "all" list if filter matches but not in categories
+  if (q && count < 20) {{
+    const allPairs = coinListData.all || [];
+    const shown = new Set();
+    for (const [key] of Object.entries(catNames)) {{
+      (cats[key] || []).forEach(p => shown.add(p));
+    }}
+    const extras = allPairs.filter(p => p.includes(q) && !shown.has(p)).slice(0, 15);
+    if (extras.length > 0) {{
+      html += '<div class="pair-cat">Other</div>';
+      extras.forEach(p => {{
+        const sel = p === SYMBOL ? ' selected-pair' : '';
+        html += '<div class="pair-opt' + sel + '" data-pair="' + p + '">' + p.replace('USDT', '/USDT') + '</div>';
+      }});
+    }}
+  }}
+  if (!html) html = '<div style="padding:10px;color:#555;font-size:.7rem">No matches</div>';
+  pairMenu.innerHTML = html;
+  // Click handlers
+  pairMenu.querySelectorAll('.pair-opt').forEach(opt => {{
+    opt.addEventListener('click', () => selectPair(opt.dataset.pair));
+  }});
+}}
+
+function selectPair(pair) {{
+  SYMBOL = pair;
+  pairSearch.value = pair;
+  pairMenu.classList.remove('open');
+  // Update header immediately
+  document.getElementById('headerPair').textContent = pair.replace('USDT', '/USDT');
+  document.title = 'Schematics 5A — ' + pair + ' ' + TIMEFRAME.toUpperCase();
+  // Update URL without reload
+  const url = new URL(window.location);
+  url.searchParams.set('symbol', pair);
+  window.history.replaceState(null, '', url);
+}}
+
+pairSearch.addEventListener('focus', () => {{
+  renderPairMenu(pairSearch.value);
+  pairMenu.classList.add('open');
+}});
+pairSearch.addEventListener('input', () => {{
+  renderPairMenu(pairSearch.value);
+  pairMenu.classList.add('open');
+}});
+pairSearch.addEventListener('keydown', (e) => {{
   if (e.key === 'Enter') {{
-    let val = e.target.value.trim().toUpperCase();
+    e.preventDefault();
+    let val = pairSearch.value.trim().toUpperCase();
     if (!val.endsWith('USDT')) val += 'USDT';
-    SYMBOL = val;
-    selectedIdx = -1;
-    _consecutiveErrors = 0;
-    loadData();
+    selectPair(val);
+  }}
+  if (e.key === 'Escape') pairMenu.classList.remove('open');
+}});
+// Close dropdown when clicking outside
+document.addEventListener('click', (e) => {{
+  if (!document.getElementById('pairDropdown').contains(e.target)) {{
+    pairMenu.classList.remove('open');
   }}
 }});
 
+/* ===== scan button ===== */
+function runScan() {{
+  // Read latest values from the controls
+  let sym = pairSearch.value.trim().toUpperCase();
+  if (!sym.endsWith('USDT')) sym += 'USDT';
+  SYMBOL = sym;
+  TIMEFRAME = document.getElementById('tfSelect').value;
+
+  // Update header and URL
+  document.getElementById('headerPair').textContent = SYMBOL.replace('USDT', '/USDT');
+  document.getElementById('headerTF').textContent = TIMEFRAME.toUpperCase();
+  document.title = 'Schematics 5A — ' + SYMBOL + ' ' + TIMEFRAME.toUpperCase();
+  const url = new URL(window.location);
+  url.searchParams.set('symbol', SYMBOL);
+  url.searchParams.set('timeframe', TIMEFRAME);
+  window.history.replaceState(null, '', url);
+
+  // Reset state and scan
+  selectedIdx = -1;
+  _consecutiveErrors = 0;
+  hasScanRun = true;
+  document.getElementById('scanBtn').disabled = true;
+  document.getElementById('scanBtn').textContent = 'Scanning…';
+  document.getElementById('panel').innerHTML = '<div class="empty">Scanning ' + SYMBOL.replace('USDT','/USDT') + ' on ' + TIMEFRAME.toUpperCase() + '…</div>';
+  loadData().finally(() => {{
+    document.getElementById('scanBtn').disabled = false;
+    document.getElementById('scanBtn').textContent = '3. Scan Schematics';
+  }});
+}}
+
 /* ===== init ===== */
 initChart();
-loadData();
-scheduleRefresh();
+loadCoinList();
+
+// Auto-scan on load if a specific symbol was provided in URL
+const urlParams = new URLSearchParams(window.location.search);
+if (urlParams.has('symbol') && urlParams.get('symbol').toUpperCase() !== 'BTCUSDT') {{
+  // A specific symbol was requested — auto-scan
+  hasScanRun = true;
+  loadData();
+  scheduleRefresh();
+}} else {{
+  // Default landing: show empty state, wait for user to pick pair + timeframe
+  // Still load default chart candles for context
+  hasScanRun = true;
+  loadData();
+  scheduleRefresh();
+}}
 
 // Reconnect on visibility change (tab switch / phone wake)
 document.addEventListener('visibilitychange', () => {{
-  if (!document.hidden) loadData();
+  if (!document.hidden && hasScanRun) loadData();
 }});
 </script>
 </body>
@@ -13866,6 +14132,433 @@ document.getElementById('tfSelect').addEventListener('change', loadData);
 </html>"""
 
     return HTMLResponse(content=html)
+
+
+# ================================================================
+# TENSOR TRADE — API ENDPOINTS
+# ================================================================
+
+@app.get("/api/tensor-trade/scan")
+async def tensor_trade_scan():
+    """Run a single TCT scan-and-trade cycle."""
+    trader = get_trader()
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, trader.scan_and_trade)
+    return convert_numpy_types(result)
+
+
+@app.get("/api/tensor-trade/state")
+async def tensor_trade_state():
+    """Return current trading state for the dashboard."""
+    trader = get_trader()
+    return convert_numpy_types(trader.state.snapshot())
+
+
+@app.get("/api/tensor-trade/force-close")
+async def tensor_trade_force_close():
+    """Force-close the current open trade."""
+    trader = get_trader()
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, trader.force_close)
+    return convert_numpy_types(result)
+
+
+@app.get("/api/tensor-trade/reset")
+async def tensor_trade_reset():
+    """Reset trading state to $5,000 starting balance."""
+    trader = get_trader()
+    return convert_numpy_types(trader.reset())
+
+
+@app.get("/tensor-trade", response_class=HTMLResponse)
+async def tensor_trade_page():
+    """
+    TensorTrade TCT Simulated Trading Dashboard.
+    Shows current trade, trade history, P&L, win/loss analysis,
+    reward-based adaptations, and running balance.
+    """
+    html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TensorTrade TCT — Simulated Trading</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-serif;overflow-x:hidden}
+
+/* header */
+.header{display:flex;align-items:center;justify-content:space-between;padding:10px 24px;background:#101018;border-bottom:1px solid #1e1e2d}
+.header h1{font-size:1.1rem;color:#e040fb;display:flex;align-items:center;gap:8px}
+.header .subtitle{color:#666;font-size:.8rem;font-weight:400}
+.header-right{display:flex;align-items:center;gap:10px}
+.back-link{color:#888;text-decoration:none;font-size:.75rem;padding:4px 10px;border:1px solid #333;border-radius:4px}
+.back-link:hover{color:#e0e0e0;border-color:#555}
+
+/* controls */
+.controls{display:flex;align-items:center;gap:10px;padding:8px 24px;background:#101018;border-bottom:1px solid #1a1a28;flex-wrap:wrap}
+.btn{padding:6px 16px;border:1px solid #333;border-radius:4px;background:#181824;color:#e0e0e0;font-size:.78rem;cursor:pointer;transition:all .2s}
+.btn:hover{background:#222238;border-color:#e040fb}
+.btn-scan{border-color:#00d4ff;color:#00d4ff}
+.btn-scan:hover{background:#00d4ff22}
+.btn-danger{border-color:#ff4444;color:#ff4444}
+.btn-danger:hover{background:#ff444422}
+.btn-reset{border-color:#ff8800;color:#ff8800}
+.btn-reset:hover{background:#ff880022}
+.status-text{color:#666;font-size:.75rem;margin-left:auto}
+.auto-label{color:#888;font-size:.75rem}
+
+/* stats row */
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;padding:16px 24px}
+.stat-card{background:#12121e;border:1px solid #1e1e2d;border-radius:8px;padding:14px;text-align:center}
+.stat-label{color:#666;font-size:.7rem;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}
+.stat-value{font-size:1.3rem;font-weight:700}
+.stat-value.green{color:#00e676}
+.stat-value.red{color:#ff4444}
+.stat-value.blue{color:#00d4ff}
+.stat-value.purple{color:#e040fb}
+.stat-value.white{color:#e0e0e0}
+
+/* main layout */
+.main{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:16px 24px}
+@media(max-width:900px){.main{grid-template-columns:1fr}}
+
+/* panels */
+.panel{background:#12121e;border:1px solid #1e1e2d;border-radius:8px;overflow:hidden}
+.panel-header{padding:10px 16px;background:#181828;border-bottom:1px solid #1e1e2d;font-size:.85rem;font-weight:600;display:flex;align-items:center;gap:8px}
+.panel-body{padding:12px 16px;max-height:500px;overflow-y:auto}
+
+/* current trade */
+.trade-card{background:#181828;border:1px solid #2d2d44;border-radius:6px;padding:14px;margin-bottom:8px}
+.trade-card.bullish{border-left:3px solid #00e676}
+.trade-card.bearish{border-left:3px solid #ff4444}
+.trade-row{display:flex;justify-content:space-between;align-items:center;padding:3px 0;font-size:.78rem}
+.trade-row .label{color:#888}
+.trade-row .value{font-weight:600}
+.badge{display:inline-block;padding:2px 8px;border-radius:3px;font-size:.7rem;font-weight:600;text-transform:uppercase}
+.badge-bullish{background:#00e67622;color:#00e676;border:1px solid #00e67644}
+.badge-bearish{background:#ff444422;color:#ff4444;border:1px solid #ff444444}
+.badge-win{background:#00e67622;color:#00e676}
+.badge-loss{background:#ff444422;color:#ff4444}
+.badge-open{background:#00d4ff22;color:#00d4ff;border:1px solid #00d4ff44}
+.no-trade{color:#555;font-size:.85rem;padding:20px;text-align:center}
+
+/* history table */
+.history-table{width:100%;border-collapse:collapse;font-size:.75rem}
+.history-table th{color:#888;text-align:left;padding:6px 8px;border-bottom:1px solid #1e1e2d;font-weight:600;text-transform:uppercase;font-size:.65rem;letter-spacing:.5px}
+.history-table td{padding:6px 8px;border-bottom:1px solid #1a1a28}
+.history-table tr:hover{background:#181828}
+
+/* analysis panel */
+.analysis-item{background:#181828;border:1px solid #1e1e2d;border-radius:6px;padding:10px 14px;margin-bottom:8px;font-size:.78rem}
+.analysis-item .trade-id{color:#e040fb;font-weight:600;margin-bottom:4px}
+.analysis-item .analysis-text{color:#bbb;line-height:1.5}
+.analysis-item .solution-text{color:#00d4ff;margin-top:6px;padding-top:6px;border-top:1px solid #1e1e2d}
+
+/* solutions panel */
+.solution-item{padding:6px 0;border-bottom:1px solid #1a1a28;font-size:.78rem;color:#bbb}
+.solution-item:last-child{border-bottom:none}
+
+/* scrollbar */
+::-webkit-scrollbar{width:6px}
+::-webkit-scrollbar-track{background:#0a0a0f}
+::-webkit-scrollbar-thumb{background:#333;border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:#555}
+
+/* loading spinner */
+.spinner{display:inline-block;width:14px;height:14px;border:2px solid #333;border-top:2px solid #e040fb;border-radius:50%;animation:spin .8s linear infinite;margin-right:6px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.loading{display:none;align-items:center;color:#888;font-size:.78rem}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>TensorTrade TCT <span class="subtitle">Simulated Trading — BTCUSDT</span></h1>
+  <div class="header-right">
+    <a href="/schematics-5A" class="back-link">Schematics 5A</a>
+    <a href="/dashboard" class="back-link">Dashboard</a>
+  </div>
+</div>
+
+<div class="controls">
+  <button class="btn btn-scan" onclick="runScan()">Manual Scan</button>
+  <button class="btn" onclick="refreshState()">Refresh</button>
+  <button class="btn btn-danger" onclick="forceClose()">Force Close</button>
+  <button class="btn btn-reset" onclick="resetTrading()">Reset ($5K)</button>
+  <span class="auto-label" style="color:#00e676">Server auto-scan: ON (every 60s)</span>
+  <div class="loading" id="loadingIndicator"><div class="spinner"></div>Scanning...</div>
+  <span class="status-text" id="statusText">Auto-scanning...</span>
+</div>
+
+<!-- Stats Row -->
+<div class="stats" id="statsRow">
+  <div class="stat-card"><div class="stat-label">Balance</div><div class="stat-value blue" id="statBalance">$5,000.00</div></div>
+  <div class="stat-card"><div class="stat-label">Total P&L</div><div class="stat-value white" id="statPnl">$0.00</div></div>
+  <div class="stat-card"><div class="stat-label">P&L %</div><div class="stat-value white" id="statPnlPct">0.00%</div></div>
+  <div class="stat-card"><div class="stat-label">Trades</div><div class="stat-value purple" id="statTrades">0</div></div>
+  <div class="stat-card"><div class="stat-label">Win Rate</div><div class="stat-value white" id="statWinRate">0%</div></div>
+  <div class="stat-card"><div class="stat-label">Wins / Losses</div><div class="stat-value white" id="statWL">0 / 0</div></div>
+  <div class="stat-card"><div class="stat-label">Avg Reward</div><div class="stat-value purple" id="statReward">0.000000</div></div>
+</div>
+
+<!-- Main Layout -->
+<div class="main">
+
+  <!-- Left Column: Current Trade + History -->
+  <div>
+    <div class="panel" style="margin-bottom:16px">
+      <div class="panel-header"><span style="color:#00d4ff">Current Trade</span></div>
+      <div class="panel-body" id="currentTradePanel">
+        <div class="no-trade">No active trade — server auto-scanning every 60s</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header"><span style="color:#e040fb">Trade History</span></div>
+      <div class="panel-body" id="historyPanel" style="max-height:400px">
+        <table class="history-table">
+          <thead><tr><th>#</th><th>Dir</th><th>Model</th><th>Entry</th><th>Exit</th><th>P&L</th><th>Result</th><th>Balance</th></tr></thead>
+          <tbody id="historyBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Right Column: Analysis + Solutions -->
+  <div>
+    <div class="panel" style="margin-bottom:16px">
+      <div class="panel-header"><span style="color:#ff8800">Trade Analysis</span> <span style="color:#666;font-size:.7rem;font-weight:400">— Why win/loss + reward learning</span></div>
+      <div class="panel-body" id="analysisPanel" style="max-height:350px">
+        <div class="no-trade">No completed trades yet</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header"><span style="color:#00e676">Adaptive Solutions</span> <span style="color:#666;font-size:.7rem;font-weight:400">— How the system improves</span></div>
+      <div class="panel-body" id="solutionsPanel" style="max-height:300px">
+        <div class="no-trade">No adaptations applied yet</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+let autoScanInterval = null;
+const API = '';
+
+async function fetchJSON(url) {
+  const r = await fetch(API + url);
+  return r.json();
+}
+
+function setStatus(msg) {
+  document.getElementById('statusText').textContent = msg;
+}
+
+function showLoading(v) {
+  document.getElementById('loadingIndicator').style.display = v ? 'flex' : 'none';
+}
+
+// Run a scan cycle
+async function runScan() {
+  showLoading(true);
+  setStatus('Scanning...');
+  try {
+    const res = await fetchJSON('/api/tensor-trade/scan');
+    setStatus('Scan: ' + (res.action || 'done') + ' @ ' + new Date().toLocaleTimeString());
+    await refreshState();
+  } catch(e) {
+    setStatus('Scan error: ' + e.message);
+  }
+  showLoading(false);
+}
+
+// Refresh dashboard state
+async function refreshState() {
+  try {
+    const s = await fetchJSON('/api/tensor-trade/state');
+    updateStats(s);
+    updateCurrentTrade(s.current_trade);
+    updateHistory(s.trade_history || []);
+    updateAnalysis(s.trade_history || []);
+    updateSolutions(s.solutions_applied || []);
+  } catch(e) {
+    setStatus('Refresh error: ' + e.message);
+  }
+}
+
+function updateStats(s) {
+  document.getElementById('statBalance').textContent = '$' + s.balance.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
+  const pnl = s.pnl_total;
+  const pnlEl = document.getElementById('statPnl');
+  pnlEl.textContent = (pnl >= 0 ? '+$' : '-$') + Math.abs(pnl).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
+  pnlEl.className = 'stat-value ' + (pnl >= 0 ? 'green' : 'red');
+
+  const pctEl = document.getElementById('statPnlPct');
+  pctEl.textContent = (s.pnl_pct >= 0 ? '+' : '') + s.pnl_pct + '%';
+  pctEl.className = 'stat-value ' + (s.pnl_pct >= 0 ? 'green' : 'red');
+
+  document.getElementById('statTrades').textContent = s.total_trades;
+  document.getElementById('statWinRate').textContent = s.win_rate + '%';
+  document.getElementById('statWinRate').className = 'stat-value ' + (s.win_rate >= 50 ? 'green' : s.win_rate > 0 ? 'red' : 'white');
+  document.getElementById('statWL').textContent = s.wins + ' / ' + s.losses;
+  document.getElementById('statReward').textContent = s.avg_reward.toFixed(6);
+
+  // Update status text with last scan info
+  if (s.last_scan_time) {
+    const t = new Date(s.last_scan_time).toLocaleTimeString();
+    const action = s.last_scan_action || '—';
+    const err = s.last_error ? ' | Error: ' + s.last_error : '';
+    setStatus('Last scan: ' + action + ' @ ' + t + err);
+  }
+}
+
+function updateCurrentTrade(trade) {
+  const panel = document.getElementById('currentTradePanel');
+  if (!trade) {
+    panel.innerHTML = '<div class="no-trade">No active trade — server auto-scanning every 60s</div>';
+    return;
+  }
+  const dir = trade.direction || 'unknown';
+  const pnl = trade.live_pnl_pct || 0;
+  const pnlColor = pnl >= 0 ? '#00e676' : '#ff4444';
+  panel.innerHTML = `
+    <div class="trade-card ${dir}">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <span class="badge badge-${dir}">${dir.toUpperCase()}</span>
+        <span class="badge badge-open">OPEN</span>
+        <span style="color:${pnlColor};font-size:.9rem;font-weight:700">${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%</span>
+      </div>
+      <div class="trade-row"><span class="label">Model</span><span class="value">${trade.model || '—'}</span></div>
+      <div class="trade-row"><span class="label">Timeframe</span><span class="value" style="color:#ffc107">${trade.timeframe || '—'}</span></div>
+      <div class="trade-row"><span class="label">Entry</span><span class="value">$${(trade.entry_price||0).toLocaleString()}</span></div>
+      <div class="trade-row"><span class="label">Current</span><span class="value" style="color:${pnlColor}">$${(trade.current_price||trade.entry_price||0).toLocaleString()}</span></div>
+      <div class="trade-row"><span class="label">Stop Loss</span><span class="value" style="color:#ff4444">$${(trade.stop_price||0).toLocaleString()}</span></div>
+      <div class="trade-row"><span class="label">Target</span><span class="value" style="color:#00e676">$${(trade.target_price||0).toLocaleString()}</span></div>
+      <div class="trade-row"><span class="label">R:R</span><span class="value">${(trade.rr||0).toFixed(1)}</span></div>
+      <div class="trade-row"><span class="label">Position Size</span><span class="value">$${(trade.position_size||0).toLocaleString()}</span></div>
+      <div class="trade-row"><span class="label">Risk</span><span class="value">$${(trade.risk_amount||0).toFixed(2)}</span></div>
+      <div class="trade-row"><span class="label">Leverage</span><span class="value">${trade.leverage||10}x</span></div>
+      <div class="trade-row"><span class="label">Entry Score</span><span class="value" style="color:#e040fb">${trade.entry_score||0}/100</span></div>
+      <div class="trade-row"><span class="label">Reward Bias</span><span class="value">${(trade.reward_bias||{}).bias||'—'} (${(trade.reward_bias||{}).confidence||0}%)</span></div>
+      <div class="trade-row"><span class="label">Opened</span><span class="value">${trade.opened_at ? new Date(trade.opened_at).toLocaleString() : '—'}</span></div>
+      ${trade.entry_reasons ? '<div style="margin-top:8px;padding-top:8px;border-top:1px solid #1e1e2d;font-size:.72rem;color:#888">Reasons: ' + trade.entry_reasons.join(' | ') + '</div>' : ''}
+    </div>`;
+}
+
+function updateHistory(trades) {
+  const tbody = document.getElementById('historyBody');
+  if (!trades.length) {
+    tbody.innerHTML = '<tr><td colspan="8" style="color:#555;text-align:center;padding:16px">No trades yet</td></tr>';
+    return;
+  }
+  // Show most recent first
+  const reversed = [...trades].reverse();
+  tbody.innerHTML = reversed.map(t => {
+    const pnlColor = t.is_win ? '#00e676' : '#ff4444';
+    return `<tr>
+      <td style="color:#e040fb">#${t.id||'—'}</td>
+      <td><span class="badge badge-${t.direction}">${(t.direction||'?').slice(0,4).toUpperCase()}</span></td>
+      <td style="color:#888">${(t.model||'—').replace('_',' ')}</td>
+      <td>$${(t.entry_price||0).toLocaleString()}</td>
+      <td>$${(t.exit_price||0).toLocaleString()}</td>
+      <td style="color:${pnlColor};font-weight:600">${t.pnl_pct >= 0 ? '+' : ''}${(t.pnl_pct||0).toFixed(2)}% ($${(t.pnl_dollars||0).toFixed(2)})</td>
+      <td><span class="badge ${t.is_win ? 'badge-win' : 'badge-loss'}">${t.is_win ? 'WIN' : 'LOSS'}</span></td>
+      <td style="color:#00d4ff">$${(t.balance_after||0).toLocaleString(undefined,{minimumFractionDigits:2})}</td>
+    </tr>`;
+  }).join('');
+}
+
+function updateAnalysis(trades) {
+  const panel = document.getElementById('analysisPanel');
+  const closed = trades.filter(t => t.status === 'closed');
+  if (!closed.length) {
+    panel.innerHTML = '<div class="no-trade">No completed trades yet</div>';
+    return;
+  }
+  const reversed = [...closed].reverse().slice(0, 20);
+  panel.innerHTML = reversed.map(t => `
+    <div class="analysis-item">
+      <div class="trade-id">Trade #${t.id} — <span class="badge ${t.is_win ? 'badge-win' : 'badge-loss'}">${t.is_win ? 'WIN' : 'LOSS'}</span> ${(t.direction||'').toUpperCase()} ${t.model||''}</div>
+      <div class="analysis-text">${t.analysis || 'No analysis available'}</div>
+      <div class="solution-text">Solution: ${t.solution || 'None'}</div>
+    </div>
+  `).join('');
+}
+
+function updateSolutions(solutions) {
+  const panel = document.getElementById('solutionsPanel');
+  if (!solutions.length) {
+    panel.innerHTML = '<div class="no-trade">No adaptations applied yet</div>';
+    return;
+  }
+  const reversed = [...solutions].reverse();
+  panel.innerHTML = reversed.map((s, i) => `
+    <div class="solution-item">${reversed.length - i}. ${s}</div>
+  `).join('');
+}
+
+async function forceClose() {
+  if (!confirm('Force-close the current trade at market price?')) return;
+  showLoading(true);
+  try {
+    const res = await fetchJSON('/api/tensor-trade/force-close');
+    setStatus('Force closed: ' + (res.action || 'done'));
+    await refreshState();
+  } catch(e) { setStatus('Error: ' + e.message); }
+  showLoading(false);
+}
+
+async function resetTrading() {
+  if (!confirm('Reset all trading data? Balance will return to $5,000.')) return;
+  try {
+    await fetchJSON('/api/tensor-trade/reset');
+    setStatus('Reset complete');
+    await refreshState();
+  } catch(e) { setStatus('Error: ' + e.message); }
+}
+
+// Auto-refresh dashboard every 15s to reflect server-side auto-scan results
+setInterval(refreshState, 15000);
+
+// Initial load
+refreshState();
+</script>
+</body>
+</html>"""
+
+    return HTMLResponse(content=html)
+
+
+# ================================================================
+# TENSOR TRADE — BACKGROUND AUTO-SCAN LOOP
+# ================================================================
+
+async def tensor_trade_auto_scan_loop():
+    """
+    Server-side background loop that runs the TensorTCT trader's
+    scan_and_trade() cycle autonomously every AUTO_SCAN_INTERVAL seconds.
+    No browser tab required — this runs entirely on the server.
+    """
+    from tensor_tct_trader import get_trader, AUTO_SCAN_INTERVAL
+
+    # Let the server finish starting up before first scan
+    await asyncio.sleep(15)
+    logger.info(f"[TENSOR-TRADE] Auto-scan loop started — interval: {AUTO_SCAN_INTERVAL}s")
+
+    while True:
+        try:
+            trader = get_trader()
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, trader.scan_and_trade)
+            action = result.get("action", "unknown")
+            ts = result.get("timestamp", "")
+            logger.info(f"[TENSOR-TRADE] Auto-scan result: {action} @ {ts}")
+        except Exception as e:
+            logger.error(f"[TENSOR-TRADE] Auto-scan error: {e}")
+        await asyncio.sleep(AUTO_SCAN_INTERVAL)
 
 
 # ================================================================

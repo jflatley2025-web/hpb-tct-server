@@ -32,3 +32,6 @@ ENV/
 *.swp
 *.swo
 
+# Runtime data
+tensor_trade_log.json
+
