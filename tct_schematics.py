@@ -880,12 +880,14 @@ class TCTSchematicDetector:
 
         # Try each swing high (lowest price first) — BOS = first broken MS level
         for sh in swing_highs:
-            search_start = sh["idx"] + 1
+            # BOS must confirm AFTER tap3, never before the deviation completes
+            search_start = max(sh["idx"] + 1, start_idx + 1)
             for i in range(search_start, min(start_idx + 35, len(self.candles))):
                 close_price = float(self.candles.iloc[i]["close"])
-                if close_price > sh["price"]:
-                    # Entry is at the broken swing level, not the candle close.
-                    # TCT: "enter on the break" = the MS level that was broken.
+                # BOS close must break the swing high AND the entry level
+                # (swing high) must be above tap3 low — otherwise stop > entry.
+                # TCT: "enter on the break" = the MS level that was broken.
+                if close_price > sh["price"] and sh["price"] > low_price:
                     is_inside_range = sh["price"] < high_price
                     return {
                         "idx": i,
@@ -950,12 +952,14 @@ class TCTSchematicDetector:
 
         # Try each swing low (highest price first) — BOS = first broken MS level
         for sl in swing_lows:
-            search_start = sl["idx"] + 1
+            # BOS must confirm AFTER tap3, never before the deviation completes
+            search_start = max(sl["idx"] + 1, start_idx + 1)
             for i in range(search_start, min(start_idx + 35, len(self.candles))):
                 close_price = float(self.candles.iloc[i]["close"])
-                if close_price < sl["price"]:
-                    # Entry is at the broken swing level, not the candle close.
-                    # TCT: "enter on the break" = the MS level that was broken.
+                # BOS close must break the swing low AND the entry level
+                # (swing low) must be below tap3 high — otherwise stop < entry.
+                # TCT: "enter on the break" = the MS level that was broken.
+                if close_price < sl["price"] and sl["price"] < high_price:
                     is_inside_range = sl["price"] > low_price
                     return {
                         "idx": i,
@@ -1129,6 +1133,12 @@ class TCTSchematicDetector:
         stop_buffer = range_data["range_size"] * 0.02
         stop_loss = tap3["price"] - stop_buffer
         target = range_data["range_high"]  # TCT: "Target the Range High"
+
+        # Safety: for a long (accumulation), entry must be above stop.
+        # If not, the BOS is invalid — discard it.
+        if entry_price is not None and entry_price <= stop_loss:
+            bos = None
+            entry_price = None
 
         # ============================================================
         # LECTURE 5B ENHANCEMENTS
@@ -1327,6 +1337,12 @@ class TCTSchematicDetector:
         stop_buffer = range_data["range_size"] * 0.02
         stop_loss = tap3["price"] + stop_buffer
         target = range_data["range_low"]  # TCT: "Target the Range Low"
+
+        # Safety: for a short (distribution), entry must be below stop.
+        # If not, the BOS is invalid — discard it.
+        if entry_price is not None and entry_price >= stop_loss:
+            bos = None
+            entry_price = None
 
         # ============================================================
         # LECTURE 5B ENHANCEMENTS
