@@ -3001,12 +3001,16 @@ async def scanner_loop():
 
 @app.on_event("startup")
 async def startup_event():
-    """Start the background scanner on server startup (if enabled)."""
+    """Start background scanners on server startup."""
     if ENABLE_SCANNER:
         asyncio.create_task(scanner_loop())
         logger.info(f"[SCANNER] Background scanner started — interval: {SCANNER_INTERVAL_SEC}s ({SCANNER_INTERVAL_SEC // 3600}h)")
     else:
         logger.info("[SCANNER] Scanner DISABLED via ENABLE_SCANNER env var — web-only mode")
+
+    # Always start the tensor-trade auto-scan loop (hands-free trading)
+    asyncio.create_task(tensor_trade_auto_scan_loop())
+    logger.info("[TENSOR-TRADE] Background auto-scan loop launched")
 
 
 @app.on_event("shutdown")
@@ -14278,13 +14282,13 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
 </div>
 
 <div class="controls">
-  <button class="btn btn-scan" onclick="runScan()">Scan & Trade</button>
+  <button class="btn btn-scan" onclick="runScan()">Manual Scan</button>
   <button class="btn" onclick="refreshState()">Refresh</button>
   <button class="btn btn-danger" onclick="forceClose()">Force Close</button>
   <button class="btn btn-reset" onclick="resetTrading()">Reset ($5K)</button>
-  <label class="auto-label"><input type="checkbox" id="autoScan" onchange="toggleAutoScan()"> Auto-scan (60s)</label>
+  <span class="auto-label" style="color:#00e676">Server auto-scan: ON (every 60s)</span>
   <div class="loading" id="loadingIndicator"><div class="spinner"></div>Scanning...</div>
-  <span class="status-text" id="statusText">Ready</span>
+  <span class="status-text" id="statusText">Auto-scanning...</span>
 </div>
 
 <!-- Stats Row -->
@@ -14306,7 +14310,7 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
     <div class="panel" style="margin-bottom:16px">
       <div class="panel-header"><span style="color:#00d4ff">Current Trade</span></div>
       <div class="panel-body" id="currentTradePanel">
-        <div class="no-trade">No active trade — click "Scan & Trade" to begin</div>
+        <div class="no-trade">No active trade — server auto-scanning every 60s</div>
       </div>
     </div>
 
@@ -14401,12 +14405,20 @@ function updateStats(s) {
   document.getElementById('statWinRate').className = 'stat-value ' + (s.win_rate >= 50 ? 'green' : s.win_rate > 0 ? 'red' : 'white');
   document.getElementById('statWL').textContent = s.wins + ' / ' + s.losses;
   document.getElementById('statReward').textContent = s.avg_reward.toFixed(6);
+
+  // Update status text with last scan info
+  if (s.last_scan_time) {
+    const t = new Date(s.last_scan_time).toLocaleTimeString();
+    const action = s.last_scan_action || '—';
+    const err = s.last_error ? ' | Error: ' + s.last_error : '';
+    setStatus('Last scan: ' + action + ' @ ' + t + err);
+  }
 }
 
 function updateCurrentTrade(trade) {
   const panel = document.getElementById('currentTradePanel');
   if (!trade) {
-    panel.innerHTML = '<div class="no-trade">No active trade — click "Scan & Trade" to begin</div>';
+    panel.innerHTML = '<div class="no-trade">No active trade — server auto-scanning every 60s</div>';
     return;
   }
   const dir = trade.direction || 'unknown';
@@ -14420,6 +14432,7 @@ function updateCurrentTrade(trade) {
         <span style="color:${pnlColor};font-size:.9rem;font-weight:700">${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%</span>
       </div>
       <div class="trade-row"><span class="label">Model</span><span class="value">${trade.model || '—'}</span></div>
+      <div class="trade-row"><span class="label">Timeframe</span><span class="value" style="color:#ffc107">${trade.timeframe || '—'}</span></div>
       <div class="trade-row"><span class="label">Entry</span><span class="value">$${(trade.entry_price||0).toLocaleString()}</span></div>
       <div class="trade-row"><span class="label">Current</span><span class="value" style="color:${pnlColor}">$${(trade.current_price||trade.entry_price||0).toLocaleString()}</span></div>
       <div class="trade-row"><span class="label">Stop Loss</span><span class="value" style="color:#ff4444">$${(trade.stop_price||0).toLocaleString()}</span></div>
@@ -14507,18 +14520,8 @@ async function resetTrading() {
   } catch(e) { setStatus('Error: ' + e.message); }
 }
 
-function toggleAutoScan() {
-  const checked = document.getElementById('autoScan').checked;
-  if (checked) {
-    runScan();
-    autoScanInterval = setInterval(runScan, 60000);
-    setStatus('Auto-scan ON (every 60s)');
-  } else {
-    if (autoScanInterval) clearInterval(autoScanInterval);
-    autoScanInterval = null;
-    setStatus('Auto-scan OFF');
-  }
-}
+// Auto-refresh dashboard every 15s to reflect server-side auto-scan results
+setInterval(refreshState, 15000);
 
 // Initial load
 refreshState();
@@ -14527,6 +14530,35 @@ refreshState();
 </html>"""
 
     return HTMLResponse(content=html)
+
+
+# ================================================================
+# TENSOR TRADE — BACKGROUND AUTO-SCAN LOOP
+# ================================================================
+
+async def tensor_trade_auto_scan_loop():
+    """
+    Server-side background loop that runs the TensorTCT trader's
+    scan_and_trade() cycle autonomously every AUTO_SCAN_INTERVAL seconds.
+    No browser tab required — this runs entirely on the server.
+    """
+    from tensor_tct_trader import get_trader, AUTO_SCAN_INTERVAL
+
+    # Let the server finish starting up before first scan
+    await asyncio.sleep(15)
+    logger.info(f"[TENSOR-TRADE] Auto-scan loop started — interval: {AUTO_SCAN_INTERVAL}s")
+
+    while True:
+        try:
+            trader = get_trader()
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, trader.scan_and_trade)
+            action = result.get("action", "unknown")
+            ts = result.get("timestamp", "")
+            logger.info(f"[TENSOR-TRADE] Auto-scan result: {action} @ {ts}")
+        except Exception as e:
+            logger.error(f"[TENSOR-TRADE] Auto-scan error: {e}")
+        await asyncio.sleep(AUTO_SCAN_INTERVAL)
 
 
 # ================================================================

@@ -44,7 +44,11 @@ STARTING_BALANCE = 5000.0
 RISK_PER_TRADE_PCT = 1.0  # 1% of balance per trade
 DEFAULT_LEVERAGE = 10
 SYMBOL = "BTCUSDT"
-TIMEFRAME = "4h"
+TIMEFRAME = "4h"  # legacy default (multi-TF scanning overrides this)
+# Scan these timeframes from highest to lowest — first qualifying setup wins
+SCAN_TIMEFRAMES = ["4h", "1h", "15m", "5m", "1m"]
+# How often the background auto-scan loop runs (seconds)
+AUTO_SCAN_INTERVAL = int(os.getenv("TENSOR_SCAN_INTERVAL", "60"))
 TRADE_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tensor_trade_log.json")
 
 
@@ -64,6 +68,7 @@ class TradeState:
         self.total_losses = 0
         self.solutions_applied: List[str] = []
         self.last_scan_time: Optional[str] = None
+        self.last_scan_action: Optional[str] = None
         self.last_error: Optional[str] = None
         self._load()
 
@@ -86,6 +91,7 @@ class TradeState:
                 self.total_losses = data.get("total_losses", 0)
                 self.solutions_applied = data.get("solutions_applied", [])
                 self.last_scan_time = data.get("last_scan_time")
+                self.last_scan_action = data.get("last_scan_action")
                 logger.info(f"[STATE] Loaded trade state — balance=${self.balance:.2f}, trades={len(self.trade_history)}")
         except Exception as e:
             logger.warning(f"[STATE] Could not load trade state: {e}")
@@ -103,6 +109,7 @@ class TradeState:
                 "total_losses": self.total_losses,
                 "solutions_applied": self.solutions_applied,
                 "last_scan_time": self.last_scan_time,
+                "last_scan_action": self.last_scan_action,
                 "last_error": self.last_error,
             }
             with open(self._log_path(), "w") as f:
@@ -129,6 +136,7 @@ class TradeState:
             "trade_history": self.trade_history[-50:],  # last 50 trades
             "solutions_applied": self.solutions_applied[-20:],
             "last_scan_time": self.last_scan_time,
+            "last_scan_action": self.last_scan_action,
             "last_error": self.last_error,
         }
 
@@ -138,6 +146,9 @@ class TradeState:
 # ================================================================
 def fetch_candles_sync(symbol: str = SYMBOL, interval: str = TIMEFRAME, limit: int = 200) -> Optional[pd.DataFrame]:
     """Fetch OHLCV candles from MEXC (synchronous)."""
+    # Normalize intervals to MEXC-supported values (MEXC spot uses 60m not 1h)
+    _MEXC_INTERVAL_MAP = {"1h": "60m", "2h": "4h"}
+    interval = _MEXC_INTERVAL_MAP.get(interval, interval)
     url = f"{MEXC_URL_BASE}/api/v3/klines"
     params = {"symbol": symbol, "interval": interval, "limit": limit}
     try:
@@ -336,7 +347,9 @@ class TensorTCTTrader:
 
     def scan_and_trade(self) -> Dict:
         """
-        Main cycle: fetch data, detect schematics, evaluate, and trade.
+        Main cycle: fetch data across multiple timeframes, detect schematics,
+        evaluate, and trade.  Scans SCAN_TIMEFRAMES from highest to lowest —
+        the first qualifying setup wins.
         Returns a summary of what happened this cycle.
         """
         cycle_result = {
@@ -346,86 +359,98 @@ class TensorTCTTrader:
         }
 
         try:
-            # 1. Fetch candles
-            df = fetch_candles_sync(SYMBOL, TIMEFRAME, 200)
-            if df is None or len(df) < 50:
-                self.state.last_error = "Insufficient candle data"
+            # 1. Get current price from the fastest feed (1m)
+            df_price = fetch_candles_sync(SYMBOL, "1m", 10)
+            if df_price is None or len(df_price) == 0:
+                self.state.last_error = "Could not fetch price data"
                 self.state.save()
                 cycle_result["action"] = "error"
-                cycle_result["details"] = {"error": "Insufficient candle data"}
+                cycle_result["details"] = {"error": "Could not fetch price data"}
                 return cycle_result
 
-            current_price = float(df.iloc[-1]["close"])
-            prices = df["close"].values
+            current_price = float(df_price.iloc[-1]["close"])
 
-            # 2. Compute reward bias
-            reward_bias = self.evaluator.compute_reward_bias(prices)
-
-            # 3. Check if we have an open trade — manage it
+            # 2. If we have an open trade — manage it (check SL/TP) and return
             if self.state.current_trade:
                 result = self._manage_open_trade(current_price)
                 cycle_result["action"] = result.get("action", "manage")
                 cycle_result["details"] = result
                 self.state.last_scan_time = cycle_result["timestamp"]
+                self.state.last_scan_action = cycle_result["action"]
                 self.state.save()
                 return cycle_result
 
-            # 4. Detect TCT schematics
-            schematics_result = detect_tct_schematics(df, [])
-
-            all_schematics = (
-                schematics_result.get("accumulation_schematics", [])
-                + schematics_result.get("distribution_schematics", [])
-            )
-
-            if not all_schematics:
-                cycle_result["action"] = "no_setups"
-                cycle_result["details"] = {
-                    "price": current_price,
-                    "reward_bias": reward_bias,
-                    "schematics_found": 0,
-                }
-                self.state.last_scan_time = cycle_result["timestamp"]
-                self.state.last_error = None
-                self.state.save()
-                return cycle_result
-
-            # 5. Evaluate each schematic
+            # 3. Scan across all timeframes for the best qualifying setup
             best_setup = None
             best_score = 0
-            evaluations = []
+            best_tf = None
+            best_reward_bias = None
+            all_tf_results = {}
 
-            for s in all_schematics:
-                if not isinstance(s, dict):
-                    continue
-                eval_result = self.evaluator.evaluate_schematic(s, reward_bias, current_price)
-                evaluations.append(eval_result)
-                if eval_result["pass"] and eval_result["score"] > best_score:
-                    best_score = eval_result["score"]
-                    best_setup = (s, eval_result)
+            for tf in SCAN_TIMEFRAMES:
+                try:
+                    df = fetch_candles_sync(SYMBOL, tf, 200)
+                    if df is None or len(df) < 50:
+                        all_tf_results[tf] = {"status": "insufficient_data"}
+                        continue
 
-            # 6. Enter trade if we have a qualifying setup
+                    prices = df["close"].values
+                    reward_bias = self.evaluator.compute_reward_bias(prices)
+
+                    schematics_result = detect_tct_schematics(df, [])
+                    all_schematics = (
+                        schematics_result.get("accumulation_schematics", [])
+                        + schematics_result.get("distribution_schematics", [])
+                    )
+
+                    tf_evals = []
+                    for s in all_schematics:
+                        if not isinstance(s, dict):
+                            continue
+                        eval_result = self.evaluator.evaluate_schematic(s, reward_bias, current_price)
+                        tf_evals.append(eval_result)
+                        if eval_result["pass"] and eval_result["score"] > best_score:
+                            best_score = eval_result["score"]
+                            best_setup = (s, eval_result)
+                            best_tf = tf
+                            best_reward_bias = reward_bias
+
+                    all_tf_results[tf] = {
+                        "status": "scanned",
+                        "schematics_found": len(all_schematics),
+                        "confirmed": sum(1 for s in all_schematics if isinstance(s, dict) and s.get("is_confirmed")),
+                        "best_score": max((e["score"] for e in tf_evals), default=0),
+                        "reward_bias": reward_bias["bias"],
+                    }
+
+                except Exception as tf_err:
+                    logger.warning(f"[TRADE] Error scanning {tf}: {tf_err}")
+                    all_tf_results[tf] = {"status": "error", "error": str(tf_err)}
+
+            # 4. Enter trade if we found a qualifying setup on any timeframe
             if best_setup:
                 schematic, evaluation = best_setup
-                trade = self._enter_trade(schematic, evaluation, current_price, reward_bias)
+                trade = self._enter_trade(schematic, evaluation, current_price, best_reward_bias)
+                trade["timeframe"] = best_tf
                 cycle_result["action"] = "trade_entered"
                 cycle_result["details"] = trade
+                logger.info(f"[TRADE] Setup found on {best_tf} — entering trade")
             else:
                 cycle_result["action"] = "no_qualifying_setups"
                 cycle_result["details"] = {
                     "price": current_price,
-                    "reward_bias": reward_bias,
-                    "schematics_found": len(all_schematics),
-                    "evaluations": evaluations,
+                    "timeframes_scanned": all_tf_results,
                 }
 
             self.state.last_scan_time = cycle_result["timestamp"]
+            self.state.last_scan_action = cycle_result["action"]
             self.state.last_error = None
             self.state.save()
 
         except Exception as e:
             logger.error(f"[TRADE] Scan error: {e}")
             self.state.last_error = str(e)
+            self.state.last_scan_action = "error"
             self.state.save()
             cycle_result["action"] = "error"
             cycle_result["details"] = {"error": str(e)}
