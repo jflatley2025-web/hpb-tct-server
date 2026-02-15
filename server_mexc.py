@@ -3670,7 +3670,11 @@ async def get_schematics_5a_data(symbol: str = "BTCUSDT", timeframe: str = "4h")
         # range_low, range_high_idx, range_low_idx, equilibrium, dl_high, dl_low).
         # detect_best_range() returns {high, low} without _idx fields, causing
         # _create_tab() to return None and skip every schematic.
-        schematics_result = detect_tct_schematics(df, [])
+        # Run in thread executor to avoid blocking the event loop
+        loop = asyncio.get_event_loop()
+        schematics_result = await loop.run_in_executor(
+            None, detect_tct_schematics, df, []
+        )
 
         # --- Debug diagnostics: expose internal detection details ---
         debug_info = {
@@ -3708,7 +3712,7 @@ async def get_schematics_5a_data(symbol: str = "BTCUSDT", timeframe: str = "4h")
                             tap3 = t3_m1 or t3_m2
                             if tap3:
                                 model = "Model_1_Accumulation" if t3_m1 else "Model_2_Accumulation"
-                                bos_info = _dbg_det._detect_bos_confirmation(t2, tap3, model)
+                                bos_info = _dbg_det._detect_bos_confirmation(t2, tap3, model, range_data=rd)
                 elif t1 and rtype == "distribution":
                     t2 = _dbg_det._find_distribution_tap2(rd, t1)
                     if t2:
@@ -3719,7 +3723,7 @@ async def get_schematics_5a_data(symbol: str = "BTCUSDT", timeframe: str = "4h")
                             tap3 = t3_m1 or t3_m2
                             if tap3:
                                 model = "Model_1_Distribution" if t3_m1 else "Model_2_Distribution"
-                                bos_info = _dbg_det._detect_bos_confirmation(t2, tap3, model)
+                                bos_info = _dbg_det._detect_bos_confirmation(t2, tap3, model, range_data=rd)
                 _range_details.append({
                     "type": rtype,
                     "range_high": rd.get("range_high"),
@@ -3959,6 +3963,39 @@ body{{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-ser
 
 /* ---- no-data ---- */
 .empty{{color:#555;text-align:center;padding:40px 20px;font-size:.8rem}}
+
+/* ---- mobile responsive ---- */
+@media (max-width: 768px) {{
+  body{{overflow:auto}}
+  .header{{flex-wrap:wrap;padding:6px 10px;gap:6px}}
+  .header h1{{font-size:.85rem;width:100%}}
+  .header-right{{width:100%;justify-content:space-between}}
+  .controls{{padding:6px 10px;gap:6px}}
+  .controls label{{font-size:.65rem}}
+  .controls select,.controls input{{font-size:.8rem;padding:6px 8px}}
+  .filter-btn{{padding:6px 10px;font-size:.72rem}}
+  .summary-chips{{width:100%;margin-left:0;margin-top:4px;justify-content:flex-start}}
+  .main{{
+    display:flex;flex-direction:column;height:auto;
+  }}
+  .chart-area{{height:50vh;min-height:280px}}
+  .panel{{
+    border-left:none;border-top:1px solid #1e1e2d;
+    max-height:50vh;overflow-y:auto;padding:6px;
+  }}
+  .card{{padding:10px;font-size:.76rem}}
+  .card-title{{font-size:.82rem}}
+  .state-badge{{font-size:.64rem;padding:3px 8px}}
+  .legend{{font-size:.58rem;gap:8px;bottom:4px;left:4px;right:4px;flex-wrap:wrap}}
+  .pnl-bar{{font-size:.82rem}}
+}}
+@media (max-width: 480px) {{
+  .header h1{{font-size:.78rem}}
+  .chart-area{{height:40vh;min-height:240px}}
+  .panel{{max-height:60vh}}
+  .back-link{{font-size:.68rem;padding:4px 6px}}
+  .controls select,.controls input{{width:80px}}
+}}
 </style>
 </head>
 <body>
@@ -4056,9 +4093,11 @@ function initChart() {{
     borderUpColor: '#00ff88', borderDownColor: '#ff4444',
     wickUpColor: '#00ff88', wickDownColor: '#ff4444',
   }});
-  window.addEventListener('resize', () => {{
+  const resizeChart = () => {{
     chart.applyOptions({{ width: el.clientWidth, height: el.clientHeight }});
-  }});
+  }};
+  window.addEventListener('resize', resizeChart);
+  window.addEventListener('orientationchange', () => setTimeout(resizeChart, 200));
 }}
 
 /* ===== formatting ===== */
@@ -4320,17 +4359,48 @@ function renderPanel() {{
   panel.innerHTML = html;
 }}
 
+/* ===== connection stability ===== */
+let _loadController = null;    // abort controller for in-flight request
+let _loadInProgress = false;   // dedup guard
+let _consecutiveErrors = 0;    // for backoff
+let _refreshTimer = null;      // so we can reset the interval
+const BASE_INTERVAL = 60000;   // 60s normal refresh
+const MAX_BACKOFF   = 300000;  // 5min max backoff
+
+function scheduleRefresh() {{
+  if (_refreshTimer) clearInterval(_refreshTimer);
+  const delay = _consecutiveErrors > 0
+    ? Math.min(BASE_INTERVAL * Math.pow(2, _consecutiveErrors), MAX_BACKOFF)
+    : BASE_INTERVAL;
+  _refreshTimer = setInterval(loadData, delay);
+}}
+
 /* ===== fetch data and render ===== */
 async function loadData() {{
+  if (_loadInProgress) return;  // skip if previous request still running
+  _loadInProgress = true;
+
+  // Abort any stale in-flight request
+  if (_loadController) _loadController.abort();
+  _loadController = new AbortController();
+
   try {{
     const url = '/api/schematics-5a-data?symbol=' + encodeURIComponent(SYMBOL) + '&timeframe=' + TIMEFRAME;
-    const resp = await fetch(url);
+    const resp = await fetch(url, {{
+      signal: _loadController.signal,
+      headers: {{ 'Cache-Control': 'no-cache' }},
+    }});
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const data = await resp.json();
 
     if (data.error) {{
       document.getElementById('panel').innerHTML = '<div class="empty" style="color:#ff4444">Error: ' + data.error + '</div>';
+      _loadInProgress = false;
       return;
     }}
+
+    _consecutiveErrors = 0;  // reset on success
+    scheduleRefresh();
 
     chartData = data;
     allSchematics = [
@@ -4406,8 +4476,14 @@ async function loadData() {{
 
     renderPanel();
   }} catch (e) {{
+    if (e.name === 'AbortError') {{ _loadInProgress = false; return; }}
+    _consecutiveErrors++;
+    scheduleRefresh();
     console.error('Failed to load schematics-5A data:', e);
-    document.getElementById('panel').innerHTML = '<div class="empty" style="color:#ff4444">Connection error: ' + (e.message || e) + '</div>';
+    const retryIn = Math.min(BASE_INTERVAL * Math.pow(2, _consecutiveErrors), MAX_BACKOFF);
+    document.getElementById('panel').innerHTML = '<div class="empty" style="color:#ff4444">Connection error: ' + (e.message || e) + '<br><span style="color:#888;font-size:.7rem">Retrying in ' + Math.round(retryIn/1000) + 's...</span></div>';
+  }} finally {{
+    _loadInProgress = false;
   }}
 }}
 
@@ -4433,6 +4509,7 @@ document.querySelectorAll('.filter-btn').forEach(btn => {{
 document.getElementById('tfSelect').addEventListener('change', (e) => {{
   TIMEFRAME = e.target.value;
   selectedIdx = -1;
+  _consecutiveErrors = 0;
   loadData();
 }});
 
@@ -4442,6 +4519,7 @@ document.getElementById('symInput').addEventListener('keydown', (e) => {{
     if (!val.endsWith('USDT')) val += 'USDT';
     SYMBOL = val;
     selectedIdx = -1;
+    _consecutiveErrors = 0;
     loadData();
   }}
 }});
@@ -4449,9 +4527,12 @@ document.getElementById('symInput').addEventListener('keydown', (e) => {{
 /* ===== init ===== */
 initChart();
 loadData();
+scheduleRefresh();
 
-// Auto-refresh every 60s
-setInterval(loadData, 60000);
+// Reconnect on visibility change (tab switch / phone wake)
+document.addEventListener('visibilitychange', () => {{
+  if (!document.hidden) loadData();
+}});
 </script>
 </body>
 </html>"""

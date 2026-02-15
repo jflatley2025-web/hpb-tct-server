@@ -753,7 +753,8 @@ class TCTSchematicDetector:
     # BREAK OF STRUCTURE CONFIRMATION
     # ================================================================
 
-    def _detect_bos_confirmation(self, tap2: Dict, tap3: Dict, schematic_type: str) -> Optional[Dict]:
+    def _detect_bos_confirmation(self, tap2: Dict, tap3: Dict, schematic_type: str,
+                                  range_data: Optional[Dict] = None) -> Optional[Dict]:
         """
         Detect break of structure confirmation for entry.
 
@@ -763,6 +764,9 @@ class TCTSchematicDetector:
 
         TCT: "When that downwards Market structure breaks back to bullish after
         deviating that second Tap low that is when we confirm our TCT model"
+
+        Uses LTF (lookback=1) internal market structure for BOS detection so that
+        the entry confirms in the discount/premium zone rather than near EQ.
         """
         tap2_idx = tap2["idx"]
         tap3_idx = tap3["idx"]
@@ -771,15 +775,19 @@ class TCTSchematicDetector:
         if tap3_idx >= len(self.candles) - 3:
             return None
 
+        # Extract equilibrium for LTF filtering (keeps BOS away from EQ)
+        equilibrium = range_data.get("equilibrium") if range_data else None
+
         if "Accumulation" in schematic_type:
             # Find highest point between Tap2 and Tap3
             range_candles = self.candles.iloc[tap2_idx:tap3_idx + 1]
             highest_point_idx = range_candles["high"].idxmax()
             highest_point_price = float(self.candles.iloc[highest_point_idx]["high"])
 
-            # Watch structure from highest point to Tap3 low
-            # TCT: Look for break back to bullish
-            bos = self._find_bullish_bos(tap3_idx, highest_point_price, tap3_price)
+            # Watch LTF structure from highest point to Tap3 low
+            # TCT: Look for break back to bullish on internal structure
+            bos = self._find_bullish_bos(tap3_idx, highest_point_price, tap3_price,
+                                          equilibrium=equilibrium)
 
             if bos:
                 return {
@@ -800,9 +808,10 @@ class TCTSchematicDetector:
             lowest_point_idx = range_candles["low"].idxmin()
             lowest_point_price = float(self.candles.iloc[lowest_point_idx]["low"])
 
-            # Watch structure from lowest point to Tap3 high
-            # TCT: Look for break back to bearish
-            bos = self._find_bearish_bos(tap3_idx, lowest_point_price, tap3_price)
+            # Watch LTF structure from lowest point to Tap3 high
+            # TCT: Look for break back to bearish on internal structure
+            bos = self._find_bearish_bos(tap3_idx, lowest_point_price, tap3_price,
+                                          equilibrium=equilibrium)
 
             if bos:
                 return {
@@ -819,30 +828,57 @@ class TCTSchematicDetector:
 
         return None
 
-    def _find_bullish_bos(self, start_idx: int, high_price: float, low_price: float) -> Optional[Dict]:
+    def _find_bullish_bos(self, start_idx: int, high_price: float, low_price: float,
+                           equilibrium: float = None) -> Optional[Dict]:
         """
-        Find bullish break of structure after Tap3.
+        Find bullish break of structure after Tap3 using LTF internal structure.
 
         TCT Lecture 1: BOS is confirmed when candle CLOSE breaks above the
         previous MS high (not wick). Preferably inside original range values.
+
+        Uses lookback=1 for LTF swing detection so the BOS reference point
+        is a small internal swing near Tap3 (discount zone), not a larger
+        HTF swing near EQ that eats into profit.
         """
-        # Collect swing highs after Tap3 (use lookback=2 for shorter-term
-        # MS pivots appropriate for BOS detection)
+        # Collect swing highs after Tap3 using lookback=1 for LTF
+        # internal market structure (finer-grained pivots)
         swing_highs = []
-        for i in range(start_idx + 1, min(start_idx + 25, len(self.candles) - 2)):
-            if self._is_swing_high(i, lookback=2):
+        for i in range(start_idx + 1, min(start_idx + 25, len(self.candles) - 1)):
+            if self._is_swing_high(i, lookback=1):
+                sh_price = float(self.candles.iloc[i]["high"])
+                # Filter: for accumulation BOS, prefer swing highs below EQ
+                # so the entry confirms in the discount zone
+                if equilibrium is not None and sh_price > equilibrium:
+                    continue
                 swing_highs.append({
                     "idx": i,
-                    "price": float(self.candles.iloc[i]["high"])
+                    "price": sh_price
                 })
 
+        # Sort by price ascending — prefer the lowest swing high first
+        # so BOS confirms at a lower price (more room to target)
+        swing_highs.sort(key=lambda s: s["price"])
+
         if not swing_highs:
-            # Fallback: find any previous swing high in the region
+            # Fallback: use lookback=2 if no LTF swings found
+            for i in range(start_idx + 1, min(start_idx + 25, len(self.candles) - 2)):
+                if self._is_swing_high(i, lookback=2):
+                    sh_price = float(self.candles.iloc[i]["high"])
+                    if equilibrium is not None and sh_price > equilibrium:
+                        continue
+                    swing_highs.append({
+                        "idx": i,
+                        "price": sh_price
+                    })
+            swing_highs.sort(key=lambda s: s["price"])
+
+        if not swing_highs:
+            # Last resort: find any previous swing high in the region
             sh = self._find_previous_swing_high(min(start_idx + 10, len(self.candles) - 3))
             if sh:
                 swing_highs.append(sh)
 
-        # Try each swing high (earliest first) — BOS = first broken MS level
+        # Try each swing high (lowest price first) — BOS = first broken MS level
         for sh in swing_highs:
             search_start = sh["idx"] + 1
             for i in range(search_start, min(start_idx + 35, len(self.candles))):
@@ -859,29 +895,57 @@ class TCTSchematicDetector:
 
         return None
 
-    def _find_bearish_bos(self, start_idx: int, low_price: float, high_price: float) -> Optional[Dict]:
+    def _find_bearish_bos(self, start_idx: int, low_price: float, high_price: float,
+                           equilibrium: float = None) -> Optional[Dict]:
         """
-        Find bearish break of structure after Tap3.
+        Find bearish break of structure after Tap3 using LTF internal structure.
 
         TCT Lecture 1: BOS is confirmed when candle CLOSE breaks below the
         previous MS low (not wick). Preferably inside original range values.
+
+        Uses lookback=1 for LTF swing detection so the BOS reference point
+        is a small internal swing near Tap3 (premium zone), not a larger
+        HTF swing near EQ that eats into profit.
         """
-        # Collect swing lows after Tap3 (use lookback=2 for shorter-term
-        # MS pivots appropriate for BOS detection)
+        # Collect swing lows after Tap3 using lookback=1 for LTF
+        # internal market structure (finer-grained pivots)
         swing_lows = []
-        for i in range(start_idx + 1, min(start_idx + 25, len(self.candles) - 2)):
-            if self._is_swing_low(i, lookback=2):
+        for i in range(start_idx + 1, min(start_idx + 25, len(self.candles) - 1)):
+            if self._is_swing_low(i, lookback=1):
+                sl_price = float(self.candles.iloc[i]["low"])
+                # Filter: for distribution BOS, prefer swing lows above EQ
+                # so the entry confirms in the premium zone
+                if equilibrium is not None and sl_price < equilibrium:
+                    continue
                 swing_lows.append({
                     "idx": i,
-                    "price": float(self.candles.iloc[i]["low"])
+                    "price": sl_price
                 })
 
+        # Sort by price descending — prefer the highest swing low first
+        # so BOS confirms at a higher price (more room to target)
+        swing_lows.sort(key=lambda s: s["price"], reverse=True)
+
         if not swing_lows:
+            # Fallback: use lookback=2 if no LTF swings found
+            for i in range(start_idx + 1, min(start_idx + 25, len(self.candles) - 2)):
+                if self._is_swing_low(i, lookback=2):
+                    sl_price = float(self.candles.iloc[i]["low"])
+                    if equilibrium is not None and sl_price < equilibrium:
+                        continue
+                    swing_lows.append({
+                        "idx": i,
+                        "price": sl_price
+                    })
+            swing_lows.sort(key=lambda s: s["price"], reverse=True)
+
+        if not swing_lows:
+            # Last resort: find any previous swing low in the region
             sl = self._find_previous_swing_low(min(start_idx + 10, len(self.candles) - 3))
             if sl:
                 swing_lows.append(sl)
 
-        # Try each swing low (earliest first) — BOS = first broken MS level
+        # Try each swing low (highest price first) — BOS = first broken MS level
         for sl in swing_lows:
             search_start = sl["idx"] + 1
             for i in range(search_start, min(start_idx + 35, len(self.candles))):
@@ -1050,8 +1114,8 @@ class TCTSchematicDetector:
         """
         schematic_type = f"{model_type}_Accumulation"
 
-        # Detect BOS confirmation
-        bos = self._detect_bos_confirmation(tap2, tap3, schematic_type)
+        # Detect BOS confirmation (LTF internal structure, filtered by EQ)
+        bos = self._detect_bos_confirmation(tap2, tap3, schematic_type, range_data=range_data)
 
         # Calculate entry, stop loss, target
         entry_price = bos["bos_price"] if bos else None
@@ -1246,8 +1310,8 @@ class TCTSchematicDetector:
         """
         schematic_type = f"{model_type}_Distribution"
 
-        # Detect BOS confirmation
-        bos = self._detect_bos_confirmation(tap2, tap3, schematic_type)
+        # Detect BOS confirmation (LTF internal structure, filtered by EQ)
+        bos = self._detect_bos_confirmation(tap2, tap3, schematic_type, range_data=range_data)
 
         # Calculate entry, stop loss, target
         entry_price = bos["bos_price"] if bos else None
