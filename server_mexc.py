@@ -3940,6 +3940,51 @@ body{{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-ser
   padding:4px 8px;font-size:.75rem;outline:none;
 }}
 .controls select:focus,.controls input:focus{{border-color:#e040fb}}
+
+/* ---- pair dropdown with search ---- */
+.pair-dropdown-wrap{{position:relative;display:inline-block}}
+.pair-search{{width:140px;background:#181824;color:#e0e0e0;border:1px solid #2d2d44;border-radius:4px;padding:4px 8px;font-size:.75rem;outline:none}}
+.pair-search:focus{{border-color:#e040fb}}
+.pair-menu{{
+  position:absolute;top:100%;left:0;width:220px;max-height:260px;overflow-y:auto;
+  background:#181824;border:1px solid #2d2d44;border-radius:0 0 6px 6px;
+  z-index:100;display:none;
+}}
+.pair-menu.open{{display:block}}
+.pair-cat{{color:#666;font-size:.6rem;padding:6px 8px 2px;text-transform:uppercase;letter-spacing:.5px}}
+.pair-opt{{
+  padding:5px 10px;font-size:.73rem;color:#ccc;cursor:pointer;
+}}
+.pair-opt:hover,.pair-opt.highlighted{{background:#252540;color:#fff}}
+.pair-opt.selected-pair{{color:#e040fb;font-weight:600}}
+
+/* ---- scan button ---- */
+.scan-btn{{
+  padding:4px 14px;font-size:.72rem;border-radius:4px;cursor:pointer;
+  border:1px solid #e040fb;background:rgba(224,64,251,.12);color:#e040fb;
+  font-weight:600;transition:all .15s;
+}}
+.scan-btn:hover{{background:#e040fb;color:#fff}}
+.scan-btn:disabled{{opacity:.4;cursor:not-allowed}}
+
+/* ---- debug toggle ---- */
+.debug-toggle{{
+  display:flex;align-items:center;gap:6px;padding:6px 10px;cursor:pointer;
+  color:#e040fb;font-size:.68rem;font-weight:600;border:1px solid #22223a;
+  border-radius:6px;background:#14141f;margin-bottom:2px;user-select:none;
+}}
+.debug-toggle:hover{{border-color:#e040fb;background:#1a1a2e}}
+.debug-toggle .arrow{{transition:transform .15s}}
+.debug-toggle .arrow.open{{transform:rotate(90deg)}}
+.debug-body{{display:none}}
+.debug-body.open{{display:block}}
+
+/* ---- panel section label ---- */
+.panel-section-label{{
+  color:#888;font-size:.62rem;text-transform:uppercase;letter-spacing:.6px;
+  padding:6px 4px 3px;border-bottom:1px solid #1e1e2d;margin-bottom:4px;
+}}
+
 .filter-btn{{
   padding:4px 10px;font-size:.7rem;border-radius:4px;cursor:pointer;
   border:1px solid #333;background:transparent;color:#888;transition:all .15s;
@@ -4078,9 +4123,12 @@ body{{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-ser
 </div>
 
 <div class="controls" id="controlsBar">
-  <label>Symbol</label>
-  <input id="symInput" value="{symbol}" style="width:100px" />
-  <label>Timeframe</label>
+  <label>1. Pair</label>
+  <div class="pair-dropdown-wrap" id="pairDropdown">
+    <input class="pair-search" id="pairSearch" value="{symbol}" placeholder="Search pair…" autocomplete="off" />
+    <div class="pair-menu" id="pairMenu"></div>
+  </div>
+  <label>2. Timeframe</label>
   <select id="tfSelect">
     <option value="1m" {"selected" if timeframe=="1m" else ""}>1m</option>
     <option value="5m" {"selected" if timeframe=="5m" else ""}>5m</option>
@@ -4091,6 +4139,8 @@ body{{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-ser
     <option value="4h" {"selected" if timeframe=="4h" else ""}>4H</option>
     <option value="1d" {"selected" if timeframe=="1d" else ""}>1D</option>
   </select>
+  <button class="scan-btn" id="scanBtn" onclick="runScan()">3. Scan Schematics</button>
+  <span style="color:#333;font-size:.6rem;margin:0 4px">|</span>
   <button class="filter-btn active" data-filter="all">All</button>
   <button class="filter-btn" data-filter="active">Active</button>
   <button class="filter-btn" data-filter="in_formation">Forming</button>
@@ -4115,9 +4165,19 @@ body{{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-ser
     </div>
   </div>
   <div class="panel">
-    <div id="debugPanel"></div>
+    <div class="panel-section-label">TCT Schematic Models</div>
     <div id="panel">
-      <div class="empty">Loading schematics&hellip;</div>
+      <div class="empty">Select a pair and timeframe, then click <b>Scan Schematics</b></div>
+    </div>
+    <div style="margin-top:auto">
+      <div class="debug-toggle" id="debugToggle" onclick="toggleDebug()">
+        <span class="arrow" id="debugArrow">&#9654;</span>
+        Debug Diagnostics
+        <span id="debugBadge" style="margin-left:auto;color:#666;font-size:.6rem"></span>
+      </div>
+      <div class="debug-body" id="debugBody">
+        <div id="debugPanel"></div>
+      </div>
     </div>
   </div>
 </div>
@@ -4135,6 +4195,16 @@ let currentFilter = 'all';
 let selectedIdx = -1;
 let allSchematics = [];   // merged list
 let chartData = null;
+let coinListData = null;  // cached coin list
+let hasScanRun = false;   // track whether user has triggered a scan
+
+/* ===== debug toggle ===== */
+function toggleDebug() {{
+  const body = document.getElementById('debugBody');
+  const arrow = document.getElementById('debugArrow');
+  body.classList.toggle('open');
+  arrow.classList.toggle('open');
+}}
 
 /* ===== chart ===== */
 let chart, candleSeries;
@@ -4472,6 +4542,12 @@ async function loadData() {{
       ...(data.completed || []),
     ];
 
+    // Use the resolved symbol from API response to ensure chart matches
+    if (data.symbol) {{
+      SYMBOL = data.symbol;
+      document.getElementById('pairSearch').value = data.symbol;
+    }}
+
     // Update live price and header
     if (data.current_price) {{
       document.getElementById('livePrice').textContent = fmt(data.current_price);
@@ -4480,6 +4556,12 @@ async function loadData() {{
     document.getElementById('headerTF').textContent = TIMEFRAME.toUpperCase();
     document.title = 'Schematics 5A — ' + SYMBOL + ' ' + TIMEFRAME.toUpperCase();
 
+    // Update URL to reflect current pair + timeframe
+    const curUrl = new URL(window.location);
+    curUrl.searchParams.set('symbol', SYMBOL);
+    curUrl.searchParams.set('timeframe', TIMEFRAME);
+    window.history.replaceState(null, '', curUrl);
+
     // Summary chips
     const chips = document.getElementById('summaryChips');
     chips.innerHTML =
@@ -4487,11 +4569,12 @@ async function loadData() {{
       '<span class="chip forming">Forming: ' + (data.in_formation?.length || 0) + '</span>' +
       '<span class="chip completed">Done: ' + (data.completed?.length || 0) + '</span>';
 
-    // Debug info in panel header
+    // Debug info — collapsed section
     if (data.debug) {{
       const d = data.debug;
+      const rangeCount = (d.acc_ranges_found ?? 0) + (d.dist_ranges_found ?? 0);
+      document.getElementById('debugBadge').textContent = d.candles_count + ' candles, ' + rangeCount + ' ranges';
       let dbgHtml = '<div class="card" style="border-left:3px solid #e040fb;font-size:.65rem">';
-      dbgHtml += '<div class="card-header"><span class="card-title" style="color:#e040fb">Debug Diagnostics</span></div>';
       dbgHtml += '<div class="card-grid">';
       dbgHtml += '<div class="card-row"><span class="card-label">Candles</span><span class="card-val">' + d.candles_count + '</span></div>';
       dbgHtml += '<div class="card-row"><span class="card-label">Acc Ranges</span><span class="card-val">' + (d.acc_ranges_found ?? '?') + '</span></div>';
@@ -4501,7 +4584,6 @@ async function loadData() {{
       if (d.detector_error) dbgHtml += '<div class="card-row"><span class="card-label">Det Error</span><span class="card-val red">' + d.detector_error + '</span></div>';
       if (d.debug_error) dbgHtml += '<div class="card-row"><span class="card-label">Dbg Error</span><span class="card-val red">' + d.debug_error + '</span></div>';
       dbgHtml += '</div>';
-      // Range details
       if (d.range_details && d.range_details.length > 0) {{
         dbgHtml += '<div style="margin-top:6px;border-top:1px solid #222;padding-top:4px">';
         d.range_details.forEach((r, i) => {{
@@ -4558,7 +4640,6 @@ document.querySelectorAll('.filter-btn').forEach(btn => {{
     currentFilter = btn.dataset.filter;
     selectedIdx = -1;
     renderPanel();
-    // Redraw first matching
     clearOverlays();
     const filtered = allSchematics.filter(s => currentFilter === 'all' || s.state === currentFilter);
     if (filtered.length > 0) {{
@@ -4569,32 +4650,149 @@ document.querySelectorAll('.filter-btn').forEach(btn => {{
   }});
 }});
 
-document.getElementById('tfSelect').addEventListener('change', (e) => {{
-  TIMEFRAME = e.target.value;
-  selectedIdx = -1;
-  _consecutiveErrors = 0;
-  loadData();
-}});
+/* ===== pair dropdown ===== */
+const pairSearch = document.getElementById('pairSearch');
+const pairMenu   = document.getElementById('pairMenu');
+let pairHighlightIdx = -1;
 
-document.getElementById('symInput').addEventListener('keydown', (e) => {{
+async function loadCoinList() {{
+  try {{
+    const resp = await fetch('/api/coin-list');
+    coinListData = await resp.json();
+    renderPairMenu('');
+  }} catch(e) {{ console.error('coin-list load error', e); }}
+}}
+
+function renderPairMenu(filter) {{
+  if (!coinListData) return;
+  const q = filter.toUpperCase();
+  let html = '';
+  const cats = coinListData.categories || {{}};
+  const catNames = {{ majors: 'Majors', defi: 'DeFi', layer_1_2: 'Layer 1/2', meme: 'Meme', ai: 'AI' }};
+  let count = 0;
+  for (const [key, label] of Object.entries(catNames)) {{
+    const pairs = (cats[key] || []).filter(p => !q || p.includes(q));
+    if (pairs.length === 0) continue;
+    html += '<div class="pair-cat">' + label + '</div>';
+    pairs.forEach(p => {{
+      const sel = p === SYMBOL ? ' selected-pair' : '';
+      html += '<div class="pair-opt' + sel + '" data-pair="' + p + '">' + p.replace('USDT', '/USDT') + '</div>';
+      count++;
+    }});
+  }}
+  // Also show from "all" list if filter matches but not in categories
+  if (q && count < 20) {{
+    const allPairs = coinListData.all || [];
+    const shown = new Set();
+    for (const [key] of Object.entries(catNames)) {{
+      (cats[key] || []).forEach(p => shown.add(p));
+    }}
+    const extras = allPairs.filter(p => p.includes(q) && !shown.has(p)).slice(0, 15);
+    if (extras.length > 0) {{
+      html += '<div class="pair-cat">Other</div>';
+      extras.forEach(p => {{
+        const sel = p === SYMBOL ? ' selected-pair' : '';
+        html += '<div class="pair-opt' + sel + '" data-pair="' + p + '">' + p.replace('USDT', '/USDT') + '</div>';
+      }});
+    }}
+  }}
+  if (!html) html = '<div style="padding:10px;color:#555;font-size:.7rem">No matches</div>';
+  pairMenu.innerHTML = html;
+  // Click handlers
+  pairMenu.querySelectorAll('.pair-opt').forEach(opt => {{
+    opt.addEventListener('click', () => selectPair(opt.dataset.pair));
+  }});
+}}
+
+function selectPair(pair) {{
+  SYMBOL = pair;
+  pairSearch.value = pair;
+  pairMenu.classList.remove('open');
+  // Update header immediately
+  document.getElementById('headerPair').textContent = pair.replace('USDT', '/USDT');
+  document.title = 'Schematics 5A — ' + pair + ' ' + TIMEFRAME.toUpperCase();
+  // Update URL without reload
+  const url = new URL(window.location);
+  url.searchParams.set('symbol', pair);
+  window.history.replaceState(null, '', url);
+}}
+
+pairSearch.addEventListener('focus', () => {{
+  renderPairMenu(pairSearch.value);
+  pairMenu.classList.add('open');
+}});
+pairSearch.addEventListener('input', () => {{
+  renderPairMenu(pairSearch.value);
+  pairMenu.classList.add('open');
+}});
+pairSearch.addEventListener('keydown', (e) => {{
   if (e.key === 'Enter') {{
-    let val = e.target.value.trim().toUpperCase();
+    e.preventDefault();
+    let val = pairSearch.value.trim().toUpperCase();
     if (!val.endsWith('USDT')) val += 'USDT';
-    SYMBOL = val;
-    selectedIdx = -1;
-    _consecutiveErrors = 0;
-    loadData();
+    selectPair(val);
+  }}
+  if (e.key === 'Escape') pairMenu.classList.remove('open');
+}});
+// Close dropdown when clicking outside
+document.addEventListener('click', (e) => {{
+  if (!document.getElementById('pairDropdown').contains(e.target)) {{
+    pairMenu.classList.remove('open');
   }}
 }});
 
+/* ===== scan button ===== */
+function runScan() {{
+  // Read latest values from the controls
+  let sym = pairSearch.value.trim().toUpperCase();
+  if (!sym.endsWith('USDT')) sym += 'USDT';
+  SYMBOL = sym;
+  TIMEFRAME = document.getElementById('tfSelect').value;
+
+  // Update header and URL
+  document.getElementById('headerPair').textContent = SYMBOL.replace('USDT', '/USDT');
+  document.getElementById('headerTF').textContent = TIMEFRAME.toUpperCase();
+  document.title = 'Schematics 5A — ' + SYMBOL + ' ' + TIMEFRAME.toUpperCase();
+  const url = new URL(window.location);
+  url.searchParams.set('symbol', SYMBOL);
+  url.searchParams.set('timeframe', TIMEFRAME);
+  window.history.replaceState(null, '', url);
+
+  // Reset state and scan
+  selectedIdx = -1;
+  _consecutiveErrors = 0;
+  hasScanRun = true;
+  document.getElementById('scanBtn').disabled = true;
+  document.getElementById('scanBtn').textContent = 'Scanning…';
+  document.getElementById('panel').innerHTML = '<div class="empty">Scanning ' + SYMBOL.replace('USDT','/USDT') + ' on ' + TIMEFRAME.toUpperCase() + '…</div>';
+  loadData().finally(() => {{
+    document.getElementById('scanBtn').disabled = false;
+    document.getElementById('scanBtn').textContent = '3. Scan Schematics';
+  }});
+}}
+
 /* ===== init ===== */
 initChart();
-loadData();
-scheduleRefresh();
+loadCoinList();
+
+// Auto-scan on load if a specific symbol was provided in URL
+const urlParams = new URLSearchParams(window.location.search);
+if (urlParams.has('symbol') && urlParams.get('symbol').toUpperCase() !== 'BTCUSDT') {{
+  // A specific symbol was requested — auto-scan
+  hasScanRun = true;
+  loadData();
+  scheduleRefresh();
+}} else {{
+  // Default landing: show empty state, wait for user to pick pair + timeframe
+  // Still load default chart candles for context
+  hasScanRun = true;
+  loadData();
+  scheduleRefresh();
+}}
 
 // Reconnect on visibility change (tab switch / phone wake)
 document.addEventListener('visibilitychange', () => {{
-  if (!document.hidden) loadData();
+  if (!document.hidden && hasScanRun) loadData();
 }});
 </script>
 </body>
