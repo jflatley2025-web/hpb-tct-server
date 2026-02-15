@@ -30,7 +30,7 @@ def AUTO_INIT():
 
 
         if TENSORTRADE_CONFIG["auto_train"]:
-            env.simulate_training(episodes=TENSORTRADE_CONFIG["episodes"])
+            env.auto_train(episodes=TENSORTRADE_CONFIG["episodes"])
 
 
         print("[AUTO_INIT] HPB–TCT environment ready.")
