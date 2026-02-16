@@ -33,6 +33,11 @@ from trade_execution import (
     calculate_liquidation_price,
     check_liquidation_safety,
 )
+from telegram_notifications import (
+    notify_trade_entered,
+    notify_trade_closed,
+    notify_trade_force_closed,
+)
 
 logger = logging.getLogger("TensorTCT")
 
@@ -570,6 +575,7 @@ class TensorTCTTrader:
         self.state.current_trade = trade
         self.state.save()
         logger.info(f"[TRADE] Entered {direction} @ {entry_price} | SL={stop_price} | TP={target_price} | Score={evaluation['score']}")
+        notify_trade_entered(trade)
         return trade
 
     def _manage_open_trade(self, current_price: float) -> Dict:
@@ -675,6 +681,16 @@ class TensorTCTTrader:
         self.state.save()
 
         logger.info(f"[TRADE] Closed: {reason} | P&L={pnl_pct:.2f}% (${pnl_dollars:.2f}) | Balance=${self.state.balance:.2f}")
+
+        # Include win/loss totals for the notification
+        closed_trade["_wins"] = self.state.total_wins
+        closed_trade["_losses"] = self.state.total_losses
+
+        if reason == "force_closed":
+            notify_trade_force_closed(closed_trade)
+        else:
+            notify_trade_closed(closed_trade)
+
         return {
             "action": "trade_closed",
             "trade": closed_trade,
