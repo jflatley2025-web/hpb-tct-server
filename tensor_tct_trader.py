@@ -159,17 +159,22 @@ def fetch_candles_sync(symbol: str = SYMBOL, interval: str = TIMEFRAME, limit: i
         data = res.json()
         if not isinstance(data, list) or len(data) == 0:
             return None
-        df = pd.DataFrame(data, columns=[
+        # MEXC spot /api/v3/klines returns variable column counts (8 or 12).
+        # Build column names dynamically to match what the API actually returns.
+        _ALL_COLS = [
             "open_time", "open", "high", "low", "close", "volume",
             "close_time", "quote_vol", "trades", "taker_base",
             "taker_quote", "ignore"
-        ])
+        ]
+        ncols = len(data[0]) if data else 0
+        col_names = _ALL_COLS[:ncols] if ncols <= len(_ALL_COLS) else _ALL_COLS
+        df = pd.DataFrame(data, columns=col_names)
         df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
         df = df.astype({"open": float, "high": float, "low": float, "close": float, "volume": float})
         df = df[["open_time", "open", "high", "low", "close", "volume"]].sort_values("open_time")
         return df
     except Exception as e:
-        logger.error(f"[FETCH] {e}")
+        logger.error(f"[FETCH] {symbol}/{interval}: {e}", exc_info=True)
         return None
 
 
@@ -222,10 +227,13 @@ class TCTTradeEvaluator:
         model = schematic.get("model_type", "unknown")
         is_confirmed = schematic.get("is_confirmed", False)
         rr = schematic.get("risk_reward_ratio", 0)
+        # Also check "risk_reward" key (schematics use both naming conventions)
+        if not rr:
+            rr = schematic.get("risk_reward", 0) or 0
 
         # Must be confirmed (BOS happened)
         if not is_confirmed:
-            return {"score": 0, "direction": direction, "reasons": ["No BOS confirmation"]}
+            return {"score": 0, "direction": direction, "reasons": ["No BOS confirmation"], "required_score": 50, "pass": False, "model": model, "rr": rr}
 
         # BOS confirmation = base score
         score += 30
@@ -239,31 +247,51 @@ class TCTTradeEvaluator:
             score += 15
             reasons.append(f"Good R:R ({rr:.1f})")
         elif rr >= 1.5:
-            score += 5
+            score += 8
             reasons.append(f"Acceptable R:R ({rr:.1f})")
+        elif rr >= 1.0:
+            score += 3
+            reasons.append(f"Minimum R:R ({rr:.1f})")
         else:
-            return {"score": 0, "direction": direction, "reasons": [f"R:R too low ({rr:.1f})"]}
+            return {"score": 0, "direction": direction, "reasons": [f"R:R too low ({rr:.1f})"], "required_score": 50, "pass": False, "model": model, "rr": rr}
+
+        # 6CR validation — strong quality signal from TCT methodology
+        six_cr_valid = schematic.get("six_candle_valid", False)
+        htf_val = schematic.get("lecture_5b_enhancements", {}) or {}
+        htf_6cr = (htf_val.get("htf_validation") or {}).get("all_taps_valid_6cr", False)
+        if six_cr_valid or htf_6cr:
+            score += 10
+            reasons.append("6CR validated on all taps")
+
+        # Quality score from the schematic detector
+        quality = schematic.get("quality_score", 0) or 0
+        if quality >= 0.8:
+            score += 8
+            reasons.append(f"High quality ({quality:.0%})")
+        elif quality >= 0.5:
+            score += 4
+            reasons.append(f"Moderate quality ({quality:.0%})")
 
         # Reward bias alignment
         if direction == "bullish" and reward_bias["bias"] == "bullish":
-            score += 20
+            score += 15
             reasons.append("Reward bias aligned (bullish)")
         elif direction == "bearish" and reward_bias["bias"] == "bearish":
-            score += 20
+            score += 15
             reasons.append("Reward bias aligned (bearish)")
         elif reward_bias["bias"] == "neutral":
             score += 5
             reasons.append("Neutral reward bias — proceed with caution")
         else:
-            score -= 10
+            score -= 5
             reasons.append(f"Reward bias conflicting ({reward_bias['bias']} vs {direction})")
 
         # Confidence boost
         if reward_bias["confidence"] > 60:
-            score += 10
+            score += 8
             reasons.append(f"High reward confidence ({reward_bias['confidence']}%)")
         elif reward_bias["confidence"] > 30:
-            score += 5
+            score += 4
             reasons.append(f"Moderate reward confidence ({reward_bias['confidence']}%)")
 
         # Model type preference
@@ -274,26 +302,35 @@ class TCTTradeEvaluator:
             score += 3
             reasons.append("Model 2 — higher low / lower high")
 
-        # Consecutive loss adaptation — tighten entry requirements
-        if self.consecutive_losses >= 3:
-            required = 70
-            reasons.append(f"Tightened entry (3+ losses) — need score >= {required}")
-        elif self.consecutive_losses >= 2:
-            required = 60
-            reasons.append(f"Cautious mode (2 losses) — need score >= {required}")
-        else:
-            required = 50
-
-        # Check price relative to entry
+        # Price proximity to entry — bonus when price is near the entry zone
         entry_info = schematic.get("entry", {})
         entry_price = entry_info.get("price")
-        if entry_price:
+        if entry_price and entry_price > 0:
+            distance_pct = abs(current_price - entry_price) / entry_price * 100
+            if distance_pct <= 0.3:
+                score += 10
+                reasons.append(f"Price at entry zone ({distance_pct:.2f}% away)")
+            elif distance_pct <= 1.0:
+                score += 5
+                reasons.append(f"Price near entry ({distance_pct:.2f}% away)")
+
+            # Penalize if price already moved well past entry
             if direction == "bullish" and current_price > entry_price * 1.02:
-                score -= 15
+                score -= 10
                 reasons.append("Price already moved 2%+ above entry — late")
             elif direction == "bearish" and current_price < entry_price * 0.98:
-                score -= 15
+                score -= 10
                 reasons.append("Price already moved 2%+ below entry — late")
+
+        # Consecutive loss adaptation — tighten entry requirements
+        if self.consecutive_losses >= 3:
+            required = 65
+            reasons.append(f"Tightened entry (3+ losses) — need score >= {required}")
+        elif self.consecutive_losses >= 2:
+            required = 55
+            reasons.append(f"Cautious mode (2 losses) — need score >= {required}")
+        else:
+            required = 45
 
         score = max(0, min(100, score))
         return {
@@ -344,6 +381,7 @@ class TensorTCTTrader:
     def __init__(self):
         self.state = TradeState()
         self.evaluator = TCTTradeEvaluator()
+        self.last_debug: Dict = {}  # detailed debug from last scan cycle
 
     def scan_and_trade(self) -> Dict:
         """
@@ -391,7 +429,11 @@ class TensorTCTTrader:
                 try:
                     df = fetch_candles_sync(SYMBOL, tf, 200)
                     if df is None or len(df) < 50:
-                        all_tf_results[tf] = {"status": "insufficient_data"}
+                        all_tf_results[tf] = {
+                            "status": "insufficient_data",
+                            "candles": 0 if df is None else len(df),
+                            "fetch_error": df is None,
+                        }
                         continue
 
                     prices = df["close"].values
@@ -417,15 +459,29 @@ class TensorTCTTrader:
 
                     all_tf_results[tf] = {
                         "status": "scanned",
+                        "candles": len(df),
                         "schematics_found": len(all_schematics),
                         "confirmed": sum(1 for s in all_schematics if isinstance(s, dict) and s.get("is_confirmed")),
                         "best_score": max((e["score"] for e in tf_evals), default=0),
                         "reward_bias": reward_bias["bias"],
+                        "reward_confidence": reward_bias["confidence"],
+                        "evaluations": tf_evals[:10],  # top 10 for debug
+                        "detection_error": schematics_result.get("error"),
                     }
 
                 except Exception as tf_err:
                     logger.warning(f"[TRADE] Error scanning {tf}: {tf_err}")
                     all_tf_results[tf] = {"status": "error", "error": str(tf_err)}
+
+            # Store debug info from this scan cycle
+            self.last_debug = {
+                "timestamp": cycle_result["timestamp"],
+                "current_price": current_price,
+                "timeframes": all_tf_results,
+                "best_tf": best_tf,
+                "best_score": best_score,
+                "consecutive_losses": self.evaluator.consecutive_losses,
+            }
 
             # 4. Enter trade if we found a qualifying setup on any timeframe
             if best_setup:
@@ -448,7 +504,7 @@ class TensorTCTTrader:
             self.state.save()
 
         except Exception as e:
-            logger.error(f"[TRADE] Scan error: {e}")
+            logger.error(f"[TRADE] Scan error: {e}", exc_info=True)
             self.state.last_error = str(e)
             self.state.last_scan_action = "error"
             self.state.save()
