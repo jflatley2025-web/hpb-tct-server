@@ -4109,6 +4109,69 @@ body{{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-ser
   .back-link{{font-size:.68rem;padding:4px 6px}}
   .controls select,.controls input{{width:80px}}
 }}
+
+/* ---- setup card overlay ---- */
+.setup-card-overlay{{
+  position:absolute;top:12px;right:12px;z-index:20;
+  background:rgba(16,16,32,.95);border-radius:10px;
+  border:1.5px solid #e040fb;box-shadow:0 0 24px rgba(224,64,251,.25);
+  padding:14px 18px;min-width:220px;max-width:280px;
+  backdrop-filter:blur(12px);
+  animation:setupCardIn .4s ease-out;
+  pointer-events:none;
+}}
+.setup-card-overlay.hiding{{
+  animation:setupCardOut .5s ease-in forwards;
+}}
+@keyframes setupCardIn{{
+  from{{opacity:0;transform:translateY(-12px) scale(.95)}}
+  to{{opacity:1;transform:translateY(0) scale(1)}}
+}}
+@keyframes setupCardOut{{
+  from{{opacity:1;transform:translateY(0) scale(1)}}
+  to{{opacity:0;transform:translateY(-8px) scale(.97)}}
+}}
+.setup-card-overlay .sc-header{{
+  display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;
+}}
+.setup-card-overlay .sc-dir{{
+  font-size:.72rem;font-weight:700;padding:3px 10px;border-radius:4px;
+  text-transform:uppercase;letter-spacing:.5px;
+}}
+.setup-card-overlay .sc-dir.bullish{{background:rgba(0,230,118,.15);color:#00e676;border:1px solid rgba(0,230,118,.3)}}
+.setup-card-overlay .sc-dir.bearish{{background:rgba(255,68,68,.15);color:#ff4444;border:1px solid rgba(255,68,68,.3)}}
+.setup-card-overlay .sc-model{{font-size:.62rem;color:#e040fb;font-weight:600}}
+.setup-card-overlay .sc-label{{font-size:.6rem;color:#666;text-transform:uppercase;letter-spacing:.4px;margin-bottom:1px}}
+.setup-card-overlay .sc-row{{
+  display:flex;justify-content:space-between;align-items:center;padding:3px 0;
+  border-bottom:1px solid rgba(255,255,255,.04);
+}}
+.setup-card-overlay .sc-row:last-child{{border-bottom:none}}
+.setup-card-overlay .sc-val{{font-size:.78rem;font-weight:700}}
+.setup-card-overlay .sc-val.entry{{color:#00d4ff}}
+.setup-card-overlay .sc-val.stop{{color:#ff4444}}
+.setup-card-overlay .sc-val.target{{color:#00ff88}}
+.setup-card-overlay .sc-val.rr{{color:#ffc107}}
+.setup-card-overlay .sc-ready{{
+  margin-top:8px;text-align:center;font-size:.65rem;font-weight:700;
+  color:#00ff88;padding:4px;border-radius:4px;
+  background:rgba(0,255,136,.08);border:1px solid rgba(0,255,136,.2);
+  animation:readyPulse 1.5s ease-in-out infinite;
+}}
+@keyframes readyPulse{{
+  0%,100%{{opacity:.7}}
+  50%{{opacity:1}}
+}}
+.setup-card-overlay .sc-timer{{
+  margin-top:4px;text-align:center;font-size:.55rem;color:#555;
+}}
+.setup-card-overlay .sc-timer-bar{{
+  height:2px;background:#333;border-radius:1px;margin-top:3px;overflow:hidden;
+}}
+.setup-card-overlay .sc-timer-fill{{
+  height:100%;background:#e040fb;border-radius:1px;
+  transition:width 10s linear;
+}}
 </style>
 </head>
 <body>
@@ -4156,6 +4219,7 @@ body{{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-ser
 <div class="main">
   <div class="chart-area">
     <div id="chartContainer"></div>
+    <div id="setupCardContainer"></div>
     <div class="legend">
       <div class="legend-item"><div class="lbox" style="background:rgba(128,128,128,.18);border:1px solid rgba(128,128,128,.5)"></div>Range</div>
       <div class="legend-item"><div class="ldot" style="background:#00d4ff"></div>Tap (Range)</div>
@@ -4625,6 +4689,9 @@ async function loadData() {{
     }}
 
     renderPanel();
+
+    // Check if any active schematic has price near entry — show setup card
+    checkAndShowSetupCard(data.current_price, allSchematics);
   }} catch (e) {{
     if (e.name === 'AbortError') {{ _loadInProgress = false; return; }}
     _consecutiveErrors++;
@@ -4635,6 +4702,85 @@ async function loadData() {{
   }} finally {{
     _loadInProgress = false;
   }}
+}}
+
+/* ===== setup card overlay ===== */
+let _setupCardTimer = null;
+let _setupCardShown = null;  // track which schematic is currently showing
+
+function checkAndShowSetupCard(currentPrice, schematics) {{
+  if (!currentPrice || !schematics || schematics.length === 0) return;
+
+  // Find active schematics where price is at or very close to entry
+  const PROXIMITY_PCT = 0.3;  // 0.3% threshold for "at entry"
+  for (const s of schematics) {{
+    if (s.state !== 'active') continue;
+    const entry = s.entry?.price;
+    if (!entry || entry <= 0) continue;
+
+    const distPct = Math.abs(currentPrice - entry) / entry * 100;
+    if (distPct <= PROXIMITY_PCT) {{
+      // Don't re-show if we just showed this same schematic
+      const schematicKey = (s.model_type || s.schematic_type || '') + '_' + entry;
+      if (_setupCardShown === schematicKey) return;
+      showSetupCard(s, currentPrice, distPct);
+      _setupCardShown = schematicKey;
+      return;
+    }}
+  }}
+}}
+
+function showSetupCard(s, currentPrice, distPct) {{
+  const container = document.getElementById('setupCardContainer');
+  if (_setupCardTimer) clearTimeout(_setupCardTimer);
+
+  const dir = s.direction || 'bullish';
+  const entry = s.entry?.price;
+  const stop = s.stop_loss?.price;
+  const target = s.target?.price;
+  const rr = s.risk_reward;
+  const model = (s.schematic_type || s.model_type || '').replace(/_/g, ' ');
+  const quality = s.quality_score;
+  const sixCR = s.six_candle_valid;
+
+  let html = '<div class="setup-card-overlay" id="activeSetupCard">';
+  // Header
+  html += '<div class="sc-header">';
+  html += '<span class="sc-dir ' + dir + '">' + dir.toUpperCase() + '</span>';
+  html += '<span class="sc-model">' + model + '</span>';
+  html += '</div>';
+  // Body rows
+  html += '<div class="sc-row"><span class="sc-label">Entry</span><span class="sc-val entry">' + fmt(entry) + '</span></div>';
+  html += '<div class="sc-row"><span class="sc-label">Stop Loss</span><span class="sc-val stop">' + fmt(stop) + '</span></div>';
+  html += '<div class="sc-row"><span class="sc-label">Target</span><span class="sc-val target">' + fmt(target) + '</span></div>';
+  if (rr != null) html += '<div class="sc-row"><span class="sc-label">R:R</span><span class="sc-val rr">' + rr.toFixed(1) + ':1</span></div>';
+  if (quality != null) html += '<div class="sc-row"><span class="sc-label">Quality</span><span class="sc-val" style="color:#e040fb">' + Math.round(quality * 100) + '%</span></div>';
+  if (sixCR != null) html += '<div class="sc-row"><span class="sc-label">6CR Valid</span><span class="sc-val" style="color:' + (sixCR ? '#00ff88' : '#ff4444') + '">' + (sixCR ? 'Yes' : 'No') + '</span></div>';
+  html += '<div class="sc-row"><span class="sc-label">Current Price</span><span class="sc-val" style="color:#fff">' + fmt(currentPrice) + '</span></div>';
+  html += '<div class="sc-row"><span class="sc-label">Distance</span><span class="sc-val" style="color:#00d4ff">' + distPct.toFixed(3) + '%</span></div>';
+  // Ready indicator
+  html += '<div class="sc-ready">SETUP READY — PRICE AT ENTRY</div>';
+  // Timer bar
+  html += '<div class="sc-timer">Auto-dismiss in 10s</div>';
+  html += '<div class="sc-timer-bar"><div class="sc-timer-fill" id="setupTimerFill" style="width:100%"></div></div>';
+  html += '</div>';
+
+  container.innerHTML = html;
+
+  // Animate timer bar
+  requestAnimationFrame(() => {{
+    const fill = document.getElementById('setupTimerFill');
+    if (fill) fill.style.width = '0%';
+  }});
+
+  // Auto-dismiss after 10 seconds
+  _setupCardTimer = setTimeout(() => {{
+    const card = document.getElementById('activeSetupCard');
+    if (card) {{
+      card.classList.add('hiding');
+      setTimeout(() => {{ container.innerHTML = ''; _setupCardShown = null; }}, 500);
+    }}
+  }}, 10000);
 }}
 
 /* ===== controls wiring ===== */
@@ -14170,6 +14316,24 @@ async def tensor_trade_reset():
     return convert_numpy_types(trader.reset())
 
 
+@app.get("/api/tensor-trade/debug")
+async def tensor_trade_debug():
+    """Return detailed debug diagnostics from the last scan cycle."""
+    trader = get_trader()
+    debug = dict(trader.last_debug) if trader.last_debug else {}
+    debug["evaluator_consecutive_losses"] = trader.evaluator.consecutive_losses
+    debug["adaptation_notes"] = trader.evaluator.adaptation_notes[-10:]
+    debug["state_summary"] = {
+        "balance": trader.state.balance,
+        "has_open_trade": trader.state.current_trade is not None,
+        "total_trades": len(trader.state.trade_history),
+        "last_scan_time": trader.state.last_scan_time,
+        "last_scan_action": trader.state.last_scan_action,
+        "last_error": trader.state.last_error,
+    }
+    return convert_numpy_types(debug)
+
+
 @app.get("/tensor-trade", response_class=HTMLResponse)
 async def tensor_trade_page():
     """
@@ -14259,6 +14423,27 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
 .solution-item{padding:6px 0;border-bottom:1px solid #1a1a28;font-size:.78rem;color:#bbb}
 .solution-item:last-child{border-bottom:none}
 
+/* debug section */
+.debug-section{padding:16px 24px}
+.debug-toggle-btn{display:flex;align-items:center;gap:8px;padding:8px 16px;background:#12121e;border:1px solid #1e1e2d;border-radius:8px;color:#e040fb;font-size:.78rem;font-weight:600;cursor:pointer;width:100%;text-align:left}
+.debug-toggle-btn:hover{border-color:#e040fb;background:#181828}
+.debug-toggle-btn .darrow{transition:transform .15s;display:inline-block}
+.debug-toggle-btn .darrow.dopen{transform:rotate(90deg)}
+.debug-body-wrap{display:none;margin-top:8px}
+.debug-body-wrap.dopen{display:block}
+.debug-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}
+.debug-card{background:#12121e;border:1px solid #1e1e2d;border-radius:8px;padding:12px 14px;font-size:.72rem}
+.debug-card-title{color:#e040fb;font-weight:700;font-size:.78rem;margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.debug-row{display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid rgba(255,255,255,.03)}
+.debug-row .dlabel{color:#666}
+.debug-row .dval{color:#e0e0e0;font-weight:600}
+.debug-row .dval.dgreen{color:#00e676}
+.debug-row .dval.dred{color:#ff4444}
+.debug-row .dval.dyellow{color:#ffc107}
+.debug-row .dval.dcyan{color:#00d4ff}
+.debug-eval{background:#181828;border:1px solid #222;border-radius:4px;padding:6px 8px;margin-top:4px;font-size:.68rem}
+.debug-eval .dereason{color:#888;font-size:.65rem;margin-top:2px}
+
 /* scrollbar */
 ::-webkit-scrollbar{width:6px}
 ::-webkit-scrollbar-track{background:#0a0a0f}
@@ -14342,6 +14527,20 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
     </div>
   </div>
 
+</div>
+
+<!-- Debug Diagnostics Section -->
+<div class="debug-section">
+  <button class="debug-toggle-btn" onclick="toggleDebugSection()">
+    <span class="darrow" id="debugArrow">&#9654;</span>
+    Debug Diagnostics — Scan Details
+    <span id="debugSummary" style="margin-left:auto;color:#666;font-size:.65rem"></span>
+  </button>
+  <div class="debug-body-wrap" id="debugBodyWrap">
+    <div class="debug-grid" id="debugGrid">
+      <div class="debug-card"><div style="color:#555;text-align:center;padding:20px">Click "Manual Scan" or wait for auto-scan to see debug data</div></div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -14519,6 +14718,104 @@ async function resetTrading() {
     await refreshState();
   } catch(e) { setStatus('Error: ' + e.message); }
 }
+
+// ========== Debug Section ==========
+function toggleDebugSection() {
+  const body = document.getElementById('debugBodyWrap');
+  const arrow = document.getElementById('debugArrow');
+  body.classList.toggle('dopen');
+  arrow.classList.toggle('dopen');
+  if (body.classList.contains('dopen')) refreshDebug();
+}
+
+async function refreshDebug() {
+  try {
+    const d = await fetchJSON('/api/tensor-trade/debug');
+    renderDebug(d);
+  } catch(e) {
+    document.getElementById('debugGrid').innerHTML = '<div class="debug-card"><div style="color:#ff4444">Debug fetch error: ' + e.message + '</div></div>';
+  }
+}
+
+function renderDebug(d) {
+  const grid = document.getElementById('debugGrid');
+  const summary = document.getElementById('debugSummary');
+  if (!d || !d.timeframes) {
+    summary.textContent = d.state_summary?.last_error || 'No scan data yet';
+    grid.innerHTML = '<div class="debug-card">' +
+      '<div class="debug-card-title">State</div>' +
+      '<div class="debug-row"><span class="dlabel">Last Scan</span><span class="dval">' + (d.state_summary?.last_scan_time || 'Never') + '</span></div>' +
+      '<div class="debug-row"><span class="dlabel">Last Action</span><span class="dval">' + (d.state_summary?.last_scan_action || 'None') + '</span></div>' +
+      '<div class="debug-row"><span class="dlabel">Last Error</span><span class="dval dred">' + (d.state_summary?.last_error || 'None') + '</span></div>' +
+      '<div class="debug-row"><span class="dlabel">Open Trade</span><span class="dval">' + (d.state_summary?.has_open_trade ? 'Yes' : 'No') + '</span></div>' +
+      '</div>';
+    return;
+  }
+
+  const ts = d.timestamp ? new Date(d.timestamp).toLocaleTimeString() : '?';
+  const totalSchems = Object.values(d.timeframes).reduce((s,v) => s + (v.schematics_found || 0), 0);
+  const totalConf = Object.values(d.timeframes).reduce((s,v) => s + (v.confirmed || 0), 0);
+  summary.textContent = ts + ' | ' + totalSchems + ' schematics, ' + totalConf + ' confirmed, best=' + (d.best_score || 0);
+
+  let html = '';
+
+  // Overview card
+  html += '<div class="debug-card">' +
+    '<div class="debug-card-title">Scan Overview</div>' +
+    '<div class="debug-row"><span class="dlabel">Time</span><span class="dval">' + ts + '</span></div>' +
+    '<div class="debug-row"><span class="dlabel">Price</span><span class="dval dcyan">$' + (d.current_price || 0).toLocaleString() + '</span></div>' +
+    '<div class="debug-row"><span class="dlabel">Best TF</span><span class="dval dyellow">' + (d.best_tf || 'None') + '</span></div>' +
+    '<div class="debug-row"><span class="dlabel">Best Score</span><span class="dval ' + (d.best_score >= 45 ? 'dgreen' : 'dred') + '">' + (d.best_score || 0) + '/100</span></div>' +
+    '<div class="debug-row"><span class="dlabel">Consecutive Losses</span><span class="dval">' + (d.consecutive_losses || 0) + '</span></div>' +
+    '<div class="debug-row"><span class="dlabel">Balance</span><span class="dval dcyan">$' + (d.state_summary?.balance || 0).toLocaleString(undefined,{minimumFractionDigits:2}) + '</span></div>' +
+    '<div class="debug-row"><span class="dlabel">Open Trade</span><span class="dval">' + (d.state_summary?.has_open_trade ? 'Yes' : 'No') + '</span></div>' +
+    '<div class="debug-row"><span class="dlabel">Last Error</span><span class="dval ' + (d.state_summary?.last_error ? 'dred' : '') + '">' + (d.state_summary?.last_error || 'None') + '</span></div>' +
+    '</div>';
+
+  // Per-timeframe cards
+  const tfOrder = ['4h','1h','15m','5m','1m'];
+  for (const tf of tfOrder) {
+    const t = d.timeframes[tf];
+    if (!t) continue;
+    html += '<div class="debug-card">';
+    html += '<div class="debug-card-title">' + tf.toUpperCase() + ' Timeframe';
+    if (tf === d.best_tf) html += ' <span style="color:#00e676;font-size:.6rem;background:#00e67622;padding:1px 6px;border-radius:3px">BEST</span>';
+    html += '</div>';
+    html += '<div class="debug-row"><span class="dlabel">Status</span><span class="dval ' + (t.status === 'scanned' ? 'dgreen' : 'dred') + '">' + t.status + '</span></div>';
+    html += '<div class="debug-row"><span class="dlabel">Candles</span><span class="dval">' + (t.candles ?? '?') + '</span></div>';
+    if (t.fetch_error) html += '<div class="debug-row"><span class="dlabel">Fetch Error</span><span class="dval dred">Yes — data unavailable</span></div>';
+    if (t.status === 'scanned') {
+      html += '<div class="debug-row"><span class="dlabel">Schematics</span><span class="dval">' + t.schematics_found + '</span></div>';
+      html += '<div class="debug-row"><span class="dlabel">Confirmed (BOS)</span><span class="dval ' + (t.confirmed > 0 ? 'dgreen' : 'dred') + '">' + t.confirmed + '</span></div>';
+      html += '<div class="debug-row"><span class="dlabel">Best Score</span><span class="dval ' + (t.best_score >= 45 ? 'dgreen' : t.best_score > 0 ? 'dyellow' : 'dred') + '">' + t.best_score + '</span></div>';
+      html += '<div class="debug-row"><span class="dlabel">Reward Bias</span><span class="dval">' + (t.reward_bias || '?') + ' (' + (t.reward_confidence || 0) + '%)</span></div>';
+      if (t.detection_error) html += '<div class="debug-row"><span class="dlabel">Detection Error</span><span class="dval dred">' + t.detection_error + '</span></div>';
+      // Show evaluations
+      if (t.evaluations && t.evaluations.length > 0) {
+        html += '<div style="margin-top:6px;border-top:1px solid #222;padding-top:4px;font-size:.65rem;color:#888">Evaluations:</div>';
+        t.evaluations.forEach((ev, i) => {
+          const passC = ev.pass ? 'dgreen' : 'dred';
+          html += '<div class="debug-eval">';
+          html += '<span style="color:#e040fb">#' + (i+1) + '</span> ';
+          html += '<span class="dval ' + passC + '">' + (ev.pass ? 'PASS' : 'FAIL') + '</span> ';
+          html += 'Score: <span class="dval">' + ev.score + '/' + (ev.required_score||45) + '</span> ';
+          html += (ev.direction||'?').toUpperCase() + ' ' + (ev.model||'?') + ' R:R=' + (ev.rr||0).toFixed(1);
+          html += '<div class="dereason">' + (ev.reasons || []).join(' | ') + '</div>';
+          html += '</div>';
+        });
+      }
+    }
+    if (t.error) html += '<div class="debug-row"><span class="dlabel">Error</span><span class="dval dred">' + t.error + '</span></div>';
+    html += '</div>';
+  }
+
+  grid.innerHTML = html;
+}
+
+// Auto-refresh debug if open
+setInterval(() => {
+  if (document.getElementById('debugBodyWrap').classList.contains('dopen')) refreshDebug();
+}, 15000);
 
 // Auto-refresh dashboard every 15s to reflect server-side auto-scan results
 setInterval(refreshState, 15000);
