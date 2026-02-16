@@ -260,7 +260,7 @@ class TCTTradeEvaluator:
 
         # Must be confirmed (BOS happened)
         if not is_confirmed:
-            return {"score": 0, "direction": direction, "reasons": ["No BOS confirmation"]}
+            return {"score": 0, "direction": direction, "model": model, "rr": rr, "required_score": 50, "pass": False, "reasons": ["No BOS confirmation"]}
 
         # BOS confirmation = base score
         score += 30
@@ -277,7 +277,7 @@ class TCTTradeEvaluator:
             score += 5
             reasons.append(f"Acceptable R:R ({rr:.1f})")
         else:
-            return {"score": 0, "direction": direction, "reasons": [f"R:R too low ({rr:.1f})"]}
+            return {"score": 0, "direction": direction, "model": model, "rr": rr, "required_score": 50, "pass": False, "reasons": [f"R:R too low ({rr:.1f})"]}
 
         # Reward bias alignment
         if direction == "bullish" and reward_bias["bias"] == "bullish":
