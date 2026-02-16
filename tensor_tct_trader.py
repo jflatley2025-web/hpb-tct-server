@@ -149,38 +149,55 @@ class TradeState:
 # ================================================================
 # MEXC DATA FETCH (sync for use in background thread)
 # ================================================================
-def fetch_candles_sync(symbol: str = SYMBOL, interval: str = TIMEFRAME, limit: int = 200) -> Optional[pd.DataFrame]:
-    """Fetch OHLCV candles from MEXC (synchronous)."""
+def fetch_candles_sync(symbol: str = SYMBOL, interval: str = TIMEFRAME, limit: int = 200, _retries: int = 3) -> Optional[pd.DataFrame]:
+    """Fetch OHLCV candles from MEXC (synchronous) with retry logic."""
     # Normalize intervals to MEXC-supported values (MEXC spot uses 60m not 1h)
     _MEXC_INTERVAL_MAP = {"1h": "60m", "2h": "4h"}
-    interval = _MEXC_INTERVAL_MAP.get(interval, interval)
+    mexc_interval = _MEXC_INTERVAL_MAP.get(interval, interval)
     url = f"{MEXC_URL_BASE}/api/v3/klines"
-    params = {"symbol": symbol, "interval": interval, "limit": limit}
-    try:
-        res = requests.get(url, params=params, timeout=15)
-        if res.status_code != 200:
-            logger.error(f"[FETCH] HTTP {res.status_code}")
-            return None
-        data = res.json()
-        if not isinstance(data, list) or len(data) == 0:
-            return None
-        # MEXC spot /api/v3/klines returns variable column counts (8 or 12).
-        # Build column names dynamically to match what the API actually returns.
-        _ALL_COLS = [
-            "open_time", "open", "high", "low", "close", "volume",
-            "close_time", "quote_vol", "trades", "taker_base",
-            "taker_quote", "ignore"
-        ]
-        ncols = len(data[0]) if data else 0
-        col_names = _ALL_COLS[:ncols] if ncols <= len(_ALL_COLS) else _ALL_COLS
-        df = pd.DataFrame(data, columns=col_names)
-        df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
-        df = df.astype({"open": float, "high": float, "low": float, "close": float, "volume": float})
-        df = df[["open_time", "open", "high", "low", "close", "volume"]].sort_values("open_time")
-        return df
-    except Exception as e:
-        logger.error(f"[FETCH] {symbol}/{interval}: {e}", exc_info=True)
-        return None
+    params = {"symbol": symbol, "interval": mexc_interval, "limit": limit}
+
+    last_error = None
+    for attempt in range(_retries):
+        try:
+            res = requests.get(url, params=params, timeout=20)
+            if res.status_code != 200:
+                body = res.text[:300] if res.text else "(empty)"
+                logger.error(f"[FETCH] {symbol}/{interval} HTTP {res.status_code} — {body}")
+                last_error = f"HTTP {res.status_code}"
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            data = res.json()
+            if not isinstance(data, list) or len(data) == 0:
+                logger.warning(f"[FETCH] {symbol}/{interval} returned empty data (attempt {attempt + 1}/{_retries})")
+                last_error = "empty response"
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            # MEXC spot /api/v3/klines returns variable column counts (8 or 12).
+            # Build column names dynamically to match what the API actually returns.
+            _ALL_COLS = [
+                "open_time", "open", "high", "low", "close", "volume",
+                "close_time", "quote_vol", "trades", "taker_base",
+                "taker_quote", "ignore"
+            ]
+            ncols = len(data[0]) if data else 0
+            col_names = _ALL_COLS[:ncols] if ncols <= len(_ALL_COLS) else _ALL_COLS
+            df = pd.DataFrame(data, columns=col_names)
+            df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+            df = df.astype({"open": float, "high": float, "low": float, "close": float, "volume": float})
+            df = df[["open_time", "open", "high", "low", "close", "volume"]].sort_values("open_time")
+            return df
+        except requests.exceptions.Timeout:
+            logger.warning(f"[FETCH] {symbol}/{interval} timeout (attempt {attempt + 1}/{_retries})")
+            last_error = "timeout"
+            time.sleep(1.5 * (attempt + 1))
+        except Exception as e:
+            logger.error(f"[FETCH] {symbol}/{interval}: {e}", exc_info=True)
+            last_error = str(e)
+            time.sleep(1.5 * (attempt + 1))
+
+    logger.error(f"[FETCH] {symbol}/{interval} failed after {_retries} attempts — last error: {last_error}")
+    return None
 
 
 def fetch_live_price(symbol: str = SYMBOL) -> Optional[float]:
@@ -188,8 +205,16 @@ def fetch_live_price(symbol: str = SYMBOL) -> Optional[float]:
     try:
         url = f"{MEXC_URL_BASE}/api/v3/ticker/price"
         res = requests.get(url, params={"symbol": symbol}, timeout=10)
-        return float(res.json().get("price", 0))
-    except Exception:
+        if res.status_code != 200:
+            logger.error(f"[PRICE] {symbol} HTTP {res.status_code}")
+            return None
+        price = float(res.json().get("price", 0))
+        if price <= 0:
+            logger.warning(f"[PRICE] {symbol} returned invalid price: {price}")
+            return None
+        return price
+    except Exception as e:
+        logger.error(f"[PRICE] {symbol} fetch failed: {e}")
         return None
 
 
@@ -443,8 +468,14 @@ class TensorTCTTrader:
                     }
 
                 except Exception as tf_err:
-                    logger.warning(f"[TRADE] Error scanning {tf}: {tf_err}")
-                    all_tf_results[tf] = {"status": "error", "error": str(tf_err)}
+                    logger.warning(f"[TRADE] Error scanning {tf}: {tf_err}", exc_info=True)
+                    all_tf_results[tf] = {"status": "error", "error": str(tf_err), "fetch_error": True}
+
+            # Detect total fetch failure — all timeframes returned errors or no data
+            failed_tfs = [tf for tf, r in all_tf_results.items() if r.get("status") in ("insufficient_data", "error") and r.get("fetch_error", False)]
+            if len(failed_tfs) == len(SCAN_TIMEFRAMES):
+                logger.error(f"[TRADE] ALL {len(SCAN_TIMEFRAMES)} timeframes failed to fetch — possible MEXC API outage or network issue")
+                self.state.last_error = f"All timeframes failed: {', '.join(failed_tfs)}"
 
             # Store debug info from this scan cycle
             self.last_debug = {

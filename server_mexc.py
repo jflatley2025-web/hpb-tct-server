@@ -14807,6 +14807,7 @@ async def tensor_trade_auto_scan_loop():
     await asyncio.sleep(15)
     logger.info(f"[TENSOR-TRADE] Auto-scan loop started — interval: {AUTO_SCAN_INTERVAL}s")
 
+    consecutive_errors = 0
     while True:
         try:
             trader = get_trader()
@@ -14815,8 +14816,12 @@ async def tensor_trade_auto_scan_loop():
             action = result.get("action", "unknown")
             ts = result.get("timestamp", "")
             logger.info(f"[TENSOR-TRADE] Auto-scan result: {action} @ {ts}")
+            consecutive_errors = 0
         except Exception as e:
-            logger.error(f"[TENSOR-TRADE] Auto-scan error: {e}")
+            consecutive_errors += 1
+            logger.error(f"[TENSOR-TRADE] Auto-scan error ({consecutive_errors} consecutive): {e}", exc_info=True)
+            if consecutive_errors >= 5:
+                logger.critical(f"[TENSOR-TRADE] {consecutive_errors} consecutive scan failures — possible systemic issue")
         await asyncio.sleep(AUTO_SCAN_INTERVAL)
 
 
