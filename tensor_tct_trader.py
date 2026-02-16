@@ -224,7 +224,7 @@ class TCTTradeEvaluator:
         reasons = []
 
         direction = schematic.get("direction", "unknown")
-        model = schematic.get("model_type", "unknown")
+        model = schematic.get("model", "unknown")
         is_confirmed = schematic.get("is_confirmed", False)
         rr = schematic.get("risk_reward_ratio", 0)
         # Also check "risk_reward" key (schematics use both naming conventions)
