@@ -14300,22 +14300,6 @@ async def tensor_trade_state():
     return convert_numpy_types(trader.state.snapshot())
 
 
-@app.get("/api/tensor-trade/force-close")
-async def tensor_trade_force_close():
-    """Force-close the current open trade."""
-    trader = get_trader()
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, trader.force_close)
-    return convert_numpy_types(result)
-
-
-@app.get("/api/tensor-trade/reset")
-async def tensor_trade_reset():
-    """Reset trading state to $5,000 starting balance."""
-    trader = get_trader()
-    return convert_numpy_types(trader.reset())
-
-
 @app.get("/api/tensor-trade/debug")
 async def tensor_trade_debug():
     """Return detailed debug diagnostics from the last scan cycle."""
@@ -14469,8 +14453,6 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
 <div class="controls">
   <button class="btn btn-scan" onclick="runScan()">Manual Scan</button>
   <button class="btn" onclick="refreshState()">Refresh</button>
-  <button class="btn btn-danger" onclick="forceClose()">Force Close</button>
-  <button class="btn btn-reset" onclick="resetTrading()">Reset ($5K)</button>
   <span class="auto-label" style="color:#00e676">Server auto-scan: ON (every 60s)</span>
   <div class="loading" id="loadingIndicator"><div class="spinner"></div>Scanning...</div>
   <span class="status-text" id="statusText">Auto-scanning...</span>
@@ -14697,26 +14679,6 @@ function updateSolutions(solutions) {
   panel.innerHTML = reversed.map((s, i) => `
     <div class="solution-item">${reversed.length - i}. ${s}</div>
   `).join('');
-}
-
-async function forceClose() {
-  if (!confirm('Force-close the current trade at market price?')) return;
-  showLoading(true);
-  try {
-    const res = await fetchJSON('/api/tensor-trade/force-close');
-    setStatus('Force closed: ' + (res.action || 'done'));
-    await refreshState();
-  } catch(e) { setStatus('Error: ' + e.message); }
-  showLoading(false);
-}
-
-async function resetTrading() {
-  if (!confirm('Reset all trading data? Balance will return to $5,000.')) return;
-  try {
-    await fetchJSON('/api/tensor-trade/reset');
-    setStatus('Reset complete');
-    await refreshState();
-  } catch(e) { setStatus('Error: ' + e.message); }
 }
 
 // ========== Debug Section ==========
