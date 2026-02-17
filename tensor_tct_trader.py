@@ -624,6 +624,53 @@ class TensorTCTTrader:
         if not stop_price or not target_price:
             return {"error": "Missing stop or target price"}
 
+        # Validate target/stop vs entry direction at actual market price.
+        # The schematic's target was calculated against BOS price, but we enter
+        # at current market price — if price has already moved past target,
+        # the trade is invalid.
+        if direction == "bearish":
+            if target_price >= entry_price:
+                logger.warning(
+                    f"[TRADE] REJECTED short: target ${target_price:,.2f} >= entry ${entry_price:,.2f} — "
+                    f"price already moved past target"
+                )
+                return {"error": "Invalid short: target above entry — price moved past target"}
+            if stop_price <= entry_price:
+                logger.warning(
+                    f"[TRADE] REJECTED short: stop ${stop_price:,.2f} <= entry ${entry_price:,.2f}"
+                )
+                return {"error": "Invalid short: stop below entry"}
+        else:  # bullish
+            if target_price <= entry_price:
+                logger.warning(
+                    f"[TRADE] REJECTED long: target ${target_price:,.2f} <= entry ${entry_price:,.2f} — "
+                    f"price already moved past target"
+                )
+                return {"error": "Invalid long: target below entry — price moved past target"}
+            if stop_price >= entry_price:
+                logger.warning(
+                    f"[TRADE] REJECTED long: stop ${stop_price:,.2f} >= entry ${entry_price:,.2f}"
+                )
+                return {"error": "Invalid long: stop above entry"}
+
+        # Recalculate R:R at actual market entry price (not schematic BOS price).
+        # TCT rule: never risk more than the reward.
+        if direction == "bearish":
+            actual_risk = stop_price - entry_price
+            actual_reward = entry_price - target_price
+        else:
+            actual_risk = entry_price - stop_price
+            actual_reward = target_price - entry_price
+
+        actual_rr = actual_reward / actual_risk if actual_risk > 0 else 0
+
+        if actual_rr < 1.0:
+            logger.warning(
+                f"[TRADE] REJECTED: R:R at market price is {actual_rr:.2f} — "
+                f"risking more than reward (risk=${actual_risk:,.2f}, reward=${actual_reward:,.2f})"
+            )
+            return {"error": f"R:R too low at market price ({actual_rr:.2f}:1) — risk exceeds reward"}
+
         # Calculate position sizing (1% risk)
         risk_amount = self.state.balance * (RISK_PER_TRADE_PCT / 100)
         if direction == "bullish":
@@ -654,7 +701,7 @@ class TensorTCTTrader:
             "margin": round(margin, 2),
             "risk_amount": round(risk_amount, 2),
             "leverage": DEFAULT_LEVERAGE,
-            "rr": evaluation.get("rr", 0),
+            "rr": round(actual_rr, 2),
             "entry_score": evaluation["score"],
             "entry_reasons": evaluation["reasons"],
             "reward_bias": reward_bias,
