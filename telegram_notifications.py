@@ -7,6 +7,7 @@
 
 import os
 import logging
+import threading
 import requests
 from typing import Dict, Optional
 
@@ -29,23 +30,29 @@ def _is_configured() -> bool:
     return True
 
 
+def _send_sync(url: str, payload: dict) -> None:
+    """Blocking HTTP POST to Telegram API — runs in a background thread."""
+    try:
+        resp = requests.post(url, json=payload, timeout=5)
+        if resp.status_code != 200:
+            logger.error(f"[TELEGRAM] Send failed: HTTP {resp.status_code} — {resp.text}")
+    except Exception as e:
+        logger.error(f"[TELEGRAM] Send error: {e}")
+
+
 def send_message(text: str, parse_mode: str = "HTML") -> bool:
-    """Send a message to the configured Telegram chat."""
+    """Fire-and-forget: dispatches the Telegram message to a background thread
+    so the caller (trade execution) is never blocked."""
     token, chat_id = _get_credentials()
     if not token or not chat_id:
         logger.warning("[TELEGRAM] Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID — notifications disabled")
         return False
-    try:
-        url = f"{TELEGRAM_API}/bot{token}/sendMessage"
-        payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
-        resp = requests.post(url, json=payload, timeout=10)
-        if resp.status_code != 200:
-            logger.error(f"[TELEGRAM] Send failed: HTTP {resp.status_code} — {resp.text}")
-            return False
-        return True
-    except Exception as e:
-        logger.error(f"[TELEGRAM] Send error: {e}")
-        return False
+
+    url = f"{TELEGRAM_API}/bot{token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
+    t = threading.Thread(target=_send_sync, args=(url, payload), daemon=True)
+    t.start()
+    return True
 
 
 # ────────────────────────────────────────────────
