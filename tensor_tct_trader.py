@@ -55,6 +55,12 @@ SCAN_TIMEFRAMES = ["4h", "1h", "15m", "5m", "1m"]
 # How often the background auto-scan loop runs (seconds)
 AUTO_SCAN_INTERVAL = int(os.getenv("TENSOR_SCAN_INTERVAL", "60"))
 TRADE_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tensor_trade_log.json")
+TRADE_LOG_BACKUP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tensor_trade_log_backup.json")
+
+# Deduplication: minimum seconds between closing one trade and entering the next
+# with the same entry price/direction (prevents re-entering the same schematic)
+DUPLICATE_COOLDOWN_SECONDS = 300  # 5 minutes
+DUPLICATE_PRICE_TOLERANCE = 0.002  # 0.2% price tolerance for "same entry"
 
 
 # ================================================================
@@ -80,6 +86,9 @@ class TradeState:
     def _log_path(self):
         return TRADE_LOG_PATH
 
+    def _backup_path(self):
+        return TRADE_LOG_BACKUP_PATH
+
     def _load(self):
         """Load state from disk if available."""
         try:
@@ -98,12 +107,82 @@ class TradeState:
                 self.last_scan_time = data.get("last_scan_time")
                 self.last_scan_action = data.get("last_scan_action")
                 logger.info(f"[STATE] Loaded trade state — balance=${self.balance:.2f}, trades={len(self.trade_history)}")
+                # One-time deduplication of trade history
+                deduped = self._deduplicate_history()
+                if deduped:
+                    self.save()
         except Exception as e:
             logger.warning(f"[STATE] Could not load trade state: {e}")
 
-    def save(self):
-        """Persist state to disk."""
+    def _deduplicate_history(self) -> bool:
+        """
+        Remove duplicate trades from history. Two trades are considered
+        duplicates if they share the same entry_price and direction.
+        Keeps the first occurrence of each unique (entry_price, direction) pair.
+        Returns True if any duplicates were removed.
+        """
+        if len(self.trade_history) <= 1:
+            return False
+
+        seen = set()
+        unique = []
+        removed = 0
+        for t in self.trade_history:
+            key = (round(t.get("entry_price", 0), 2), t.get("direction", ""))
+            if key in seen:
+                removed += 1
+                continue
+            seen.add(key)
+            unique.append(t)
+
+        if removed == 0:
+            return False
+
+        logger.info(f"[STATE] Deduplicated trade history: removed {removed} duplicates, kept {len(unique)}")
+        self.trade_history = unique
+        # Re-number trade IDs
+        for i, t in enumerate(self.trade_history):
+            t["id"] = i + 1
+        # Recalculate stats from clean history
+        self.total_wins = sum(1 for t in self.trade_history if t.get("is_win"))
+        self.total_losses = sum(1 for t in self.trade_history if not t.get("is_win") and t.get("status") == "closed")
+        self.reward_history = [t.get("reward_value", 0) for t in self.trade_history if "reward_value" in t]
+        # Set balance to the last trade's balance_after, or starting balance
+        if self.trade_history:
+            self.balance = self.trade_history[-1].get("balance_after", self.balance)
+        self.solutions_applied = [t.get("solution", "") for t in self.trade_history if t.get("solution")]
+        return True
+
+    def _backup(self):
+        """Create a backup copy of the trade log before writing."""
+        import shutil
         try:
+            src = self._log_path()
+            if os.path.exists(src):
+                shutil.copy2(src, self._backup_path())
+        except Exception as e:
+            logger.warning(f"[STATE] Backup failed: {e}")
+
+    def restore_from_backup(self) -> bool:
+        """Restore trade state from the backup file."""
+        try:
+            bak = self._backup_path()
+            if not os.path.exists(bak):
+                logger.warning("[STATE] No backup file found")
+                return False
+            import shutil
+            shutil.copy2(bak, self._log_path())
+            self._load()
+            logger.info("[STATE] Restored from backup")
+            return True
+        except Exception as e:
+            logger.error(f"[STATE] Restore failed: {e}")
+            return False
+
+    def save(self):
+        """Persist state to disk (with automatic backup)."""
+        try:
+            self._backup()
             data = {
                 "balance": round(self.balance, 2),
                 "starting_balance": self.starting_balance,
@@ -490,11 +569,25 @@ class TensorTCTTrader:
             # 4. Enter trade if we found a qualifying setup on any timeframe
             if best_setup:
                 schematic, evaluation = best_setup
-                trade = self._enter_trade(schematic, evaluation, current_price, best_reward_bias)
-                trade["timeframe"] = best_tf
-                cycle_result["action"] = "trade_entered"
-                cycle_result["details"] = trade
-                logger.info(f"[TRADE] Setup found on {best_tf} — entering trade")
+                entry_info = schematic.get("entry", {})
+                candidate_price = entry_info.get("price", current_price)
+
+                # Deduplication: skip if this is the same setup we just traded
+                if self._is_duplicate_setup(candidate_price, evaluation["direction"]):
+                    cycle_result["action"] = "duplicate_setup_skipped"
+                    cycle_result["details"] = {
+                        "price": current_price,
+                        "skipped_entry": candidate_price,
+                        "skipped_direction": evaluation["direction"],
+                        "reason": "Same entry price/direction as recent trade — cooldown active",
+                    }
+                    logger.info(f"[TRADE] Duplicate setup skipped: {evaluation['direction']} @ {candidate_price}")
+                else:
+                    trade = self._enter_trade(schematic, evaluation, current_price, best_reward_bias)
+                    trade["timeframe"] = best_tf
+                    cycle_result["action"] = "trade_entered"
+                    cycle_result["details"] = trade
+                    logger.info(f"[TRADE] Setup found on {best_tf} — entering trade")
             else:
                 cycle_result["action"] = "no_qualifying_setups"
                 cycle_result["details"] = {
@@ -694,6 +787,46 @@ class TensorTCTTrader:
             "action": "trade_closed",
             "trade": closed_trade,
         }
+
+    def _is_duplicate_setup(self, entry_price: float, direction: str) -> bool:
+        """
+        Check if this setup duplicates a recently closed trade.
+        Returns True if the same entry price + direction was traded recently
+        (within DUPLICATE_COOLDOWN_SECONDS and DUPLICATE_PRICE_TOLERANCE).
+        """
+        if not self.state.trade_history:
+            return False
+
+        now = datetime.now(timezone.utc)
+        # Check last 5 closed trades for matching entry price + direction
+        for t in reversed(self.state.trade_history[-5:]):
+            t_entry = t.get("entry_price", 0)
+            t_dir = t.get("direction", "")
+            if t_dir != direction:
+                continue
+            # Price within tolerance?
+            if t_entry > 0 and abs(t_entry - entry_price) / t_entry < DUPLICATE_PRICE_TOLERANCE:
+                # Check cooldown timer from when the trade was closed
+                closed_at = t.get("closed_at")
+                if closed_at:
+                    try:
+                        closed_time = datetime.fromisoformat(closed_at)
+                        if closed_time.tzinfo is None:
+                            closed_time = closed_time.replace(tzinfo=timezone.utc)
+                        elapsed = (now - closed_time).total_seconds()
+                        if elapsed < DUPLICATE_COOLDOWN_SECONDS:
+                            logger.info(
+                                f"[DEDUP] Blocking duplicate: {direction} @ {entry_price} "
+                                f"matches trade #{t.get('id')} closed {elapsed:.0f}s ago "
+                                f"(cooldown {DUPLICATE_COOLDOWN_SECONDS}s)"
+                            )
+                            return True
+                    except (ValueError, TypeError):
+                        pass
+                else:
+                    # No closed_at timestamp — treat as recent duplicate to be safe
+                    return True
+        return False
 
     def force_close(self) -> Dict:
         """Force-close the current trade at market price."""

@@ -14300,6 +14300,16 @@ async def tensor_trade_state():
     return convert_numpy_types(trader.state.snapshot())
 
 
+@app.get("/api/tensor-trade/restore")
+async def tensor_trade_restore():
+    """Restore trade state from the most recent backup."""
+    trader = get_trader()
+    success = trader.state.restore_from_backup()
+    if success:
+        return {"status": "restored", "balance": trader.state.balance, "trades": len(trader.state.trade_history)}
+    return {"status": "failed", "message": "No backup found or restore failed"}
+
+
 @app.get("/api/tensor-trade/debug")
 async def tensor_trade_debug():
     """Return detailed debug diagnostics from the last scan cycle."""
@@ -14349,10 +14359,6 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
 .btn:hover{background:#222238;border-color:#e040fb}
 .btn-scan{border-color:#00d4ff;color:#00d4ff}
 .btn-scan:hover{background:#00d4ff22}
-.btn-danger{border-color:#ff4444;color:#ff4444}
-.btn-danger:hover{background:#ff444422}
-.btn-reset{border-color:#ff8800;color:#ff8800}
-.btn-reset:hover{background:#ff880022}
 .status-text{color:#666;font-size:.75rem;margin-left:auto}
 .auto-label{color:#888;font-size:.75rem}
 
