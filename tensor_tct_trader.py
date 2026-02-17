@@ -4,7 +4,7 @@ tensor_tct_trader.py — TensorTrade TCT Simulated Trading Engine
 Uses TCT schematics (Lecture 5A) to detect trade setups on BTCUSDT,
 executes simulated trades with a $5,000 starting balance, and integrates
 the HPBContextualReward system for adaptive learning.
-
+test
 Each cycle:
 1. Fetch live BTCUSDT candles from MEXC
 2. Run TCT schematic detection (accumulation & distribution models)
