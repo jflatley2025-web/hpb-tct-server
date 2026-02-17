@@ -617,7 +617,7 @@ class TensorTCTTrader:
         stop_info = schematic.get("stop_loss", {})
         target_info = schematic.get("target", {})
 
-        entry_price = entry_info.get("price", current_price)
+        entry_price = current_price  # always enter at actual market price
         stop_price = stop_info.get("price")
         target_price = target_info.get("price")
 
