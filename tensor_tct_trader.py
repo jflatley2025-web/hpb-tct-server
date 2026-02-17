@@ -335,7 +335,7 @@ class TCTTradeEvaluator:
         direction = schematic.get("direction", "unknown")
         model = schematic.get("model_type", "unknown")
         is_confirmed = schematic.get("is_confirmed", False)
-        rr = schematic.get("risk_reward_ratio", 0)
+        rr = schematic.get("risk_reward", 0) or 0
 
         # Must be confirmed (BOS happened)
         if not is_confirmed:
