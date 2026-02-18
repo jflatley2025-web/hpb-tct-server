@@ -409,12 +409,44 @@ class TCTTradeEvaluator:
                 score -= 15
                 reasons.append("Price already moved 2%+ below entry — late")
 
+        # Pre-check R:R at actual market price (same logic as _enter_trade).
+        # This prevents the evaluator from choosing a "best" setup that will
+        # just get rejected at entry time because price moved since BOS.
+        stop_info = schematic.get("stop_loss", {})
+        target_info = schematic.get("target", {})
+        stop_price = stop_info.get("price")
+        target_price = target_info.get("price")
+        market_rr = None
+
+        if stop_price and target_price:
+            if direction == "bullish":
+                if target_price <= current_price or stop_price >= current_price:
+                    return {"score": 0, "direction": direction, "model": model, "rr": rr, "market_rr": 0, "required_score": required, "pass": False,
+                            "reasons": [f"Invalid at market price ${current_price:,.0f} — target/stop wrong side of entry"]}
+                actual_risk = current_price - stop_price
+                actual_reward = target_price - current_price
+            else:
+                if target_price >= current_price or stop_price <= current_price:
+                    return {"score": 0, "direction": direction, "model": model, "rr": rr, "market_rr": 0, "required_score": required, "pass": False,
+                            "reasons": [f"Invalid at market price ${current_price:,.0f} — target/stop wrong side of entry"]}
+                actual_risk = stop_price - current_price
+                actual_reward = current_price - target_price
+
+            market_rr = round(actual_reward / actual_risk, 2) if actual_risk > 0 else 0
+
+            if market_rr < 1.0:
+                return {"score": 0, "direction": direction, "model": model, "rr": rr, "market_rr": market_rr, "required_score": required, "pass": False,
+                        "reasons": [f"R:R at market price too low ({market_rr:.2f}:1) — setup is stale"]}
+
+            reasons.append(f"Market-price R:R = {market_rr:.1f}:1")
+
         score = max(0, min(100, score))
         return {
             "score": score,
             "direction": direction,
             "model": model,
             "rr": rr,
+            "market_rr": market_rr,
             "required_score": required,
             "pass": score >= required,
             "reasons": reasons,
@@ -584,10 +616,22 @@ class TensorTCTTrader:
                     logger.info(f"[TRADE] Duplicate setup skipped: {evaluation['direction']} @ {candidate_price}")
                 else:
                     trade = self._enter_trade(schematic, evaluation, current_price, best_reward_bias)
-                    trade["timeframe"] = best_tf
-                    cycle_result["action"] = "trade_entered"
-                    cycle_result["details"] = trade
-                    logger.info(f"[TRADE] Setup found on {best_tf} — entering trade")
+                    if "error" in trade:
+                        cycle_result["action"] = "trade_rejected"
+                        cycle_result["details"] = {
+                            "price": current_price,
+                            "timeframe": best_tf,
+                            "score": evaluation["score"],
+                            "direction": evaluation["direction"],
+                            "schematic_rr": evaluation.get("rr", 0),
+                            "rejection_reason": trade["error"],
+                        }
+                        logger.warning(f"[TRADE] Setup on {best_tf} passed evaluation but rejected at entry: {trade['error']}")
+                    else:
+                        trade["timeframe"] = best_tf
+                        cycle_result["action"] = "trade_entered"
+                        cycle_result["details"] = trade
+                        logger.info(f"[TRADE] Setup found on {best_tf} — entering trade")
             else:
                 cycle_result["action"] = "no_qualifying_setups"
                 cycle_result["details"] = {
