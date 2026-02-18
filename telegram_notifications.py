@@ -49,9 +49,19 @@ def send_message(text: str, parse_mode: str = "HTML") -> bool:
         return False
 
     url = f"{TELEGRAM_API}/bot{token}/sendMessage"
+
+    # Send to primary chat
     payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
     t = threading.Thread(target=_send_sync, args=(url, payload), daemon=True)
     t.start()
+
+    # Send to secondary chat if configured
+    chat_id_2 = os.getenv("TELEGRAM_CHAT_ID_2")
+    if chat_id_2:
+        payload_2 = {"chat_id": chat_id_2, "text": text, "parse_mode": parse_mode}
+        t2 = threading.Thread(target=_send_sync, args=(url, payload_2), daemon=True)
+        t2.start()
+
     return True
 
 
