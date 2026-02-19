@@ -27,15 +27,15 @@
     "opened_at": "2026-02-19T06:20:01.407537+00:00",
     "status": "open",
     "timeframe": "1h",
-    "live_pnl_pct": -0.0,
-    "current_price": 67098.68
+    "live_pnl_pct": 0.02,
+    "current_price": 67114.0
   },
   "trade_history": [],
   "reward_history": [],
   "total_wins": 0,
   "total_losses": 0,
   "solutions_applied": [],
-  "last_scan_time": "2026-02-19T07:04:16.102739+00:00",
+  "last_scan_time": "2026-02-19T08:04:38.215633+00:00",
   "last_scan_action": "holding",
   "last_error": null
 }
