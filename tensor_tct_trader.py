@@ -52,6 +52,12 @@ SYMBOL = "BTCUSDT"
 TIMEFRAME = "4h"  # legacy default (multi-TF scanning overrides this)
 # Scan these timeframes from highest to lowest — first qualifying setup wins
 SCAN_TIMEFRAMES = ["4h", "1h", "15m", "5m", "1m"]
+# HTF→MTF→LTF cascade structure:
+#   HTF — directional bias gate only (no schematic trade entries)
+#   MTF — schematic detection + trade entry (must not contradict HTF)
+#   LTF — entry price polling only (via the 1m price fetch above)
+HTF_TIMEFRAME = "4h"
+MTF_TIMEFRAMES = ["1h", "15m"]
 # How often the background auto-scan loop runs (seconds)
 AUTO_SCAN_INTERVAL = int(os.getenv("TENSOR_SCAN_INTERVAL", "60"))
 TRADE_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tensor_trade_log.json")
@@ -367,22 +373,41 @@ class TCTTradeEvaluator:
         confidence = min(abs(avg) * 1000, 100.0)  # scale to 0-100
         return {"bias": bias, "confidence": round(confidence, 2), "avg_reward": avg}
 
-    def evaluate_schematic(self, schematic: Dict, reward_bias: Dict, current_price: float) -> Dict:
+    def evaluate_schematic(self, schematic: Dict, htf_bias: str, current_price: float) -> Dict:
         """
         Score a schematic for trade entry quality.
+
+        htf_bias: "bullish" | "bearish" | "neutral" — derived from confirmed HTF schematics.
         Returns a dict with score (0-100), direction, and reasoning.
         """
         score = 0
         reasons = []
 
         direction = schematic.get("direction", "unknown")
-        model = schematic.get("model_type", "unknown")
+        # Use "model" key (correct field name from _build_*_schematic); fall back to schematic_type
+        model = schematic.get("model", schematic.get("schematic_type", "unknown"))
         is_confirmed = schematic.get("is_confirmed", False)
         rr = schematic.get("risk_reward", 0) or 0
+        tap3 = schematic.get("tap3", {})
 
         # Must be confirmed (BOS happened)
         if not is_confirmed:
             return {"score": 0, "direction": direction, "model": model, "rr": rr, "required_score": 50, "pass": False, "reasons": ["No BOS confirmation"]}
+
+        # Hard validation gates: model structure must match the claimed model type.
+        # Model_1_from_M2_failure is a conversion — skip strict gate, it was already validated.
+        if "Model_1_from_M2_failure" not in model:
+            if "Model_1" in model:
+                if tap3.get("type") != "tap3_model1":
+                    return {"score": 0, "direction": direction, "model": model, "rr": rr, "required_score": 50, "pass": False,
+                            "reasons": ["Model 1 hard gate: Tap3 must be a deeper deviation (type=tap3_model1)"]}
+            elif "Model_2" in model:
+                if direction == "bullish" and not tap3.get("is_higher_low"):
+                    return {"score": 0, "direction": direction, "model": model, "rr": rr, "required_score": 50, "pass": False,
+                            "reasons": ["Model 2 hard gate: Tap3 must be a higher low for accumulation"]}
+                if direction == "bearish" and not tap3.get("is_lower_high"):
+                    return {"score": 0, "direction": direction, "model": model, "rr": rr, "required_score": 50, "pass": False,
+                            "reasons": ["Model 2 hard gate: Tap3 must be a lower high for distribution"]}
 
         # BOS confirmation = base score
         score += 30
@@ -401,27 +426,21 @@ class TCTTradeEvaluator:
         else:
             return {"score": 0, "direction": direction, "model": model, "rr": rr, "required_score": 50, "pass": False, "reasons": [f"R:R too low ({rr:.1f})"]}
 
-        # Reward bias alignment
-        if direction == "bullish" and reward_bias["bias"] == "bullish":
+        # HTF directional gate alignment — replaces the old momentum-based reward bias
+        if direction == "bullish" and htf_bias == "bullish":
             score += 20
-            reasons.append("Reward bias aligned (bullish)")
-        elif direction == "bearish" and reward_bias["bias"] == "bearish":
+            reasons.append("HTF bias aligned (bullish accumulation on 4h)")
+        elif direction == "bearish" and htf_bias == "bearish":
             score += 20
-            reasons.append("Reward bias aligned (bearish)")
-        elif reward_bias["bias"] == "neutral":
+            reasons.append("HTF bias aligned (bearish distribution on 4h)")
+        elif htf_bias == "neutral":
             score += 5
-            reasons.append("Neutral reward bias — proceed with caution")
+            reasons.append("HTF neutral — both directions permitted")
         else:
+            # Safety net: should be unreachable (contradicting schematics are filtered
+            # before evaluate_schematic is called), but penalise just in case
             score -= 10
-            reasons.append(f"Reward bias conflicting ({reward_bias['bias']} vs {direction})")
-
-        # Confidence boost
-        if reward_bias["confidence"] > 60:
-            score += 10
-            reasons.append(f"High reward confidence ({reward_bias['confidence']}%)")
-        elif reward_bias["confidence"] > 30:
-            score += 5
-            reasons.append(f"Moderate reward confidence ({reward_bias['confidence']}%)")
+            reasons.append(f"HTF bias conflict ({htf_bias} vs {direction})")
 
         # Model type preference — data-driven after sufficient history, fixed defaults before
         _weights = getattr(self, 'model_weights', {})
@@ -434,7 +453,7 @@ class TCTTradeEvaluator:
             elif bonus < 0:
                 score += bonus
                 reasons.append(f"{model} — underperforming historically ({bonus} adjustment, {sample} trades)")
-            # bonus == 0: model has insufficient sample or neutral — no change, no noise
+            # bonus == 0: neutral or insufficient sample — no change, no noise
         else:
             # Cold start — use fixed defaults until min_trades threshold is reached
             if "Model_1" in model:
@@ -554,14 +573,46 @@ class TensorTCTTrader:
                 self.state.save()
                 return cycle_result
 
-            # 3. Scan across all timeframes for the best qualifying setup
+            # 3. HTF gate: determine directional bias from confirmed 4h schematics.
+            #    Accumulation confirmed on HTF → bullish bias (gate shorts out).
+            #    Distribution confirmed on HTF → bearish bias (gate longs out).
+            #    Both or neither confirmed → neutral (both directions permitted on MTF).
+            htf_bias = "neutral"
+            htf_result_debug: Dict = {"status": "not_fetched"}
+            try:
+                df_htf = fetch_candles_sync(SYMBOL, HTF_TIMEFRAME, 200)
+                if df_htf is None or len(df_htf) < 50:
+                    htf_result_debug = {"status": "insufficient_data", "candles": 0 if df_htf is None else len(df_htf)}
+                else:
+                    htf_schematics = detect_tct_schematics(df_htf, [])
+                    htf_acc = [s for s in htf_schematics.get("accumulation_schematics", []) if isinstance(s, dict) and s.get("is_confirmed")]
+                    htf_dist = [s for s in htf_schematics.get("distribution_schematics", []) if isinstance(s, dict) and s.get("is_confirmed")]
+                    if htf_acc and not htf_dist:
+                        htf_bias = "bullish"
+                    elif htf_dist and not htf_acc:
+                        htf_bias = "bearish"
+                    # else: both or neither → neutral
+                    htf_result_debug = {
+                        "status": "scanned",
+                        "candles": len(df_htf),
+                        "confirmed_accumulation": len(htf_acc),
+                        "confirmed_distribution": len(htf_dist),
+                        "htf_bias": htf_bias,
+                    }
+            except Exception as htf_err:
+                logger.warning(f"[TRADE] HTF gate error on {HTF_TIMEFRAME}: {htf_err}", exc_info=True)
+                htf_result_debug = {"status": "error", "error": str(htf_err)}
+
+            logger.info(f"[TRADE] HTF bias ({HTF_TIMEFRAME}): {htf_bias}")
+
+            # 4. Scan MTF timeframes for the best qualifying setup that does not
+            #    contradict the HTF directional bias.
             best_setup = None
             best_score = 0
             best_tf = None
-            best_reward_bias = None
-            all_tf_results = {}
+            all_tf_results = {HTF_TIMEFRAME: htf_result_debug}
 
-            for tf in SCAN_TIMEFRAMES:
+            for tf in MTF_TIMEFRAMES:
                 try:
                     df = fetch_candles_sync(SYMBOL, tf, 200)
                     if df is None or len(df) < 50:
@@ -571,9 +622,6 @@ class TensorTCTTrader:
                             "fetch_error": df is None,
                         }
                         continue
-
-                    prices = df["close"].values
-                    reward_bias = self.evaluator.compute_reward_bias(prices)
 
                     schematics_result = detect_tct_schematics(df, [])
                     all_schematics = (
@@ -585,22 +633,28 @@ class TensorTCTTrader:
                     for s in all_schematics:
                         if not isinstance(s, dict):
                             continue
-                        eval_result = self.evaluator.evaluate_schematic(s, reward_bias, current_price)
+                        # HTF direction gate: skip schematics that contradict HTF bias
+                        s_direction = s.get("direction", "unknown")
+                        if htf_bias == "bullish" and s_direction == "bearish":
+                            continue
+                        if htf_bias == "bearish" and s_direction == "bullish":
+                            continue
+                        # htf_bias == "neutral" → allow both
+
+                        eval_result = self.evaluator.evaluate_schematic(s, htf_bias, current_price)
                         tf_evals.append(eval_result)
                         if eval_result["pass"] and eval_result["score"] > best_score:
                             best_score = eval_result["score"]
                             best_setup = (s, eval_result)
                             best_tf = tf
-                            best_reward_bias = reward_bias
 
                     all_tf_results[tf] = {
                         "status": "scanned",
                         "candles": len(df),
                         "schematics_found": len(all_schematics),
                         "confirmed": sum(1 for s in all_schematics if isinstance(s, dict) and s.get("is_confirmed")),
+                        "htf_bias": htf_bias,
                         "best_score": max((e["score"] for e in tf_evals), default=0),
-                        "reward_bias": reward_bias["bias"],
-                        "reward_confidence": reward_bias["confidence"],
                         "evaluations": tf_evals[:10],  # top 10 for debug
                         "detection_error": schematics_result.get("error"),
                     }
@@ -609,11 +663,11 @@ class TensorTCTTrader:
                     logger.warning(f"[TRADE] Error scanning {tf}: {tf_err}", exc_info=True)
                     all_tf_results[tf] = {"status": "error", "error": str(tf_err), "fetch_error": True}
 
-            # Detect total fetch failure — all timeframes returned errors or no data
-            failed_tfs = [tf for tf, r in all_tf_results.items() if r.get("status") in ("insufficient_data", "error") and r.get("fetch_error", False)]
-            if len(failed_tfs) == len(SCAN_TIMEFRAMES):
-                logger.error(f"[TRADE] ALL {len(SCAN_TIMEFRAMES)} timeframes failed to fetch — possible MEXC API outage or network issue")
-                self.state.last_error = f"All timeframes failed: {', '.join(failed_tfs)}"
+            # Detect total MTF fetch failure
+            failed_tfs = [tf for tf, r in all_tf_results.items() if tf in MTF_TIMEFRAMES and r.get("status") in ("insufficient_data", "error") and r.get("fetch_error", False)]
+            if len(failed_tfs) == len(MTF_TIMEFRAMES):
+                logger.error(f"[TRADE] ALL MTF timeframes failed to fetch — possible MEXC API outage or network issue")
+                self.state.last_error = f"All MTF timeframes failed: {', '.join(failed_tfs)}"
 
             # Store debug info from this scan cycle
             self.last_debug = {
@@ -642,7 +696,7 @@ class TensorTCTTrader:
                     }
                     logger.info(f"[TRADE] Duplicate setup skipped: {evaluation['direction']} @ {candidate_price}")
                 else:
-                    trade = self._enter_trade(schematic, evaluation, current_price, best_reward_bias)
+                    trade = self._enter_trade(schematic, evaluation, current_price, htf_bias)
                     trade["timeframe"] = best_tf
                     cycle_result["action"] = "trade_entered"
                     cycle_result["details"] = trade
@@ -669,7 +723,7 @@ class TensorTCTTrader:
 
         return cycle_result
 
-    def _enter_trade(self, schematic: Dict, evaluation: Dict, current_price: float, reward_bias: Dict) -> Dict:
+    def _enter_trade(self, schematic: Dict, evaluation: Dict, current_price: float, htf_bias: str) -> Dict:
         """Open a simulated trade based on a qualifying schematic."""
         direction = evaluation["direction"]
         entry_info = schematic.get("entry", {})
@@ -763,7 +817,7 @@ class TensorTCTTrader:
             "rr": round(actual_rr, 2),
             "entry_score": evaluation["score"],
             "entry_reasons": evaluation["reasons"],
-            "reward_bias": reward_bias,
+            "htf_bias": htf_bias,
             "liquidation_price": round(liq_price, 2),
             "liquidation_safe": safety["is_safe"],
             "opened_at": datetime.now(timezone.utc).isoformat(),
@@ -854,8 +908,8 @@ class TensorTCTTrader:
             self.state.total_losses += 1
             solution = self.evaluator.adapt_after_loss(trade)
             analysis = f"LOSS: {trade['model']} {direction} trade stopped out. Price moved against position."
-            if trade.get("reward_bias", {}).get("bias") != direction.replace("ish", ""):
-                analysis += " Reward bias was conflicting — consider only trading with aligned bias."
+            if trade.get("htf_bias") not in (direction, "neutral"):
+                analysis += " HTF bias was conflicting — consider only trading with aligned HTF bias."
 
         closed_trade = {
             **trade,
