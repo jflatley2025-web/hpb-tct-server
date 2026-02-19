@@ -3016,6 +3016,15 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     """Clean up shared httpx client on shutdown."""
+    # Push trade log to GitHub on graceful shutdown (belt-and-suspenders alongside hourly push)
+    try:
+        from github_storage import push_trade_log
+        from tensor_tct_trader import TRADE_LOG_PATH
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, push_trade_log, TRADE_LOG_PATH)
+    except Exception as e:
+        logger.warning(f"[SHUTDOWN] GitHub push failed: {e}")
+
     global _shared_client
     if _shared_client and not _shared_client.is_closed:
         await _shared_client.aclose()
@@ -14806,14 +14815,21 @@ async def tensor_trade_auto_scan_loop():
     Server-side background loop that runs the TensorTCT trader's
     scan_and_trade() cycle autonomously every AUTO_SCAN_INTERVAL seconds.
     No browser tab required — this runs entirely on the server.
+
+    Also pushes the trade log to GitHub every hour so trade history
+    survives Render deployments.
     """
-    from tensor_tct_trader import get_trader, AUTO_SCAN_INTERVAL
+    from tensor_tct_trader import get_trader, AUTO_SCAN_INTERVAL, TRADE_LOG_PATH
+    from github_storage import push_trade_log
 
     # Let the server finish starting up before first scan
     await asyncio.sleep(15)
     logger.info(f"[TENSOR-TRADE] Auto-scan loop started — interval: {AUTO_SCAN_INTERVAL}s")
 
     consecutive_errors = 0
+    _last_github_push = time.time()
+    GITHUB_PUSH_INTERVAL = 3600  # 1 hour
+
     while True:
         try:
             trader = get_trader()
@@ -14828,6 +14844,14 @@ async def tensor_trade_auto_scan_loop():
             logger.error(f"[TENSOR-TRADE] Auto-scan error ({consecutive_errors} consecutive): {e}", exc_info=True)
             if consecutive_errors >= 5:
                 logger.critical(f"[TENSOR-TRADE] {consecutive_errors} consecutive scan failures — possible systemic issue")
+
+        # Hourly push to GitHub — trade history persists across deployments
+        now = time.time()
+        if now - _last_github_push >= GITHUB_PUSH_INTERVAL:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, push_trade_log, TRADE_LOG_PATH)
+            _last_github_push = now
+
         await asyncio.sleep(AUTO_SCAN_INTERVAL)
 
 

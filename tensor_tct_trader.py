@@ -91,6 +91,13 @@ class TradeState:
 
     def _load(self):
         """Load state from disk if available."""
+        # Attempt to restore from GitHub if local file is missing (post-deployment recovery)
+        try:
+            from github_storage import fetch_trade_log
+            fetch_trade_log(self._log_path())
+        except Exception as github_err:
+            logger.warning(f"[STATE] GitHub restore skipped: {github_err}")
+
         try:
             path = self._log_path()
             if os.path.exists(path):
@@ -200,6 +207,42 @@ class TradeState:
                 json.dump(data, f, indent=2, default=str)
         except Exception as e:
             logger.error(f"[STATE] Failed to save: {e}")
+
+    def compute_model_weights(self, min_trades: int = 10) -> dict:
+        """
+        Compute per-model score bonuses from closed trade history.
+
+        Returns an empty dict (use fixed defaults) if fewer than min_trades
+        closed trades exist — prevents the system from over-fitting on a tiny sample.
+
+        Bonus formula: round((win_rate - 0.5) * 20)
+          0% win rate  → -10  (actively penalise)
+          50% win rate →   0  (neutral)
+         100% win rate → +10  (strong bonus)
+
+        Only models with >= 3 individual trades contribute — too few trades
+        per model produces unreliable statistics.
+        """
+        closed = [t for t in self.trade_history if t.get("status") == "closed"]
+        if len(closed) < min_trades:
+            return {}
+
+        model_stats: dict = {}
+        for t in closed:
+            m = t.get("model", "unknown")
+            if m not in model_stats:
+                model_stats[m] = {"wins": 0, "total": 0}
+            model_stats[m]["total"] += 1
+            if t.get("is_win"):
+                model_stats[m]["wins"] += 1
+
+        weights: dict = {"_sample_size": len(closed)}
+        for m, stats in model_stats.items():
+            if stats["total"] >= 3:
+                win_rate = stats["wins"] / stats["total"]
+                weights[m] = round((win_rate - 0.5) * 20)
+
+        return weights
 
     def snapshot(self) -> Dict:
         """Return JSON-safe state snapshot for the dashboard."""
@@ -380,13 +423,26 @@ class TCTTradeEvaluator:
             score += 5
             reasons.append(f"Moderate reward confidence ({reward_bias['confidence']}%)")
 
-        # Model type preference
-        if "Model_1" in model:
-            score += 5
-            reasons.append("Model 1 — deeper deviation (stronger)")
-        elif "Model_2" in model:
-            score += 3
-            reasons.append("Model 2 — higher low / lower high")
+        # Model type preference — data-driven after sufficient history, fixed defaults before
+        _weights = getattr(self, 'model_weights', {})
+        if _weights:
+            bonus = _weights.get(model, 0)
+            sample = _weights.get("_sample_size", "?")
+            if bonus > 0:
+                score += bonus
+                reasons.append(f"{model} — learned bonus +{bonus} (from {sample} trade history)")
+            elif bonus < 0:
+                score += bonus
+                reasons.append(f"{model} — underperforming historically ({bonus} adjustment, {sample} trades)")
+            # bonus == 0: model has insufficient sample or neutral — no change, no noise
+        else:
+            # Cold start — use fixed defaults until min_trades threshold is reached
+            if "Model_1" in model:
+                score += 5
+                reasons.append("Model 1 — deeper deviation (stronger)")
+            elif "Model_2" in model:
+                score += 3
+                reasons.append("Model 2 — higher low / lower high")
 
         # Consecutive loss adaptation — tighten entry requirements
         if self.consecutive_losses >= 3:
@@ -474,6 +530,9 @@ class TensorTCTTrader:
         }
 
         try:
+            # Refresh learned model weights from trade history before scanning
+            self.evaluator.model_weights = self.state.compute_model_weights()
+
             # 1. Get current price from the fastest feed (1m)
             df_price = fetch_candles_sync(SYMBOL, "1m", 10)
             if df_price is None or len(df_price) == 0:
