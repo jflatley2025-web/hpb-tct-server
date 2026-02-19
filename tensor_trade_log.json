@@ -1,5 +1,5 @@
 {
-  "balance": 4884.71,
+  "balance": 4513.53,
   "starting_balance": 5000.0,
   "current_trade": null,
   "trade_history": [
@@ -84,19 +84,63 @@
       "reward_value": -0.002507,
       "_wins": 0,
       "_losses": 2
+    },
+    {
+      "id": 3,
+      "symbol": "BTCUSDT",
+      "direction": "bullish",
+      "model": "Model_1",
+      "entry_price": 66418.21,
+      "stop_price": 66407.78,
+      "target_price": 69234.83,
+      "position_size": 311159.51,
+      "margin": 31115.95,
+      "risk_amount": 48.85,
+      "leverage": 10,
+      "rr": 270.14,
+      "entry_score": 65,
+      "entry_reasons": [
+        "BOS confirmed",
+        "Excellent R:R (3.3)",
+        "HTF neutral \u2014 both directions permitted",
+        "Model 1 \u2014 deeper deviation (stronger)",
+        "Cautious mode (2 losses) \u2014 need score >= 60"
+      ],
+      "htf_bias": "neutral",
+      "liquidation_price": 60108.48,
+      "liquidation_safe": true,
+      "opened_at": "2026-02-19T13:16:43.635299+00:00",
+      "status": "closed",
+      "timeframe": "1h",
+      "live_pnl_pct": -0.12,
+      "current_price": 66338.98,
+      "exit_price": 66338.98,
+      "exit_reason": "stop_hit",
+      "pnl_pct": -0.12,
+      "pnl_dollars": -371.18,
+      "is_win": false,
+      "closed_at": "2026-02-19T13:17:44.335126+00:00",
+      "analysis": "LOSS: Model_1 bullish trade stopped out. Price moved against position.",
+      "solution": "Switched to high-confidence-only mode (score >= 70) after 3 consecutive losses",
+      "balance_after": 4513.53,
+      "reward_value": -0.001193,
+      "_wins": 0,
+      "_losses": 3
     }
   ],
   "reward_history": [
     -0.010967209550171372,
-    -0.0025074856373746147
+    -0.0025074856373746147,
+    -0.0011928957435018268
   ],
   "total_wins": 0,
-  "total_losses": 2,
+  "total_losses": 3,
   "solutions_applied": [
     "No specific adaptation needed \u2014 loss within normal parameters",
-    "No specific adaptation needed \u2014 loss within normal parameters"
+    "No specific adaptation needed \u2014 loss within normal parameters",
+    "Switched to high-confidence-only mode (score >= 70) after 3 consecutive losses"
   ],
-  "last_scan_time": "2026-02-19T13:06:31.089366+00:00",
-  "last_scan_action": "trade_entered",
+  "last_scan_time": "2026-02-19T14:07:52.712679+00:00",
+  "last_scan_action": "no_qualifying_setups",
   "last_error": null
 }
