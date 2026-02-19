@@ -26,7 +26,7 @@ from typing import Dict, List, Optional
 from pathlib import Path
 
 from tct_schematics import detect_tct_schematics
-from tensortrade_env import HPBContextualReward, HPB_TensorTrade_Env
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from trade_execution import (
     calculate_position_size,
     calculate_margin,
@@ -250,6 +250,23 @@ class TradeState:
 
         return weights
 
+    def derive_consecutive_losses(self) -> int:
+        """
+        Derive the current consecutive-loss streak from the tail of closed trade history.
+
+        Counts backwards through closed trades, stopping at the first win. Force-closes
+        are treated as losses because they represent an unmanaged exit.
+        Survives server restarts — always computed from the source-of-truth trade log.
+        """
+        count = 0
+        for t in reversed(self.trade_history):
+            if t.get("status") != "closed":
+                continue
+            if t.get("is_win"):
+                break
+            count += 1
+        return count
+
     def snapshot(self) -> Dict:
         """Return JSON-safe state snapshot for the dashboard."""
         win_rate = (self.total_wins / max(len(self.trade_history), 1)) * 100
@@ -356,24 +373,11 @@ class TCTTradeEvaluator:
     """
 
     def __init__(self):
-        self.reward_scheme = HPBContextualReward()
-        self.env = HPB_TensorTrade_Env(symbol=SYMBOL, interval=TIMEFRAME, window=100)
         self.consecutive_losses = 0
         self.adaptation_notes: List[str] = []
 
-    def compute_reward_bias(self, prices: np.ndarray) -> Dict:
-        """Run reward scheme over recent prices to determine market bias."""
-        self.reward_scheme = HPBContextualReward()  # reset
-        rewards = []
-        for p in prices:
-            r = self.reward_scheme.compute(float(p))
-            rewards.append(r)
-        avg = float(np.mean(rewards)) if rewards else 0.0
-        bias = "bullish" if avg > 0 else "bearish" if avg < 0 else "neutral"
-        confidence = min(abs(avg) * 1000, 100.0)  # scale to 0-100
-        return {"bias": bias, "confidence": round(confidence, 2), "avg_reward": avg}
-
-    def evaluate_schematic(self, schematic: Dict, htf_bias: str, current_price: float) -> Dict:
+    def evaluate_schematic(self, schematic: Dict, htf_bias: str, current_price: float,
+                           total_candles: int = 200, max_stale_candles: int = 5) -> Dict:
         """
         Score a schematic for trade entry quality.
 
@@ -387,12 +391,35 @@ class TCTTradeEvaluator:
         # Use "model" key (correct field name from _build_*_schematic); fall back to schematic_type
         model = schematic.get("model", schematic.get("schematic_type", "unknown"))
         is_confirmed = schematic.get("is_confirmed", False)
-        rr = schematic.get("risk_reward", 0) or 0
         tap3 = schematic.get("tap3", {})
+
+        # Issue 2: Calculate R:R using live market price, not the schematic's stored R:R.
+        # The schematic's R:R was computed at the historical BOS price; current_price may
+        # have moved significantly, degrading the actual edge at entry.
+        stop_price = (schematic.get("stop_loss") or {}).get("price")
+        target_price_val = (schematic.get("target") or {}).get("price")
+        if stop_price and target_price_val and current_price > 0:
+            if direction == "bullish":
+                live_risk = current_price - stop_price
+                live_reward = target_price_val - current_price
+            else:
+                live_risk = stop_price - current_price
+                live_reward = current_price - target_price_val
+            rr = (live_reward / live_risk) if live_risk > 0 else 0
+        else:
+            rr = schematic.get("risk_reward", 0) or 0
 
         # Must be confirmed (BOS happened)
         if not is_confirmed:
             return {"score": 0, "direction": direction, "model": model, "rr": rr, "required_score": 50, "pass": False, "reasons": ["No BOS confirmation"]}
+
+        # Issue 1: Stale BOS gate — reject schematics whose BOS confirmed too many candles ago.
+        # A BOS from deep in history is not a live signal; price has long since moved on.
+        bos = schematic.get("bos_confirmation") or {}
+        bos_idx = bos.get("bos_idx")
+        if bos_idx is not None and bos_idx < total_candles - max_stale_candles:
+            return {"score": 0, "direction": direction, "model": model, "rr": rr, "required_score": 50, "pass": False,
+                    "reasons": [f"Stale BOS: confirmed at candle {bos_idx}, now {total_candles - bos_idx} candles ago (max {max_stale_candles})"]}
 
         # Hard validation gates: model structure must match the claimed model type.
         # Model_1_from_M2_failure is a conversion — skip strict gate, it was already validated.
@@ -409,11 +436,19 @@ class TCTTradeEvaluator:
                     return {"score": 0, "direction": direction, "model": model, "rr": rr, "required_score": 50, "pass": False,
                             "reasons": ["Model 2 hard gate: Tap3 must be a lower high for distribution"]}
 
+        # Issue 8B: Quality floor gate — reject schematics below minimum quality threshold.
+        # The detector computes a rich quality_score (0.0–1.0) incorporating 5A+5B factors;
+        # a score below 0.70 means the schematic failed too many structural checks to be trusted.
+        quality_score = schematic.get("quality_score", 0.0)
+        if quality_score < 0.70:
+            return {"score": 0, "direction": direction, "model": model, "rr": rr, "required_score": 50, "pass": False,
+                    "reasons": [f"Schematic quality too low ({quality_score:.2f} < 0.70)"]}
+
         # BOS confirmation = base score
         score += 30
         reasons.append("BOS confirmed")
 
-        # R:R quality
+        # R:R quality (using live R:R calculated above)
         if rr >= 3.0:
             score += 25
             reasons.append(f"Excellent R:R ({rr:.1f})")
@@ -424,9 +459,16 @@ class TCTTradeEvaluator:
             score += 5
             reasons.append(f"Acceptable R:R ({rr:.1f})")
         else:
-            return {"score": 0, "direction": direction, "model": model, "rr": rr, "required_score": 50, "pass": False, "reasons": [f"R:R too low ({rr:.1f})"]}
+            return {"score": 0, "direction": direction, "model": model, "rr": rr, "required_score": 50, "pass": False, "reasons": [f"R:R too low at market price ({rr:.1f})"]}
 
-        # HTF directional gate alignment — replaces the old momentum-based reward bias
+        # Issue 8A: Quality score bonus — rewards higher-quality schematics proportionally.
+        # Maps quality_score [0.70–1.0] to roughly [10–15] bonus points.
+        quality_bonus = round(quality_score * 15)
+        score += quality_bonus
+        reasons.append(f"Schematic quality {quality_score:.2f} (+{quality_bonus} pts)")
+
+        # Issue 3: HTF directional gate — neutral is not a green light; it means wait.
+        # TCT methodology requires a confirmed HTF directional bias before entering on MTF.
         if direction == "bullish" and htf_bias == "bullish":
             score += 20
             reasons.append("HTF bias aligned (bullish accumulation on 4h)")
@@ -434,11 +476,11 @@ class TCTTradeEvaluator:
             score += 20
             reasons.append("HTF bias aligned (bearish distribution on 4h)")
         elif htf_bias == "neutral":
-            score += 5
-            reasons.append("HTF neutral — both directions permitted")
+            return {"score": 0, "direction": direction, "model": model, "rr": rr, "required_score": 50, "pass": False,
+                    "reasons": ["HTF bias is neutral — no confirmed 4h directional bias, waiting for clarity"]}
         else:
-            # Safety net: should be unreachable (contradicting schematics are filtered
-            # before evaluate_schematic is called), but penalise just in case
+            # Safety net: contradicting schematics are filtered before evaluate_schematic is
+            # called, but penalise here just in case something slips through.
             score -= 10
             reasons.append(f"HTF bias conflict ({htf_bias} vs {direction})")
 
@@ -530,10 +572,21 @@ class TensorTCTTrader:
     Manages the full lifecycle: scan → evaluate → enter → manage → exit.
     """
 
+    # TTL for the HTF bias cache: directional biases are stable for a full 4h candle;
+    # neutral is re-checked every 15 minutes so a new bias is picked up quickly.
+    _HTF_CACHE_TTL: Dict[str, int] = {"bullish": 4 * 3600, "bearish": 4 * 3600, "neutral": 900}
+
     def __init__(self):
         self.state = TradeState()
         self.evaluator = TCTTradeEvaluator()
+        # Issue 5: Restore consecutive-loss streak from trade history so the adaptive
+        # entry threshold survives server restarts (Render deploys reset in-memory state).
+        self.evaluator.consecutive_losses = self.state.derive_consecutive_losses()
         self.last_debug: Dict = {}  # detailed debug from last scan cycle
+        # Issue 13: HTF bias cache — avoids re-fetching and re-detecting 4h schematics
+        # every 60 seconds when the 4h candle only closes every 240 minutes.
+        self._htf_bias_cache: str = "neutral"
+        self._htf_bias_expiry: float = 0.0  # Unix timestamp
 
     def scan_and_trade(self) -> Dict:
         """
@@ -576,45 +629,82 @@ class TensorTCTTrader:
             # 3. HTF gate: determine directional bias from confirmed 4h schematics.
             #    Accumulation confirmed on HTF → bullish bias (gate shorts out).
             #    Distribution confirmed on HTF → bearish bias (gate longs out).
-            #    Both or neither confirmed → neutral (both directions permitted on MTF).
-            htf_bias = "neutral"
-            htf_result_debug: Dict = {"status": "not_fetched"}
-            try:
-                df_htf = fetch_candles_sync(SYMBOL, HTF_TIMEFRAME, 200)
-                if df_htf is None or len(df_htf) < 50:
-                    htf_result_debug = {"status": "insufficient_data", "candles": 0 if df_htf is None else len(df_htf)}
-                else:
-                    htf_schematics = detect_tct_schematics(df_htf, [])
-                    htf_acc = [s for s in htf_schematics.get("accumulation_schematics", []) if isinstance(s, dict) and s.get("is_confirmed")]
-                    htf_dist = [s for s in htf_schematics.get("distribution_schematics", []) if isinstance(s, dict) and s.get("is_confirmed")]
-                    if htf_acc and not htf_dist:
-                        htf_bias = "bullish"
-                    elif htf_dist and not htf_acc:
-                        htf_bias = "bearish"
-                    # else: both or neither → neutral
-                    htf_result_debug = {
-                        "status": "scanned",
-                        "candles": len(df_htf),
-                        "confirmed_accumulation": len(htf_acc),
-                        "confirmed_distribution": len(htf_dist),
-                        "htf_bias": htf_bias,
-                    }
-            except Exception as htf_err:
-                logger.warning(f"[TRADE] HTF gate error on {HTF_TIMEFRAME}: {htf_err}", exc_info=True)
-                htf_result_debug = {"status": "error", "error": str(htf_err)}
+            #    Both or neither confirmed → neutral (Issue 3: blocks all MTF entries).
+            #
+            #    Issue 13: Cache the HTF result — a 4h candle closes every 4 hours so
+            #    re-fetching and re-detecting every 60 seconds is redundant. Directional
+            #    biases are cached for 4h; neutral is re-checked every 15 minutes so a
+            #    newly-formed bias is picked up quickly.
+            now_ts = time.time()
+            if now_ts < self._htf_bias_expiry:
+                htf_bias = self._htf_bias_cache
+                htf_result_debug: Dict = {
+                    "status": "cached",
+                    "htf_bias": htf_bias,
+                    "expires_in_s": round(self._htf_bias_expiry - now_ts),
+                }
+            else:
+                htf_bias = "neutral"
+                htf_result_debug = {"status": "not_fetched"}
+                try:
+                    df_htf = fetch_candles_sync(SYMBOL, HTF_TIMEFRAME, 200)
+                    if df_htf is None or len(df_htf) < 50:
+                        htf_result_debug = {"status": "insufficient_data", "candles": 0 if df_htf is None else len(df_htf)}
+                    else:
+                        htf_schematics = detect_tct_schematics(df_htf, [])
+                        htf_acc = [s for s in htf_schematics.get("accumulation_schematics", []) if isinstance(s, dict) and s.get("is_confirmed")]
+                        htf_dist = [s for s in htf_schematics.get("distribution_schematics", []) if isinstance(s, dict) and s.get("is_confirmed")]
+                        if htf_acc and not htf_dist:
+                            htf_bias = "bullish"
+                        elif htf_dist and not htf_acc:
+                            htf_bias = "bearish"
+                        # else: both or neither → neutral
+                        htf_result_debug = {
+                            "status": "scanned",
+                            "candles": len(df_htf),
+                            "confirmed_accumulation": len(htf_acc),
+                            "confirmed_distribution": len(htf_dist),
+                            "htf_bias": htf_bias,
+                        }
+                except Exception as htf_err:
+                    logger.warning(f"[TRADE] HTF gate error on {HTF_TIMEFRAME}: {htf_err}", exc_info=True)
+                    htf_result_debug = {"status": "error", "error": str(htf_err), "fetch_error": True}
+
+                # Store cache: directional bias is stable for 4h; neutral re-checks every 15m
+                self._htf_bias_cache = htf_bias
+                self._htf_bias_expiry = now_ts + self._HTF_CACHE_TTL.get(htf_bias, 900)
 
             logger.info(f"[TRADE] HTF bias ({HTF_TIMEFRAME}): {htf_bias}")
 
             # 4. Scan MTF timeframes for the best qualifying setup that does not
             #    contradict the HTF directional bias.
+            #
+            #    Issue 15: Fetch all MTF candles concurrently — the 1h and 15m fetches are
+            #    fully independent and previously added 2–4s of sequential wait per cycle.
             best_setup = None
             best_score = 0
             best_tf = None
             all_tf_results = {HTF_TIMEFRAME: htf_result_debug}
 
+            # Per-timeframe staleness limits for the BOS recency gate (Issue 1).
+            # A BOS on 1h must be within 3 candles (~3h); on 15m within 5 candles (~75m).
+            _MAX_STALE: Dict[str, int] = {"1h": 3, "15m": 5}
+
+            # Fetch all MTF candles in parallel
+            mtf_dfs: Dict[str, Optional[pd.DataFrame]] = {}
+            with ThreadPoolExecutor(max_workers=len(MTF_TIMEFRAMES)) as _ex:
+                _future_to_tf = {_ex.submit(fetch_candles_sync, SYMBOL, tf, 200): tf for tf in MTF_TIMEFRAMES}
+                for _future in as_completed(_future_to_tf):
+                    _tf = _future_to_tf[_future]
+                    try:
+                        mtf_dfs[_tf] = _future.result()
+                    except Exception as _fetch_err:
+                        logger.warning(f"[TRADE] Parallel fetch failed for {_tf}: {_fetch_err}")
+                        mtf_dfs[_tf] = None
+
             for tf in MTF_TIMEFRAMES:
                 try:
-                    df = fetch_candles_sync(SYMBOL, tf, 200)
+                    df = mtf_dfs.get(tf)
                     if df is None or len(df) < 50:
                         all_tf_results[tf] = {
                             "status": "insufficient_data",
@@ -630,6 +720,8 @@ class TensorTCTTrader:
                     )
 
                     tf_evals = []
+                    max_stale = _MAX_STALE.get(tf, 5)
+                    total_candles = len(df)
                     for s in all_schematics:
                         if not isinstance(s, dict):
                             continue
@@ -639,9 +731,12 @@ class TensorTCTTrader:
                             continue
                         if htf_bias == "bearish" and s_direction == "bullish":
                             continue
-                        # htf_bias == "neutral" → allow both
+                        # htf_bias == "neutral" → evaluate_schematic will return pass:False (Issue 3)
 
-                        eval_result = self.evaluator.evaluate_schematic(s, htf_bias, current_price)
+                        eval_result = self.evaluator.evaluate_schematic(
+                            s, htf_bias, current_price,
+                            total_candles=total_candles, max_stale_candles=max_stale
+                        )
                         tf_evals.append(eval_result)
                         if eval_result["pass"] and eval_result["score"] > best_score:
                             best_score = eval_result["score"]
@@ -650,7 +745,7 @@ class TensorTCTTrader:
 
                     all_tf_results[tf] = {
                         "status": "scanned",
-                        "candles": len(df),
+                        "candles": total_candles,
                         "schematics_found": len(all_schematics),
                         "confirmed": sum(1 for s in all_schematics if isinstance(s, dict) and s.get("is_confirmed")),
                         "htf_bias": htf_bias,
@@ -661,6 +756,8 @@ class TensorTCTTrader:
 
                 except Exception as tf_err:
                     logger.warning(f"[TRADE] Error scanning {tf}: {tf_err}", exc_info=True)
+                    # Issue 7: mark fetch_error True on exceptions so the all-MTF-failed
+                    # guard fires correctly (previously only set for None/short DataFrames).
                     all_tf_results[tf] = {"status": "error", "error": str(tf_err), "fetch_error": True}
 
             # Detect total MTF fetch failure
@@ -860,7 +957,9 @@ class TensorTCTTrader:
         elif hit_stop:
             return self._close_trade(current_price, "stop_hit")
         else:
-            self.state.save()
+            # Issue 14: Do not save here — live_pnl_pct and current_price are display-only
+            # fields. The per-cycle save() in scan_and_trade() persists the trade state.
+            # Saving here added a redundant write + backup copy every 60s for no extra value.
             return {
                 "action": "holding",
                 "pnl_pct": round(pnl_pct, 2),

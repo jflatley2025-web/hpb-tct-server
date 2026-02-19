@@ -872,11 +872,9 @@ class TCTSchematicDetector:
                     })
             swing_highs.sort(key=lambda s: s["price"])
 
-        if not swing_highs:
-            # Last resort: find any previous swing high in the region
-            sh = self._find_previous_swing_high(min(start_idx + 10, len(self.candles) - 3))
-            if sh:
-                swing_highs.append(sh)
+        # Issue 4: No last-resort fallback. If no valid LTF swing highs passed the EQ
+        # filter, there is no confirmed BOS — return None rather than guess with a
+        # distant historical swing that produces entries far from the discount zone.
 
         # Try each swing high (lowest price first) — BOS = first broken MS level
         for sh in swing_highs:
@@ -944,11 +942,9 @@ class TCTSchematicDetector:
                     })
             swing_lows.sort(key=lambda s: s["price"], reverse=True)
 
-        if not swing_lows:
-            # Last resort: find any previous swing low in the region
-            sl = self._find_previous_swing_low(min(start_idx + 10, len(self.candles) - 3))
-            if sl:
-                swing_lows.append(sl)
+        # Issue 4: No last-resort fallback. If no valid LTF swing lows passed the EQ
+        # filter, there is no confirmed BOS — return None rather than guess with a
+        # distant historical swing that produces entries far from the premium zone.
 
         # Try each swing low (highest price first) — BOS = first broken MS level
         for sl in swing_lows:
