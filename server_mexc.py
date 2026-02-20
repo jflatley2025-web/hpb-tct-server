@@ -4293,16 +4293,16 @@ function initChart() {{
   const el = document.getElementById('chartContainer');
   chart = LightweightCharts.createChart(el, {{
     width: el.clientWidth, height: el.clientHeight,
-    layout: {{ background: {{ color: '#0a0a0f' }}, textColor: '#888' }},
-    grid: {{ vertLines: {{ color: '#141420' }}, horzLines: {{ color: '#141420' }} }},
+    layout: {{ background: {{ color: '#ffffff' }}, textColor: '#333333' }},
+    grid: {{ vertLines: {{ color: '#e8e8e8' }}, horzLines: {{ color: '#e8e8e8' }} }},
     crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal }},
-    rightPriceScale: {{ borderColor: '#1e1e2d' }},
-    timeScale: {{ borderColor: '#1e1e2d', timeVisible: true }},
+    rightPriceScale: {{ borderColor: '#cccccc' }},
+    timeScale: {{ borderColor: '#cccccc', timeVisible: true }},
   }});
   candleSeries = chart.addCandlestickSeries({{
-    upColor: '#00ff88', downColor: '#ff4444',
-    borderUpColor: '#00ff88', borderDownColor: '#ff4444',
-    wickUpColor: '#00ff88', wickDownColor: '#ff4444',
+    upColor: '#ffffff', downColor: '#2962FF',
+    borderUpColor: '#000000', borderDownColor: '#2962FF',
+    wickUpColor: '#000000', wickDownColor: '#2962FF',
   }});
   const resizeChart = () => {{
     chart.applyOptions({{ width: el.clientWidth, height: el.clientHeight }});
@@ -4451,7 +4451,7 @@ function drawSchematic(s, candles, isPrimary) {{
 
   // Current price line
   if (chartData && chartData.current_price) {{
-    addPriceLine(chartData.current_price, 'rgba(255,255,255,0.35)', 'Price', LightweightCharts.LineStyle.Dotted, 1);
+    addPriceLine(chartData.current_price, 'rgba(0,0,0,0.35)', 'Price', LightweightCharts.LineStyle.Dotted, 1);
   }}
 }}
 

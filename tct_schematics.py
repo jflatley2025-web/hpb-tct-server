@@ -1136,6 +1136,12 @@ class TCTSchematicDetector:
             bos = None
             entry_price = None
 
+        # TCT: Entry must be inside the range (≥ range_low).
+        # A BOS swing high below range_low means price hasn't re-entered the range yet.
+        if entry_price is not None and entry_price < range_data["range_low"]:
+            bos = None
+            entry_price = None
+
         # ============================================================
         # LECTURE 5B ENHANCEMENTS
         # ============================================================
@@ -1337,6 +1343,12 @@ class TCTSchematicDetector:
         # Safety: for a short (distribution), entry must be below stop.
         # If not, the BOS is invalid — discard it.
         if entry_price is not None and entry_price >= stop_loss:
+            bos = None
+            entry_price = None
+
+        # TCT: Entry must be inside the range (≤ range_high).
+        # A BOS swing low above range_high means price hasn't re-entered the range yet.
+        if entry_price is not None and entry_price > range_data["range_high"]:
             bos = None
             entry_price = None
 
