@@ -236,8 +236,10 @@ class TCTSchematicDetector:
         """
         ranges = []
 
-        for i in range(10, len(self.candles) - 15):
+        for i in range(10, len(self.candles) - 8):
             # Find potential range low (significant swing low)
+            # Tail of -8 (down from -15) gives enough room for Tap2→Tap3→BOS to form
+            # while still detecting consolidation zones from the last ~1 week on 1D.
             if not self._is_swing_low(i):
                 continue
 
@@ -542,8 +544,10 @@ class TCTSchematicDetector:
         """
         ranges = []
 
-        for i in range(10, len(self.candles) - 15):
+        for i in range(10, len(self.candles) - 8):
             # Find potential range high (significant swing high)
+            # Tail of -8 (down from -15) gives enough room for Tap2→Tap3→BOS to form
+            # while still detecting consolidation zones from the last ~1 week on 1D.
             if not self._is_swing_high(i):
                 continue
 
