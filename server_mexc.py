@@ -2549,7 +2549,7 @@ _scanner_consecutive_errors = 0  # Track consecutive fetch errors for adaptive b
 
 # Candle cache: keyed by (symbol, interval, limit), value is (timestamp, DataFrame)
 _candle_cache: Dict[tuple, tuple] = {}
-CANDLE_CACHE_TTL_SEC = 3600  # Cache candles for 1 hour
+CANDLE_CACHE_TTL_SEC = 60  # Cache candles for 60 seconds (keeps data fresh for live schematic detection)
 
 # Invalid symbols: 400 errors → never retry during this process lifetime
 _invalid_symbols: set = set()
@@ -2624,10 +2624,16 @@ async def fetch_mexc_candles(symbol: str, interval: str, limit: int = 200) -> Op
             if not data or not isinstance(data, list):
                 return None
 
-            df = pd.DataFrame(data, columns=[
+            # MEXC spot /api/v3/klines returns variable column counts (8 or 12).
+            # Build column names dynamically to match what the API actually returns.
+            _ALL_COLS = [
                 "open_time", "open", "high", "low", "close", "volume",
-                "close_time", "quote_vol"
-            ])
+                "close_time", "quote_vol", "trades", "taker_base",
+                "taker_quote", "ignore"
+            ]
+            ncols = len(data[0]) if data else 0
+            col_names = _ALL_COLS[:ncols] if ncols <= len(_ALL_COLS) else _ALL_COLS
+            df = pd.DataFrame(data, columns=col_names)
             df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
             for c in ["open", "high", "low", "close", "volume"]:
                 df[c] = df[c].astype(float)
@@ -3753,6 +3759,33 @@ async def get_schematics_5a_data(symbol: str = "BTCUSDT", timeframe: str = "4h")
             None, detect_tct_schematics, df, []
         )
 
+        # --- HTF (4h) bias detection — mirrors tensor_tct_trader scan_and_trade ---
+        # Always fetch 4h candles for directional bias, even when viewing a lower TF.
+        htf_bias = "neutral"
+        htf_bias_detail = {}
+        try:
+            df_htf = df if timeframe == "4h" else await fetch_mexc_candles(resolved, "4h", 200)
+            if df_htf is not None and len(df_htf) >= 50:
+                htf_result = await loop.run_in_executor(None, detect_tct_schematics, df_htf, [])
+                htf_acc = [s for s in htf_result.get("accumulation_schematics", []) if isinstance(s, dict) and s.get("is_confirmed")]
+                htf_dist = [s for s in htf_result.get("distribution_schematics", []) if isinstance(s, dict) and s.get("is_confirmed")]
+                if htf_acc and not htf_dist:
+                    htf_bias = "bullish"
+                elif htf_dist and not htf_acc:
+                    htf_bias = "bearish"
+                htf_bias_detail = {
+                    "confirmed_accumulation": len(htf_acc),
+                    "confirmed_distribution": len(htf_dist),
+                }
+        except Exception as htf_e:
+            logger.warning(f"[SCHEMATICS-5A] HTF bias fetch failed: {htf_e}")
+
+        # --- TCTTradeEvaluator — same scoring logic used by tensor-trade ---
+        from tensor_tct_trader import TCTTradeEvaluator
+        _MAX_STALE_PER_TF = {"1m": 10, "5m": 8, "15m": 5, "30m": 5, "1h": 3, "2h": 5, "4h": 5, "1d": 3}
+        max_stale = _MAX_STALE_PER_TF.get(timeframe, 5)
+        evaluator = TCTTradeEvaluator()
+
         # --- Debug diagnostics: expose internal detection details ---
         debug_info = {
             "candles_count": len(df),
@@ -3886,6 +3919,20 @@ async def get_schematics_5a_data(symbol: str = "BTCUSDT", timeframe: str = "4h")
 
             # Classify state
             is_confirmed = sch.get("is_confirmed", False)
+
+            # Run the same TCTTradeEvaluator scoring used by tensor-trade on confirmed schematics
+            if is_confirmed:
+                try:
+                    eval_result = evaluator.evaluate_schematic(
+                        sch, htf_bias, current_price,
+                        total_candles=len(df), max_stale_candles=max_stale
+                    )
+                    sch["eval"] = eval_result
+                except Exception as ev_e:
+                    sch["eval"] = {"pass": False, "score": 0, "reasons": [str(ev_e)]}
+            else:
+                sch["eval"] = None
+
             if is_confirmed and sch.get("target_reached"):
                 sch["state"] = "completed"
                 completed.append(sch)
@@ -3905,6 +3952,8 @@ async def get_schematics_5a_data(symbol: str = "BTCUSDT", timeframe: str = "4h")
             "active": active,
             "in_formation": in_formation,
             "total": len(completed) + len(active) + len(in_formation),
+            "htf_bias": htf_bias,
+            "htf_bias_detail": htf_bias_detail,
             "debug": debug_info,
         })
 
@@ -4181,6 +4230,27 @@ body{{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-ser
   height:100%;background:#e040fb;border-radius:1px;
   transition:width 10s linear;
 }}
+
+/* ---- HTF bias pill ---- */
+.htf-bias{{
+  font-size:.7rem;font-weight:700;padding:3px 10px;border-radius:12px;
+  text-transform:uppercase;letter-spacing:.4px;
+}}
+.htf-bias.bullish{{background:rgba(0,255,136,.12);color:#00ff88;border:1px solid rgba(0,255,136,.3)}}
+.htf-bias.bearish{{background:rgba(255,68,68,.12);color:#ff4444;border:1px solid rgba(255,68,68,.3)}}
+.htf-bias.neutral{{background:rgba(255,193,7,.10);color:#ffc107;border:1px solid rgba(255,193,7,.3)}}
+
+/* ---- eval badge on cards ---- */
+.eval-badge{{
+  display:flex;align-items:center;gap:5px;margin-top:6px;
+  padding:5px 8px;border-radius:5px;font-size:.65rem;
+}}
+.eval-badge.pass{{background:rgba(0,255,136,.08);border:1px solid rgba(0,255,136,.2)}}
+.eval-badge.fail{{background:rgba(255,68,68,.08);border:1px solid rgba(255,68,68,.2)}}
+.eval-score{{font-weight:700;font-size:.78rem}}
+.eval-score.pass{{color:#00ff88}}
+.eval-score.fail{{color:#ff4444}}
+.eval-reasons{{color:#888;font-size:.6rem;margin-top:3px;line-height:1.4}}
 </style>
 </head>
 <body>
@@ -4194,6 +4264,7 @@ body{{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-ser
   </h1>
   <div class="header-right">
     <span class="live-price" id="livePrice">--</span>
+    <span class="htf-bias neutral" id="htfBias" title="4H directional bias (same gate as tensor-trade)">4H: --</span>
     <a href="/dashboard?symbol={symbol}" class="back-link">Dashboard</a>
     <a href="/schematic-chart?symbol={symbol}&timeframe={timeframe}" class="back-link">Schematic Chart</a>
   </div>
@@ -4503,6 +4574,20 @@ function buildCard(s, idx) {{
   }});
   h += '</div>';
 
+  // Eval badge for confirmed schematics (active + completed)
+  if ((state === 'active' || state === 'completed') && s.eval) {{
+    const ev = s.eval;
+    const evCls = ev.pass ? 'pass' : 'fail';
+    const evIcon = ev.pass ? '✓' : '✗';
+    h += '<div class="eval-badge ' + evCls + '">';
+    h += '<span class="eval-score ' + evCls + '">' + evIcon + ' ' + (ev.score ?? 0) + '/100</span>';
+    if (ev.required_score) h += '<span style="color:#555;font-size:.6rem">need ' + ev.required_score + '</span>';
+    h += '</div>';
+    if (ev.reasons && ev.reasons.length > 0) {{
+      h += '<div class="eval-reasons">' + ev.reasons.join(' · ') + '</div>';
+    }}
+  }}
+
   // P&L bar for active
   if (state === 'active' && pnl != null) {{
     const cls = pnl >= 0 ? 'positive' : 'negative';
@@ -4633,6 +4718,14 @@ async function loadData() {{
     document.getElementById('headerPair').textContent = SYMBOL.replace('USDT', '/USDT');
     document.getElementById('headerTF').textContent = TIMEFRAME.toUpperCase();
     document.title = 'Schematics 5A — ' + SYMBOL + ' ' + TIMEFRAME.toUpperCase();
+
+    // HTF bias pill
+    const biasPill = document.getElementById('htfBias');
+    if (biasPill && data.htf_bias) {{
+      const b = data.htf_bias;
+      biasPill.textContent = '4H: ' + b.toUpperCase();
+      biasPill.className = 'htf-bias ' + b;
+    }}
 
     // Update URL to reflect current pair + timeframe
     const curUrl = new URL(window.location);
