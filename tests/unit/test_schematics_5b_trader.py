@@ -1,0 +1,389 @@
+"""
+Unit tests for schematics_5b_trader.py
+=======================================
+Covers:
+- Fixed threshold is always 50 (no adaptation)
+- Trade entry/exit mechanics (long and short)
+- R:R validation at market price
+- Stale BOS rejection
+- HTF bias gate (aligned, conflicting, neutral)
+- Quality score gate
+- Deduplication cooldown
+- State save/load round-trip
+"""
+
+import json
+import os
+import time
+import pytest
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _make_schematic(
+    direction="bullish",
+    model="Model_1_Accumulation",
+    is_confirmed=True,
+    bos_idx=195,
+    quality_score=0.80,
+    stop_price=95_000.0,
+    target_price=105_000.0,
+    tap3_type="tap3_model1",
+    is_higher_low=True,
+    is_lower_high=True,
+):
+    """Build a minimal schematic dict for evaluator tests."""
+    return {
+        "direction": direction,
+        "model": model,
+        "schematic_type": model,
+        "is_confirmed": is_confirmed,
+        "quality_score": quality_score,
+        "bos_confirmation": {"bos_idx": bos_idx, "confirmed": True, "bos_price": 98_000.0},
+        "stop_loss": {"price": stop_price},
+        "target": {"price": target_price},
+        "entry": {"price": 98_000.0},
+        "tap3": {
+            "type": tap3_type,
+            "is_higher_low": is_higher_low,
+            "is_lower_high": is_lower_high,
+            "price": stop_price + 100,
+        },
+        "risk_reward": 2.5,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Evaluator Tests
+# ---------------------------------------------------------------------------
+
+class TestSchematics5BEvaluator:
+    """Test the deterministic evaluator with fixed threshold."""
+
+    @pytest.fixture
+    def evaluator(self):
+        from schematics_5b_trader import Schematics5BEvaluator
+        return Schematics5BEvaluator()
+
+    def test_fixed_threshold_is_50(self, evaluator):
+        """Threshold must always be 50, regardless of any state."""
+        from schematics_5b_trader import ENTRY_THRESHOLD
+        assert ENTRY_THRESHOLD == 50
+
+        sch = _make_schematic()
+        result = evaluator.evaluate_schematic(sch, "bullish", 98_000.0)
+        assert result["required_score"] == 50
+
+    def test_no_adapt_methods(self):
+        """5B evaluator must NOT have adapt_after_loss/win methods."""
+        from schematics_5b_trader import Schematics5BEvaluator
+        assert not hasattr(Schematics5BEvaluator, "adapt_after_loss")
+        assert not hasattr(Schematics5BEvaluator, "adapt_after_win")
+
+    def test_bullish_confirmed_passes(self, evaluator):
+        """A confirmed bullish schematic with good R:R and aligned HTF should pass."""
+        sch = _make_schematic(direction="bullish", quality_score=0.85)
+        result = evaluator.evaluate_schematic(sch, "bullish", 98_000.0)
+        assert result["pass"] is True
+        assert result["score"] >= 50
+
+    def test_bearish_confirmed_passes(self, evaluator):
+        """A confirmed bearish schematic with aligned HTF should pass."""
+        # Entry at 103000, stop 105000 (risk=2000), target 95000 (reward=8000) → R:R=4.0
+        sch = _make_schematic(
+            direction="bearish",
+            model="Model_1_Distribution",
+            stop_price=105_000.0,
+            target_price=95_000.0,
+            tap3_type="tap3_model1",
+        )
+        result = evaluator.evaluate_schematic(sch, "bearish", 103_000.0)
+        assert result["pass"] is True
+
+    def test_no_bos_fails(self, evaluator):
+        """Unconfirmed schematic must fail."""
+        sch = _make_schematic(is_confirmed=False)
+        result = evaluator.evaluate_schematic(sch, "bullish", 98_000.0)
+        assert result["pass"] is False
+        assert "No BOS confirmation" in result["reasons"]
+
+    def test_stale_bos_fails(self, evaluator):
+        """BOS from deep in history should be rejected."""
+        sch = _make_schematic(bos_idx=10)  # far from end of 200-candle window
+        result = evaluator.evaluate_schematic(sch, "bullish", 98_000.0)
+        assert result["pass"] is False
+        assert any("Stale BOS" in r for r in result["reasons"])
+
+    def test_low_quality_fails(self, evaluator):
+        """Quality score below 0.70 must be rejected."""
+        sch = _make_schematic(quality_score=0.60)
+        result = evaluator.evaluate_schematic(sch, "bullish", 98_000.0)
+        assert result["pass"] is False
+        assert any("Quality too low" in r for r in result["reasons"])
+
+    def test_low_rr_fails(self, evaluator):
+        """R:R below 1.5 at market price must be rejected."""
+        sch = _make_schematic(
+            stop_price=96_000.0,
+            target_price=99_000.0,  # tiny reward vs risk
+        )
+        result = evaluator.evaluate_schematic(sch, "bullish", 98_000.0)
+        assert result["pass"] is False
+        assert any("R:R too low" in r for r in result["reasons"])
+
+    def test_htf_neutral_fails(self, evaluator):
+        """HTF neutral bias must block entry."""
+        sch = _make_schematic()
+        result = evaluator.evaluate_schematic(sch, "neutral", 98_000.0)
+        assert result["pass"] is False
+        assert any("neutral" in r.lower() for r in result["reasons"])
+
+    def test_htf_conflict_penalises(self, evaluator):
+        """Conflicting HTF bias should reduce score."""
+        sch = _make_schematic(direction="bullish", quality_score=0.90)
+        aligned = evaluator.evaluate_schematic(sch, "bullish", 98_000.0)
+        conflicting = evaluator.evaluate_schematic(sch, "bearish", 98_000.0)
+        assert aligned["score"] > conflicting["score"]
+
+    def test_model1_structure_gate(self, evaluator):
+        """Model 1 must have tap3 type = tap3_model1."""
+        sch = _make_schematic(model="Model_1_Accumulation", tap3_type="wrong")
+        result = evaluator.evaluate_schematic(sch, "bullish", 98_000.0)
+        assert result["pass"] is False
+        assert any("Model 1" in r for r in result["reasons"])
+
+    def test_model2_bullish_gate(self, evaluator):
+        """Model 2 accumulation must have higher low."""
+        sch = _make_schematic(
+            model="Model_2_Accumulation",
+            tap3_type="tap3_model2",
+            is_higher_low=False,
+        )
+        result = evaluator.evaluate_schematic(sch, "bullish", 98_000.0)
+        assert result["pass"] is False
+
+    def test_model2_bearish_gate(self, evaluator):
+        """Model 2 distribution must have lower high."""
+        sch = _make_schematic(
+            direction="bearish",
+            model="Model_2_Distribution",
+            stop_price=105_000.0,
+            target_price=95_000.0,
+            tap3_type="tap3_model2",
+            is_lower_high=False,
+        )
+        result = evaluator.evaluate_schematic(sch, "bearish", 100_000.0)
+        assert result["pass"] is False
+
+    def test_m1_from_m2_failure_skips_structure_gate(self, evaluator):
+        """Model_1_from_M2_failure should skip the strict tap3 gate."""
+        sch = _make_schematic(model="Model_1_from_M2_failure_Accumulation", tap3_type="mixed")
+        result = evaluator.evaluate_schematic(sch, "bullish", 98_000.0)
+        # Should not be rejected for tap3 type
+        assert not any("Model 1" in r and "Tap3" in r for r in result["reasons"])
+
+    def test_late_entry_penalty(self, evaluator):
+        """Price moved 2%+ above entry should be penalised."""
+        # Wide target so R:R is still good even at late price
+        # Entry at 98000, stop 90000, target 120000
+        # At price 101000: risk=11000, reward=19000, R:R=1.7 → passes R:R gate
+        # But 101000 > 98000*1.02=99960 → late entry penalty
+        sch = _make_schematic(stop_price=90_000.0, target_price=120_000.0)
+        result = evaluator.evaluate_schematic(sch, "bullish", 101_000.0)
+        assert any("late" in r.lower() for r in result["reasons"])
+
+
+# ---------------------------------------------------------------------------
+# Trade State Tests
+# ---------------------------------------------------------------------------
+
+class TestSchematics5BTradeState:
+    """Test state persistence (save/load round-trip)."""
+
+    @pytest.fixture
+    def tmp_path_state(self, tmp_path):
+        """Override log paths to use temp dir."""
+        log_path = str(tmp_path / "test_5b_log.json")
+        backup_path = str(tmp_path / "test_5b_log_backup.json")
+        return log_path, backup_path
+
+    def test_save_load_roundtrip(self, tmp_path_state):
+        """State should persist and restore correctly."""
+        from schematics_5b_trader import Schematics5BTradeState, STARTING_BALANCE
+        log_path, backup_path = tmp_path_state
+
+        with patch("schematics_5b_trader.TRADE_LOG_PATH", log_path), \
+             patch("schematics_5b_trader.TRADE_LOG_BACKUP_PATH", backup_path), \
+             patch("schematics_5b_trader.github_fetch_5b_log", return_value=False):
+            state = Schematics5BTradeState()
+            state.balance = 5_500.00
+            state.total_wins = 3
+            state.total_losses = 1
+            state.trade_history = [
+                {"id": 1, "is_win": True, "status": "closed", "entry_price": 100_000},
+            ]
+            state.save()
+
+            # Create a new state object that loads from the file
+            state2 = Schematics5BTradeState()
+            assert state2.balance == 5_500.00
+            assert state2.total_wins == 3
+            assert state2.total_losses == 1
+            assert len(state2.trade_history) == 1
+
+    def test_snapshot_format(self, tmp_path_state):
+        """Snapshot must include expected keys and NO reward/learning fields."""
+        from schematics_5b_trader import Schematics5BTradeState
+        log_path, backup_path = tmp_path_state
+
+        with patch("schematics_5b_trader.TRADE_LOG_PATH", log_path), \
+             patch("schematics_5b_trader.TRADE_LOG_BACKUP_PATH", backup_path), \
+             patch("schematics_5b_trader.github_fetch_5b_log", return_value=False):
+            state = Schematics5BTradeState()
+            snap = state.snapshot()
+
+            # Required fields
+            assert "balance" in snap
+            assert "pnl_total" in snap
+            assert "win_rate" in snap
+            assert "current_trade" in snap
+            assert "trade_history" in snap
+
+            # Must NOT have learning fields
+            assert "reward_history" not in snap
+            assert "avg_reward" not in snap
+            assert "solutions_applied" not in snap
+
+    def test_no_reward_history_field(self, tmp_path_state):
+        """State must not have reward_history attribute."""
+        from schematics_5b_trader import Schematics5BTradeState
+        log_path, backup_path = tmp_path_state
+
+        with patch("schematics_5b_trader.TRADE_LOG_PATH", log_path), \
+             patch("schematics_5b_trader.TRADE_LOG_BACKUP_PATH", backup_path), \
+             patch("schematics_5b_trader.github_fetch_5b_log", return_value=False):
+            state = Schematics5BTradeState()
+            assert not hasattr(state, "reward_history")
+            assert not hasattr(state, "solutions_applied")
+
+
+# ---------------------------------------------------------------------------
+# Trader Tests
+# ---------------------------------------------------------------------------
+
+class TestSchematics5BTrader:
+    """Test the main trading engine behaviour."""
+
+    def test_no_learning_attributes(self):
+        """5B trader must not have learning-related attributes."""
+        from schematics_5b_trader import Schematics5BTrader, Schematics5BEvaluator
+        assert not hasattr(Schematics5BEvaluator, "consecutive_losses")
+        assert not hasattr(Schematics5BEvaluator, "model_weights")
+        assert not hasattr(Schematics5BEvaluator, "adaptation_notes")
+
+    def test_duplicate_setup_detection(self):
+        """Duplicate setups should be blocked within cooldown."""
+        from schematics_5b_trader import Schematics5BTrader
+
+        with patch("schematics_5b_trader.TRADE_LOG_PATH", "/tmp/test_5b_dedup.json"), \
+             patch("schematics_5b_trader.TRADE_LOG_BACKUP_PATH", "/tmp/test_5b_dedup_bak.json"), \
+             patch("schematics_5b_trader.github_fetch_5b_log", return_value=False):
+            trader = Schematics5BTrader()
+            trader.state.trade_history = [
+                {
+                    "entry_price": 100_000.0,
+                    "direction": "bullish",
+                    "closed_at": datetime.now(timezone.utc).isoformat(),
+                },
+            ]
+            # Same price and direction within cooldown = duplicate
+            assert trader._is_duplicate_setup(100_000.0, "bullish") is True
+            # Different direction = not duplicate
+            assert trader._is_duplicate_setup(100_000.0, "bearish") is False
+            # Different price = not duplicate
+            assert trader._is_duplicate_setup(110_000.0, "bullish") is False
+
+    def test_duplicate_expired_cooldown(self):
+        """After cooldown expires, same setup should be allowed."""
+        from schematics_5b_trader import Schematics5BTrader, DUPLICATE_COOLDOWN_SECONDS
+
+        with patch("schematics_5b_trader.TRADE_LOG_PATH", "/tmp/test_5b_dedup2.json"), \
+             patch("schematics_5b_trader.TRADE_LOG_BACKUP_PATH", "/tmp/test_5b_dedup2_bak.json"), \
+             patch("schematics_5b_trader.github_fetch_5b_log", return_value=False):
+            trader = Schematics5BTrader()
+            old_time = (datetime.now(timezone.utc) - timedelta(seconds=DUPLICATE_COOLDOWN_SECONDS + 60)).isoformat()
+            trader.state.trade_history = [
+                {
+                    "entry_price": 100_000.0,
+                    "direction": "bullish",
+                    "closed_at": old_time,
+                },
+            ]
+            assert trader._is_duplicate_setup(100_000.0, "bullish") is False
+
+
+# ---------------------------------------------------------------------------
+# Telegram Notification Tests
+# ---------------------------------------------------------------------------
+
+class TestTelegramNotifications:
+    """Test 5B notification formatting."""
+
+    def test_entry_notification_format(self):
+        from schematics_5b_trader import _notify_5b_entry
+        trade = {
+            "direction": "bullish",
+            "entry_price": 100_000.0,
+            "stop_price": 98_000.0,
+            "target_price": 105_000.0,
+            "rr": 2.5,
+            "entry_score": 65,
+        }
+        # Should not raise even without credentials
+        with patch("schematics_5b_trader._telegram_5b_send", return_value=True) as mock_send:
+            _notify_5b_entry(trade)
+            mock_send.assert_called_once()
+            msg = mock_send.call_args[0][0]
+            assert "BUY" in msg
+            assert "100,000.00" in msg
+
+    def test_exit_notification_format(self):
+        from schematics_5b_trader import _notify_5b_exit
+        trade = {
+            "is_win": True,
+            "entry_price": 100_000.0,
+            "exit_price": 105_000.0,
+            "pnl_pct": 5.0,
+            "pnl_dollars": 250.0,
+        }
+        with patch("schematics_5b_trader._telegram_5b_send", return_value=True) as mock_send:
+            _notify_5b_exit(trade)
+            mock_send.assert_called_once()
+            msg = mock_send.call_args[0][0]
+            assert "WIN" in msg
+
+
+# ---------------------------------------------------------------------------
+# GitHub Storage Tests
+# ---------------------------------------------------------------------------
+
+class TestGitHubStorage:
+    """Test 5B GitHub storage uses GITHUB_TOKEN_2."""
+
+    def test_uses_github_token_2(self):
+        """Must use GITHUB_TOKEN_2, NOT GITHUB_TOKEN."""
+        from schematics_5b_trader import _github_headers
+        with patch.dict(os.environ, {"GITHUB_TOKEN_2": "test_token_2"}):
+            headers = _github_headers()
+            assert "test_token_2" in headers["Authorization"]
+
+    def test_not_configured_without_token_2(self):
+        """Should report not configured if GITHUB_TOKEN_2 is missing."""
+        from schematics_5b_trader import _github_configured
+        with patch.dict(os.environ, {}, clear=True):
+            assert _github_configured() is False

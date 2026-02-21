@@ -1,0 +1,806 @@
+"""
+schematics_5b_trader.py — Schematics 5B Simulated Trading Engine
+================================================================
+Deterministic TCT trading engine using Lecture 5B methodology on BTCUSDT.
+No learning, no reward system — fixed 50-point entry threshold forever.
+
+Each cycle:
+1. Fetch live BTCUSDT candles from MEXC
+2. Run TCT schematic detection
+3. Evaluate confirmed schematics for trade entry (fixed threshold)
+4. Simulate position management (entry, SL, TP)
+5. Log W/L results, persist to GitHub, notify via Telegram
+"""
+
+import os
+import json
+import time
+import asyncio
+import logging
+import base64
+import shutil
+import threading
+import requests
+import numpy as np
+import pandas as pd
+from datetime import datetime, timezone
+from typing import Dict, List, Optional
+
+from tct_schematics import detect_tct_schematics
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from trade_execution import (
+    calculate_position_size,
+    calculate_margin,
+    calculate_liquidation_price,
+    check_liquidation_safety,
+)
+
+# Reuse MEXC fetch helpers from tensor trader (no duplication)
+from tensor_tct_trader import fetch_candles_sync, fetch_live_price
+
+logger = logging.getLogger("Schematics5B")
+
+# ================================================================
+# CONFIGURATION
+# ================================================================
+SYMBOL = "BTCUSDT"
+STARTING_BALANCE = 5000.0
+RISK_PER_TRADE_PCT = 1.0  # 1% of balance per trade
+DEFAULT_LEVERAGE = 10
+HTF_TIMEFRAME = "4h"
+MTF_TIMEFRAMES = ["1h", "15m"]
+AUTO_SCAN_INTERVAL = int(os.getenv("SCHEMATICS_5B_SCAN_INTERVAL", "60"))
+ENTRY_THRESHOLD = 50  # Fixed — never changes
+
+_DIR = os.path.dirname(os.path.abspath(__file__))
+TRADE_LOG_PATH = os.path.join(_DIR, "schematics_5b_trade_log.json")
+TRADE_LOG_BACKUP_PATH = os.path.join(_DIR, "schematics_5b_trade_log_backup.json")
+
+# Deduplication
+DUPLICATE_COOLDOWN_SECONDS = 300
+DUPLICATE_PRICE_TOLERANCE = 0.002
+
+
+# ================================================================
+# GITHUB STORAGE (uses GITHUB_TOKEN_2)
+# ================================================================
+_GITHUB_API = "https://api.github.com"
+_DATA_BRANCH = "data"
+_GITHUB_LOG_FILENAME = "schematics_5b_trade_log.json"
+
+
+def _github_configured() -> bool:
+    return bool(os.getenv("GITHUB_TOKEN_2") and os.getenv("GITHUB_REPO"))
+
+
+def _github_headers() -> dict:
+    return {
+        "Authorization": f"token {os.getenv('GITHUB_TOKEN_2')}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+
+
+def github_fetch_5b_log(local_path: str) -> bool:
+    """Pull schematics_5b_trade_log.json from the data branch on GitHub."""
+    if not _github_configured():
+        return False
+    if os.path.exists(local_path):
+        return True
+
+    repo = os.getenv("GITHUB_REPO")
+    url = f"{_GITHUB_API}/repos/{repo}/contents/{_GITHUB_LOG_FILENAME}"
+    try:
+        resp = requests.get(url, headers=_github_headers(), params={"ref": _DATA_BRANCH}, timeout=15)
+        if resp.status_code == 404:
+            logger.info("[5B-GITHUB] No trade log on data branch yet — starting fresh")
+            return False
+        resp.raise_for_status()
+        content = resp.json().get("content", "")
+        decoded = base64.b64decode(content).decode("utf-8")
+        with open(local_path, "w") as f:
+            f.write(decoded)
+        trades = len(json.loads(decoded).get("trade_history", []))
+        logger.info(f"[5B-GITHUB] Trade log restored — {trades} trades recovered")
+        return True
+    except Exception as e:
+        logger.warning(f"[5B-GITHUB] Fetch failed: {e}")
+        return False
+
+
+def github_push_5b_log(local_path: str) -> bool:
+    """Push schematics_5b_trade_log.json to the data branch on GitHub."""
+    if not _github_configured():
+        return False
+    if not os.path.exists(local_path):
+        return False
+
+    repo = os.getenv("GITHUB_REPO")
+    url = f"{_GITHUB_API}/repos/{repo}/contents/{_GITHUB_LOG_FILENAME}"
+    try:
+        with open(local_path, "r") as f:
+            raw = f.read()
+        encoded = base64.b64encode(raw.encode("utf-8")).decode("utf-8")
+
+        sha = None
+        get_resp = requests.get(url, headers=_github_headers(), params={"ref": _DATA_BRANCH}, timeout=10)
+        if get_resp.status_code == 200:
+            sha = get_resp.json().get("sha")
+
+        payload = {
+            "message": "chore: 5B trade log sync",
+            "content": encoded,
+            "branch": _DATA_BRANCH,
+        }
+        if sha:
+            payload["sha"] = sha
+
+        put_resp = requests.put(url, headers=_github_headers(), json=payload, timeout=15)
+        put_resp.raise_for_status()
+        logger.info("[5B-GITHUB] Trade log pushed to data branch")
+        return True
+    except Exception as e:
+        logger.warning(f"[5B-GITHUB] Push failed: {e}")
+        return False
+
+
+# ================================================================
+# TELEGRAM NOTIFICATIONS (uses TELEGRAM_CHAT_ID_3)
+# ================================================================
+_TELEGRAM_API = "https://api.telegram.org"
+
+
+def _telegram_5b_send(text: str) -> bool:
+    """Fire-and-forget Telegram message to TELEGRAM_CHAT_ID_3."""
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID_3")
+    if not token or not chat_id:
+        return False
+
+    url = f"{_TELEGRAM_API}/bot{token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+
+    def _send():
+        try:
+            requests.post(url, json=payload, timeout=5)
+        except Exception as e:
+            logger.error(f"[5B-TELEGRAM] Send error: {e}")
+
+    threading.Thread(target=_send, daemon=True).start()
+    return True
+
+
+def _notify_5b_entry(trade: Dict) -> None:
+    direction = trade.get("direction", "?")
+    arrow = "BUY" if direction == "bullish" else "SELL"
+    text = (
+        f"<b>5B {arrow} — Trade Entered</b>\n"
+        f"Entry: ${trade.get('entry_price', 0):,.2f}\n"
+        f"Stop: ${trade.get('stop_price', 0):,.2f}\n"
+        f"Target: ${trade.get('target_price', 0):,.2f}\n"
+        f"R:R: {trade.get('rr', 0):.1f} | Score: {trade.get('entry_score', 0)}/100\n"
+    )
+    _telegram_5b_send(text)
+
+
+def _notify_5b_exit(trade: Dict) -> None:
+    result = "WIN" if trade.get("is_win") else "LOSS"
+    pnl = trade.get("pnl_dollars", 0)
+    sign = "+" if pnl >= 0 else ""
+    text = (
+        f"<b>5B Trade Closed — {result}</b>\n"
+        f"Entry: ${trade.get('entry_price', 0):,.2f}\n"
+        f"Exit: ${trade.get('exit_price', 0):,.2f}\n"
+        f"P&L: {sign}${pnl:,.2f} ({sign}{trade.get('pnl_pct', 0):.2f}%)\n"
+    )
+    _telegram_5b_send(text)
+
+
+# ================================================================
+# TRADE STATE MANAGER
+# ================================================================
+class Schematics5BTradeState:
+    """Persistent trade state — no reward/learning fields."""
+
+    def __init__(self):
+        self.balance = STARTING_BALANCE
+        self.starting_balance = STARTING_BALANCE
+        self.current_trade: Optional[Dict] = None
+        self.trade_history: List[Dict] = []
+        self.total_wins = 0
+        self.total_losses = 0
+        self.last_scan_time: Optional[str] = None
+        self.last_scan_action: Optional[str] = None
+        self.last_error: Optional[str] = None
+        self._load()
+
+    def _load(self):
+        try:
+            github_fetch_5b_log(TRADE_LOG_PATH)
+        except Exception as e:
+            logger.warning(f"[5B-STATE] GitHub restore skipped: {e}")
+
+        try:
+            if os.path.exists(TRADE_LOG_PATH):
+                with open(TRADE_LOG_PATH, "r") as f:
+                    data = json.load(f)
+                self.balance = data.get("balance", STARTING_BALANCE)
+                self.starting_balance = data.get("starting_balance", STARTING_BALANCE)
+                self.current_trade = data.get("current_trade")
+                self.trade_history = data.get("trade_history", [])
+                self.total_wins = data.get("total_wins", 0)
+                self.total_losses = data.get("total_losses", 0)
+                self.last_scan_time = data.get("last_scan_time")
+                self.last_scan_action = data.get("last_scan_action")
+                logger.info(f"[5B-STATE] Loaded — balance=${self.balance:.2f}, trades={len(self.trade_history)}")
+        except Exception as e:
+            logger.warning(f"[5B-STATE] Could not load trade state: {e}")
+
+    def save(self):
+        try:
+            # Backup before write
+            if os.path.exists(TRADE_LOG_PATH):
+                shutil.copy2(TRADE_LOG_PATH, TRADE_LOG_BACKUP_PATH)
+
+            data = {
+                "balance": round(self.balance, 2),
+                "starting_balance": self.starting_balance,
+                "current_trade": self.current_trade,
+                "trade_history": self.trade_history,
+                "total_wins": self.total_wins,
+                "total_losses": self.total_losses,
+                "last_scan_time": self.last_scan_time,
+                "last_scan_action": self.last_scan_action,
+                "last_error": self.last_error,
+            }
+            with open(TRADE_LOG_PATH, "w") as f:
+                json.dump(data, f, indent=2, default=str)
+        except Exception as e:
+            logger.error(f"[5B-STATE] Failed to save: {e}")
+
+    def snapshot(self) -> Dict:
+        total = max(len(self.trade_history), 1)
+        win_rate = (self.total_wins / total) * 100
+        pnl_total = self.balance - self.starting_balance
+        return {
+            "balance": round(self.balance, 2),
+            "starting_balance": self.starting_balance,
+            "pnl_total": round(pnl_total, 2),
+            "pnl_pct": round((pnl_total / self.starting_balance) * 100, 2),
+            "total_trades": len(self.trade_history),
+            "wins": self.total_wins,
+            "losses": self.total_losses,
+            "win_rate": round(win_rate, 2),
+            "current_trade": self.current_trade,
+            "trade_history": self.trade_history[-50:],
+            "last_scan_time": self.last_scan_time,
+            "last_scan_action": self.last_scan_action,
+            "last_error": self.last_error,
+        }
+
+
+# ================================================================
+# DETERMINISTIC EVALUATOR (fixed threshold, no learning)
+# ================================================================
+class Schematics5BEvaluator:
+    """
+    Scores TCT schematics for trade entry quality.
+    Fixed 50-point threshold — never adapts.
+    """
+
+    def evaluate_schematic(self, schematic: Dict, htf_bias: str, current_price: float,
+                           total_candles: int = 200, max_stale_candles: int = 5) -> Dict:
+        score = 0
+        reasons = []
+
+        direction = schematic.get("direction", "unknown")
+        model = schematic.get("model", schematic.get("schematic_type", "unknown"))
+        is_confirmed = schematic.get("is_confirmed", False)
+        tap3 = schematic.get("tap3", {})
+
+        # Live R:R calculation
+        stop_price = (schematic.get("stop_loss") or {}).get("price")
+        target_price_val = (schematic.get("target") or {}).get("price")
+        if stop_price and target_price_val and current_price > 0:
+            if direction == "bullish":
+                live_risk = current_price - stop_price
+                live_reward = target_price_val - current_price
+            else:
+                live_risk = stop_price - current_price
+                live_reward = current_price - target_price_val
+            rr = (live_reward / live_risk) if live_risk > 0 else 0
+        else:
+            rr = schematic.get("risk_reward", 0) or 0
+
+        fail = {"score": 0, "direction": direction, "model": model, "rr": rr,
+                "required_score": ENTRY_THRESHOLD, "pass": False}
+
+        # Gate: must be confirmed
+        if not is_confirmed:
+            return {**fail, "reasons": ["No BOS confirmation"]}
+
+        # Gate: stale BOS
+        bos = schematic.get("bos_confirmation") or {}
+        bos_idx = bos.get("bos_idx")
+        if bos_idx is not None and bos_idx < total_candles - max_stale_candles:
+            return {**fail, "reasons": [f"Stale BOS: {total_candles - bos_idx} candles ago (max {max_stale_candles})"]}
+
+        # Gate: model structure validation
+        if "Model_1_from_M2_failure" not in model:
+            if "Model_1" in model:
+                if tap3.get("type") != "tap3_model1":
+                    return {**fail, "reasons": ["Model 1: Tap3 must be deeper deviation"]}
+            elif "Model_2" in model:
+                if direction == "bullish" and not tap3.get("is_higher_low"):
+                    return {**fail, "reasons": ["Model 2: Tap3 must be higher low for accumulation"]}
+                if direction == "bearish" and not tap3.get("is_lower_high"):
+                    return {**fail, "reasons": ["Model 2: Tap3 must be lower high for distribution"]}
+
+        # Gate: quality floor
+        quality_score = schematic.get("quality_score", 0.0)
+        if quality_score < 0.70:
+            return {**fail, "reasons": [f"Quality too low ({quality_score:.2f} < 0.70)"]}
+
+        # ---- Scoring ----
+
+        # BOS confirmed = base
+        score += 30
+        reasons.append("BOS confirmed")
+
+        # R:R quality
+        if rr >= 3.0:
+            score += 25
+            reasons.append(f"Excellent R:R ({rr:.1f})")
+        elif rr >= 2.0:
+            score += 15
+            reasons.append(f"Good R:R ({rr:.1f})")
+        elif rr >= 1.5:
+            score += 5
+            reasons.append(f"Acceptable R:R ({rr:.1f})")
+        else:
+            return {**fail, "reasons": [f"R:R too low ({rr:.1f})"]}
+
+        # HTF alignment
+        if direction == "bullish" and htf_bias == "bullish":
+            score += 20
+            reasons.append("HTF bias aligned (bullish)")
+        elif direction == "bearish" and htf_bias == "bearish":
+            score += 20
+            reasons.append("HTF bias aligned (bearish)")
+        elif htf_bias == "neutral":
+            return {**fail, "reasons": ["HTF bias neutral — no directional clarity"]}
+        else:
+            score -= 10
+            reasons.append(f"HTF bias conflict ({htf_bias} vs {direction})")
+
+        # Quality bonus
+        quality_bonus = round(quality_score * 15)
+        score += quality_bonus
+        reasons.append(f"Quality {quality_score:.2f} (+{quality_bonus})")
+
+        # Model type (fixed defaults — no learning)
+        if "Model_1" in model:
+            score += 5
+            reasons.append("Model 1 — deeper deviation")
+        elif "Model_2" in model:
+            score += 3
+            reasons.append("Model 2 — HL/LH")
+
+        # Late entry penalty
+        entry_info = schematic.get("entry", {})
+        entry_price = entry_info.get("price")
+        if entry_price:
+            if direction == "bullish" and current_price > entry_price * 1.02:
+                score -= 15
+                reasons.append("Price 2%+ above entry — late")
+            elif direction == "bearish" and current_price < entry_price * 0.98:
+                score -= 15
+                reasons.append("Price 2%+ below entry — late")
+
+        score = max(0, min(100, score))
+        return {
+            "score": score,
+            "direction": direction,
+            "model": model,
+            "rr": rr,
+            "required_score": ENTRY_THRESHOLD,
+            "pass": score >= ENTRY_THRESHOLD,
+            "reasons": reasons,
+        }
+
+
+# ================================================================
+# MAIN TRADING ENGINE
+# ================================================================
+class Schematics5BTrader:
+    """
+    Deterministic TCT trading engine — BTCUSDT only, fixed threshold,
+    no learning/reward system.
+    """
+
+    _HTF_CACHE_TTL = {"bullish": 4 * 3600, "bearish": 4 * 3600, "neutral": 900}
+
+    def __init__(self):
+        self.state = Schematics5BTradeState()
+        self.evaluator = Schematics5BEvaluator()
+        self.last_debug: Dict = {}
+        self._htf_bias_cache: str = "neutral"
+        self._htf_bias_expiry: float = 0.0
+
+    def scan_and_trade(self) -> Dict:
+        """Main cycle: fetch, detect, evaluate, trade."""
+        cycle_result = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "action": "none",
+            "details": {},
+        }
+
+        try:
+            # 1. Current price
+            df_price = fetch_candles_sync(SYMBOL, "1m", 10)
+            if df_price is None or len(df_price) == 0:
+                self.state.last_error = "Could not fetch price data"
+                self.state.save()
+                cycle_result["action"] = "error"
+                cycle_result["details"] = {"error": "Could not fetch price data"}
+                return cycle_result
+
+            current_price = float(df_price.iloc[-1]["close"])
+
+            # 2. Manage open trade
+            if self.state.current_trade:
+                result = self._manage_open_trade(current_price)
+                cycle_result["action"] = result.get("action", "manage")
+                cycle_result["details"] = result
+                self.state.last_scan_time = cycle_result["timestamp"]
+                self.state.last_scan_action = cycle_result["action"]
+                self.state.save()
+                return cycle_result
+
+            # 3. HTF bias gate (with cache)
+            now_ts = time.time()
+            if now_ts < self._htf_bias_expiry:
+                htf_bias = self._htf_bias_cache
+                htf_debug = {"status": "cached", "htf_bias": htf_bias,
+                             "expires_in_s": round(self._htf_bias_expiry - now_ts)}
+            else:
+                htf_bias = "neutral"
+                htf_debug = {"status": "not_fetched"}
+                try:
+                    df_htf = fetch_candles_sync(SYMBOL, HTF_TIMEFRAME, 200)
+                    if df_htf is not None and len(df_htf) >= 50:
+                        htf_schematics = detect_tct_schematics(df_htf, [])
+                        htf_acc = [s for s in htf_schematics.get("accumulation_schematics", [])
+                                   if isinstance(s, dict) and s.get("is_confirmed")]
+                        htf_dist = [s for s in htf_schematics.get("distribution_schematics", [])
+                                    if isinstance(s, dict) and s.get("is_confirmed")]
+                        if htf_acc and not htf_dist:
+                            htf_bias = "bullish"
+                        elif htf_dist and not htf_acc:
+                            htf_bias = "bearish"
+                        htf_debug = {"status": "scanned", "candles": len(df_htf),
+                                     "confirmed_acc": len(htf_acc), "confirmed_dist": len(htf_dist),
+                                     "htf_bias": htf_bias}
+                    else:
+                        htf_debug = {"status": "insufficient_data",
+                                     "candles": 0 if df_htf is None else len(df_htf)}
+                except Exception as e:
+                    logger.warning(f"[5B] HTF gate error: {e}", exc_info=True)
+                    htf_debug = {"status": "error", "error": str(e), "fetch_error": True}
+
+                self._htf_bias_cache = htf_bias
+                self._htf_bias_expiry = now_ts + self._HTF_CACHE_TTL.get(htf_bias, 900)
+
+            # 4. Scan MTF timeframes
+            best_setup = None
+            best_score = 0
+            best_tf = None
+            all_tf_results = {HTF_TIMEFRAME: htf_debug}
+
+            _MAX_STALE = {"1h": 3, "15m": 5}
+
+            # Parallel fetch
+            mtf_dfs: Dict[str, Optional[pd.DataFrame]] = {}
+            with ThreadPoolExecutor(max_workers=len(MTF_TIMEFRAMES)) as ex:
+                futures = {ex.submit(fetch_candles_sync, SYMBOL, tf, 200): tf for tf in MTF_TIMEFRAMES}
+                for future in as_completed(futures):
+                    tf = futures[future]
+                    try:
+                        mtf_dfs[tf] = future.result()
+                    except Exception as e:
+                        logger.warning(f"[5B] Fetch failed for {tf}: {e}")
+                        mtf_dfs[tf] = None
+
+            for tf in MTF_TIMEFRAMES:
+                try:
+                    df = mtf_dfs.get(tf)
+                    if df is None or len(df) < 50:
+                        all_tf_results[tf] = {"status": "insufficient_data",
+                                              "candles": 0 if df is None else len(df),
+                                              "fetch_error": df is None}
+                        continue
+
+                    schematics_result = detect_tct_schematics(df, [])
+                    all_schematics = (
+                        schematics_result.get("accumulation_schematics", [])
+                        + schematics_result.get("distribution_schematics", [])
+                    )
+
+                    tf_evals = []
+                    max_stale = _MAX_STALE.get(tf, 5)
+                    total_candles = len(df)
+
+                    for s in all_schematics:
+                        if not isinstance(s, dict):
+                            continue
+                        s_dir = s.get("direction", "unknown")
+                        if htf_bias == "bullish" and s_dir == "bearish":
+                            continue
+                        if htf_bias == "bearish" and s_dir == "bullish":
+                            continue
+
+                        eval_result = self.evaluator.evaluate_schematic(
+                            s, htf_bias, current_price,
+                            total_candles=total_candles, max_stale_candles=max_stale
+                        )
+                        tf_evals.append(eval_result)
+                        if eval_result["pass"] and eval_result["score"] > best_score:
+                            best_score = eval_result["score"]
+                            best_setup = (s, eval_result)
+                            best_tf = tf
+
+                    all_tf_results[tf] = {
+                        "status": "scanned",
+                        "candles": total_candles,
+                        "schematics_found": len(all_schematics),
+                        "confirmed": sum(1 for s in all_schematics if isinstance(s, dict) and s.get("is_confirmed")),
+                        "htf_bias": htf_bias,
+                        "best_score": max((e["score"] for e in tf_evals), default=0),
+                        "evaluations": tf_evals[:10],
+                    }
+                except Exception as e:
+                    logger.warning(f"[5B] Error scanning {tf}: {e}", exc_info=True)
+                    all_tf_results[tf] = {"status": "error", "error": str(e), "fetch_error": True}
+
+            # Store debug
+            self.last_debug = {
+                "timestamp": cycle_result["timestamp"],
+                "current_price": current_price,
+                "timeframes": all_tf_results,
+                "best_tf": best_tf,
+                "best_score": best_score,
+            }
+
+            # 5. Enter trade if qualifying setup found
+            if best_setup:
+                schematic, evaluation = best_setup
+                entry_info = schematic.get("entry", {})
+                candidate_price = entry_info.get("price", current_price)
+
+                if self._is_duplicate_setup(candidate_price, evaluation["direction"]):
+                    cycle_result["action"] = "duplicate_setup_skipped"
+                    cycle_result["details"] = {
+                        "price": current_price,
+                        "skipped_entry": candidate_price,
+                        "reason": "Same setup as recent trade — cooldown active",
+                    }
+                else:
+                    trade = self._enter_trade(schematic, evaluation, current_price, htf_bias)
+                    trade["timeframe"] = best_tf
+                    cycle_result["action"] = "trade_entered"
+                    cycle_result["details"] = trade
+            else:
+                cycle_result["action"] = "no_qualifying_setups"
+                cycle_result["details"] = {"price": current_price, "timeframes_scanned": all_tf_results}
+
+            self.state.last_scan_time = cycle_result["timestamp"]
+            self.state.last_scan_action = cycle_result["action"]
+            self.state.last_error = None
+            self.state.save()
+
+        except Exception as e:
+            logger.error(f"[5B] Scan error: {e}", exc_info=True)
+            self.state.last_error = str(e)
+            self.state.last_scan_action = "error"
+            self.state.save()
+            cycle_result["action"] = "error"
+            cycle_result["details"] = {"error": str(e)}
+
+        return cycle_result
+
+    def _enter_trade(self, schematic: Dict, evaluation: Dict, current_price: float, htf_bias: str) -> Dict:
+        direction = evaluation["direction"]
+        stop_info = schematic.get("stop_loss", {})
+        target_info = schematic.get("target", {})
+
+        entry_price = current_price
+        stop_price = stop_info.get("price")
+        target_price = target_info.get("price")
+
+        if not stop_price or not target_price:
+            return {"error": "Missing stop or target price"}
+
+        # Validate direction consistency
+        if direction == "bearish":
+            if target_price >= entry_price:
+                return {"error": "Invalid short: target above entry"}
+            if stop_price <= entry_price:
+                return {"error": "Invalid short: stop below entry"}
+        else:
+            if target_price <= entry_price:
+                return {"error": "Invalid long: target below entry"}
+            if stop_price >= entry_price:
+                return {"error": "Invalid long: stop above entry"}
+
+        # Live R:R
+        if direction == "bearish":
+            actual_risk = stop_price - entry_price
+            actual_reward = entry_price - target_price
+        else:
+            actual_risk = entry_price - stop_price
+            actual_reward = target_price - entry_price
+
+        actual_rr = actual_reward / actual_risk if actual_risk > 0 else 0
+        if actual_rr < 1.0:
+            return {"error": f"R:R too low at market ({actual_rr:.2f}:1)"}
+
+        # Position sizing (1% risk)
+        risk_amount = self.state.balance * (RISK_PER_TRADE_PCT / 100)
+        if direction == "bullish":
+            sl_pct = abs((entry_price - stop_price) / entry_price) * 100
+        else:
+            sl_pct = abs((stop_price - entry_price) / entry_price) * 100
+        if sl_pct <= 0:
+            sl_pct = 1.0
+
+        position_size = calculate_position_size(risk_amount, sl_pct)
+        margin = calculate_margin(position_size, DEFAULT_LEVERAGE)
+
+        liq_dir = "long" if direction == "bullish" else "short"
+        liq_price = calculate_liquidation_price(entry_price, DEFAULT_LEVERAGE, liq_dir)
+        safety = check_liquidation_safety(liq_price, stop_price, entry_price, liq_dir)
+
+        trade = {
+            "id": len(self.state.trade_history) + 1,
+            "symbol": SYMBOL,
+            "direction": direction,
+            "model": evaluation.get("model", "unknown"),
+            "entry_price": round(entry_price, 2),
+            "stop_price": round(stop_price, 2),
+            "target_price": round(target_price, 2),
+            "position_size": round(position_size, 2),
+            "margin": round(margin, 2),
+            "risk_amount": round(risk_amount, 2),
+            "leverage": DEFAULT_LEVERAGE,
+            "rr": round(actual_rr, 2),
+            "entry_score": evaluation["score"],
+            "entry_reasons": evaluation["reasons"],
+            "htf_bias": htf_bias,
+            "liquidation_price": round(liq_price, 2),
+            "liquidation_safe": safety["is_safe"],
+            "opened_at": datetime.now(timezone.utc).isoformat(),
+            "status": "open",
+        }
+
+        self.state.current_trade = trade
+        self.state.save()
+        logger.info(f"[5B] Entered {direction} @ {entry_price} | SL={stop_price} | TP={target_price} | Score={evaluation['score']}")
+        _notify_5b_entry(trade)
+        return trade
+
+    def _manage_open_trade(self, current_price: float) -> Dict:
+        trade = self.state.current_trade
+        if not trade:
+            return {"action": "no_trade"}
+
+        direction = trade["direction"]
+        entry_price = trade["entry_price"]
+        stop_price = trade["stop_price"]
+        target_price = trade["target_price"]
+
+        if direction == "bullish":
+            pnl_pct = ((current_price - entry_price) / entry_price) * 100
+            hit_target = current_price >= target_price
+            hit_stop = current_price <= stop_price
+        else:
+            pnl_pct = ((entry_price - current_price) / entry_price) * 100
+            hit_target = current_price <= target_price
+            hit_stop = current_price >= stop_price
+
+        trade["live_pnl_pct"] = round(pnl_pct, 2)
+        trade["current_price"] = round(current_price, 2)
+
+        if hit_target:
+            return self._close_trade(current_price, "target_hit")
+        elif hit_stop:
+            return self._close_trade(current_price, "stop_hit")
+        else:
+            return {"action": "holding", "pnl_pct": round(pnl_pct, 2),
+                    "current_price": current_price, "direction": direction}
+
+    def _close_trade(self, exit_price: float, reason: str) -> Dict:
+        trade = self.state.current_trade
+        if not trade:
+            return {"action": "no_trade"}
+
+        direction = trade["direction"]
+        entry_price = trade["entry_price"]
+
+        if direction == "bullish":
+            pnl_pct = ((exit_price - entry_price) / entry_price) * 100
+        else:
+            pnl_pct = ((entry_price - exit_price) / entry_price) * 100
+
+        is_win = reason == "target_hit"
+        position_size = trade.get("position_size", 0)
+        pnl_dollars = position_size * (pnl_pct / 100)
+        self.state.balance += pnl_dollars
+
+        if is_win:
+            self.state.total_wins += 1
+        else:
+            self.state.total_losses += 1
+
+        closed_trade = {
+            **trade,
+            "exit_price": round(exit_price, 2),
+            "exit_reason": reason,
+            "pnl_pct": round(pnl_pct, 2),
+            "pnl_dollars": round(pnl_dollars, 2),
+            "is_win": is_win,
+            "closed_at": datetime.now(timezone.utc).isoformat(),
+            "status": "closed",
+            "balance_after": round(self.state.balance, 2),
+        }
+
+        self.state.trade_history.append(closed_trade)
+        self.state.current_trade = None
+        self.state.save()
+
+        logger.info(f"[5B] Closed: {reason} | P&L={pnl_pct:.2f}% (${pnl_dollars:.2f}) | Balance=${self.state.balance:.2f}")
+        _notify_5b_exit(closed_trade)
+
+        return {"action": "trade_closed", "trade": closed_trade}
+
+    def _is_duplicate_setup(self, entry_price: float, direction: str) -> bool:
+        if not self.state.trade_history:
+            return False
+        now = datetime.now(timezone.utc)
+        for t in reversed(self.state.trade_history[-5:]):
+            if t.get("direction") != direction:
+                continue
+            t_entry = t.get("entry_price", 0)
+            if t_entry > 0 and abs(t_entry - entry_price) / t_entry < DUPLICATE_PRICE_TOLERANCE:
+                closed_at = t.get("closed_at")
+                if closed_at:
+                    try:
+                        closed_time = datetime.fromisoformat(closed_at)
+                        if closed_time.tzinfo is None:
+                            closed_time = closed_time.replace(tzinfo=timezone.utc)
+                        if (now - closed_time).total_seconds() < DUPLICATE_COOLDOWN_SECONDS:
+                            return True
+                    except (ValueError, TypeError):
+                        pass
+                else:
+                    return True
+        return False
+
+    def force_close(self) -> Dict:
+        if not self.state.current_trade:
+            return {"action": "no_trade"}
+        price = fetch_live_price(SYMBOL)
+        if not price:
+            return {"action": "error", "details": "Could not fetch live price"}
+        return self._close_trade(price, "force_closed")
+
+
+# ================================================================
+# SINGLETON
+# ================================================================
+_trader_5b: Optional[Schematics5BTrader] = None
+
+
+def get_5b_trader() -> Schematics5BTrader:
+    global _trader_5b
+    if _trader_5b is None:
+        _trader_5b = Schematics5BTrader()
+    return _trader_5b
