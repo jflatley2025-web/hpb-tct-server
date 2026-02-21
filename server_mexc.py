@@ -21,6 +21,7 @@ from po3_schematics import detect_po3_schematics
 from trade_execution import generate_execution_plan, calculate_leverage_comparison, calculate_capital_allocation
 from market_structure import MarketStructure, evaluate_rtz
 from tensor_tct_trader import get_trader
+from schematics_5b_trader import get_5b_trader
 
 
 # ================================================================
@@ -3018,18 +3019,29 @@ async def startup_event():
     asyncio.create_task(tensor_trade_auto_scan_loop())
     logger.info("[TENSOR-TRADE] Background auto-scan loop launched")
 
+    # Start the schematics-5B auto-scan loop (hands-free trading, separate engine)
+    asyncio.create_task(schematics_5b_auto_scan_loop())
+    logger.info("[5B-TRADE] Background auto-scan loop launched")
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Clean up shared httpx client on shutdown."""
-    # Push trade log to GitHub on graceful shutdown (belt-and-suspenders alongside hourly push)
+    # Push trade logs to GitHub on graceful shutdown
     try:
         from github_storage import push_trade_log
         from tensor_tct_trader import TRADE_LOG_PATH
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, push_trade_log, TRADE_LOG_PATH)
     except Exception as e:
-        logger.warning(f"[SHUTDOWN] GitHub push failed: {e}")
+        logger.warning(f"[SHUTDOWN] GitHub push failed (tensor): {e}")
+
+    try:
+        from schematics_5b_trader import github_push_5b_log, TRADE_LOG_PATH as TRADE_LOG_PATH_5B
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, github_push_5b_log, TRADE_LOG_PATH_5B)
+    except Exception as e:
+        logger.warning(f"[SHUTDOWN] GitHub push failed (5B): {e}")
 
     global _shared_client
     if _shared_client and not _shared_client.is_closed:
@@ -14943,6 +14955,484 @@ async def tensor_trade_auto_scan_loop():
         if now - _last_github_push >= GITHUB_PUSH_INTERVAL:
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, push_trade_log, TRADE_LOG_PATH)
+            _last_github_push = now
+
+        await asyncio.sleep(AUTO_SCAN_INTERVAL)
+
+
+# ================================================================
+# SCHEMATICS 5B — API ENDPOINTS
+# ================================================================
+
+@app.get("/api/schematics-5b-trader/scan")
+async def schematics_5b_scan():
+    """Run a single 5B scan-and-trade cycle."""
+    trader = get_5b_trader()
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, trader.scan_and_trade)
+    return convert_numpy_types(result)
+
+
+@app.get("/api/schematics-5b-trader/state")
+async def schematics_5b_state():
+    """Return current 5B trading state for the dashboard."""
+    trader = get_5b_trader()
+    return convert_numpy_types(trader.state.snapshot())
+
+
+@app.get("/api/schematics-5b-trader/debug")
+async def schematics_5b_debug():
+    """Return detailed debug diagnostics from the last 5B scan cycle."""
+    trader = get_5b_trader()
+    debug = dict(trader.last_debug) if trader.last_debug else {}
+    debug["state_summary"] = {
+        "balance": trader.state.balance,
+        "has_open_trade": trader.state.current_trade is not None,
+        "total_trades": len(trader.state.trade_history),
+        "last_scan_time": trader.state.last_scan_time,
+        "last_scan_action": trader.state.last_scan_action,
+        "last_error": trader.state.last_error,
+    }
+    return convert_numpy_types(debug)
+
+
+@app.get("/schematics-5B", response_class=HTMLResponse)
+async def schematics_5b_page():
+    """
+    Schematics 5B Simulated Trading Dashboard.
+    Deterministic TCT trading — BTCUSDT only, fixed threshold, no learning.
+    """
+    html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Schematics 5B — Simulated Trading</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-serif;overflow-x:hidden}
+
+.header{display:flex;align-items:center;justify-content:space-between;padding:10px 24px;background:#101018;border-bottom:1px solid #1e1e2d}
+.header h1{font-size:1.1rem;color:#00d4ff;display:flex;align-items:center;gap:8px}
+.header .subtitle{color:#666;font-size:.8rem;font-weight:400}
+.header-right{display:flex;align-items:center;gap:10px}
+.back-link{color:#888;text-decoration:none;font-size:.75rem;padding:4px 10px;border:1px solid #333;border-radius:4px}
+.back-link:hover{color:#e0e0e0;border-color:#555}
+
+.controls{display:flex;align-items:center;gap:10px;padding:8px 24px;background:#101018;border-bottom:1px solid #1a1a28;flex-wrap:wrap}
+.btn{padding:6px 16px;border:1px solid #333;border-radius:4px;background:#181824;color:#e0e0e0;font-size:.78rem;cursor:pointer;transition:all .2s}
+.btn:hover{background:#222238;border-color:#00d4ff}
+.btn-scan{border-color:#00d4ff;color:#00d4ff}
+.btn-scan:hover{background:#00d4ff22}
+.status-text{color:#666;font-size:.75rem;margin-left:auto}
+.auto-label{color:#888;font-size:.75rem}
+
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;padding:16px 24px}
+.stat-card{background:#12121e;border:1px solid #1e1e2d;border-radius:8px;padding:14px;text-align:center}
+.stat-label{color:#666;font-size:.7rem;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}
+.stat-value{font-size:1.3rem;font-weight:700}
+.stat-value.green{color:#00e676}
+.stat-value.red{color:#ff4444}
+.stat-value.blue{color:#00d4ff}
+.stat-value.purple{color:#e040fb}
+.stat-value.white{color:#e0e0e0}
+
+.main{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:16px 24px}
+@media(max-width:900px){.main{grid-template-columns:1fr}}
+
+.panel{background:#12121e;border:1px solid #1e1e2d;border-radius:8px;overflow:hidden}
+.panel-header{padding:10px 16px;background:#181828;border-bottom:1px solid #1e1e2d;font-size:.85rem;font-weight:600;display:flex;align-items:center;gap:8px}
+.panel-body{padding:12px 16px;max-height:500px;overflow-y:auto}
+
+.trade-card{background:#181828;border:1px solid #2d2d44;border-radius:6px;padding:14px;margin-bottom:8px}
+.trade-card.bullish{border-left:3px solid #00e676}
+.trade-card.bearish{border-left:3px solid #ff4444}
+.trade-row{display:flex;justify-content:space-between;align-items:center;padding:3px 0;font-size:.78rem}
+.trade-row .label{color:#888}
+.trade-row .value{font-weight:600}
+.badge{display:inline-block;padding:2px 8px;border-radius:3px;font-size:.7rem;font-weight:600;text-transform:uppercase}
+.badge-bullish{background:#00e67622;color:#00e676;border:1px solid #00e67644}
+.badge-bearish{background:#ff444422;color:#ff4444;border:1px solid #ff444444}
+.badge-win{background:#00e67622;color:#00e676}
+.badge-loss{background:#ff444422;color:#ff4444}
+.badge-open{background:#00d4ff22;color:#00d4ff;border:1px solid #00d4ff44}
+.no-trade{color:#555;font-size:.85rem;padding:20px;text-align:center}
+
+.history-table{width:100%;border-collapse:collapse;font-size:.75rem}
+.history-table th{color:#888;text-align:left;padding:6px 8px;border-bottom:1px solid #1e1e2d;font-weight:600;text-transform:uppercase;font-size:.65rem;letter-spacing:.5px}
+.history-table td{padding:6px 8px;border-bottom:1px solid #1a1a28}
+.history-table tr:hover{background:#181828}
+
+.debug-section{padding:16px 24px}
+.debug-toggle-btn{display:flex;align-items:center;gap:8px;padding:8px 16px;background:#12121e;border:1px solid #1e1e2d;border-radius:8px;color:#00d4ff;font-size:.78rem;font-weight:600;cursor:pointer;width:100%;text-align:left}
+.debug-toggle-btn:hover{border-color:#00d4ff;background:#181828}
+.debug-toggle-btn .darrow{transition:transform .15s;display:inline-block}
+.debug-toggle-btn .darrow.dopen{transform:rotate(90deg)}
+.debug-body-wrap{display:none;margin-top:8px}
+.debug-body-wrap.dopen{display:block}
+.debug-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}
+.debug-card{background:#12121e;border:1px solid #1e1e2d;border-radius:8px;padding:12px 14px;font-size:.72rem}
+.debug-card-title{color:#00d4ff;font-weight:700;font-size:.78rem;margin-bottom:8px}
+.debug-row{display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid rgba(255,255,255,.03)}
+.debug-row .dlabel{color:#666}
+.debug-row .dval{color:#e0e0e0;font-weight:600}
+.debug-row .dval.dgreen{color:#00e676}
+.debug-row .dval.dred{color:#ff4444}
+.debug-row .dval.dyellow{color:#ffc107}
+.debug-row .dval.dcyan{color:#00d4ff}
+.debug-eval{background:#181828;border:1px solid #222;border-radius:4px;padding:6px 8px;margin-top:4px;font-size:.68rem}
+.debug-eval .dereason{color:#888;font-size:.65rem;margin-top:2px}
+
+::-webkit-scrollbar{width:6px}
+::-webkit-scrollbar-track{background:#0a0a0f}
+::-webkit-scrollbar-thumb{background:#333;border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:#555}
+
+.spinner{display:inline-block;width:14px;height:14px;border:2px solid #333;border-top:2px solid #00d4ff;border-radius:50%;animation:spin .8s linear infinite;margin-right:6px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.loading{display:none;align-items:center;color:#888;font-size:.78rem}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Schematics 5B <span class="subtitle">Simulated Trading — BTCUSDT</span></h1>
+  <div class="header-right">
+    <a href="/schematics-5A" class="back-link">Schematics 5A</a>
+    <a href="/tensor-trade" class="back-link">Tensor Trade</a>
+    <a href="/dashboard" class="back-link">Dashboard</a>
+  </div>
+</div>
+
+<div class="controls">
+  <button class="btn btn-scan" onclick="runScan()">Manual Scan</button>
+  <button class="btn" onclick="refreshState()">Refresh</button>
+  <span class="auto-label" style="color:#00e676">Server auto-scan: ON (every 60s)</span>
+  <div class="loading" id="loadingIndicator"><div class="spinner"></div>Scanning...</div>
+  <span class="status-text" id="statusText">Auto-scanning...</span>
+</div>
+
+<div class="stats" id="statsRow">
+  <div class="stat-card"><div class="stat-label">Balance</div><div class="stat-value blue" id="statBalance">$5,000.00</div></div>
+  <div class="stat-card"><div class="stat-label">Total P&L</div><div class="stat-value white" id="statPnl">$0.00</div></div>
+  <div class="stat-card"><div class="stat-label">P&L %</div><div class="stat-value white" id="statPnlPct">0.00%</div></div>
+  <div class="stat-card"><div class="stat-label">Trades</div><div class="stat-value purple" id="statTrades">0</div></div>
+  <div class="stat-card"><div class="stat-label">Win Rate</div><div class="stat-value white" id="statWinRate">0%</div></div>
+  <div class="stat-card"><div class="stat-label">Wins / Losses</div><div class="stat-value white" id="statWL">0 / 0</div></div>
+</div>
+
+<div class="main">
+  <div>
+    <div class="panel" style="margin-bottom:16px">
+      <div class="panel-header"><span style="color:#00d4ff">Current Trade</span></div>
+      <div class="panel-body" id="currentTradePanel">
+        <div class="no-trade">No active trade — server auto-scanning every 60s</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header"><span style="color:#00d4ff">Trade History</span></div>
+      <div class="panel-body" id="historyPanel" style="max-height:400px">
+        <table class="history-table">
+          <thead><tr><th>#</th><th>Dir</th><th>Model</th><th>Entry</th><th>Exit</th><th>P&L</th><th>Result</th><th>Balance</th></tr></thead>
+          <tbody id="historyBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <div class="panel">
+      <div class="panel-header"><span style="color:#ffc107">Engine Info</span> <span style="color:#666;font-size:.7rem;font-weight:400">— Deterministic (no learning)</span></div>
+      <div class="panel-body" id="enginePanel">
+        <div style="font-size:.78rem;color:#888;line-height:1.8">
+          <div class="trade-row"><span class="label">Engine</span><span class="value" style="color:#00d4ff">Schematics 5B</span></div>
+          <div class="trade-row"><span class="label">Symbol</span><span class="value">BTCUSDT</span></div>
+          <div class="trade-row"><span class="label">Entry Threshold</span><span class="value" style="color:#ffc107">50/100 (fixed)</span></div>
+          <div class="trade-row"><span class="label">Risk Per Trade</span><span class="value">1%</span></div>
+          <div class="trade-row"><span class="label">Leverage</span><span class="value">10x</span></div>
+          <div class="trade-row"><span class="label">HTF Gate</span><span class="value">4H bias</span></div>
+          <div class="trade-row"><span class="label">MTF Scan</span><span class="value">1H, 15M</span></div>
+          <div class="trade-row"><span class="label">Scan Interval</span><span class="value">60s</span></div>
+          <div class="trade-row"><span class="label">Learning</span><span class="value" style="color:#ff4444">OFF</span></div>
+          <div class="trade-row"><span class="label">Adaptive Threshold</span><span class="value" style="color:#ff4444">OFF</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="debug-section">
+  <button class="debug-toggle-btn" onclick="toggleDebugSection()">
+    <span class="darrow" id="debugArrow">&#9654;</span>
+    Debug Diagnostics — Scan Details
+    <span id="debugSummary" style="margin-left:auto;color:#666;font-size:.65rem"></span>
+  </button>
+  <div class="debug-body-wrap" id="debugBodyWrap">
+    <div class="debug-grid" id="debugGrid">
+      <div class="debug-card"><div style="color:#555;text-align:center;padding:20px">Click "Manual Scan" or wait for auto-scan to see debug data</div></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = '';
+
+async function fetchJSON(url) {
+  const r = await fetch(API + url);
+  return r.json();
+}
+
+function setStatus(msg) {
+  document.getElementById('statusText').textContent = msg;
+}
+
+function showLoading(v) {
+  document.getElementById('loadingIndicator').style.display = v ? 'flex' : 'none';
+}
+
+async function runScan() {
+  showLoading(true);
+  setStatus('Scanning...');
+  try {
+    const res = await fetchJSON('/api/schematics-5b-trader/scan');
+    setStatus('Scan: ' + (res.action || 'done') + ' @ ' + new Date().toLocaleTimeString());
+    await refreshState();
+  } catch(e) {
+    setStatus('Scan error: ' + e.message);
+  }
+  showLoading(false);
+}
+
+async function refreshState() {
+  try {
+    const s = await fetchJSON('/api/schematics-5b-trader/state');
+    updateStats(s);
+    updateCurrentTrade(s.current_trade);
+    updateHistory(s.trade_history || []);
+  } catch(e) {
+    setStatus('Refresh error: ' + e.message);
+  }
+}
+
+function updateStats(s) {
+  document.getElementById('statBalance').textContent = '$' + s.balance.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
+  const pnl = s.pnl_total;
+  const pnlEl = document.getElementById('statPnl');
+  pnlEl.textContent = (pnl >= 0 ? '+$' : '-$') + Math.abs(pnl).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
+  pnlEl.className = 'stat-value ' + (pnl >= 0 ? 'green' : 'red');
+
+  const pctEl = document.getElementById('statPnlPct');
+  pctEl.textContent = (s.pnl_pct >= 0 ? '+' : '') + s.pnl_pct + '%';
+  pctEl.className = 'stat-value ' + (s.pnl_pct >= 0 ? 'green' : 'red');
+
+  document.getElementById('statTrades').textContent = s.total_trades;
+  document.getElementById('statWinRate').textContent = s.win_rate + '%';
+  document.getElementById('statWinRate').className = 'stat-value ' + (s.win_rate >= 50 ? 'green' : s.win_rate > 0 ? 'red' : 'white');
+  document.getElementById('statWL').textContent = s.wins + ' / ' + s.losses;
+
+  if (s.last_scan_time) {
+    const t = new Date(s.last_scan_time).toLocaleTimeString();
+    const action = s.last_scan_action || '-';
+    const err = s.last_error ? ' | Error: ' + s.last_error : '';
+    setStatus('Last scan: ' + action + ' @ ' + t + err);
+  }
+}
+
+function updateCurrentTrade(trade) {
+  const panel = document.getElementById('currentTradePanel');
+  if (!trade) {
+    panel.innerHTML = '<div class="no-trade">No active trade — server auto-scanning every 60s</div>';
+    return;
+  }
+  const dir = trade.direction || 'unknown';
+  const pnl = trade.live_pnl_pct || 0;
+  const pnlColor = pnl >= 0 ? '#00e676' : '#ff4444';
+  panel.innerHTML = `
+    <div class="trade-card ${dir}">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <span class="badge badge-${dir}">${dir.toUpperCase()}</span>
+        <span class="badge badge-open">OPEN</span>
+        <span style="color:${pnlColor};font-size:.9rem;font-weight:700">${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%</span>
+      </div>
+      <div class="trade-row"><span class="label">Model</span><span class="value">${trade.model || '-'}</span></div>
+      <div class="trade-row"><span class="label">Timeframe</span><span class="value" style="color:#ffc107">${trade.timeframe || '-'}</span></div>
+      <div class="trade-row"><span class="label">Entry</span><span class="value">$${(trade.entry_price||0).toLocaleString()}</span></div>
+      <div class="trade-row"><span class="label">Current</span><span class="value" style="color:${pnlColor}">$${(trade.current_price||trade.entry_price||0).toLocaleString()}</span></div>
+      <div class="trade-row"><span class="label">Stop Loss</span><span class="value" style="color:#ff4444">$${(trade.stop_price||0).toLocaleString()}</span></div>
+      <div class="trade-row"><span class="label">Target</span><span class="value" style="color:#00e676">$${(trade.target_price||0).toLocaleString()}</span></div>
+      <div class="trade-row"><span class="label">R:R</span><span class="value">${(trade.rr||0).toFixed(1)}</span></div>
+      <div class="trade-row"><span class="label">Position Size</span><span class="value">$${(trade.position_size||0).toLocaleString()}</span></div>
+      <div class="trade-row"><span class="label">Risk</span><span class="value">$${(trade.risk_amount||0).toFixed(2)}</span></div>
+      <div class="trade-row"><span class="label">Leverage</span><span class="value">${trade.leverage||10}x</span></div>
+      <div class="trade-row"><span class="label">Entry Score</span><span class="value" style="color:#00d4ff">${trade.entry_score||0}/100</span></div>
+      <div class="trade-row"><span class="label">Opened</span><span class="value">${trade.opened_at ? new Date(trade.opened_at).toLocaleString() : '-'}</span></div>
+      ${trade.entry_reasons ? '<div style="margin-top:8px;padding-top:8px;border-top:1px solid #1e1e2d;font-size:.72rem;color:#888">Reasons: ' + trade.entry_reasons.join(' | ') + '</div>' : ''}
+    </div>`;
+}
+
+function updateHistory(trades) {
+  const tbody = document.getElementById('historyBody');
+  if (!trades.length) {
+    tbody.innerHTML = '<tr><td colspan="8" style="color:#555;text-align:center;padding:16px">No trades yet</td></tr>';
+    return;
+  }
+  const reversed = [...trades].reverse();
+  tbody.innerHTML = reversed.map(t => {
+    const pnlColor = t.is_win ? '#00e676' : '#ff4444';
+    return `<tr>
+      <td style="color:#00d4ff">#${t.id||'-'}</td>
+      <td><span class="badge badge-${t.direction}">${(t.direction||'?').slice(0,4).toUpperCase()}</span></td>
+      <td style="color:#888">${(t.model||'-').replace('_',' ')}</td>
+      <td>$${(t.entry_price||0).toLocaleString()}</td>
+      <td>$${(t.exit_price||0).toLocaleString()}</td>
+      <td style="color:${pnlColor};font-weight:600">${t.pnl_pct >= 0 ? '+' : ''}${(t.pnl_pct||0).toFixed(2)}% ($${(t.pnl_dollars||0).toFixed(2)})</td>
+      <td><span class="badge ${t.is_win ? 'badge-win' : 'badge-loss'}">${t.is_win ? 'WIN' : 'LOSS'}</span></td>
+      <td style="color:#00d4ff">$${(t.balance_after||0).toLocaleString(undefined,{minimumFractionDigits:2})}</td>
+    </tr>`;
+  }).join('');
+}
+
+function toggleDebugSection() {
+  const body = document.getElementById('debugBodyWrap');
+  const arrow = document.getElementById('debugArrow');
+  body.classList.toggle('dopen');
+  arrow.classList.toggle('dopen');
+  if (body.classList.contains('dopen')) refreshDebug();
+}
+
+async function refreshDebug() {
+  try {
+    const d = await fetchJSON('/api/schematics-5b-trader/debug');
+    renderDebug(d);
+  } catch(e) {
+    document.getElementById('debugGrid').innerHTML = '<div class="debug-card"><div style="color:#ff4444">Debug fetch error: ' + e.message + '</div></div>';
+  }
+}
+
+function renderDebug(d) {
+  const grid = document.getElementById('debugGrid');
+  const summary = document.getElementById('debugSummary');
+  if (!d || !d.timeframes) {
+    summary.textContent = d.state_summary?.last_error || 'No scan data yet';
+    grid.innerHTML = '<div class="debug-card">' +
+      '<div class="debug-card-title">State</div>' +
+      '<div class="debug-row"><span class="dlabel">Last Scan</span><span class="dval">' + (d.state_summary?.last_scan_time || 'Never') + '</span></div>' +
+      '<div class="debug-row"><span class="dlabel">Last Action</span><span class="dval">' + (d.state_summary?.last_scan_action || 'None') + '</span></div>' +
+      '<div class="debug-row"><span class="dlabel">Last Error</span><span class="dval dred">' + (d.state_summary?.last_error || 'None') + '</span></div>' +
+      '</div>';
+    return;
+  }
+
+  const ts = d.timestamp ? new Date(d.timestamp).toLocaleTimeString() : '?';
+  const totalSchems = Object.values(d.timeframes).reduce((s,v) => s + (v.schematics_found || 0), 0);
+  const totalConf = Object.values(d.timeframes).reduce((s,v) => s + (v.confirmed || 0), 0);
+  summary.textContent = ts + ' | ' + totalSchems + ' schematics, ' + totalConf + ' confirmed, best=' + (d.best_score || 0);
+
+  let html = '';
+
+  html += '<div class="debug-card">' +
+    '<div class="debug-card-title">Scan Overview</div>' +
+    '<div class="debug-row"><span class="dlabel">Time</span><span class="dval">' + ts + '</span></div>' +
+    '<div class="debug-row"><span class="dlabel">Price</span><span class="dval dcyan">$' + (d.current_price || 0).toLocaleString() + '</span></div>' +
+    '<div class="debug-row"><span class="dlabel">Best TF</span><span class="dval dyellow">' + (d.best_tf || 'None') + '</span></div>' +
+    '<div class="debug-row"><span class="dlabel">Best Score</span><span class="dval ' + (d.best_score >= 50 ? 'dgreen' : 'dred') + '">' + (d.best_score || 0) + '/100</span></div>' +
+    '<div class="debug-row"><span class="dlabel">Threshold</span><span class="dval dyellow">50 (fixed)</span></div>' +
+    '<div class="debug-row"><span class="dlabel">Balance</span><span class="dval dcyan">$' + (d.state_summary?.balance || 0).toLocaleString(undefined,{minimumFractionDigits:2}) + '</span></div>' +
+    '<div class="debug-row"><span class="dlabel">Open Trade</span><span class="dval">' + (d.state_summary?.has_open_trade ? 'Yes' : 'No') + '</span></div>' +
+    '<div class="debug-row"><span class="dlabel">Last Error</span><span class="dval ' + (d.state_summary?.last_error ? 'dred' : '') + '">' + (d.state_summary?.last_error || 'None') + '</span></div>' +
+    '</div>';
+
+  const tfOrder = ['4h','1h','15m'];
+  for (const tf of tfOrder) {
+    const t = d.timeframes[tf];
+    if (!t) continue;
+    html += '<div class="debug-card">';
+    html += '<div class="debug-card-title">' + tf.toUpperCase() + ' Timeframe';
+    if (tf === d.best_tf) html += ' <span style="color:#00e676;font-size:.6rem;background:#00e67622;padding:1px 6px;border-radius:3px">BEST</span>';
+    html += '</div>';
+    html += '<div class="debug-row"><span class="dlabel">Status</span><span class="dval ' + (t.status === 'scanned' ? 'dgreen' : t.status === 'cached' ? 'dyellow' : 'dred') + '">' + t.status + '</span></div>';
+    html += '<div class="debug-row"><span class="dlabel">Candles</span><span class="dval">' + (t.candles ?? '-') + '</span></div>';
+    if (t.htf_bias) html += '<div class="debug-row"><span class="dlabel">HTF Bias</span><span class="dval ' + (t.htf_bias === 'bullish' ? 'dgreen' : t.htf_bias === 'bearish' ? 'dred' : 'dyellow') + '">' + t.htf_bias + '</span></div>';
+    if (t.status === 'scanned') {
+      html += '<div class="debug-row"><span class="dlabel">Schematics</span><span class="dval">' + t.schematics_found + '</span></div>';
+      html += '<div class="debug-row"><span class="dlabel">Confirmed</span><span class="dval ' + (t.confirmed > 0 ? 'dgreen' : 'dred') + '">' + t.confirmed + '</span></div>';
+      html += '<div class="debug-row"><span class="dlabel">Best Score</span><span class="dval ' + (t.best_score >= 50 ? 'dgreen' : t.best_score > 0 ? 'dyellow' : 'dred') + '">' + t.best_score + '</span></div>';
+      if (t.evaluations && t.evaluations.length > 0) {
+        html += '<div style="margin-top:6px;border-top:1px solid #222;padding-top:4px;font-size:.65rem;color:#888">Evaluations:</div>';
+        t.evaluations.forEach((ev, i) => {
+          const passC = ev.pass ? 'dgreen' : 'dred';
+          html += '<div class="debug-eval">';
+          html += '<span style="color:#00d4ff">#' + (i+1) + '</span> ';
+          html += '<span class="dval ' + passC + '">' + (ev.pass ? 'PASS' : 'FAIL') + '</span> ';
+          html += 'Score: <span class="dval">' + ev.score + '/50</span> ';
+          html += (ev.direction||'?').toUpperCase() + ' ' + (ev.model||'?') + ' R:R=' + (ev.rr||0).toFixed(1);
+          html += '<div class="dereason">' + (ev.reasons || []).join(' | ') + '</div>';
+          html += '</div>';
+        });
+      }
+    }
+    if (t.error) html += '<div class="debug-row"><span class="dlabel">Error</span><span class="dval dred">' + t.error + '</span></div>';
+    html += '</div>';
+  }
+
+  grid.innerHTML = html;
+}
+
+setInterval(() => {
+  if (document.getElementById('debugBodyWrap').classList.contains('dopen')) refreshDebug();
+}, 15000);
+
+setInterval(refreshState, 15000);
+
+refreshState();
+</script>
+</body>
+</html>"""
+
+    return HTMLResponse(content=html)
+
+
+# ================================================================
+# SCHEMATICS 5B — BACKGROUND AUTO-SCAN LOOP
+# ================================================================
+
+async def schematics_5b_auto_scan_loop():
+    """
+    Server-side background loop that runs the Schematics 5B trader's
+    scan_and_trade() cycle autonomously every 60 seconds.
+    Hands-free — no browser tab required.
+    Pushes trade log to GitHub every hour.
+    """
+    from schematics_5b_trader import get_5b_trader, AUTO_SCAN_INTERVAL, TRADE_LOG_PATH as LOG_5B
+    from schematics_5b_trader import github_push_5b_log
+
+    await asyncio.sleep(20)  # Let server start (stagger vs tensor trader's 15s)
+    logger.info(f"[5B-TRADE] Auto-scan loop started — interval: {AUTO_SCAN_INTERVAL}s")
+
+    consecutive_errors = 0
+    _last_github_push = time.time()
+    GITHUB_PUSH_INTERVAL = 3600
+
+    while True:
+        try:
+            trader = get_5b_trader()
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, trader.scan_and_trade)
+            action = result.get("action", "unknown")
+            ts = result.get("timestamp", "")
+            logger.info(f"[5B-TRADE] Auto-scan result: {action} @ {ts}")
+            consecutive_errors = 0
+        except Exception as e:
+            consecutive_errors += 1
+            logger.error(f"[5B-TRADE] Auto-scan error ({consecutive_errors}): {e}", exc_info=True)
+            if consecutive_errors >= 5:
+                logger.critical(f"[5B-TRADE] {consecutive_errors} consecutive failures — possible systemic issue")
+
+        now = time.time()
+        if now - _last_github_push >= GITHUB_PUSH_INTERVAL:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, github_push_5b_log, LOG_5B)
             _last_github_push = now
 
         await asyncio.sleep(AUTO_SCAN_INTERVAL)
