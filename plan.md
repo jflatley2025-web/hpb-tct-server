@@ -2,152 +2,176 @@
 
 ## Overview
 
-Build a new **schematics-5B** page that extends the existing schematics-5A page with:
-1. **Enhanced TCT logic** from Lecture 5B (real-world trade examples, structure dissection, domino effect, reconfirmation tool)
-2. **Automated simulated trading** using live MEXC prices with minimal lag
-3. **GitHub persistence** via `GITHUB_TOKEN_2` env var
-4. **Telegram notifications** to `TELEGRAM_CHAT_ID_3` with entry/exit details
+Build a new **schematics-5B** automated trading simulator page:
+1. **Enhanced TCT logic** from Lecture 5B (structure dissection, domino effect, reconfirmation tool)
+2. **Automated simulated trading** on **BTCUSDT only** using live MEXC prices
+3. **Purely deterministic evaluation** — fixed score threshold (50/100), no learning, no reward system, no adaptive adjustments
+4. **GitHub persistence** via `GITHUB_TOKEN_2` env var
+5. **Telegram notifications** to `TELEGRAM_CHAT_ID_3` with entry/exit details
 
 ---
 
-## Architecture Decisions
+## Finalized Architecture Decisions
 
-### Decision 1: Separate vs. Shared Trading Engine
+### Decision 1: Separate Trading Engine ✅ (Option A)
 
-**Option A (Recommended): Dedicated `schematics_5b_trader.py` module**
-- New standalone trader module modeled after `tensor_tct_trader.py`
-- Separate trade log file (`schematics_5b_trade_log.json`)
-- Uses `GITHUB_TOKEN_2` for persistence (separate from tensor trader's `GITHUB_TOKEN`)
-- Sends Telegram to `TELEGRAM_CHAT_ID_3` (separate channel)
-- Independent background loop in `server_mexc.py`
-- Effort: Medium
-- Risk: Low — no interference with existing tensor trader
-- Maintenance: Self-contained, easy to reason about
+Dedicated `schematics_5b_trader.py` module — clean separation from tensor trader.
 
-**Option B: Extend `tensor_tct_trader.py` with a 5B mode**
-- Add 5B-specific logic branches to existing TensorTCTTrader
-- Risk: High — coupling two trading strategies in one engine makes debugging harder
-- Could break the existing working tensor trader
+### Decision 2: Single Pair Only ✅ (Option B)
 
-**Recommendation: Option A** — clean separation, no risk to existing system.
+**BTCUSDT only.** No multi-pair scanning, no pair selector UI.
 
-### Decision 2: Scan Multi-Pair vs. Single Pair
+### Decision 3: No Learning / No Reward System ✅
 
-**Option A (Recommended): Multi-pair scanning (configurable)**
-- Allow user to select which pairs to auto-trade from the UI
-- Default to a predefined list (majors: BTC, ETH, SOL, etc.)
-- Background loop scans all enabled pairs every cycle
+Explicitly excluded from the 5B trader:
+- ❌ No `HPBContextualReward` / no reward_history tracking
+- ❌ No `compute_model_weights()` — no learned per-model score bonuses
+- ❌ No `adapt_after_loss()` / `adapt_after_win()` — no consecutive-loss adaptation
+- ❌ No tightening/loosening of entry thresholds based on trade history
+- ✅ Fixed 50-point pass threshold — same rules on trade #1 as trade #100
+- ✅ Pure W/L trade log (no reward_value, no analysis, no solution fields)
 
-**Option B: Single pair only (like current tensor trader)**
-- Simpler but less useful
+### Decision 4: Fixed Score Threshold ✅
 
-**Recommendation: Option A** — the 5B lecture covers SOL, PEPE, Gold, EUR/USD showing the methodology works on many instruments. Multi-pair gives more trade opportunities.
+Entry evaluation uses a fixed 50/100 minimum score based on structural factors:
+- BOS confirmation (30 pts)
+- R:R quality (5-25 pts based on ratio)
+- HTF bias alignment (20 pts)
+- Schematic quality score bonus (10-15 pts)
+- Model type bonus (3-5 pts)
 
-### Decision 3: Entry Refinement Strategy (Key 5B Enhancement)
-
-The biggest improvement from Lecture 5B is the **overlapping structure dissection** technique for better R:R entries. Instead of waiting for the main market structure break (which often gives bad R:R like 0.4-0.67:1), the lecture teaches:
-
-1. Identify main structure break level (red)
-2. Dissect last leg into lower-TF structure (blue)
-3. Enter on blue structure break (gets entries like 3:1 to 6:1 instead of 0.4:1)
-4. The "domino effect": break blue → red → black → target
-
-**Implementation:** Add a multi-layer structure analysis that:
-- Uses the existing TCT detector for macro structure
-- Adds a second-pass lower-TF analysis for micro structure within the last leg
-- Scores entries by R:R improvement from dissection
+No dynamic adjustments — threshold stays at 50 forever.
 
 ---
 
 ## Components to Build
 
-### 1. `schematics_5b_trader.py` — Trading Engine (~400 lines)
+### 1. `schematics_5b_trader.py` — Trading Engine (~350 lines)
 
-New module containing:
+Modeled after `tensor_tct_trader.py` but **stripped of all learning/reward logic**.
 
-- **`Schematics5BTradeState`** — Trade state manager (modeled after `TradeState`)
-  - Separate log file: `schematics_5b_trade_log.json`
-  - Balance tracking, trade history, P&L
+**`Schematics5BTradeState`** — Trade state manager
+- Separate log file: `schematics_5b_trade_log.json`
+- Balance tracking ($5,000 starting), trade history, W/L stats
+- No reward_history, no solutions_applied, no model_weights
+- GitHub restore on load (uses `GITHUB_TOKEN_2`)
 
-- **`Schematics5BTrader`** — Main trading engine
-  - `scan_and_trade()` loop scanning configurable pairs across timeframes
-  - Enhanced TCT evaluation with 5B rules:
-    - **Six candle rule validation** for highest TF range validity
-    - **Structure dissection** for better entries (overlapping structure)
-    - **Reconfirmation tool** — reject entries in supply/demand zones, wait for retest
-    - **Tap spacing check** — taps should be roughly equally spaced (5B rule)
-    - **Horizontal range quality** — reject ranges that don't look like "horizontal price action"
-    - **Model 1 from Model 2 failure** — when M2 fails, look for M1 (the "take the L to get the W" pattern)
-  - Position management: entry, SL, TP monitoring with live MEXC prices
-  - Uses existing `trade_execution.py` for position sizing
+**`Schematics5BEvaluator`** — Deterministic schematic evaluator
+- Fixed 50-point threshold (never changes)
+- Same scoring factors as tensor trader: BOS + R:R + HTF alignment + quality + model type
+- No consecutive_losses tracking, no adapt_after_loss/win
+- 5B-specific structural checks:
+  - **Tap spacing validation** — reject if tap spacing is severely uneven
+  - **Horizontal range quality** — reject steep trends disguised as ranges
+  - **Structure dissection scoring** — bonus points for overlapping structure (domino effect)
 
-- **`Schematics5BGitHubStorage`** — GitHub persistence
-  - Uses `GITHUB_TOKEN_2` env var (NOT the existing `GITHUB_TOKEN`)
-  - Separate file on data branch: `schematics_5b_trade_log.json`
-  - Push on trade close + hourly sync
+**`Schematics5BTrader`** — Main trading engine
+- `scan_and_trade()` — BTCUSDT only, scans MTF timeframes (1h, 15m)
+- HTF gate (4h bias) with caching — same pattern as tensor trader
+- Position management: entry at market, SL/TP monitoring
+- Uses existing `trade_execution.py` for position sizing (1% risk, 10x leverage)
+- Deduplication: cooldown to prevent re-entering same setup
 
-- **Telegram notifications** — to `TELEGRAM_CHAT_ID_3`
-  - Entry notification: entry price, stop loss, target
-  - Exit notification: WIN/LOSS, entry price, exit price, amount won/lost
-  - Uses existing `TELEGRAM_BOT_TOKEN` for the bot, just different chat ID
+**Reused from tensor trader (not reimplemented):**
+- `fetch_candles_sync()` — imported from `tensor_tct_trader.py`
+- `fetch_live_price()` — imported from `tensor_tct_trader.py`
+- `calculate_position_size/margin/liquidation` — imported from `trade_execution.py`
 
-### 2. Server Routes in `server_mexc.py` (~200 lines)
+**Telegram notifications** — to `TELEGRAM_CHAT_ID_3`
+- Entry: direction, entry price, stop, target, R:R, score
+- Exit: WIN/LOSS, entry price, exit price, P&L dollars
+- Uses existing `TELEGRAM_BOT_TOKEN` for the bot, different chat ID
+
+**GitHub persistence** — `Schematics5BGitHubStorage`
+- Uses `GITHUB_TOKEN_2` env var
+- Separate file on data branch: `schematics_5b_trade_log.json`
+- Push on trade close + hourly sync
+
+### 2. Server Routes in `server_mexc.py` (~150 lines)
 
 - `GET /schematics-5B` — HTML page (the UI)
-- `GET /api/schematics-5b-data` — Schematic detection data + chart candles (like 5A)
+- `GET /api/schematics-5b-data` — Schematic detection data + chart candles (reuses 5A detection logic)
 - `GET /api/schematics-5b-trader/state` — Live trade state JSON
 - `GET /api/schematics-5b-trader/scan` — Manual scan trigger
-- `GET /api/schematics-5b-trader/toggle-pair` — Enable/disable pairs for auto-trade
 - Background loop: `schematics_5b_auto_scan_loop()` launched at startup
+
+No toggle-pair endpoint (single pair only).
 
 ### 3. UI Page: `/schematics-5B` (~800 lines inline HTML/JS/CSS)
 
-Based on the schematics-5A layout with these changes (from screenshot analysis):
+Based on the tensor-trade dashboard layout (simpler than 5A — no chart needed):
 
-**Same as 5A:**
-- Left: LightweightCharts candlestick chart with schematic overlays
-- Right: Panel with schematic cards (Active/Forming/Completed)
-- Top: Header with pair selector, timeframe selector, scan button
-- Legend bar at bottom of chart
+**Header:**
+- Title: "Schematics 5B — Simulated Trading — BTCUSDT"
+- Navigation links: Schematics 5A, Tensor Trade, Dashboard
+- Live price display
 
-**New in 5B (from screenshot):**
-- **Auto-Trade toggle** in header — ON/OFF switch to enable/disable automated trading
-- **Trade Status panel** — shows current open trade (if any) with live P&L
-- **Trade History section** — recent closed trades with W/L results
-- **Balance display** — current simulated balance in header
-- **Multi-pair selector** — checkboxes to enable/disable which pairs are auto-traded
-- **Enhanced schematic cards** — show 5B-specific metrics:
-  - Structure dissection depth (how many layers of overlapping structure found)
-  - Domino chain status (blue → red → black)
-  - R:R improvement from dissection
-  - Horizontal range quality score
-  - Tap spacing score
-- **Trade execution log** — live feed of trading decisions and actions
+**Controls:**
+- Manual Scan button
+- Refresh button
+- Auto-scan status indicator (ON, every 60s)
 
-### 4. Tests (~200 lines)
+**Stats Row:**
+- Balance / Starting Balance
+- P&L ($ and %)
+- Win Rate
+- Total Trades / Wins / Losses
 
-- `tests/unit/test_schematics_5b_trader.py`
-  - Test trade entry/exit mechanics
-  - Test 5B-specific evaluation rules (tap spacing, horizontal quality, structure dissection)
-  - Test Telegram notification formatting
-  - Test GitHub storage with separate token
+**Current Trade Panel:**
+- Direction, entry price, stop, target, R:R
+- Live P&L % and current price
+- Entry score and reasons
+
+**Trade History Table:**
+- Last 50 trades: direction, entry/exit prices, P&L, W/L, timestamp
+- Color-coded green/red for wins/losses
+
+**Debug Panel (collapsible):**
+- Last scan results per timeframe
+- HTF bias status
+- Evaluator scores and rejection reasons
+
+No schematic chart, no pair selector, no learning indicators.
+
+### 4. Tests (~150 lines)
+
+`tests/unit/test_schematics_5b_trader.py`:
+- Test fixed threshold is always 50 (no adaptation)
+- Test trade entry/exit mechanics (long and short)
+- Test R:R validation at market price
+- Test stale BOS rejection
+- Test HTF bias gate (aligned, conflicting, neutral)
+- Test quality score gate
+- Test deduplication cooldown
+- Test state save/load round-trip
+
+---
+
+## Key Differences from Tensor Trader
+
+| Feature | Tensor Trader | 5B Trader |
+|---------|--------------|-----------|
+| Learning | ✅ HPBContextualReward | ❌ None |
+| Score threshold | Dynamic (50→60→70) | Fixed 50 |
+| Consecutive loss tracking | ✅ Tightens threshold | ❌ No tracking |
+| Model weights | ✅ Learned from history | ❌ Fixed defaults |
+| reward_history | ✅ Tracked | ❌ Not tracked |
+| adapt_after_loss/win | ✅ Generates solutions | ❌ Not present |
+| Pair | BTCUSDT | BTCUSDT |
+| Evaluation | Same structural checks | Same structural checks |
 
 ---
 
 ## Lecture 5B Key Rules to Encode
 
-From the transcript analysis, these are the concrete trading rules from 5B:
-
-1. **Always check highest TF range validity** — use six candle rule across timeframes (30m → 45m → 1h → 2h → 4h)
-2. **Structure dissection for better entries** — when main structure break gives bad R:R (<1.5), dissect last leg on lower TF
+1. **Always check highest TF range validity** — use six candle rule across timeframes
+2. **Structure dissection for better entries** — when main BOS gives bad R:R (<1.5), dissect last leg on lower TF
 3. **Domino effect entry** — enter on blue (micro) structure break, ride through red to black to target
-4. **Reconfirmation on breaks in supply/demand** — if BOS occurs inside a supply zone, wait for retest + lower TF break confirmation
+4. **Reconfirmation on breaks in supply/demand** — if BOS occurs inside a supply zone, wait for retest
 5. **Model 2 requirements** — price must mitigate extreme supply/demand OR grab extreme liquidity before tap 3
-6. **Extreme liquidity via six candle rule** — first market structure high/low from tap 2 to tap 3 using 6CR
-7. **Pivot point order blocks** — OBs in pivot points of deviations are best for Model 2 setups
-8. **Tap spacing** — taps should be roughly equally spaced; reject if tap 2→3 distance is much smaller than tap 1→2
-9. **Horizontal range quality** — range should look like horizontal/sideways price action, not a steep trend with wicks
-10. **Take-the-L-to-get-the-W** — when M2 fails, immediately scan for M1 on the same range
+6. **Tap spacing** — taps should be roughly equally spaced; reject if severely uneven
+7. **Horizontal range quality** — reject ranges that look like steep trends with wicks
+8. **Take-the-L-to-get-the-W** — when M2 fails, scan for M1 on the same range
 
 ---
 
@@ -155,9 +179,9 @@ From the transcript analysis, these are the concrete trading rules from 5B:
 
 | File | Action | Description |
 |------|--------|-------------|
-| `schematics_5b_trader.py` | **CREATE** | New trading engine with 5B logic |
+| `schematics_5b_trader.py` | **CREATE** | Deterministic trading engine (no learning) |
 | `server_mexc.py` | **EDIT** | Add /schematics-5B routes, API endpoints, background loop |
-| `tests/unit/test_schematics_5b_trader.py` | **CREATE** | Unit tests for new trader |
+| `tests/unit/test_schematics_5b_trader.py` | **CREATE** | Unit tests for 5B trader |
 
 ---
 
@@ -176,7 +200,7 @@ From the transcript analysis, these are the concrete trading rules from 5B:
 
 ## Execution Order
 
-1. Create `schematics_5b_trader.py` with the trading engine
+1. Create `schematics_5b_trader.py` with deterministic trading engine
 2. Add API routes and background loop to `server_mexc.py`
 3. Build the schematics-5B UI page in `server_mexc.py`
 4. Create unit tests
