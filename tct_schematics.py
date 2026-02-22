@@ -833,7 +833,7 @@ class TCTSchematicDetector:
         return None
 
     def _find_bullish_bos(self, start_idx: int, high_price: float, low_price: float,
-                           equilibrium: float = None) -> Optional[Dict]:
+                           equilibrium: float = None, window: int = 25) -> Optional[Dict]:
         """
         Find bullish break of structure after Tap3 using LTF internal structure.
 
@@ -847,7 +847,7 @@ class TCTSchematicDetector:
         # Collect swing highs after Tap3 using lookback=1 for LTF
         # internal market structure (finer-grained pivots)
         swing_highs = []
-        for i in range(start_idx + 1, min(start_idx + 25, len(self.candles) - 1)):
+        for i in range(start_idx + 1, min(start_idx + window, len(self.candles) - 1)):
             if self._is_swing_high(i, lookback=1):
                 sh_price = float(self.candles.iloc[i]["high"])
                 # Filter: for accumulation BOS, prefer swing highs below EQ
@@ -865,7 +865,7 @@ class TCTSchematicDetector:
 
         if not swing_highs:
             # Fallback: use lookback=2 if no LTF swings found
-            for i in range(start_idx + 1, min(start_idx + 25, len(self.candles) - 2)):
+            for i in range(start_idx + 1, min(start_idx + window, len(self.candles) - 2)):
                 if self._is_swing_high(i, lookback=2):
                     sh_price = float(self.candles.iloc[i]["high"])
                     if equilibrium is not None and sh_price > equilibrium:
@@ -884,7 +884,7 @@ class TCTSchematicDetector:
         for sh in swing_highs:
             # BOS must confirm AFTER tap3, never before the deviation completes
             search_start = max(sh["idx"] + 1, start_idx + 1)
-            for i in range(search_start, min(start_idx + 35, len(self.candles))):
+            for i in range(search_start, min(start_idx + window + 10, len(self.candles))):
                 close_price = float(self.candles.iloc[i]["close"])
                 # BOS close must break the swing high AND the entry level
                 # (swing high) must be above tap3 low — otherwise stop > entry.
@@ -903,7 +903,7 @@ class TCTSchematicDetector:
         return None
 
     def _find_bearish_bos(self, start_idx: int, low_price: float, high_price: float,
-                           equilibrium: float = None) -> Optional[Dict]:
+                           equilibrium: float = None, window: int = 25) -> Optional[Dict]:
         """
         Find bearish break of structure after Tap3 using LTF internal structure.
 
@@ -917,7 +917,7 @@ class TCTSchematicDetector:
         # Collect swing lows after Tap3 using lookback=1 for LTF
         # internal market structure (finer-grained pivots)
         swing_lows = []
-        for i in range(start_idx + 1, min(start_idx + 25, len(self.candles) - 1)):
+        for i in range(start_idx + 1, min(start_idx + window, len(self.candles) - 1)):
             if self._is_swing_low(i, lookback=1):
                 sl_price = float(self.candles.iloc[i]["low"])
                 # Filter: for distribution BOS, prefer swing lows above EQ
@@ -935,7 +935,7 @@ class TCTSchematicDetector:
 
         if not swing_lows:
             # Fallback: use lookback=2 if no LTF swings found
-            for i in range(start_idx + 1, min(start_idx + 25, len(self.candles) - 2)):
+            for i in range(start_idx + 1, min(start_idx + window, len(self.candles) - 2)):
                 if self._is_swing_low(i, lookback=2):
                     sl_price = float(self.candles.iloc[i]["low"])
                     if equilibrium is not None and sl_price < equilibrium:
@@ -954,7 +954,7 @@ class TCTSchematicDetector:
         for sl in swing_lows:
             # BOS must confirm AFTER tap3, never before the deviation completes
             search_start = max(sl["idx"] + 1, start_idx + 1)
-            for i in range(search_start, min(start_idx + 35, len(self.candles))):
+            for i in range(search_start, min(start_idx + window + 10, len(self.candles))):
                 close_price = float(self.candles.iloc[i]["close"])
                 # BOS close must break the swing low AND the entry level
                 # (swing low) must be below tap3 high — otherwise stop < entry.
