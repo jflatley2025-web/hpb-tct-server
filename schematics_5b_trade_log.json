@@ -5,7 +5,7 @@
   "trade_history": [],
   "total_wins": 0,
   "total_losses": 0,
-  "last_scan_time": "2026-02-22T11:53:01.946224+00:00",
-  "last_scan_action": "error",
-  "last_error": "The truth value of a DataFrame is ambiguous. Use a.empty, a.bool(), a.item(), a.any() or a.all()."
+  "last_scan_time": "2026-02-22T15:32:58.775714+00:00",
+  "last_scan_action": "no_qualifying_setups",
+  "last_error": null
 }
