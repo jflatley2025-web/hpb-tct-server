@@ -15433,17 +15433,30 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
 <script>
 const API = '';
 
+// Fetch JSON from an API endpoint.
+// - Reads body as text first so Safari never throws its opaque
+//   "The string did not match the expected pattern." on parse failure.
+// - Attaches e.status so callers can distinguish 502 (server starting)
+//   from 4xx/5xx application errors.
 async function fetchJSON(url) {
   const r = await fetch(API + url);
-  // Guard: parse as text first so a non-JSON error body (HTML 500, plain text)
-  // doesn't throw a browser-specific opaque error like Safari's
-  // "The string did not match the expected pattern."
   const text = await r.text();
+  let data;
   try {
-    return JSON.parse(text);
+    data = JSON.parse(text);
   } catch (_) {
-    throw new Error('Server returned non-JSON response (HTTP ' + r.status + ')');
+    const err = new Error('Server returned non-JSON response (HTTP ' + r.status + ')');
+    err.status = r.status;
+    throw err;
   }
+  if (!r.ok) {
+    // Server responded with an error status but still returned JSON.
+    const msg = data.detail || data.error || ('HTTP ' + r.status);
+    const err = new Error(msg);
+    err.status = r.status;
+    throw err;
+  }
+  return data;
 }
 
 function setStatus(msg) {
@@ -15454,11 +15467,35 @@ function showLoading(v) {
   document.getElementById('loadingIndicator').style.display = v ? 'flex' : 'none';
 }
 
+// ── Retry state for gateway/cold-start errors ─────────────────────
+let _retryTimer   = null;
+let _retryCount   = 0;
+const GATEWAY_STATUSES = new Set([0, 502, 503, 504]);  // 0 = network failure
+
+function _scheduleRetry(fn) {
+  // Exponential backoff capped at 60 s: 10 s, 20 s, 30 s, 60 s, 60 s…
+  const delay = Math.min(10 * Math.pow(2, _retryCount - 1), 60);
+  let t = Math.round(delay);
+  setStatus('Server starting up — retrying in ' + t + 's \u23f3');
+  if (_retryTimer) clearInterval(_retryTimer);
+  _retryTimer = setInterval(() => {
+    t--;
+    if (t <= 0) {
+      clearInterval(_retryTimer);
+      _retryTimer = null;
+      fn();
+    } else {
+      setStatus('Server starting up — retrying in ' + t + 's \u23f3');
+    }
+  }, 1000);
+}
+
 async function runScan() {
   showLoading(true);
   setStatus('Scanning...');
   try {
     const res = await fetchJSON('/api/schematics-5b-trader/scan');
+    _retryCount = 0;
     setStatus('Scan: ' + (res.action || 'done') + ' @ ' + new Date().toLocaleTimeString());
     await refreshState();
   } catch(e) {
@@ -15470,11 +15507,19 @@ async function runScan() {
 async function refreshState() {
   try {
     const s = await fetchJSON('/api/schematics-5b-trader/state');
+    _retryCount = 0;
     updateStats(s);
     updateCurrentTrade(s.current_trade);
     updateHistory(s.trade_history || []);
   } catch(e) {
-    setStatus('Refresh error: ' + e.message);
+    const status = e.status ?? 0;
+    if (GATEWAY_STATUSES.has(status)) {
+      // Render cold start or transient gateway error — retry automatically.
+      _retryCount++;
+      _scheduleRetry(refreshState);
+    } else {
+      setStatus('Refresh error: ' + e.message);
+    }
   }
 }
 
