@@ -2653,6 +2653,72 @@ async def fetch_mexc_candles(symbol: str, interval: str, limit: int = 200) -> Op
             return None
 
 
+async def fetch_mexc_candles_paginated(symbol: str, interval: str, pages: int = 2) -> Optional[pd.DataFrame]:
+    """
+    Fetch up to `pages × 1000` candles by walking backwards in time.
+
+    Used by the schematics-5A page so LTF BOS refinement can reach tap3
+    timestamps that fall outside a single 1000-candle window.  Each page
+    calls the MEXC klines endpoint with an `endTime` set to just before the
+    oldest candle retrieved so far, building a continuous history.
+
+    The schematics-5A page is user-triggered so the extra API calls are
+    acceptable.  Do NOT use this in the 5B auto-scan loop.
+    """
+    MEXC_MAX = 1000
+    _MEXC_INTERVAL_MAP = {"1h": "60m", "2h": "4h"}
+    mexc_interval = _MEXC_INTERVAL_MAP.get(interval, interval)
+
+    _ALL_COLS = [
+        "open_time", "open", "high", "low", "close", "volume",
+        "close_time", "quote_vol", "trades", "taker_base", "taker_quote", "ignore"
+    ]
+
+    dfs: list = []
+    end_time_ms: Optional[int] = None  # None → start from present
+
+    for _ in range(pages):
+        params: dict = {"symbol": symbol, "interval": mexc_interval, "limit": MEXC_MAX}
+        if end_time_ms is not None:
+            params["endTime"] = end_time_ms
+
+        sem = await _get_fetch_semaphore()
+        async with sem:
+            try:
+                client = await _get_shared_client()
+                r = await client.get(f"{MEXC_URL_BASE}/api/v3/klines", params=params)
+                if r.status_code != 200:
+                    break
+                data = r.json()
+                if not data or not isinstance(data, list):
+                    break
+                ncols = len(data[0]) if data else 0
+                col_names = _ALL_COLS[:ncols] if ncols <= len(_ALL_COLS) else _ALL_COLS
+                df = pd.DataFrame(data, columns=col_names)
+                df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+                for c in ["open", "high", "low", "close", "volume"]:
+                    df[c] = df[c].astype(float)
+                dfs.append(df)
+                # Walk backward: next call ends just before this batch's oldest candle
+                end_time_ms = int(df["open_time"].iloc[0].timestamp() * 1000) - 1
+            except Exception as e:
+                logger.warning(f"[MEXC_PAGINATED] {symbol}/{interval}: {e}")
+                break
+
+    if not dfs:
+        return None
+
+    # Concatenate oldest-first, deduplicate, sort
+    combined = pd.concat(reversed(dfs), ignore_index=True)
+    combined = (
+        combined
+        .drop_duplicates(subset=["open_time"])
+        .sort_values("open_time")
+        .reset_index(drop=True)
+    )
+    return combined
+
+
 def _evict_stale_cache():
     """Remove expired entries from the candle cache to prevent memory bloat."""
     now = time.time()
@@ -3752,11 +3818,14 @@ async def get_schematics_5a_data(symbol: str = "BTCUSDT", timeframe: str = "4h")
     try:
         resolved = resolve_symbol(symbol)
 
-        # Parallel fetch: main TF at increased limits + LTF candles for BOS cascade.
+        # Parallel fetch: main TF at increased limits + paginated LTF candles for BOS cascade.
+        # Paginated fetch gives 2×1000 candles per LTF (5m≈83h, 1m≈33h) so the BOS refinement
+        # can reach tap3 timestamps that fall outside a single 1000-candle window.
         main_limit = _5A_CANDLE_LIMITS.get(timeframe, 300)
         fetch_results = await asyncio.gather(
             fetch_mexc_candles(resolved, timeframe, main_limit),
-            *[fetch_mexc_candles(resolved, ltf, _LTF_CANDLE_LIMITS[ltf]) for ltf in LTF_BOS_TIMEFRAMES],
+            fetch_mexc_candles_paginated(resolved, "5m", pages=2),
+            fetch_mexc_candles_paginated(resolved, "1m", pages=2),
             return_exceptions=True,
         )
         df = fetch_results[0] if isinstance(fetch_results[0], pd.DataFrame) else None
@@ -11279,7 +11348,11 @@ body{background:#fff;color:#333;font-family:'Segoe UI',sans-serif;overflow:hidde
 .chart-btns button:hover{background:#545b62}
 .back-link{color:#666;text-decoration:none;font-size:.7rem;padding:3px 8px;border:1px solid #ced4da;border-radius:4px;margin-left:auto}
 .back-link:hover{color:#333;border-color:#adb5bd}
-.main-area{display:flex;height:calc(100vh - 80px)}
+.page-nav{display:flex;gap:4px;flex-basis:100%;padding:4px 0 2px;border-top:1px solid #dee2e6;margin-top:4px;flex-wrap:wrap}
+.nav-link{font-size:.65rem;padding:2px 8px;border:1px solid #ced4da;border-radius:3px;text-decoration:none;color:#555;white-space:nowrap}
+.nav-link:hover{color:#333;border-color:#adb5bd;background:#f0f0f0}
+.nav-link.active{background:#007bff;color:#fff;border-color:#007bff;font-weight:600}
+.main-area{display:flex;height:calc(100vh - 112px)}
 .chart-wrap{flex:1;position:relative;background:#fff}
 .chart-container{width:100%;height:100%}
 .info-panel{width:260px;background:#f8f9fa;border-left:1px solid #dee2e6;overflow-y:auto;padding:10px;font-size:.7rem}
@@ -11346,6 +11419,14 @@ body{background:#fff;color:#333;font-family:'Segoe UI',sans-serif;overflow:hidde
         <button onclick="testChart()" style="background:#6c757d;color:#fff;border:none;border-radius:4px;padding:4px 10px;font-size:.72rem;cursor:pointer;margin-left:10px" title="Draw 5 hardcoded candles to verify chart renders">Test</button>
     </div>
     <a class="back-link" href="/dashboard">← Back</a>
+    <div class="page-nav">
+        <a href="/market-structure" class="nav-link active">Market Structure</a>
+        <a href="/ranges" class="nav-link">Ranges</a>
+        <a href="/supply-demand" class="nav-link">Supply &amp; Demand</a>
+        <a href="/liquidity" class="nav-link">Liquidity</a>
+        <a href="/schematics-5A" class="nav-link">Schematics 5A</a>
+        <a href="/schematics-5B" class="nav-link">Schematics 5B</a>
+    </div>
 </div>
 
 <div class="main-area">
@@ -12064,7 +12145,11 @@ body{background:#fff;color:#333;font-family:'Segoe UI',sans-serif;overflow:hidde
 .chart-btns button:hover{background:#545b62}
 .back-link{color:#666;text-decoration:none;font-size:.7rem;padding:3px 8px;border:1px solid #ced4da;border-radius:4px;margin-left:auto}
 .back-link:hover{color:#333;border-color:#adb5bd}
-.main-area{display:flex;height:calc(100vh - 80px)}
+.page-nav{display:flex;gap:4px;flex-basis:100%;padding:4px 0 2px;border-top:1px solid #dee2e6;margin-top:4px;flex-wrap:wrap}
+.nav-link{font-size:.65rem;padding:2px 8px;border:1px solid #ced4da;border-radius:3px;text-decoration:none;color:#555;white-space:nowrap}
+.nav-link:hover{color:#333;border-color:#adb5bd;background:#f0f0f0}
+.nav-link.active{background:#007bff;color:#fff;border-color:#007bff;font-weight:600}
+.main-area{display:flex;height:calc(100vh - 112px)}
 .chart-wrap{flex:1;position:relative;background:#fff}
 .chart-container{width:100%;height:100%}
 .info-panel{width:280px;background:#f8f9fa;border-left:1px solid #dee2e6;overflow-y:auto;padding:10px;font-size:.7rem}
@@ -12132,6 +12217,14 @@ body{background:#fff;color:#333;font-family:'Segoe UI',sans-serif;overflow:hidde
         <button onclick="zoomOut()">−</button>
     </div>
     <a class="back-link" href="/dashboard">← Back</a>
+    <div class="page-nav">
+        <a href="/market-structure" class="nav-link">Market Structure</a>
+        <a href="/ranges" class="nav-link active">Ranges</a>
+        <a href="/supply-demand" class="nav-link">Supply &amp; Demand</a>
+        <a href="/liquidity" class="nav-link">Liquidity</a>
+        <a href="/schematics-5A" class="nav-link">Schematics 5A</a>
+        <a href="/schematics-5B" class="nav-link">Schematics 5B</a>
+    </div>
 </div>
 
 <div class="main-area">
@@ -12849,7 +12942,11 @@ body{background:#fff;color:#333;font-family:'Segoe UI',sans-serif;overflow:hidde
 .chart-btns button:hover{background:#545b62}
 .back-link{color:#666;text-decoration:none;font-size:.7rem;padding:3px 8px;border:1px solid #ced4da;border-radius:4px;margin-left:auto}
 .back-link:hover{color:#333;border-color:#adb5bd}
-.main-area{display:flex;height:calc(100vh - 80px)}
+.page-nav{display:flex;gap:4px;flex-basis:100%;padding:4px 0 2px;border-top:1px solid #dee2e6;margin-top:4px;flex-wrap:wrap}
+.nav-link{font-size:.65rem;padding:2px 8px;border:1px solid #ced4da;border-radius:3px;text-decoration:none;color:#555;white-space:nowrap}
+.nav-link:hover{color:#333;border-color:#adb5bd;background:#f0f0f0}
+.nav-link.active{background:#007bff;color:#fff;border-color:#007bff;font-weight:600}
+.main-area{display:flex;height:calc(100vh - 112px)}
 .chart-wrap{flex:1;position:relative;background:#fff}
 .chart-container{width:100%;height:100%}
 .info-panel{width:290px;background:#f8f9fa;border-left:1px solid #dee2e6;overflow-y:auto;padding:10px;font-size:.7rem}
@@ -13712,7 +13809,11 @@ body{background:#fff;color:#333;font-family:'Segoe UI',sans-serif;overflow:hidde
 .chart-btns button:hover{background:#545b62}
 .back-link{color:#666;text-decoration:none;font-size:.7rem;padding:3px 8px;border:1px solid #ced4da;border-radius:4px;margin-left:auto}
 .back-link:hover{color:#333;border-color:#adb5bd}
-.main-area{display:flex;height:calc(100vh - 80px)}
+.page-nav{display:flex;gap:4px;flex-basis:100%;padding:4px 0 2px;border-top:1px solid #dee2e6;margin-top:4px;flex-wrap:wrap}
+.nav-link{font-size:.65rem;padding:2px 8px;border:1px solid #ced4da;border-radius:3px;text-decoration:none;color:#555;white-space:nowrap}
+.nav-link:hover{color:#333;border-color:#adb5bd;background:#f0f0f0}
+.nav-link.active{background:#007bff;color:#fff;border-color:#007bff;font-weight:600}
+.main-area{display:flex;height:calc(100vh - 112px)}
 .chart-wrap{flex:1;position:relative;background:#fff}
 .chart-container{width:100%;height:100%}
 .info-panel{width:290px;background:#f8f9fa;border-left:1px solid #dee2e6;overflow-y:auto;padding:10px;font-size:.7rem}

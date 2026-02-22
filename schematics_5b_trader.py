@@ -81,7 +81,7 @@ _MAX_STALE: Dict[str, int] = {
 # Per TCT model, cascade from highest TF down to the lowest that confirms BOS;
 # the earliest (lowest-TF) BOS gives the best entry and best R:R.
 LTF_BOS_TIMEFRAMES = ["5m", "1m"]  # highest → lowest; we keep overwriting so lowest TF wins
-_LTF_CANDLE_LIMITS = {"5m": 500, "1m": 1000}  # 500×5m ≈ 41 h; 1000×1m ≈ 17 h
+_LTF_CANDLE_LIMITS = {"5m": 1000, "1m": 1000}  # 1000×5m ≈ 83 h; 1000×1m ≈ 17 h (MEXC max per call)
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
 TRADE_LOG_PATH = os.path.join(_DIR, "schematics_5b_trade_log.json")
