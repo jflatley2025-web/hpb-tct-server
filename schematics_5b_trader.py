@@ -419,6 +419,140 @@ class Schematics5BEvaluator:
 
 
 # ================================================================
+# SHARED LTF BOS REFINEMENT HELPER
+# Extracted as a module-level function so the schematics-5A page can reuse it
+# without duplicating the cascade logic.
+# ================================================================
+
+def refine_schematic_bos_with_ltf(
+    schematic: Dict,
+    ltf_dfs: Dict[str, Optional[pd.DataFrame]],
+    *,
+    label: str = "LTF",
+) -> Dict:
+    """
+    Refine the BOS entry price using lower-timeframe data.
+
+    TCT methodology: after identifying tap2/tap3, cascade from the highest TF
+    down to the lowest to find the EARLIEST confirmed BOS.  A lower-TF BOS
+    closes sooner in real time, giving an entry closer to tap3 and therefore
+    a smaller stop distance and better R:R.
+
+    The MTF schematic's bos_confirmation already contains the reference prices
+    (highest/lowest point between tap2 and tap3) so we reuse them directly —
+    no need to re-scan the tap2-tap3 window on the lower TF.
+
+    Writes ltf_refined metadata into bos_confirmation and updates entry.price.
+    Returns a shallow copy of the schematic (original is never mutated).
+
+    Args:
+        schematic: A confirmed TCT schematic dict.
+        ltf_dfs:   Mapping of timeframe label → DataFrame (e.g. {"5m": df, "1m": df}).
+        label:     Log prefix for tracing (e.g. "5A-LTF" or "5B-LTF").
+    """
+    bos_conf = schematic.get("bos_confirmation")
+    if not bos_conf:
+        return schematic
+
+    tap3 = schematic.get("tap3") or {}
+    tap3_time_str = tap3.get("time", "")
+    if not tap3_time_str:
+        return schematic
+
+    try:
+        tap3_time = pd.Timestamp(tap3_time_str)
+        if tap3_time.tzinfo is None:
+            tap3_time = tap3_time.tz_localize("UTC")
+    except Exception:
+        return schematic
+
+    direction = schematic.get("direction")
+    equilibrium = (schematic.get("range") or {}).get("equilibrium")
+    tap3_price = tap3.get("price")
+
+    # Reference prices already computed by MTF BOS detection — reuse them.
+    if direction == "bullish":
+        ref_high = (bos_conf.get("highest_point_between_tabs") or {}).get("price")
+        ref_low = tap3_price
+    elif direction == "bearish":
+        ref_low = (bos_conf.get("lowest_point_between_tabs") or {}).get("price")
+        ref_high = tap3_price
+    else:
+        return schematic
+
+    if not ref_high or not ref_low:
+        return schematic
+
+    best_bos = None
+    best_ltf = None
+
+    # LTF_BOS_TIMEFRAMES is ordered highest → lowest (e.g. ["5m", "1m"]).
+    # We keep overwriting best_bos so the LOWEST TF that confirms wins.
+    for ltf in LTF_BOS_TIMEFRAMES:
+        ltf_df = ltf_dfs.get(ltf)
+        if ltf_df is None or len(ltf_df) < 20:
+            continue
+
+        ltf_df_reset = ltf_df.reset_index(drop=True)
+
+        # Find the first LTF candle whose open_time is at or after tap3's bar open.
+        # BOS is only valid once tap3's deviation has completed.
+        after_tap3 = ltf_df_reset["open_time"] >= tap3_time
+        if not after_tap3.any():
+            logger.debug(
+                f"[{label}] {ltf}: tap3_time {tap3_time} predates all {len(ltf_df)} candles — skipping"
+            )
+            continue
+
+        tap3_ltf_pos = int(after_tap3.idxmax())
+
+        try:
+            detector = TCTSchematicDetector(ltf_df_reset)
+            if direction == "bullish":
+                bos = detector._find_bullish_bos(
+                    tap3_ltf_pos, ref_high, ref_low, equilibrium=equilibrium
+                )
+            else:
+                bos = detector._find_bearish_bos(
+                    tap3_ltf_pos, ref_low, ref_high, equilibrium=equilibrium
+                )
+        except Exception as e:
+            logger.warning(f"[{label}] BOS detection error on {ltf}: {e}")
+            continue
+
+        if bos:
+            best_bos = bos
+            best_ltf = ltf
+            # Do NOT break — continue to lower TFs so the lowest confirmed TF wins.
+
+    if not best_bos:
+        return schematic
+
+    mtf_bos_price = bos_conf.get("bos_price")
+    mtf_bos_str = f"{mtf_bos_price:.2f}" if mtf_bos_price else "?"
+    logger.debug(
+        f"[{label}] Refined BOS on {best_ltf}: entry={best_bos['price']:.2f} "
+        f"(MTF BOS was {mtf_bos_str})"
+    )
+
+    refined = {**schematic}
+    refined["bos_confirmation"] = {
+        **bos_conf,
+        "ltf_refined": True,
+        "ltf_timeframe": best_ltf,
+        "ltf_bos_price": best_bos["price"],
+        "ltf_bos_idx": best_bos["idx"],
+    }
+    refined["entry"] = {
+        **(schematic.get("entry") or {}),
+        "price": best_bos["price"],
+        "type": f"LTF_BOS_{best_ltf}",
+        "description": f"Enter on {best_ltf} BOS — earliest confirmation, best R:R",
+    }
+    return refined
+
+
+# ================================================================
 # MAIN TRADING ENGINE
 # ================================================================
 class Schematics5BTrader:
@@ -638,125 +772,8 @@ class Schematics5BTrader:
     def _refine_schematic_bos_with_ltf(
         self, schematic: Dict, ltf_dfs: Dict[str, Optional[pd.DataFrame]]
     ) -> Dict:
-        """
-        Refine the BOS entry price using lower-timeframe data.
-
-        TCT methodology: after identifying tap2/tap3, cascade from the highest TF
-        down to the lowest to find the EARLIEST confirmed BOS.  A lower-TF BOS
-        closes sooner in real time, giving an entry closer to tap3 and therefore
-        a smaller stop distance and better R:R.
-
-        The MTF schematic's bos_confirmation already contains the reference prices
-        (highest/lowest point between tap2 and tap3) so we reuse them directly —
-        no need to re-scan the tap2-tap3 window on the lower TF.
-
-        Writes ltf_refined metadata into bos_confirmation and updates entry.price.
-        Returns a shallow copy of the schematic (original is never mutated).
-        """
-        bos_conf = schematic.get("bos_confirmation")
-        if not bos_conf:
-            return schematic
-
-        tap3 = schematic.get("tap3") or {}
-        tap3_time_str = tap3.get("time", "")
-        if not tap3_time_str:
-            return schematic
-
-        try:
-            tap3_time = pd.Timestamp(tap3_time_str)
-            if tap3_time.tzinfo is None:
-                tap3_time = tap3_time.tz_localize("UTC")
-        except Exception:
-            return schematic
-
-        direction = schematic.get("direction")
-        equilibrium = (schematic.get("range") or {}).get("equilibrium")
-        tap3_price = tap3.get("price")
-
-        # Reference prices already computed by MTF BOS detection — reuse them.
-        if direction == "bullish":
-            # Accumulation: highest point between tap2 and tap3 anchors the bearish
-            # internal structure; BOS = close above that structure's swing high.
-            ref_high = (bos_conf.get("highest_point_between_tabs") or {}).get("price")
-            ref_low = tap3_price
-        elif direction == "bearish":
-            # Distribution: lowest point between tap2 and tap3 anchors the bullish
-            # internal structure; BOS = close below that structure's swing low.
-            ref_low = (bos_conf.get("lowest_point_between_tabs") or {}).get("price")
-            ref_high = tap3_price
-        else:
-            return schematic
-
-        if not ref_high or not ref_low:
-            return schematic
-
-        best_bos = None
-        best_ltf = None
-
-        # LTF_BOS_TIMEFRAMES is ordered highest → lowest (e.g. ["5m", "1m"]).
-        # We keep overwriting best_bos so the LOWEST TF that confirms wins.
-        for ltf in LTF_BOS_TIMEFRAMES:
-            ltf_df = ltf_dfs.get(ltf)
-            if ltf_df is None or len(ltf_df) < 20:
-                continue
-
-            ltf_df_reset = ltf_df.reset_index(drop=True)
-
-            # Find the first LTF candle whose open_time is at or after tap3's bar open.
-            # BOS is only valid once tap3's deviation has completed.
-            after_tap3 = ltf_df_reset["open_time"] >= tap3_time
-            if not after_tap3.any():
-                logger.debug(
-                    f"[5B-LTF] {ltf}: tap3_time {tap3_time} predates all {len(ltf_df)} candles — skipping"
-                )
-                continue
-
-            tap3_ltf_pos = int(after_tap3.idxmax())
-
-            try:
-                detector = TCTSchematicDetector(ltf_df_reset)
-                if direction == "bullish":
-                    bos = detector._find_bullish_bos(
-                        tap3_ltf_pos, ref_high, ref_low, equilibrium=equilibrium
-                    )
-                else:
-                    bos = detector._find_bearish_bos(
-                        tap3_ltf_pos, ref_low, ref_high, equilibrium=equilibrium
-                    )
-            except Exception as e:
-                logger.warning(f"[5B-LTF] BOS detection error on {ltf}: {e}")
-                continue
-
-            if bos:
-                best_bos = bos
-                best_ltf = ltf
-                # Do NOT break — continue to lower TFs so the lowest confirmed TF wins.
-
-        if not best_bos:
-            return schematic
-
-        mtf_bos_price = bos_conf.get("bos_price")
-        mtf_bos_str = f"{mtf_bos_price:.2f}" if mtf_bos_price else "?"
-        logger.debug(
-            f"[5B-LTF] Refined BOS on {best_ltf}: entry={best_bos['price']:.2f} "
-            f"(MTF BOS was {mtf_bos_str})"
-        )
-
-        refined = {**schematic}
-        refined["bos_confirmation"] = {
-            **bos_conf,
-            "ltf_refined": True,
-            "ltf_timeframe": best_ltf,
-            "ltf_bos_price": best_bos["price"],
-            "ltf_bos_idx": best_bos["idx"],
-        }
-        refined["entry"] = {
-            **(schematic.get("entry") or {}),
-            "price": best_bos["price"],
-            "type": f"LTF_BOS_{best_ltf}",
-            "description": f"Enter on {best_ltf} BOS — earliest confirmation, best R:R",
-        }
-        return refined
+        """Delegate to the shared module-level helper with a 5B-specific log label."""
+        return refine_schematic_bos_with_ltf(schematic, ltf_dfs, label="5B-LTF")
 
     def _enter_trade(self, schematic: Dict, evaluation: Dict, current_price: float, htf_bias: str) -> Dict:
         direction = evaluation["direction"]

@@ -607,3 +607,84 @@ class TestLTFBOSRefinement:
 
         # MTF bos_idx must be unchanged so the stale gate still works correctly
         assert result["bos_confirmation"]["bos_idx"] == original_bos_idx
+
+
+# ---------------------------------------------------------------------------
+# Module-level refine_schematic_bos_with_ltf — shared with schematics-5A
+# ---------------------------------------------------------------------------
+
+class TestModuleLevelRefinement:
+    """
+    The class method delegates to the module-level refine_schematic_bos_with_ltf.
+    These tests exercise it directly so both 5A and 5B consumers are covered
+    by the same assertions.
+    """
+
+    def test_module_level_function_exists(self):
+        """refine_schematic_bos_with_ltf must be importable at module level."""
+        from schematics_5b_trader import refine_schematic_bos_with_ltf
+        assert callable(refine_schematic_bos_with_ltf)
+
+    def test_label_parameter_defaults_to_ltf(self):
+        """Calling without label= should not raise and should return original (no LTF data)."""
+        import pandas as pd
+        from schematics_5b_trader import refine_schematic_bos_with_ltf
+
+        tap3_time = pd.Timestamp("2024-01-01 10:00:00", tz="UTC")
+        sch = _make_bullish_schematic_with_bos(str(tap3_time))
+        # No LTF data — should pass through without error
+        result = refine_schematic_bos_with_ltf(sch, {})
+        assert result is sch
+
+    def test_custom_label_accepted(self):
+        """label= keyword arg should be accepted without error."""
+        import pandas as pd
+        from schematics_5b_trader import refine_schematic_bos_with_ltf
+
+        tap3_time = pd.Timestamp("2024-01-01 10:00:00", tz="UTC")
+        sch = _make_bullish_schematic_with_bos(str(tap3_time))
+        result = refine_schematic_bos_with_ltf(sch, {}, label="5A-LTF")
+        assert result is sch  # no LTF data → no change
+
+    def test_class_method_delegates_to_module_function(self):
+        """The class _refine_schematic_bos_with_ltf must delegate to the module function."""
+        import pandas as pd
+        from unittest.mock import patch
+        from schematics_5b_trader import Schematics5BTrader, refine_schematic_bos_with_ltf
+
+        tap3_time = pd.Timestamp("2024-01-01 10:00:00", tz="UTC")
+        sch = _make_bullish_schematic_with_bos(str(tap3_time))
+
+        with patch("schematics_5b_trader.TRADE_LOG_PATH", "/tmp/test_delegate.json"), \
+             patch("schematics_5b_trader.TRADE_LOG_BACKUP_PATH", "/tmp/test_delegate_bak.json"), \
+             patch("schematics_5b_trader.github_fetch_5b_log", return_value=False), \
+             patch("schematics_5b_trader.refine_schematic_bos_with_ltf") as mock_fn:
+            mock_fn.return_value = sch
+            trader = Schematics5BTrader()
+            result = trader._refine_schematic_bos_with_ltf(sch, {"5m": None})
+
+        mock_fn.assert_called_once_with(sch, {"5m": None}, label="5B-LTF")
+        assert result is sch
+
+    def test_5a_label_metadata_in_refined_output(self):
+        """When called with label='5A-LTF', the entry type should still be LTF_BOS_<tf>."""
+        import pandas as pd
+        from unittest.mock import patch
+        from schematics_5b_trader import refine_schematic_bos_with_ltf
+
+        tap3_time = pd.Timestamp("2024-01-01 00:00:00", tz="UTC")
+        sch = _make_bullish_schematic_with_bos(str(tap3_time), tap3_price=95_000.0)
+        fake_bos = {"idx": 10, "price": 96_200.0, "bos_method": "candle_close",
+                    "confirmation_close": 96_300.0}
+
+        with patch("schematics_5b_trader.TCTSchematicDetector") as MockDetector:
+            instance = MockDetector.return_value
+            instance._find_bullish_bos.return_value = fake_bos
+
+            ltf_df = _make_ltf_df(n=200, start_price=97_000.0)
+            result = refine_schematic_bos_with_ltf(sch, {"5m": ltf_df}, label="5A-LTF")
+
+        assert result["bos_confirmation"].get("ltf_refined") is True
+        assert result["bos_confirmation"]["ltf_timeframe"] == "5m"
+        assert result["entry"]["price"] == 96_200.0
+        assert result["entry"]["type"] == "LTF_BOS_5m"
