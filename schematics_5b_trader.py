@@ -504,6 +504,18 @@ def refine_schematic_bos_with_ltf(
     if not ref_high or not ref_low:
         return schematic
 
+    # Extract tap2 time to bound the internal LTF structure window.
+    tap2 = schematic.get("tap2") or {}
+    tap2_time: Optional[pd.Timestamp] = None
+    try:
+        tap2_time_str = (tap2.get("time") or "")
+        if tap2_time_str:
+            tap2_time = pd.Timestamp(tap2_time_str)
+            if tap2_time.tzinfo is None:
+                tap2_time = tap2_time.tz_localize("UTC")
+    except Exception:
+        pass
+
     best_bos = None
     best_ltf = None
 
@@ -516,8 +528,7 @@ def refine_schematic_bos_with_ltf(
 
         ltf_df_reset = ltf_df.reset_index(drop=True)
 
-        # Find the first LTF candle whose open_time is at or after tap3's bar open.
-        # BOS is only valid once tap3's deviation has completed.
+        # Find tap3 position in LTF data.
         after_tap3 = ltf_df_reset["open_time"] >= tap3_time
         if not after_tap3.any():
             logger.debug(
@@ -527,16 +538,101 @@ def refine_schematic_bos_with_ltf(
 
         tap3_ltf_pos = int(after_tap3.idxmax())
 
+        # Find tap2 position in LTF data (bounds the between-tap internal structure window).
+        tap2_ltf_pos: Optional[int] = None
+        if tap2_time is not None:
+            after_tap2 = ltf_df_reset["open_time"] >= tap2_time
+            if after_tap2.any():
+                tap2_ltf_pos = int(after_tap2.idxmax())
+
+        bos = None
         try:
             detector = TCTSchematicDetector(ltf_df_reset)
-            if direction == "bullish":
-                bos = detector._find_bullish_bos(
-                    tap3_ltf_pos, ref_high, ref_low, equilibrium=equilibrium
-                )
-            else:
-                bos = detector._find_bearish_bos(
-                    tap3_ltf_pos, ref_low, ref_high, equilibrium=equilibrium
-                )
+
+            # PRIMARY: scan LTF candles BETWEEN tap2 and tap3 for internal
+            # swing structure.  TCT methodology: the market structure drawn
+            # between tap2 and tap3 (swing highs for bullish, swing lows for
+            # bearish) is the correct BOS reference — these levels are BELOW
+            # the MTF structural high, giving an earlier and lower entry.
+            # The first LTF close that breaks one of those levels AFTER tap3
+            # is the entry signal.
+            if tap2_ltf_pos is not None and tap2_ltf_pos < tap3_ltf_pos - 2:
+                if direction == "bullish":
+                    ltf_swings = []
+                    for i in range(tap2_ltf_pos + 1, tap3_ltf_pos):
+                        if detector._is_swing_high(i, lookback=1):
+                            sh_price = float(ltf_df_reset.iloc[i]["high"])
+                            # Must be within the tap2-tap3 window (below MTF struct high)
+                            if ref_low < sh_price < ref_high:
+                                ltf_swings.append({"idx": i, "price": sh_price})
+                    if not ltf_swings:
+                        # Fallback to coarser swings within the same window
+                        for i in range(tap2_ltf_pos + 2, tap3_ltf_pos - 1):
+                            if detector._is_swing_high(i, lookback=2):
+                                sh_price = float(ltf_df_reset.iloc[i]["high"])
+                                if ref_low < sh_price < ref_high:
+                                    ltf_swings.append({"idx": i, "price": sh_price})
+                    # Lowest first → earliest entry at best R:R
+                    ltf_swings.sort(key=lambda s: s["price"])
+                    for sh in ltf_swings:
+                        for i in range(tap3_ltf_pos, len(ltf_df_reset)):
+                            if float(ltf_df_reset.iloc[i]["close"]) > sh["price"]:
+                                bos = {
+                                    "idx": i,
+                                    "price": sh["price"],
+                                    "confirmation_close": float(ltf_df_reset.iloc[i]["close"]),
+                                    "is_inside_range": True,
+                                    "bos_method": "ltf_internal_structure",
+                                }
+                                break
+                        if bos:
+                            break
+
+                else:  # bearish
+                    ltf_swings = []
+                    for i in range(tap2_ltf_pos + 1, tap3_ltf_pos):
+                        if detector._is_swing_low(i, lookback=1):
+                            sl_price = float(ltf_df_reset.iloc[i]["low"])
+                            if ref_low < sl_price < ref_high:
+                                ltf_swings.append({"idx": i, "price": sl_price})
+                    if not ltf_swings:
+                        for i in range(tap2_ltf_pos + 2, tap3_ltf_pos - 1):
+                            if detector._is_swing_low(i, lookback=2):
+                                sl_price = float(ltf_df_reset.iloc[i]["low"])
+                                if ref_low < sl_price < ref_high:
+                                    ltf_swings.append({"idx": i, "price": sl_price})
+                    # Highest first → earliest entry at best R:R
+                    ltf_swings.sort(key=lambda s: s["price"], reverse=True)
+                    for sl in ltf_swings:
+                        for i in range(tap3_ltf_pos, len(ltf_df_reset)):
+                            if float(ltf_df_reset.iloc[i]["close"]) < sl["price"]:
+                                bos = {
+                                    "idx": i,
+                                    "price": sl["price"],
+                                    "confirmation_close": float(ltf_df_reset.iloc[i]["close"]),
+                                    "is_inside_range": True,
+                                    "bos_method": "ltf_internal_structure",
+                                }
+                                break
+                        if bos:
+                            break
+
+            if bos is None:
+                # FALLBACK: tap2 not in LTF window or no internal swings found.
+                # Search post-tap3 LTF swings with no EQ filter and full window
+                # so we still get a better entry than the MTF BOS.
+                ltf_window = max(len(ltf_df_reset) - tap3_ltf_pos, 25)
+                if direction == "bullish":
+                    bos = detector._find_bullish_bos(
+                        tap3_ltf_pos, ref_high, ref_low,
+                        equilibrium=None, window=ltf_window,
+                    )
+                else:
+                    bos = detector._find_bearish_bos(
+                        tap3_ltf_pos, ref_low, ref_high,
+                        equilibrium=None, window=ltf_window,
+                    )
+
         except Exception as e:
             logger.warning(f"[{label}] BOS detection error on {ltf}: {e}")
             continue
