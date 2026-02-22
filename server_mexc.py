@@ -15140,17 +15140,21 @@ async def schematics_5b_state():
 @app.get("/api/schematics-5b-trader/debug")
 async def schematics_5b_debug():
     """Return detailed debug diagnostics from the last 5B scan cycle."""
-    trader = get_5b_trader()
-    debug = dict(trader.last_debug) if trader.last_debug else {}
-    debug["state_summary"] = {
-        "balance": trader.state.balance,
-        "has_open_trade": trader.state.current_trade is not None,
-        "total_trades": len(trader.state.trade_history),
-        "last_scan_time": trader.state.last_scan_time,
-        "last_scan_action": trader.state.last_scan_action,
-        "last_error": trader.state.last_error,
-    }
-    return convert_numpy_types(debug)
+    try:
+        trader = get_5b_trader()
+        debug = dict(trader.last_debug) if trader.last_debug else {}
+        debug["state_summary"] = {
+            "balance": trader.state.balance,
+            "has_open_trade": trader.state.current_trade is not None,
+            "total_trades": len(trader.state.trade_history),
+            "last_scan_time": trader.state.last_scan_time,
+            "last_scan_action": trader.state.last_scan_action,
+            "last_error": trader.state.last_error,
+        }
+        return convert_numpy_types(debug)
+    except Exception as e:
+        logger.error(f"[5B-DEBUG] Failed to build debug response: {e}", exc_info=True)
+        return {"error": str(e), "state_summary": {}}
 
 
 @app.get("/api/schematics-5b-trader/candles")
@@ -15431,7 +15435,15 @@ const API = '';
 
 async function fetchJSON(url) {
   const r = await fetch(API + url);
-  return r.json();
+  // Guard: parse as text first so a non-JSON error body (HTML 500, plain text)
+  // doesn't throw a browser-specific opaque error like Safari's
+  // "The string did not match the expected pattern."
+  const text = await r.text();
+  try {
+    return JSON.parse(text);
+  } catch (_) {
+    throw new Error('Server returned non-JSON response (HTTP ' + r.status + ')');
+  }
 }
 
 function setStatus(msg) {
@@ -15594,7 +15606,8 @@ function renderDebug(d) {
     '<div class="debug-row"><span class="dlabel">Last Error</span><span class="dval ' + (d.state_summary?.last_error ? 'dred' : '') + '">' + (d.state_summary?.last_error || 'None') + '</span></div>' +
     '</div>';
 
-  const tfOrder = ['1d','4h','1h','30m','15m'];
+  // Include 5m and 1m — added to MTF_TIMEFRAMES so they now appear in scan results
+  const tfOrder = ['1d','4h','1h','30m','15m','5m','1m'];
   for (const tf of tfOrder) {
     const t = d.timeframes[tf];
     if (!t) continue;
