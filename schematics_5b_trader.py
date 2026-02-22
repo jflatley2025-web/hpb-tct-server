@@ -53,7 +53,7 @@ HTF_TIMEFRAME = "1d"
 # Scan TFs — ordered high to low.  4h is now scanned for setups (not just bias);
 # 3D is not available on MEXC Spot so 1d is the longest granularity available.
 # 30m added to give the HTF cascade a stepping-stone between 15m and 1h.
-MTF_TIMEFRAMES = ["1d", "4h", "1h", "30m", "15m"]
+MTF_TIMEFRAMES = ["1d", "4h", "1h", "30m", "15m", "5m", "1m"]
 AUTO_SCAN_INTERVAL = int(os.getenv("SCHEMATICS_5B_SCAN_INTERVAL", "60"))
 ENTRY_THRESHOLD = 50  # Fixed — never changes
 
@@ -65,16 +65,18 @@ _TF_HIERARCHY = ["1W", "1d", "4h", "1h", "30m", "15m", "5m", "1m"]
 # Candle limits per TF — sized so the BOS window never falls off the array
 # even when tap3 is a recent candle.
 _MTF_CANDLE_LIMITS = {
-    "1d": 200,  # ~200 days
-    "4h": 300,  # ~50 days
-    "1h": 300,  # ~12.5 days
-    "30m": 400, # ~8.3 days
-    "15m": 500, # ~5.2 days
+    "1d": 200,   # ~200 days
+    "4h": 300,   # ~50 days
+    "1h": 300,   # ~12.5 days
+    "30m": 400,  # ~8.3 days
+    "15m": 500,  # ~5.2 days
+    "5m": 1000,  # ~83 h — same as LTF limit; cascade reuses these candles
+    "1m": 1000,  # ~17 h — same as LTF limit
 }
 
 # Max candles since BOS before a setup is considered stale
 _MAX_STALE: Dict[str, int] = {
-    "1d": 2, "4h": 3, "1h": 3, "30m": 4, "15m": 5,
+    "1d": 2, "4h": 3, "1h": 3, "30m": 4, "15m": 5, "5m": 12, "1m": 30,
 }
 
 # LTF cascade: fetch lower-TF candles once per cycle for BOS refinement.
@@ -829,15 +831,16 @@ class Schematics5BTrader:
                     tf = futures[future]
                     try:
                         df_result = future.result()
+                        # A TF can be in both lists (5m, 1m) — populate whichever apply.
                         if tf in MTF_TIMEFRAMES:
                             mtf_dfs[tf] = df_result
-                        else:
+                        if tf in LTF_BOS_TIMEFRAMES:
                             ltf_dfs[tf] = df_result
                     except Exception as e:
                         logger.warning(f"[5B] Fetch failed for {tf}: {e}")
                         if tf in MTF_TIMEFRAMES:
                             mtf_dfs[tf] = None
-                        else:
+                        if tf in LTF_BOS_TIMEFRAMES:
                             ltf_dfs[tf] = None
 
             # Phase A: collect all detected schematics per TF (needed for HTF cascade)
