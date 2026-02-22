@@ -2653,6 +2653,72 @@ async def fetch_mexc_candles(symbol: str, interval: str, limit: int = 200) -> Op
             return None
 
 
+async def fetch_mexc_candles_paginated(symbol: str, interval: str, pages: int = 2) -> Optional[pd.DataFrame]:
+    """
+    Fetch up to `pages × 1000` candles by walking backwards in time.
+
+    Used by the schematics-5A page so LTF BOS refinement can reach tap3
+    timestamps that fall outside a single 1000-candle window.  Each page
+    calls the MEXC klines endpoint with an `endTime` set to just before the
+    oldest candle retrieved so far, building a continuous history.
+
+    The schematics-5A page is user-triggered so the extra API calls are
+    acceptable.  Do NOT use this in the 5B auto-scan loop.
+    """
+    MEXC_MAX = 1000
+    _MEXC_INTERVAL_MAP = {"1h": "60m", "2h": "4h"}
+    mexc_interval = _MEXC_INTERVAL_MAP.get(interval, interval)
+
+    _ALL_COLS = [
+        "open_time", "open", "high", "low", "close", "volume",
+        "close_time", "quote_vol", "trades", "taker_base", "taker_quote", "ignore"
+    ]
+
+    dfs: list = []
+    end_time_ms: Optional[int] = None  # None → start from present
+
+    for _ in range(pages):
+        params: dict = {"symbol": symbol, "interval": mexc_interval, "limit": MEXC_MAX}
+        if end_time_ms is not None:
+            params["endTime"] = end_time_ms
+
+        sem = await _get_fetch_semaphore()
+        async with sem:
+            try:
+                client = await _get_shared_client()
+                r = await client.get(f"{MEXC_URL_BASE}/api/v3/klines", params=params)
+                if r.status_code != 200:
+                    break
+                data = r.json()
+                if not data or not isinstance(data, list):
+                    break
+                ncols = len(data[0]) if data else 0
+                col_names = _ALL_COLS[:ncols] if ncols <= len(_ALL_COLS) else _ALL_COLS
+                df = pd.DataFrame(data, columns=col_names)
+                df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+                for c in ["open", "high", "low", "close", "volume"]:
+                    df[c] = df[c].astype(float)
+                dfs.append(df)
+                # Walk backward: next call ends just before this batch's oldest candle
+                end_time_ms = int(df["open_time"].iloc[0].timestamp() * 1000) - 1
+            except Exception as e:
+                logger.warning(f"[MEXC_PAGINATED] {symbol}/{interval}: {e}")
+                break
+
+    if not dfs:
+        return None
+
+    # Concatenate oldest-first, deduplicate, sort
+    combined = pd.concat(reversed(dfs), ignore_index=True)
+    combined = (
+        combined
+        .drop_duplicates(subset=["open_time"])
+        .sort_values("open_time")
+        .reset_index(drop=True)
+    )
+    return combined
+
+
 def _evict_stale_cache():
     """Remove expired entries from the candle cache to prevent memory bloat."""
     now = time.time()
@@ -3752,11 +3818,14 @@ async def get_schematics_5a_data(symbol: str = "BTCUSDT", timeframe: str = "4h")
     try:
         resolved = resolve_symbol(symbol)
 
-        # Parallel fetch: main TF at increased limits + LTF candles for BOS cascade.
+        # Parallel fetch: main TF at increased limits + paginated LTF candles for BOS cascade.
+        # Paginated fetch gives 2×1000 candles per LTF (5m≈83h, 1m≈33h) so the BOS refinement
+        # can reach tap3 timestamps that fall outside a single 1000-candle window.
         main_limit = _5A_CANDLE_LIMITS.get(timeframe, 300)
         fetch_results = await asyncio.gather(
             fetch_mexc_candles(resolved, timeframe, main_limit),
-            *[fetch_mexc_candles(resolved, ltf, _LTF_CANDLE_LIMITS[ltf]) for ltf in LTF_BOS_TIMEFRAMES],
+            fetch_mexc_candles_paginated(resolved, "5m", pages=2),
+            fetch_mexc_candles_paginated(resolved, "1m", pages=2),
             return_exceptions=True,
         )
         df = fetch_results[0] if isinstance(fetch_results[0], pd.DataFrame) else None
@@ -4022,7 +4091,7 @@ body{{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-ser
 
 /* ---- header ---- */
 .header{{
-  display:flex;align-items:center;justify-content:space-between;
+  display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;
   padding:8px 20px;background:#101018;border-bottom:1px solid #1e1e2d;
 }}
 .header h1{{font-size:1rem;color:#e040fb;display:flex;align-items:center;gap:8px}}
@@ -4031,6 +4100,10 @@ body{{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-ser
 .back-link{{color:#888;text-decoration:none;font-size:.75rem;padding:4px 10px;border:1px solid #333;border-radius:4px}}
 .back-link:hover{{color:#e0e0e0;border-color:#555}}
 .live-price{{font-size:.85rem;color:#00d4ff;font-weight:600}}
+.page-nav{{display:flex;gap:4px;flex-basis:100%;padding:4px 0 2px;border-top:1px solid #1e1e2d;margin-top:4px;flex-wrap:wrap}}
+.nav-link{{font-size:.65rem;padding:2px 8px;border:1px solid #333;border-radius:3px;text-decoration:none;color:#888;white-space:nowrap}}
+.nav-link:hover{{color:#e0e0e0;border-color:#555;background:#1a1a28}}
+.nav-link.active{{background:rgba(0,212,255,.12);color:#00d4ff;border-color:#00d4ff;font-weight:600}}
 
 /* ---- controls bar ---- */
 .controls{{
@@ -4101,7 +4174,7 @@ body{{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-ser
 .chip.forming{{background:rgba(255,193,7,.12);color:#ffc107}}
 
 /* ---- layout ---- */
-.main{{display:grid;grid-template-columns:1fr 320px;height:calc(100vh - 86px)}}
+.main{{display:grid;grid-template-columns:1fr 320px;height:calc(100vh - 116px)}}
 .chart-area{{position:relative;overflow:hidden}}
 #chartContainer{{width:100%;height:100%}}
 .panel{{
@@ -4307,6 +4380,14 @@ body{{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-ser
     <span class="htf-bias neutral" id="htfBias" title="4H directional bias (same gate as tensor-trade)">4H: --</span>
     <a href="/dashboard?symbol={symbol}" class="back-link">Dashboard</a>
     <a href="/schematic-chart?symbol={symbol}&timeframe={timeframe}" class="back-link">Schematic Chart</a>
+  </div>
+  <div class="page-nav">
+    <a href="/market-structure" class="nav-link">Market Structure</a>
+    <a href="/ranges" class="nav-link">Ranges</a>
+    <a href="/supply-demand" class="nav-link">Supply &amp; Demand</a>
+    <a href="/liquidity" class="nav-link">Liquidity</a>
+    <a href="/schematics-5A" class="nav-link active">Schematics 5A</a>
+    <a href="/schematics-5B" class="nav-link">Schematics 5B</a>
   </div>
 </div>
 
@@ -11279,7 +11360,11 @@ body{background:#fff;color:#333;font-family:'Segoe UI',sans-serif;overflow:hidde
 .chart-btns button:hover{background:#545b62}
 .back-link{color:#666;text-decoration:none;font-size:.7rem;padding:3px 8px;border:1px solid #ced4da;border-radius:4px;margin-left:auto}
 .back-link:hover{color:#333;border-color:#adb5bd}
-.main-area{display:flex;height:calc(100vh - 80px)}
+.page-nav{display:flex;gap:4px;flex-basis:100%;padding:4px 0 2px;border-top:1px solid #dee2e6;margin-top:4px;flex-wrap:wrap}
+.nav-link{font-size:.65rem;padding:2px 8px;border:1px solid #ced4da;border-radius:3px;text-decoration:none;color:#555;white-space:nowrap}
+.nav-link:hover{color:#333;border-color:#adb5bd;background:#f0f0f0}
+.nav-link.active{background:#007bff;color:#fff;border-color:#007bff;font-weight:600}
+.main-area{display:flex;height:calc(100vh - 112px)}
 .chart-wrap{flex:1;position:relative;background:#fff}
 .chart-container{width:100%;height:100%}
 .info-panel{width:260px;background:#f8f9fa;border-left:1px solid #dee2e6;overflow-y:auto;padding:10px;font-size:.7rem}
@@ -11346,6 +11431,14 @@ body{background:#fff;color:#333;font-family:'Segoe UI',sans-serif;overflow:hidde
         <button onclick="testChart()" style="background:#6c757d;color:#fff;border:none;border-radius:4px;padding:4px 10px;font-size:.72rem;cursor:pointer;margin-left:10px" title="Draw 5 hardcoded candles to verify chart renders">Test</button>
     </div>
     <a class="back-link" href="/dashboard">← Back</a>
+    <div class="page-nav">
+        <a href="/market-structure" class="nav-link active">Market Structure</a>
+        <a href="/ranges" class="nav-link">Ranges</a>
+        <a href="/supply-demand" class="nav-link">Supply &amp; Demand</a>
+        <a href="/liquidity" class="nav-link">Liquidity</a>
+        <a href="/schematics-5A" class="nav-link">Schematics 5A</a>
+        <a href="/schematics-5B" class="nav-link">Schematics 5B</a>
+    </div>
 </div>
 
 <div class="main-area">
@@ -11394,9 +11487,9 @@ function initChart() {
         handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
     });
     candleSeries = chart.addCandlestickSeries({
-        upColor: '#26a69a', downColor: '#ef5350',
-        borderUpColor: '#26a69a', borderDownColor: '#ef5350',
-        wickUpColor: '#26a69a', wickDownColor: '#ef5350',
+        upColor: '#ffffff', downColor: '#2962FF',
+        borderUpColor: '#000000', borderDownColor: '#2962FF',
+        wickUpColor: '#000000', wickDownColor: '#2962FF',
     });
     window.addEventListener('resize', () => {
         chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
@@ -12064,7 +12157,11 @@ body{background:#fff;color:#333;font-family:'Segoe UI',sans-serif;overflow:hidde
 .chart-btns button:hover{background:#545b62}
 .back-link{color:#666;text-decoration:none;font-size:.7rem;padding:3px 8px;border:1px solid #ced4da;border-radius:4px;margin-left:auto}
 .back-link:hover{color:#333;border-color:#adb5bd}
-.main-area{display:flex;height:calc(100vh - 80px)}
+.page-nav{display:flex;gap:4px;flex-basis:100%;padding:4px 0 2px;border-top:1px solid #dee2e6;margin-top:4px;flex-wrap:wrap}
+.nav-link{font-size:.65rem;padding:2px 8px;border:1px solid #ced4da;border-radius:3px;text-decoration:none;color:#555;white-space:nowrap}
+.nav-link:hover{color:#333;border-color:#adb5bd;background:#f0f0f0}
+.nav-link.active{background:#007bff;color:#fff;border-color:#007bff;font-weight:600}
+.main-area{display:flex;height:calc(100vh - 112px)}
 .chart-wrap{flex:1;position:relative;background:#fff}
 .chart-container{width:100%;height:100%}
 .info-panel{width:280px;background:#f8f9fa;border-left:1px solid #dee2e6;overflow-y:auto;padding:10px;font-size:.7rem}
@@ -12132,6 +12229,14 @@ body{background:#fff;color:#333;font-family:'Segoe UI',sans-serif;overflow:hidde
         <button onclick="zoomOut()">−</button>
     </div>
     <a class="back-link" href="/dashboard">← Back</a>
+    <div class="page-nav">
+        <a href="/market-structure" class="nav-link">Market Structure</a>
+        <a href="/ranges" class="nav-link active">Ranges</a>
+        <a href="/supply-demand" class="nav-link">Supply &amp; Demand</a>
+        <a href="/liquidity" class="nav-link">Liquidity</a>
+        <a href="/schematics-5A" class="nav-link">Schematics 5A</a>
+        <a href="/schematics-5B" class="nav-link">Schematics 5B</a>
+    </div>
 </div>
 
 <div class="main-area">
@@ -12173,9 +12278,9 @@ function initChart() {
         handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
     });
     candleSeries = chart.addCandlestickSeries({
-        upColor: '#26a69a', downColor: '#ef5350',
-        borderUpColor: '#26a69a', borderDownColor: '#ef5350',
-        wickUpColor: '#26a69a', wickDownColor: '#ef5350',
+        upColor: '#ffffff', downColor: '#2962FF',
+        borderUpColor: '#000000', borderDownColor: '#2962FF',
+        wickUpColor: '#000000', wickDownColor: '#2962FF',
     });
     window.addEventListener('resize', () => {
         chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
@@ -12849,7 +12954,11 @@ body{background:#fff;color:#333;font-family:'Segoe UI',sans-serif;overflow:hidde
 .chart-btns button:hover{background:#545b62}
 .back-link{color:#666;text-decoration:none;font-size:.7rem;padding:3px 8px;border:1px solid #ced4da;border-radius:4px;margin-left:auto}
 .back-link:hover{color:#333;border-color:#adb5bd}
-.main-area{display:flex;height:calc(100vh - 80px)}
+.page-nav{display:flex;gap:4px;flex-basis:100%;padding:4px 0 2px;border-top:1px solid #dee2e6;margin-top:4px;flex-wrap:wrap}
+.nav-link{font-size:.65rem;padding:2px 8px;border:1px solid #ced4da;border-radius:3px;text-decoration:none;color:#555;white-space:nowrap}
+.nav-link:hover{color:#333;border-color:#adb5bd;background:#f0f0f0}
+.nav-link.active{background:#007bff;color:#fff;border-color:#007bff;font-weight:600}
+.main-area{display:flex;height:calc(100vh - 112px)}
 .chart-wrap{flex:1;position:relative;background:#fff}
 .chart-container{width:100%;height:100%}
 .info-panel{width:290px;background:#f8f9fa;border-left:1px solid #dee2e6;overflow-y:auto;padding:10px;font-size:.7rem}
@@ -12938,6 +13047,14 @@ body{background:#fff;color:#333;font-family:'Segoe UI',sans-serif;overflow:hidde
         <button onclick="zoomOut()">&minus;</button>
     </div>
     <a class="back-link" href="/dashboard">&larr; Back</a>
+    <div class="page-nav">
+        <a href="/market-structure" class="nav-link">Market Structure</a>
+        <a href="/ranges" class="nav-link">Ranges</a>
+        <a href="/supply-demand" class="nav-link active">Supply &amp; Demand</a>
+        <a href="/liquidity" class="nav-link">Liquidity</a>
+        <a href="/schematics-5A" class="nav-link">Schematics 5A</a>
+        <a href="/schematics-5B" class="nav-link">Schematics 5B</a>
+    </div>
 </div>
 
 <div class="main-area">
@@ -12997,9 +13114,9 @@ function initChart() {
         handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
     });
     candleSeries = chart.addCandlestickSeries({
-        upColor: '#26a69a', downColor: '#ef5350',
-        borderUpColor: '#26a69a', borderDownColor: '#ef5350',
-        wickUpColor: '#26a69a', wickDownColor: '#ef5350',
+        upColor: '#ffffff', downColor: '#2962FF',
+        borderUpColor: '#000000', borderDownColor: '#2962FF',
+        wickUpColor: '#000000', wickDownColor: '#2962FF',
     });
     window.addEventListener('resize', () => {
         chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
@@ -13712,7 +13829,11 @@ body{background:#fff;color:#333;font-family:'Segoe UI',sans-serif;overflow:hidde
 .chart-btns button:hover{background:#545b62}
 .back-link{color:#666;text-decoration:none;font-size:.7rem;padding:3px 8px;border:1px solid #ced4da;border-radius:4px;margin-left:auto}
 .back-link:hover{color:#333;border-color:#adb5bd}
-.main-area{display:flex;height:calc(100vh - 80px)}
+.page-nav{display:flex;gap:4px;flex-basis:100%;padding:4px 0 2px;border-top:1px solid #dee2e6;margin-top:4px;flex-wrap:wrap}
+.nav-link{font-size:.65rem;padding:2px 8px;border:1px solid #ced4da;border-radius:3px;text-decoration:none;color:#555;white-space:nowrap}
+.nav-link:hover{color:#333;border-color:#adb5bd;background:#f0f0f0}
+.nav-link.active{background:#007bff;color:#fff;border-color:#007bff;font-weight:600}
+.main-area{display:flex;height:calc(100vh - 112px)}
 .chart-wrap{flex:1;position:relative;background:#fff}
 .chart-container{width:100%;height:100%}
 .info-panel{width:290px;background:#f8f9fa;border-left:1px solid #dee2e6;overflow-y:auto;padding:10px;font-size:.7rem}
@@ -13802,6 +13923,14 @@ body{background:#fff;color:#333;font-family:'Segoe UI',sans-serif;overflow:hidde
         <button onclick="zoomOut()">&minus;</button>
     </div>
     <a class="back-link" href="/dashboard">&larr; Back</a>
+    <div class="page-nav">
+        <a href="/market-structure" class="nav-link">Market Structure</a>
+        <a href="/ranges" class="nav-link">Ranges</a>
+        <a href="/supply-demand" class="nav-link">Supply &amp; Demand</a>
+        <a href="/liquidity" class="nav-link active">Liquidity</a>
+        <a href="/schematics-5A" class="nav-link">Schematics 5A</a>
+        <a href="/schematics-5B" class="nav-link">Schematics 5B</a>
+    </div>
 </div>
 
 <div class="main-area">
@@ -13858,9 +13987,9 @@ function initChart() {
         handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
     });
     candleSeries = chart.addCandlestickSeries({
-        upColor: '#26a69a', downColor: '#ef5350',
-        borderUpColor: '#26a69a', borderDownColor: '#ef5350',
-        wickUpColor: '#26a69a', wickDownColor: '#ef5350',
+        upColor: '#ffffff', downColor: '#2962FF',
+        borderUpColor: '#000000', borderDownColor: '#2962FF',
+        wickUpColor: '#000000', wickDownColor: '#2962FF',
     });
     window.addEventListener('resize', () => {
         chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
@@ -15040,12 +15169,16 @@ async def schematics_5b_page():
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-serif;overflow-x:hidden}
 
-.header{display:flex;align-items:center;justify-content:space-between;padding:10px 24px;background:#101018;border-bottom:1px solid #1e1e2d}
+.header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;padding:10px 24px;background:#101018;border-bottom:1px solid #1e1e2d}
 .header h1{font-size:1.1rem;color:#00d4ff;display:flex;align-items:center;gap:8px}
 .header .subtitle{color:#666;font-size:.8rem;font-weight:400}
 .header-right{display:flex;align-items:center;gap:10px}
 .back-link{color:#888;text-decoration:none;font-size:.75rem;padding:4px 10px;border:1px solid #333;border-radius:4px}
 .back-link:hover{color:#e0e0e0;border-color:#555}
+.page-nav{display:flex;gap:4px;flex-basis:100%;padding:4px 0 2px;border-top:1px solid #1e1e2d;margin-top:4px;flex-wrap:wrap}
+.nav-link{font-size:.65rem;padding:2px 8px;border:1px solid #333;border-radius:3px;text-decoration:none;color:#888;white-space:nowrap}
+.nav-link:hover{color:#e0e0e0;border-color:#555;background:#1a1a28}
+.nav-link.active{background:rgba(0,212,255,.12);color:#00d4ff;border-color:#00d4ff;font-weight:600}
 
 .controls{display:flex;align-items:center;gap:10px;padding:8px 24px;background:#101018;border-bottom:1px solid #1a1a28;flex-wrap:wrap}
 .btn{padding:6px 16px;border:1px solid #333;border-radius:4px;background:#181824;color:#e0e0e0;font-size:.78rem;cursor:pointer;transition:all .2s}
@@ -15126,9 +15259,16 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
 <div class="header">
   <h1>Schematics 5B <span class="subtitle">Simulated Trading — BTCUSDT</span></h1>
   <div class="header-right">
-    <a href="/schematics-5A" class="back-link">Schematics 5A</a>
     <a href="/tensor-trade" class="back-link">Tensor Trade</a>
     <a href="/dashboard" class="back-link">Dashboard</a>
+  </div>
+  <div class="page-nav">
+    <a href="/market-structure" class="nav-link">Market Structure</a>
+    <a href="/ranges" class="nav-link">Ranges</a>
+    <a href="/supply-demand" class="nav-link">Supply &amp; Demand</a>
+    <a href="/liquidity" class="nav-link">Liquidity</a>
+    <a href="/schematics-5A" class="nav-link">Schematics 5A</a>
+    <a href="/schematics-5B" class="nav-link active">Schematics 5B</a>
   </div>
 </div>
 
