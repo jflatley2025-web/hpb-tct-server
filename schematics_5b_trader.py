@@ -868,7 +868,7 @@ class Schematics5BTrader:
             # check finds upgrades from the smaller-granularity schematics first.
             for tf in reversed(MTF_TIMEFRAMES):
                 df = mtf_dfs.get(tf)
-                if tf not in all_schematics_by_tf or "status" in all_tf_results.get(tf, {}):
+                if tf not in all_schematics_by_tf or all_tf_results.get(tf, {}).get("status") in {"error", "insufficient_data"}:
                     continue  # already recorded as error/insufficient above
 
                 all_sch = all_schematics_by_tf[tf]
