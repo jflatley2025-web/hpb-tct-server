@@ -24,7 +24,7 @@ import requests
 import numpy as np
 import pandas as pd
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from tct_schematics import detect_tct_schematics, TCTSchematicDetector
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -47,14 +47,35 @@ SYMBOL = "BTCUSDT"
 STARTING_BALANCE = 5000.0
 RISK_PER_TRADE_PCT = 1.0  # 1% of balance per trade
 DEFAULT_LEVERAGE = 10
-HTF_TIMEFRAME = "4h"
-MTF_TIMEFRAMES = ["1h", "15m"]
+# HTF bias gate — daily candle tells us the dominant directional context.
+# 4h was too narrow; 1d changes once a day so the cache TTL matches.
+HTF_TIMEFRAME = "1d"
+# Scan TFs — ordered high to low.  4h is now scanned for setups (not just bias);
+# 3D is not available on MEXC Spot so 1d is the longest granularity available.
+# 30m added to give the HTF cascade a stepping-stone between 15m and 1h.
+MTF_TIMEFRAMES = ["1d", "4h", "1h", "30m", "15m"]
 AUTO_SCAN_INTERVAL = int(os.getenv("SCHEMATICS_5B_SCAN_INTERVAL", "60"))
 ENTRY_THRESHOLD = 50  # Fixed — never changes
 
-# Candle limits — MTF increased from 200 to keep the BOS window from running off
-# the end of the array when tap3 is recent.
-_MTF_CANDLE_LIMITS = {"1h": 300, "15m": 500}
+# TF hierarchy for the upward cascade (ordered highest → lowest).
+# When a schematic is confirmed at a lower TF, we try to upgrade it to the
+# highest TF that contains the same pattern in the same price area.
+_TF_HIERARCHY = ["1W", "1d", "4h", "1h", "30m", "15m", "5m", "1m"]
+
+# Candle limits per TF — sized so the BOS window never falls off the array
+# even when tap3 is a recent candle.
+_MTF_CANDLE_LIMITS = {
+    "1d": 200,  # ~200 days
+    "4h": 300,  # ~50 days
+    "1h": 300,  # ~12.5 days
+    "30m": 400, # ~8.3 days
+    "15m": 500, # ~5.2 days
+}
+
+# Max candles since BOS before a setup is considered stale
+_MAX_STALE: Dict[str, int] = {
+    "1d": 2, "4h": 3, "1h": 3, "30m": 4, "15m": 5,
+}
 
 # LTF cascade: fetch lower-TF candles once per cycle for BOS refinement.
 # Per TCT model, cascade from highest TF down to the lowest that confirms BOS;
@@ -553,6 +574,63 @@ def refine_schematic_bos_with_ltf(
 
 
 # ================================================================
+# HTF UPGRADE CASCADE HELPER
+# ================================================================
+
+def _find_htf_upgrade(
+    schematic: Dict,
+    this_tf: str,
+    all_schematics_by_tf: Dict[str, List[Dict]],
+) -> Tuple[Dict, str]:
+    """
+    Walk UP the TF hierarchy from this_tf, looking for a same-direction
+    confirmed schematic at a higher timeframe whose range bracket contains
+    this schematic's tap3 price.
+
+    TCT principle: a confirmed model at a higher TF is higher probability
+    because it represents a larger structural imbalance.  When the same
+    pattern is visible on multiple TFs, prefer the highest-TF version.
+
+    The search stops at the first (= highest) TF that satisfies both:
+      - same direction (bullish / bearish)
+      - range [low, high] contains tap3 price of the *original* schematic
+
+    Returns (schematic, effective_tf).  If no upgrade found, returns the
+    original (schematic, this_tf).
+    """
+    tap3_price = (schematic.get("tap3") or {}).get("price")
+    direction = schematic.get("direction")
+    if not tap3_price or not direction or this_tf not in _TF_HIERARCHY:
+        return schematic, this_tf
+
+    this_idx = _TF_HIERARCHY.index(this_tf)
+    if this_idx == 0:
+        return schematic, this_tf  # already at highest TF
+
+    # _TF_HIERARCHY[:this_idx] = all TFs above this_tf, already in high→low order.
+    # Iterating in that order means we return the HIGHEST match immediately.
+    for higher_tf in _TF_HIERARCHY[:this_idx]:
+        higher_schematics = all_schematics_by_tf.get(higher_tf, [])
+        for s in higher_schematics:
+            if not isinstance(s, dict) or not s.get("is_confirmed"):
+                continue
+            if s.get("direction") != direction:
+                continue
+            r = s.get("range") or {}
+            r_high = r.get("high")
+            r_low = r.get("low")
+            if r_high is not None and r_low is not None and r_low <= tap3_price <= r_high:
+                logger.info(
+                    f"[5B-HTF] Upgraded {this_tf}→{higher_tf}: "
+                    f"tap3={tap3_price:.2f} ∈ [{r_low:.2f},{r_high:.2f}] "
+                    f"({direction})"
+                )
+                return s, higher_tf
+
+    return schematic, this_tf
+
+
+# ================================================================
 # MAIN TRADING ENGINE
 # ================================================================
 class Schematics5BTrader:
@@ -561,7 +639,8 @@ class Schematics5BTrader:
     no learning/reward system.
     """
 
-    _HTF_CACHE_TTL = {"bullish": 4 * 3600, "bearish": 4 * 3600, "neutral": 900}
+    # 1d candle → bias stable for 24h; neutral re-checks every hour
+    _HTF_CACHE_TTL = {"bullish": 24 * 3600, "bearish": 24 * 3600, "neutral": 3600}
 
     def __init__(self):
         self.state = Schematics5BTradeState()
@@ -634,15 +713,13 @@ class Schematics5BTrader:
                 self._htf_bias_cache = htf_bias
                 self._htf_bias_expiry = now_ts + self._HTF_CACHE_TTL.get(htf_bias, 900)
 
-            # 4. Scan MTF timeframes
+            # 4. Parallel fetch — MTF at increased limits + LTF for BOS cascade
             best_setup = None
             best_score = 0
             best_tf = None
+            # HTF_TIMEFRAME bias result is always shown first in the debug output
             all_tf_results = {HTF_TIMEFRAME: htf_debug}
 
-            _MAX_STALE = {"1h": 3, "15m": 5}
-
-            # Parallel fetch — MTF at increased limits + LTF for BOS cascade
             mtf_dfs: Dict[str, Optional[pd.DataFrame]] = {}
             ltf_dfs: Dict[str, Optional[pd.DataFrame]] = {}
             all_tfs = {
@@ -667,61 +744,92 @@ class Schematics5BTrader:
                         else:
                             ltf_dfs[tf] = None
 
+            # Phase A: collect all detected schematics per TF (needed for HTF cascade)
+            all_schematics_by_tf: Dict[str, List[Dict]] = {}
             for tf in MTF_TIMEFRAMES:
+                df = mtf_dfs.get(tf)
+                if df is None or len(df) < 50:
+                    all_schematics_by_tf[tf] = []
+                    all_tf_results[tf] = {
+                        "status": "insufficient_data",
+                        "candles": 0 if df is None else len(df),
+                        "fetch_error": df is None,
+                    }
+                    continue
                 try:
-                    df = mtf_dfs.get(tf)
-                    if df is None or len(df) < 50:
-                        all_tf_results[tf] = {"status": "insufficient_data",
-                                              "candles": 0 if df is None else len(df),
-                                              "fetch_error": df is None}
+                    result = detect_tct_schematics(df, [])
+                    all_schematics_by_tf[tf] = (
+                        result.get("accumulation_schematics", [])
+                        + result.get("distribution_schematics", [])
+                    )
+                except Exception as e:
+                    logger.warning(f"[5B] Detection error on {tf}: {e}", exc_info=True)
+                    all_schematics_by_tf[tf] = []
+                    all_tf_results[tf] = {"status": "error", "error": str(e)}
+
+            # Phase B: evaluate with HTF cascade.
+            # Walk MTF_TIMEFRAMES in reverse (lowest → highest TF) so the cascade
+            # check finds upgrades from the smaller-granularity schematics first.
+            for tf in reversed(MTF_TIMEFRAMES):
+                df = mtf_dfs.get(tf)
+                if tf not in all_schematics_by_tf or "status" in all_tf_results.get(tf, {}):
+                    continue  # already recorded as error/insufficient above
+
+                all_sch = all_schematics_by_tf[tf]
+                tf_evals = []
+                htf_upgraded_count = 0
+
+                for s in all_sch:
+                    if not isinstance(s, dict):
+                        continue
+                    s_dir = s.get("direction", "unknown")
+                    if htf_bias == "bullish" and s_dir == "bearish":
+                        continue
+                    if htf_bias == "bearish" and s_dir == "bullish":
                         continue
 
-                    schematics_result = detect_tct_schematics(df, [])
-                    all_schematics = (
-                        schematics_result.get("accumulation_schematics", [])
-                        + schematics_result.get("distribution_schematics", [])
+                    # LTF BOS refinement: sharpen the entry price.
+                    if s.get("is_confirmed"):
+                        s = self._refine_schematic_bos_with_ltf(s, ltf_dfs)
+
+                    # HTF upgrade cascade: prefer the highest TF that covers this pattern.
+                    effective_tf = tf
+                    if s.get("is_confirmed"):
+                        s, effective_tf = _find_htf_upgrade(s, tf, all_schematics_by_tf)
+                        if effective_tf != tf:
+                            htf_upgraded_count += 1
+
+                    # Evaluate against the *effective* TF's candle count and stale limit.
+                    eff_df = mtf_dfs.get(effective_tf) or df
+                    eval_result = self.evaluator.evaluate_schematic(
+                        s, htf_bias, current_price,
+                        total_candles=len(eff_df),
+                        max_stale_candles=_MAX_STALE.get(effective_tf, 5),
                     )
+                    eval_result["source_tf"] = tf
+                    eval_result["effective_tf"] = effective_tf
+                    if effective_tf != tf:
+                        eval_result["htf_upgraded"] = True
 
-                    tf_evals = []
-                    max_stale = _MAX_STALE.get(tf, 5)
-                    total_candles = len(df)
+                    tf_evals.append(eval_result)
+                    if eval_result["pass"] and eval_result["score"] > best_score:
+                        best_score = eval_result["score"]
+                        best_setup = (s, eval_result)
+                        best_tf = effective_tf
 
-                    for s in all_schematics:
-                        if not isinstance(s, dict):
-                            continue
-                        s_dir = s.get("direction", "unknown")
-                        if htf_bias == "bullish" and s_dir == "bearish":
-                            continue
-                        if htf_bias == "bearish" and s_dir == "bullish":
-                            continue
-
-                        # TCT: for confirmed schematics refine BOS using lower TF cascade.
-                        # The earliest (lowest-TF) BOS gives the best entry and R:R.
-                        if s.get("is_confirmed"):
-                            s = self._refine_schematic_bos_with_ltf(s, ltf_dfs)
-
-                        eval_result = self.evaluator.evaluate_schematic(
-                            s, htf_bias, current_price,
-                            total_candles=total_candles, max_stale_candles=max_stale
-                        )
-                        tf_evals.append(eval_result)
-                        if eval_result["pass"] and eval_result["score"] > best_score:
-                            best_score = eval_result["score"]
-                            best_setup = (s, eval_result)
-                            best_tf = tf
-
-                    all_tf_results[tf] = {
-                        "status": "scanned",
-                        "candles": total_candles,
-                        "schematics_found": len(all_schematics),
-                        "confirmed": sum(1 for s in all_schematics if isinstance(s, dict) and s.get("is_confirmed")),
-                        "htf_bias": htf_bias,
-                        "best_score": max((e["score"] for e in tf_evals), default=0),
-                        "evaluations": tf_evals[:10],
-                    }
-                except Exception as e:
-                    logger.warning(f"[5B] Error scanning {tf}: {e}", exc_info=True)
-                    all_tf_results[tf] = {"status": "error", "error": str(e), "fetch_error": True}
+                total_candles = len(df) if df is not None else 0
+                all_tf_results[tf] = {
+                    "status": "scanned",
+                    "candles": total_candles,
+                    "schematics_found": len(all_sch),
+                    "confirmed": sum(
+                        1 for s in all_sch if isinstance(s, dict) and s.get("is_confirmed")
+                    ),
+                    "htf_upgraded": htf_upgraded_count,
+                    "htf_bias": htf_bias,
+                    "best_score": max((e["score"] for e in tf_evals), default=0),
+                    "evaluations": tf_evals[:10],
+                }
 
             # Store debug
             self.last_debug = {
@@ -730,6 +838,7 @@ class Schematics5BTrader:
                 "timeframes": all_tf_results,
                 "best_tf": best_tf,
                 "best_score": best_score,
+                "htf_cascade_active": True,
             }
 
             # 5. Enter trade if qualifying setup found

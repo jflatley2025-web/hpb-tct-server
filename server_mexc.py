@@ -15179,8 +15179,9 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
           <div class="trade-row"><span class="label">Entry Threshold</span><span class="value" style="color:#ffc107">50/100 (fixed)</span></div>
           <div class="trade-row"><span class="label">Risk Per Trade</span><span class="value">1%</span></div>
           <div class="trade-row"><span class="label">Leverage</span><span class="value">10x</span></div>
-          <div class="trade-row"><span class="label">HTF Gate</span><span class="value">4H bias</span></div>
-          <div class="trade-row"><span class="label">MTF Scan</span><span class="value">1H, 15M</span></div>
+          <div class="trade-row"><span class="label">HTF Gate</span><span class="value">1D bias</span></div>
+          <div class="trade-row"><span class="label">MTF Scan</span><span class="value">1D, 4H, 1H, 30M, 15M</span></div>
+          <div class="trade-row"><span class="label">HTF Cascade</span><span class="value" style="color:#00e676">ON — upgrades to highest TF</span></div>
           <div class="trade-row"><span class="label">Scan Interval</span><span class="value">60s</span></div>
           <div class="trade-row"><span class="label">Learning</span><span class="value" style="color:#ff4444">OFF</span></div>
           <div class="trade-row"><span class="label">Adaptive Threshold</span><span class="value" style="color:#ff4444">OFF</span></div>
@@ -15371,7 +15372,7 @@ function renderDebug(d) {
     '<div class="debug-row"><span class="dlabel">Last Error</span><span class="dval ' + (d.state_summary?.last_error ? 'dred' : '') + '">' + (d.state_summary?.last_error || 'None') + '</span></div>' +
     '</div>';
 
-  const tfOrder = ['4h','1h','15m'];
+  const tfOrder = ['1d','4h','1h','30m','15m'];
   for (const tf of tfOrder) {
     const t = d.timeframes[tf];
     if (!t) continue;
@@ -15385,6 +15386,7 @@ function renderDebug(d) {
     if (t.status === 'scanned') {
       html += '<div class="debug-row"><span class="dlabel">Schematics</span><span class="dval">' + t.schematics_found + '</span></div>';
       html += '<div class="debug-row"><span class="dlabel">Confirmed</span><span class="dval ' + (t.confirmed > 0 ? 'dgreen' : 'dred') + '">' + t.confirmed + '</span></div>';
+      if (t.htf_upgraded > 0) html += '<div class="debug-row"><span class="dlabel">HTF Upgraded</span><span class="dval dcyan">↑ ' + t.htf_upgraded + ' promoted to higher TF</span></div>';
       html += '<div class="debug-row"><span class="dlabel">Best Score</span><span class="dval ' + (t.best_score >= 50 ? 'dgreen' : t.best_score > 0 ? 'dyellow' : 'dred') + '">' + t.best_score + '</span></div>';
       if (t.evaluations && t.evaluations.length > 0) {
         html += '<div style="margin-top:6px;border-top:1px solid #222;padding-top:4px;font-size:.65rem;color:#888">Evaluations:</div>';
@@ -15394,6 +15396,7 @@ function renderDebug(d) {
           html += '<span style="color:#00d4ff">#' + (i+1) + '</span> ';
           html += '<span class="dval ' + passC + '">' + (ev.pass ? 'PASS' : 'FAIL') + '</span> ';
           html += 'Score: <span class="dval">' + ev.score + '/50</span> ';
+          if (ev.htf_upgraded) html += '<span style="color:#00d4ff;font-size:.6rem"> ↑' + (ev.effective_tf||'') + '</span> ';
           html += (ev.direction||'?').toUpperCase() + ' ' + (ev.model||'?') + ' R:R=' + (ev.rr||0).toFixed(1);
           html += '<div class="dereason">' + (ev.reasons || []).join(' | ') + '</div>';
           html += '</div>';
