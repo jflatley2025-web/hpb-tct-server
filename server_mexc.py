@@ -21,7 +21,12 @@ from po3_schematics import detect_po3_schematics
 from trade_execution import generate_execution_plan, calculate_leverage_comparison, calculate_capital_allocation
 from market_structure import MarketStructure, evaluate_rtz
 from tensor_tct_trader import get_trader
-from schematics_5b_trader import get_5b_trader
+from schematics_5b_trader import (
+    get_5b_trader,
+    refine_schematic_bos_with_ltf,
+    LTF_BOS_TIMEFRAMES,
+    _LTF_CANDLE_LIMITS,
+)
 
 
 # ================================================================
@@ -3726,6 +3731,12 @@ async def schematic_chart_page(symbol: str = "BTCUSDT", timeframe: str = "4h", t
 # ---------------------------------------------------------------------------
 # Schematics-5A  –  Standalone TCT Schematic Debug Page (Lecture 5A)
 # ---------------------------------------------------------------------------
+# Candle limits per timeframe — increased from 200 to give the BOS window
+# enough history when tap3 is recent (mirrors the 5B MTF fix).
+_5A_CANDLE_LIMITS: Dict[str, int] = {
+    "1m": 1000, "5m": 500, "15m": 500, "30m": 300,
+    "1h": 300,  "2h": 300, "4h": 300,  "1d": 200,
+}
 
 @app.get("/api/schematics-5a-data")
 async def get_schematics_5a_data(symbol: str = "BTCUSDT", timeframe: str = "4h"):
@@ -3740,7 +3751,20 @@ async def get_schematics_5a_data(symbol: str = "BTCUSDT", timeframe: str = "4h")
     """
     try:
         resolved = resolve_symbol(symbol)
-        df = await fetch_mexc_candles(resolved, timeframe, 200)
+
+        # Parallel fetch: main TF at increased limits + LTF candles for BOS cascade.
+        main_limit = _5A_CANDLE_LIMITS.get(timeframe, 300)
+        fetch_results = await asyncio.gather(
+            fetch_mexc_candles(resolved, timeframe, main_limit),
+            *[fetch_mexc_candles(resolved, ltf, _LTF_CANDLE_LIMITS[ltf]) for ltf in LTF_BOS_TIMEFRAMES],
+            return_exceptions=True,
+        )
+        df = fetch_results[0] if isinstance(fetch_results[0], pd.DataFrame) else None
+        ltf_dfs: Dict[str, Optional[pd.DataFrame]] = {
+            ltf: (fetch_results[i + 1] if isinstance(fetch_results[i + 1], pd.DataFrame) else None)
+            for i, ltf in enumerate(LTF_BOS_TIMEFRAMES)
+        }
+
         if df is None or len(df) < 30:
             return {"error": "Insufficient candle data", "symbol": resolved}
 
@@ -3931,6 +3955,10 @@ async def get_schematics_5a_data(symbol: str = "BTCUSDT", timeframe: str = "4h")
 
             # Classify state
             is_confirmed = sch.get("is_confirmed", False)
+
+            # Refine BOS entry using lower-TF cascade — mirrors the 5B candle fix.
+            if is_confirmed:
+                sch = refine_schematic_bos_with_ltf(sch, ltf_dfs, label="5A-LTF")
 
             # Run the same TCTTradeEvaluator scoring used by tensor-trade on confirmed schematics
             if is_confirmed:
