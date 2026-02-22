@@ -15153,6 +15153,42 @@ async def schematics_5b_debug():
     return convert_numpy_types(debug)
 
 
+@app.get("/api/schematics-5b-trader/candles")
+async def schematics_5b_candles(tf: str = "15m", limit: int = 200):
+    """Return BTCUSDT OHLC candles + trade overlays for the candlestick chart."""
+    from tensor_tct_trader import fetch_candles_sync
+    limit = max(50, min(int(limit), 500))
+    loop = asyncio.get_event_loop()
+    df = await loop.run_in_executor(None, fetch_candles_sync, "BTCUSDT", tf, limit)
+    candles = []
+    if df is not None and len(df) > 0:
+        for _, row in df.iterrows():
+            candles.append({
+                "t": int(row["open_time"].timestamp() * 1000),
+                "o": float(row["open"]),
+                "h": float(row["high"]),
+                "l": float(row["low"]),
+                "c": float(row["close"]),
+            })
+    trader = get_5b_trader()
+    snap = trader.state.snapshot()
+    debug = dict(trader.last_debug) if trader.last_debug else {}
+    # Expose forming setup info if score >= 20 and no open trade
+    forming = None
+    if not snap.get("current_trade") and debug.get("best_score", 0) >= 20:
+        forming = {
+            "score": debug.get("best_score", 0),
+            "price": debug.get("current_price"),
+            "tf": debug.get("best_tf"),
+        }
+    return convert_numpy_types({
+        "candles": candles,
+        "current_trade": snap.get("current_trade"),
+        "trade_history": snap.get("trade_history", []),
+        "forming": forming,
+    })
+
+
 @app.get("/schematics-5B", response_class=HTMLResponse)
 async def schematics_5b_page():
     """
@@ -15252,6 +15288,27 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
 .spinner{display:inline-block;width:14px;height:14px;border:2px solid #333;border-top:2px solid #00d4ff;border-radius:50%;animation:spin .8s linear infinite;margin-right:6px}
 @keyframes spin{to{transform:rotate(360deg)}}
 .loading{display:none;align-items:center;color:#888;font-size:.78rem}
+
+.chart-section{background:#fff;border:1px solid #1e1e2d;border-radius:8px;margin:0 24px 16px;overflow:hidden}
+.chart-header{display:flex;align-items:center;gap:10px;padding:10px 14px;background:#181828;border-bottom:1px solid #1e1e2d;flex-wrap:wrap}
+.chart-title{font-size:.85rem;font-weight:600;color:#00d4ff}
+.tf-buttons{display:flex;gap:4px;margin-left:auto}
+.tf-btn{padding:3px 10px;border:1px solid #333;border-radius:3px;background:#12121e;color:#888;font-size:.72rem;cursor:pointer;transition:all .15s}
+.tf-btn:hover{border-color:#00d4ff;color:#e0e0e0}
+.tf-btn.active{border-color:#00d4ff;color:#00d4ff;background:rgba(0,212,255,.1)}
+.chart-status{color:#555;font-size:.7rem;white-space:nowrap}
+.chart-wrap{background:#fff;position:relative;line-height:0}
+.chart-wrap canvas{display:block;width:100%}
+.chart-legend{display:flex;gap:14px;padding:7px 14px;background:#0e0e1c;border-top:1px solid #1e1e2d;flex-wrap:wrap}
+.legend-item{display:flex;align-items:center;gap:5px;font-size:.68rem;color:#888}
+.legend-box{width:12px;height:10px;display:inline-block}
+.legend-box.bull{background:#fff;border:1px solid #1565C0}
+.legend-box.bear{background:#1565C0;border:1px solid #1565C0}
+.legend-dot{width:10px;height:10px;border-radius:50%;display:inline-block}
+.legend-dot.active-trade{background:#00bcd4}
+.legend-dot.win{background:#00c853}
+.legend-dot.loss{background:#ff1744}
+.legend-dot.forming{background:#ffc107}
 </style>
 </head>
 <body>
@@ -15287,6 +15344,31 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
   <div class="stat-card"><div class="stat-label">Trades</div><div class="stat-value purple" id="statTrades">0</div></div>
   <div class="stat-card"><div class="stat-label">Win Rate</div><div class="stat-value white" id="statWinRate">0%</div></div>
   <div class="stat-card"><div class="stat-label">Wins / Losses</div><div class="stat-value white" id="statWL">0 / 0</div></div>
+</div>
+
+<!-- BTCUSDT Candlestick Chart — Blue (bearish) / White (bullish) -->
+<div class="chart-section">
+  <div class="chart-header">
+    <span class="chart-title">BTCUSDT — Trade Chart</span>
+    <div class="tf-buttons">
+      <button class="tf-btn active" data-tf="15m">15M</button>
+      <button class="tf-btn" data-tf="1h">1H</button>
+      <button class="tf-btn" data-tf="4h">4H</button>
+      <button class="tf-btn" data-tf="1d">1D</button>
+    </div>
+    <span class="chart-status" id="chartStatus">Loading...</span>
+  </div>
+  <div class="chart-wrap">
+    <canvas id="chartCanvas"></canvas>
+  </div>
+  <div class="chart-legend">
+    <span class="legend-item"><span class="legend-box bull"></span> Bullish — Close &gt; Open (White/Hollow)</span>
+    <span class="legend-item"><span class="legend-box bear"></span> Bearish — Close &lt; Open (Blue)</span>
+    <span class="legend-item"><span class="legend-dot active-trade"></span> Active Trade (Entry/TP/SL lines)</span>
+    <span class="legend-item"><span class="legend-dot win"></span> Win (closed)</span>
+    <span class="legend-item"><span class="legend-dot loss"></span> Loss (closed)</span>
+    <span class="legend-item"><span class="legend-dot forming"></span> Forming (detected, not yet executed)</span>
+  </div>
 </div>
 
 <div class="main">
@@ -15557,6 +15639,343 @@ setInterval(() => {
 setInterval(refreshState, 15000);
 
 refreshState();
+
+// ================================================================
+// CANDLESTICK CHART — Blue (bearish) / White (bullish)
+// ================================================================
+
+const CHART_BG       = '#ffffff';
+const CHART_GRID     = '#e8e8e8';
+const CHART_AXIS_TXT = '#555555';
+// Candle colors per the HPB-TCT convention:
+//   Close > Open  → bullish  → white body with blue border
+//   Close < Open  → bearish  → solid blue body
+const BULL_FILL   = '#ffffff';
+const BULL_BORDER = '#1565C0';
+const BEAR_FILL   = '#1565C0';
+const WICK_COLOR  = '#1565C0';
+
+let _chartTF   = '15m';
+let _chartData = null;
+
+// Fetch OHLC + trade data from our new endpoint
+async function fetchChartData(tf) {
+  const r = await fetch('/api/schematics-5b-trader/candles?tf=' + tf + '&limit=200');
+  return r.json();
+}
+
+// Find the candle index whose open_time is nearest to the given UTC ms timestamp.
+// Returns -1 if the candles array is empty or timestamp is out of range.
+function nearestCandleIdx(candles, tsMs) {
+  if (!candles || !candles.length) return -1;
+  const first = candles[0].t;
+  const last  = candles[candles.length - 1].t;
+  // Estimate candle interval from first two candles (fallback 60000ms)
+  const interval = candles.length > 1 ? (candles[1].t - candles[0].t) : 60000;
+  // Reject timestamps clearly outside the visible window (>2 candle intervals away from edges)
+  if (tsMs < first - interval * 2 || tsMs > last + interval * 2) return -1;
+  let best = 0, bestDiff = Math.abs(candles[0].t - tsMs);
+  for (let i = 1; i < candles.length; i++) {
+    const diff = Math.abs(candles[i].t - tsMs);
+    if (diff < bestDiff) { bestDiff = diff; best = i; }
+  }
+  return best;
+}
+
+// Draw a dashed or solid horizontal line with a right-edge label
+function hLine(ctx, x1, y, x2, color, label, dashed) {
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash(dashed ? [6, 4] : []);
+  ctx.beginPath();
+  ctx.moveTo(x1, y);
+  ctx.lineTo(x2, y);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  if (label) {
+    ctx.fillStyle = color;
+    ctx.font = 'bold 10px monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText(label, x2 + 4, y + 4);
+  }
+  ctx.restore();
+}
+
+// Draw entry triangle marker (direction: 'up' = bullish, 'down' = bearish)
+function drawEntryMarker(ctx, x, y, dir, color) {
+  const s = 6;
+  ctx.save();
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  if (dir === 'up') {
+    ctx.moveTo(x,     y - s);
+    ctx.lineTo(x + s, y + s);
+    ctx.lineTo(x - s, y + s);
+  } else {
+    ctx.moveTo(x,     y + s);
+    ctx.lineTo(x + s, y - s);
+    ctx.lineTo(x - s, y - s);
+  }
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+// Draw exit circle marker
+function drawExitMarker(ctx, x, y, color) {
+  ctx.save();
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(x, y, 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function renderChart(data) {
+  const canvas = document.getElementById('chartCanvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const container = canvas.parentElement;
+
+  // Set pixel dimensions — always match container width
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = container.clientWidth || 800;
+  const cssH = 440;
+  canvas.style.width  = cssW + 'px';
+  canvas.style.height = cssH + 'px';
+  canvas.width  = cssW * dpr;
+  canvas.height = cssH * dpr;
+  ctx.scale(dpr, dpr);
+
+  const W = cssW;
+  const H = cssH;
+
+  // White chart background
+  ctx.fillStyle = CHART_BG;
+  ctx.fillRect(0, 0, W, H);
+
+  const candles = (data && data.candles) || [];
+  const currentTrade  = (data && data.current_trade)  || null;
+  const tradeHistory  = (data && data.trade_history)  || [];
+  const forming       = (data && data.forming)        || null;
+
+  if (!candles.length) {
+    ctx.fillStyle = '#888';
+    ctx.font = '14px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('No candle data — waiting for server scan', W / 2, H / 2);
+    return;
+  }
+
+  // Layout margins: left is minimal; right gives room for price labels
+  const m = { top: 24, right: 88, bottom: 46, left: 8 };
+  const cw = W - m.left - m.right;
+  const ch = H - m.top  - m.bottom;
+
+  // Price range — candles + any open trade levels so lines stay visible
+  let pMin = Math.min(...candles.map(c => c.l));
+  let pMax = Math.max(...candles.map(c => c.h));
+  if (currentTrade) {
+    const lvls = [currentTrade.entry_price, currentTrade.stop_price, currentTrade.target_price].filter(Boolean);
+    if (lvls.length) {
+      pMin = Math.min(pMin, ...lvls);
+      pMax = Math.max(pMax, ...lvls);
+    }
+  }
+  const pRange = pMax - pMin;
+  pMin -= pRange * 0.04;
+  pMax += pRange * 0.04;
+
+  const toY = p  => m.top + ch - ((p - pMin) / (pMax - pMin)) * ch;
+  const n   = candles.length;
+  const gap = cw / n;                          // px per candle slot
+  const bw  = Math.max(1.5, gap * 0.65);       // body width
+  const toX = i  => m.left + (i + 0.5) * gap;
+
+  // ── Horizontal price grid ─────────────────────────────────────
+  const steps = 8;
+  for (let i = 0; i <= steps; i++) {
+    const p = pMin + (pMax - pMin) * (i / steps);
+    const y = toY(p);
+    ctx.strokeStyle = CHART_GRID;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.moveTo(m.left, y);
+    ctx.lineTo(W - m.right, y);
+    ctx.stroke();
+    // Price label on right axis
+    ctx.fillStyle = CHART_AXIS_TXT;
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'left';
+    const label = '$' + p.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+    ctx.fillText(label, W - m.right + 4, y + 4);
+  }
+
+  // ── Candles ──────────────────────────────────────────────────
+  for (let i = 0; i < n; i++) {
+    const c = candles[i];
+    const x = toX(i);
+    const isBull = c.c >= c.o;
+
+    // Wick (high → low)
+    ctx.strokeStyle = WICK_COLOR;
+    ctx.lineWidth   = 1;
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.moveTo(x, toY(c.h));
+    ctx.lineTo(x, toY(c.l));
+    ctx.stroke();
+
+    // Body (open ↔ close)
+    const yTop = toY(Math.max(c.o, c.c));
+    const yBot = toY(Math.min(c.o, c.c));
+    const bh   = Math.max(1, yBot - yTop);
+    const bx   = x - bw / 2;
+
+    if (isBull) {
+      // White / hollow — bullish (close > open)
+      ctx.fillStyle   = BULL_FILL;
+      ctx.strokeStyle = BULL_BORDER;
+      ctx.lineWidth   = 1;
+      ctx.fillRect(bx, yTop, bw, bh);
+      ctx.strokeRect(bx, yTop, bw, bh);
+    } else {
+      // Solid blue — bearish (close < open)
+      ctx.fillStyle = BEAR_FILL;
+      ctx.lineWidth = 0;
+      ctx.fillRect(bx, yTop, bw, bh);
+    }
+  }
+
+  // ── Trade history markers (completed / executed) ─────────────
+  for (const t of tradeHistory) {
+    const isBull = t.direction === 'bullish';
+    const color  = t.is_win ? '#00c853' : '#ff1744';
+
+    // Entry marker — triangle at entry candle
+    const entryTs = t.opened_at ? new Date(t.opened_at).getTime() : null;
+    if (entryTs !== null) {
+      const ci = nearestCandleIdx(candles, entryTs);
+      if (ci >= 0) {
+        drawEntryMarker(ctx, toX(ci), toY(t.entry_price), isBull ? 'up' : 'down', color);
+      }
+    }
+
+    // Exit marker — circle at exit candle
+    const exitTs = t.closed_at ? new Date(t.closed_at).getTime() : null;
+    if (exitTs !== null && t.exit_price) {
+      const ci = nearestCandleIdx(candles, exitTs);
+      if (ci >= 0) {
+        drawExitMarker(ctx, toX(ci), toY(t.exit_price), color);
+      }
+    }
+  }
+
+  // ── Forming setup marker (detected schematic, score < 50) ────
+  if (forming && forming.price) {
+    const lastX = toX(n - 1);
+    const fy    = toY(forming.price);
+    // Dashed amber line at the latest candle's price area
+    hLine(ctx, m.left, fy, W - m.right, '#ffc107',
+          'FORMING ' + (forming.score || '?') + '/100' + (forming.tf ? ' [' + forming.tf + ']' : ''),
+          true);
+    // Amber diamond marker
+    ctx.save();
+    ctx.fillStyle = '#ffc107';
+    ctx.beginPath();
+    ctx.moveTo(lastX, fy - 6);
+    ctx.lineTo(lastX + 5, fy);
+    ctx.lineTo(lastX, fy + 6);
+    ctx.lineTo(lastX - 5, fy);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // ── Active trade overlay (entry / TP / SL lines) ─────────────
+  if (currentTrade) {
+    const ep = currentTrade.entry_price;
+    const tp = currentTrade.target_price;
+    const sl = currentTrade.stop_price;
+    const dir = currentTrade.direction;
+
+    // Shaded profit zone between entry and target
+    if (ep && tp) {
+      const y1 = toY(Math.max(ep, tp));
+      const y2 = toY(Math.min(ep, tp));
+      ctx.save();
+      ctx.fillStyle = dir === 'bullish' ? 'rgba(0,200,83,0.07)' : 'rgba(255,23,68,0.07)';
+      ctx.fillRect(m.left, y1, cw, y2 - y1);
+      ctx.restore();
+    }
+
+    if (ep) hLine(ctx, m.left, toY(ep), W - m.right, '#00bcd4',
+                  'ENTRY $' + ep.toLocaleString(), false);
+    if (tp) hLine(ctx, m.left, toY(tp), W - m.right, '#00c853',
+                  'TP $' + tp.toLocaleString(), true);
+    if (sl) hLine(ctx, m.left, toY(sl), W - m.right, '#ff1744',
+                  'SL $' + sl.toLocaleString(), true);
+
+    // Entry marker at the opened_at candle
+    const entryTs = currentTrade.opened_at ? new Date(currentTrade.opened_at).getTime() : null;
+    if (entryTs !== null && ep) {
+      const ci = nearestCandleIdx(candles, entryTs);
+      if (ci >= 0) drawEntryMarker(ctx, toX(ci), toY(ep), dir === 'bullish' ? 'up' : 'down', '#00bcd4');
+    }
+  }
+
+  // ── X-axis time labels ────────────────────────────────────────
+  ctx.fillStyle  = CHART_AXIS_TXT;
+  ctx.font       = '10px monospace';
+  ctx.textAlign  = 'center';
+  const labelStep = Math.max(1, Math.floor(n / 8));
+  for (let i = 0; i < n; i += labelStep) {
+    const d  = new Date(candles[i].t);
+    const lbl = (d.getMonth() + 1) + '/' + d.getDate()
+              + ' ' + d.getHours().toString().padStart(2, '0')
+              + ':' + d.getMinutes().toString().padStart(2, '0');
+    ctx.fillText(lbl, toX(i), H - m.bottom + 16);
+  }
+
+  // ── Chart border ──────────────────────────────────────────────
+  ctx.strokeStyle = CHART_GRID;
+  ctx.lineWidth   = 1;
+  ctx.setLineDash([]);
+  ctx.strokeRect(m.left, m.top, cw, ch);
+}
+
+async function loadChart() {
+  document.getElementById('chartStatus').textContent = 'Loading...';
+  try {
+    _chartData = await fetchChartData(_chartTF);
+    renderChart(_chartData);
+    document.getElementById('chartStatus').textContent =
+      'Updated ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    document.getElementById('chartStatus').textContent = 'Error: ' + e.message;
+  }
+}
+
+// TF selector buttons
+document.querySelectorAll('.tf-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    _chartTF = btn.dataset.tf;
+    loadChart();
+  });
+});
+
+// Re-render on window resize (no refetch needed)
+window.addEventListener('resize', () => { if (_chartData) renderChart(_chartData); });
+
+// Auto-refresh chart every 30 s (aligned with trade state refresh)
+setInterval(loadChart, 30000);
+
+// Initial chart load
+loadChart();
 </script>
 </body>
 </html>"""
