@@ -4091,7 +4091,7 @@ body{{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-ser
 
 /* ---- header ---- */
 .header{{
-  display:flex;align-items:center;justify-content:space-between;
+  display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;
   padding:8px 20px;background:#101018;border-bottom:1px solid #1e1e2d;
 }}
 .header h1{{font-size:1rem;color:#e040fb;display:flex;align-items:center;gap:8px}}
@@ -4100,6 +4100,10 @@ body{{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-ser
 .back-link{{color:#888;text-decoration:none;font-size:.75rem;padding:4px 10px;border:1px solid #333;border-radius:4px}}
 .back-link:hover{{color:#e0e0e0;border-color:#555}}
 .live-price{{font-size:.85rem;color:#00d4ff;font-weight:600}}
+.page-nav{{display:flex;gap:4px;flex-basis:100%;padding:4px 0 2px;border-top:1px solid #1e1e2d;margin-top:4px;flex-wrap:wrap}}
+.nav-link{{font-size:.65rem;padding:2px 8px;border:1px solid #333;border-radius:3px;text-decoration:none;color:#888;white-space:nowrap}}
+.nav-link:hover{{color:#e0e0e0;border-color:#555;background:#1a1a28}}
+.nav-link.active{{background:rgba(0,212,255,.12);color:#00d4ff;border-color:#00d4ff;font-weight:600}}
 
 /* ---- controls bar ---- */
 .controls{{
@@ -4170,7 +4174,7 @@ body{{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-ser
 .chip.forming{{background:rgba(255,193,7,.12);color:#ffc107}}
 
 /* ---- layout ---- */
-.main{{display:grid;grid-template-columns:1fr 320px;height:calc(100vh - 86px)}}
+.main{{display:grid;grid-template-columns:1fr 320px;height:calc(100vh - 116px)}}
 .chart-area{{position:relative;overflow:hidden}}
 #chartContainer{{width:100%;height:100%}}
 .panel{{
@@ -4376,6 +4380,14 @@ body{{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-ser
     <span class="htf-bias neutral" id="htfBias" title="4H directional bias (same gate as tensor-trade)">4H: --</span>
     <a href="/dashboard?symbol={symbol}" class="back-link">Dashboard</a>
     <a href="/schematic-chart?symbol={symbol}&timeframe={timeframe}" class="back-link">Schematic Chart</a>
+  </div>
+  <div class="page-nav">
+    <a href="/market-structure" class="nav-link">Market Structure</a>
+    <a href="/ranges" class="nav-link">Ranges</a>
+    <a href="/supply-demand" class="nav-link">Supply &amp; Demand</a>
+    <a href="/liquidity" class="nav-link">Liquidity</a>
+    <a href="/schematics-5A" class="nav-link active">Schematics 5A</a>
+    <a href="/schematics-5B" class="nav-link">Schematics 5B</a>
   </div>
 </div>
 
@@ -11475,9 +11487,9 @@ function initChart() {
         handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
     });
     candleSeries = chart.addCandlestickSeries({
-        upColor: '#26a69a', downColor: '#ef5350',
-        borderUpColor: '#26a69a', borderDownColor: '#ef5350',
-        wickUpColor: '#26a69a', wickDownColor: '#ef5350',
+        upColor: '#ffffff', downColor: '#2962FF',
+        borderUpColor: '#000000', borderDownColor: '#2962FF',
+        wickUpColor: '#000000', wickDownColor: '#2962FF',
     });
     window.addEventListener('resize', () => {
         chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
@@ -12266,9 +12278,9 @@ function initChart() {
         handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
     });
     candleSeries = chart.addCandlestickSeries({
-        upColor: '#26a69a', downColor: '#ef5350',
-        borderUpColor: '#26a69a', borderDownColor: '#ef5350',
-        wickUpColor: '#26a69a', wickDownColor: '#ef5350',
+        upColor: '#ffffff', downColor: '#2962FF',
+        borderUpColor: '#000000', borderDownColor: '#2962FF',
+        wickUpColor: '#000000', wickDownColor: '#2962FF',
     });
     window.addEventListener('resize', () => {
         chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
@@ -13035,6 +13047,14 @@ body{background:#fff;color:#333;font-family:'Segoe UI',sans-serif;overflow:hidde
         <button onclick="zoomOut()">&minus;</button>
     </div>
     <a class="back-link" href="/dashboard">&larr; Back</a>
+    <div class="page-nav">
+        <a href="/market-structure" class="nav-link">Market Structure</a>
+        <a href="/ranges" class="nav-link">Ranges</a>
+        <a href="/supply-demand" class="nav-link active">Supply &amp; Demand</a>
+        <a href="/liquidity" class="nav-link">Liquidity</a>
+        <a href="/schematics-5A" class="nav-link">Schematics 5A</a>
+        <a href="/schematics-5B" class="nav-link">Schematics 5B</a>
+    </div>
 </div>
 
 <div class="main-area">
@@ -13094,9 +13114,9 @@ function initChart() {
         handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
     });
     candleSeries = chart.addCandlestickSeries({
-        upColor: '#26a69a', downColor: '#ef5350',
-        borderUpColor: '#26a69a', borderDownColor: '#ef5350',
-        wickUpColor: '#26a69a', wickDownColor: '#ef5350',
+        upColor: '#ffffff', downColor: '#2962FF',
+        borderUpColor: '#000000', borderDownColor: '#2962FF',
+        wickUpColor: '#000000', wickDownColor: '#2962FF',
     });
     window.addEventListener('resize', () => {
         chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
@@ -13903,6 +13923,14 @@ body{background:#fff;color:#333;font-family:'Segoe UI',sans-serif;overflow:hidde
         <button onclick="zoomOut()">&minus;</button>
     </div>
     <a class="back-link" href="/dashboard">&larr; Back</a>
+    <div class="page-nav">
+        <a href="/market-structure" class="nav-link">Market Structure</a>
+        <a href="/ranges" class="nav-link">Ranges</a>
+        <a href="/supply-demand" class="nav-link">Supply &amp; Demand</a>
+        <a href="/liquidity" class="nav-link active">Liquidity</a>
+        <a href="/schematics-5A" class="nav-link">Schematics 5A</a>
+        <a href="/schematics-5B" class="nav-link">Schematics 5B</a>
+    </div>
 </div>
 
 <div class="main-area">
@@ -13959,9 +13987,9 @@ function initChart() {
         handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
     });
     candleSeries = chart.addCandlestickSeries({
-        upColor: '#26a69a', downColor: '#ef5350',
-        borderUpColor: '#26a69a', borderDownColor: '#ef5350',
-        wickUpColor: '#26a69a', wickDownColor: '#ef5350',
+        upColor: '#ffffff', downColor: '#2962FF',
+        borderUpColor: '#000000', borderDownColor: '#2962FF',
+        wickUpColor: '#000000', wickDownColor: '#2962FF',
     });
     window.addEventListener('resize', () => {
         chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
@@ -15141,12 +15169,16 @@ async def schematics_5b_page():
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-serif;overflow-x:hidden}
 
-.header{display:flex;align-items:center;justify-content:space-between;padding:10px 24px;background:#101018;border-bottom:1px solid #1e1e2d}
+.header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;padding:10px 24px;background:#101018;border-bottom:1px solid #1e1e2d}
 .header h1{font-size:1.1rem;color:#00d4ff;display:flex;align-items:center;gap:8px}
 .header .subtitle{color:#666;font-size:.8rem;font-weight:400}
 .header-right{display:flex;align-items:center;gap:10px}
 .back-link{color:#888;text-decoration:none;font-size:.75rem;padding:4px 10px;border:1px solid #333;border-radius:4px}
 .back-link:hover{color:#e0e0e0;border-color:#555}
+.page-nav{display:flex;gap:4px;flex-basis:100%;padding:4px 0 2px;border-top:1px solid #1e1e2d;margin-top:4px;flex-wrap:wrap}
+.nav-link{font-size:.65rem;padding:2px 8px;border:1px solid #333;border-radius:3px;text-decoration:none;color:#888;white-space:nowrap}
+.nav-link:hover{color:#e0e0e0;border-color:#555;background:#1a1a28}
+.nav-link.active{background:rgba(0,212,255,.12);color:#00d4ff;border-color:#00d4ff;font-weight:600}
 
 .controls{display:flex;align-items:center;gap:10px;padding:8px 24px;background:#101018;border-bottom:1px solid #1a1a28;flex-wrap:wrap}
 .btn{padding:6px 16px;border:1px solid #333;border-radius:4px;background:#181824;color:#e0e0e0;font-size:.78rem;cursor:pointer;transition:all .2s}
@@ -15227,9 +15259,16 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
 <div class="header">
   <h1>Schematics 5B <span class="subtitle">Simulated Trading — BTCUSDT</span></h1>
   <div class="header-right">
-    <a href="/schematics-5A" class="back-link">Schematics 5A</a>
     <a href="/tensor-trade" class="back-link">Tensor Trade</a>
     <a href="/dashboard" class="back-link">Dashboard</a>
+  </div>
+  <div class="page-nav">
+    <a href="/market-structure" class="nav-link">Market Structure</a>
+    <a href="/ranges" class="nav-link">Ranges</a>
+    <a href="/supply-demand" class="nav-link">Supply &amp; Demand</a>
+    <a href="/liquidity" class="nav-link">Liquidity</a>
+    <a href="/schematics-5A" class="nav-link">Schematics 5A</a>
+    <a href="/schematics-5B" class="nav-link active">Schematics 5B</a>
   </div>
 </div>
 

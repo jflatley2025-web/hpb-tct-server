@@ -800,7 +800,7 @@ class Schematics5BTrader:
                             htf_upgraded_count += 1
 
                     # Evaluate against the *effective* TF's candle count and stale limit.
-                    eff_df = mtf_dfs.get(effective_tf) or df
+                    eff_df = mtf_dfs.get(effective_tf) if mtf_dfs.get(effective_tf) is not None else df
                     eval_result = self.evaluator.evaluate_schematic(
                         s, htf_bias, current_price,
                         total_candles=len(eff_df),
