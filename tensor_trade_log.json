@@ -140,7 +140,7 @@
     "No specific adaptation needed \u2014 loss within normal parameters",
     "Switched to high-confidence-only mode (score >= 70) after 3 consecutive losses"
   ],
-  "last_scan_time": "2026-02-23T10:42:15.997167+00:00",
+  "last_scan_time": "2026-02-23T10:53:06.465987+00:00",
   "last_scan_action": "no_qualifying_setups",
   "last_error": null
 }
