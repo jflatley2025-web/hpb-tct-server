@@ -15338,6 +15338,13 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
 .legend-dot.win{background:#00c853}
 .legend-dot.loss{background:#ff1744}
 .legend-dot.forming{background:#ffc107}
+
+.chart-tools{display:flex;align-items:center;gap:6px;padding:6px 14px;background:#181828;border-bottom:1px solid #1e1e2d;flex-wrap:wrap}
+.tool-btn{padding:3px 10px;border:1px solid #333;border-radius:3px;background:#12121e;color:#888;font-size:.72rem;cursor:pointer;transition:all .15s;white-space:nowrap;user-select:none}
+.tool-btn:hover{border-color:#00d4ff;color:#e0e0e0}
+.tool-btn.active{border-color:#00c853;color:#00c853;background:rgba(0,200,83,.1)}
+.tool-sep{width:1px;height:16px;background:#333;margin:0 2px;flex-shrink:0}
+.tool-hint{color:#444;font-size:.65rem;margin-left:auto;white-space:nowrap}
 </style>
 </head>
 <body>
@@ -15386,6 +15393,16 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
       <button class="tf-btn" data-tf="1d">1D</button>
     </div>
     <span class="chart-status" id="chartStatus">Loading...</span>
+  </div>
+  <div class="chart-tools">
+    <button class="tool-btn" onclick="chartZoomIn()">Zoom In</button>
+    <button class="tool-btn" onclick="chartZoomOut()">Zoom Out</button>
+    <div class="tool-sep"></div>
+    <button class="tool-btn" onclick="chartFitAll()">Fit All</button>
+    <button class="tool-btn" onclick="chartReset()">Reset</button>
+    <div class="tool-sep"></div>
+    <button class="tool-btn" id="btnScaleToCandles" onclick="chartToggleScale()">Scale to Candles</button>
+    <span class="tool-hint">Scroll to zoom &middot; Shift+drag to pan</span>
   </div>
   <div class="chart-wrap">
     <canvas id="chartCanvas"></canvas>
@@ -15740,8 +15757,11 @@ const BULL_BORDER = '#1565C0';
 const BEAR_FILL   = '#1565C0';
 const WICK_COLOR  = '#1565C0';
 
-let _chartTF   = '15m';
-let _chartData = null;
+let _chartTF        = '15m';
+let _chartData      = null;
+let _viewStart      = 0;      // index of first visible candle in the all-candles array
+let _viewLen        = null;   // number of candles to show; null = show all
+let _fitToCandles   = false;  // true = Y-axis fits only visible candle prices (ignores trade levels)
 
 // Fetch OHLC + trade data from our new endpoint
 async function fetchChartData(tf) {
@@ -15817,17 +15837,26 @@ function drawExitMarker(ctx, x, y, color) {
   ctx.restore();
 }
 
-// Draw forming TCT schematics (T1 / T2 / T3 tap markers, range box, target & stop lines).
-// Called after candles are drawn so markers appear on top.
+// Draw forming TCT schematics (T1/T2/T3 tap markers, range box, target & stop lines).
+// Up to 3 schematics shown. Each gets a distinct color palette by index so they
+// never visually merge. TGT/SL labels include TF+model to disambiguate overlapping lines.
 function drawFormingSchematics(ctx, schematics, candles, toX, toY, W, m) {
   if (!schematics || !schematics.length) return;
+
+  // Distinct color per schematic slot (bull / bear variant per direction)
+  const PALETTES = [
+    { bull: '#00c853', bear: '#ff6b35' },   // slot 0 — green   / orange
+    { bull: '#00b4d8', bear: '#ce93d8' },   // slot 1 — cyan    / lavender
+    { bull: '#ffd600', bear: '#ff5252' },   // slot 2 — gold    / red-pink
+  ];
 
   // Show at most 3 (sorted newest tap3 first by the backend)
   const toShow = schematics.slice(0, 3);
 
   toShow.forEach(function(fs, idx) {
     const isBull   = fs.direction === 'bullish';
-    const schColor = isBull ? '#00c853' : '#ff6b35';
+    const palette  = PALETTES[idx] || PALETTES[0];
+    const schColor = isBull ? palette.bull : palette.bear;
 
     const t1 = fs.tap1 || null;
     const t2 = fs.tap2 || null;
@@ -15845,8 +15874,8 @@ function drawFormingSchematics(ctx, schematics, candles, toX, toY, W, m) {
       const rx  = toX(ci1) - (W / candles.length) * 0.5;
       const rw  = (W - m.right) - rx;
       ctx.save();
-      ctx.fillStyle   = isBull ? 'rgba(0,200,83,0.06)' : 'rgba(255,107,53,0.06)';
-      ctx.strokeStyle = isBull ? 'rgba(0,200,83,0.35)' : 'rgba(255,107,53,0.35)';
+      ctx.fillStyle   = schColor + '0f';   // ~6% opacity fill
+      ctx.strokeStyle = schColor + '55';   // ~33% opacity border
       ctx.lineWidth   = 1;
       ctx.setLineDash([4, 3]);
       ctx.fillRect(rx, ry1, rw, ry2 - ry1);
@@ -15854,41 +15883,51 @@ function drawFormingSchematics(ctx, schematics, candles, toX, toY, W, m) {
       ctx.restore();
     }
 
-    // ── Target line (dashed) ──────────────────────────────────────────────
+    // Label suffix: "TF Model" — e.g. "[1H Model_1]" — disambiguates overlapping lines
+    const tfMod    = ((fs.tf || '').toUpperCase() + (fs.model ? ' ' + fs.model : '')).trim();
+    const tfSuffix = tfMod ? ' [' + tfMod + ']' : '';
+
+    // ── Target line (dashed, schematic color) ────────────────────────────
     if (fs.target) {
       const ty = toY(fs.target);
       ctx.save();
-      ctx.strokeStyle = isBull ? 'rgba(0,200,83,0.75)' : 'rgba(255,107,53,0.75)';
+      ctx.strokeStyle = schColor;
+      ctx.globalAlpha = 0.8;
       ctx.lineWidth   = 1.5;
       ctx.setLineDash([6, 4]);
       ctx.beginPath();
       ctx.moveTo(m.left, ty);
       ctx.lineTo(W - m.right, ty);
       ctx.stroke();
-      ctx.fillStyle   = isBull ? 'rgba(0,200,83,0.75)' : 'rgba(255,107,53,0.75)';
-      ctx.font        = '9px monospace';
-      ctx.textAlign   = 'right';
       ctx.setLineDash([]);
-      ctx.fillText('TGT ' + (fs.tf || '').toUpperCase(), W - m.right - 4, ty - 3);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle   = schColor;
+      ctx.font        = 'bold 9px monospace';
+      ctx.textAlign   = 'right';
+      ctx.fillText('TGT' + tfSuffix, W - m.right - 4, ty - 3);
       ctx.restore();
     }
 
-    // ── Stop loss line (dashed red) ───────────────────────────────────────
+    // ── Stop loss line (dashed, per-schematic tinted red) ────────────────
     if (fs.stop_loss) {
       const sy = toY(fs.stop_loss);
+      // Tint stop line toward the schematic color so multiple SLs are distinguishable
+      const slColor = idx === 0 ? '#ff1744' : (idx === 1 ? '#ff6090' : '#ff8a65');
       ctx.save();
-      ctx.strokeStyle = 'rgba(255,23,68,0.45)';
+      ctx.strokeStyle = slColor;
+      ctx.globalAlpha = 0.55;
       ctx.lineWidth   = 1;
       ctx.setLineDash([4, 4]);
       ctx.beginPath();
       ctx.moveTo(m.left, sy);
       ctx.lineTo(W - m.right, sy);
       ctx.stroke();
-      ctx.fillStyle  = 'rgba(255,23,68,0.55)';
-      ctx.font       = '9px monospace';
-      ctx.textAlign  = 'right';
       ctx.setLineDash([]);
-      ctx.fillText('SL', W - m.right - 4, sy - 3);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle  = slColor;
+      ctx.font       = 'bold 9px monospace';
+      ctx.textAlign  = 'right';
+      ctx.fillText('SL' + tfSuffix, W - m.right - 4, sy - 3);
       ctx.restore();
     }
 
@@ -15898,27 +15937,27 @@ function drawFormingSchematics(ctx, schematics, candles, toX, toY, W, m) {
       const tx = toX(ci);
       const ty = toY(price);
       ctx.save();
-      // Outer glow circle
+      // Outer glow
       ctx.beginPath();
-      ctx.arc(tx, ty, 9, 0, 2 * Math.PI);
-      ctx.fillStyle = isBull ? 'rgba(0,200,83,0.15)' : 'rgba(255,107,53,0.15)';
+      ctx.arc(tx, ty, 11, 0, 2 * Math.PI);
+      ctx.fillStyle = schColor + '22';
       ctx.fill();
-      // Filled circle
+      // Filled circle with white border
       ctx.beginPath();
-      ctx.arc(tx, ty, 6, 0, 2 * Math.PI);
+      ctx.arc(tx, ty, 7, 0, 2 * Math.PI);
       ctx.fillStyle   = schColor;
       ctx.strokeStyle = '#ffffff';
       ctx.lineWidth   = 1.5;
       ctx.setLineDash([]);
       ctx.fill();
       ctx.stroke();
-      // Label inside dot
-      ctx.fillStyle     = '#ffffff';
-      ctx.font          = 'bold 7px sans-serif';
-      ctx.textAlign     = 'center';
-      ctx.textBaseline  = 'middle';
+      // Label inside
+      ctx.fillStyle    = '#000000';
+      ctx.font         = 'bold 7px sans-serif';
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
       ctx.fillText(label, tx, ty);
-      ctx.textBaseline  = 'alphabetic';
+      ctx.textBaseline = 'alphabetic';
       ctx.restore();
     }
 
@@ -15926,16 +15965,40 @@ function drawFormingSchematics(ctx, schematics, candles, toX, toY, W, m) {
     if (ci2 >= 0 && t2) drawTap(ci2, t2.price, 'T2');
     if (ci3 >= 0 && t3) drawTap(ci3, t3.price, 'T3');
 
-    // ── TF + model badge above T3 ─────────────────────────────────────────
-    if (ci3 >= 0 && t3 && (fs.tf || fs.model)) {
-      const badge = ((fs.tf || '').toUpperCase() + (fs.model ? ' ' + fs.model : '')).trim();
+    // ── TF + model badge above T3 — pill background for legibility ────────
+    if (ci3 >= 0 && t3 && tfMod) {
       const bx = toX(ci3);
-      const by = toY(t3.price) - 16;
+      const by = toY(t3.price) - 14;
       ctx.save();
-      ctx.fillStyle  = schColor;
-      ctx.font       = 'bold 8px monospace';
-      ctx.textAlign  = 'center';
-      ctx.fillText(badge, bx, by);
+      ctx.font = 'bold 9px monospace';
+      const tw   = ctx.measureText(tfMod).width;
+      const padX = 5, padY = 3, r = 4;
+      const rx = bx - tw / 2 - padX;
+      const ry = by - 9 - padY;
+      const rw = tw + padX * 2;
+      const rh = 12 + padY * 2;
+      // Pill background
+      ctx.fillStyle   = schColor;
+      ctx.globalAlpha = 0.92;
+      ctx.beginPath();
+      ctx.moveTo(rx + r, ry);
+      ctx.lineTo(rx + rw - r, ry);
+      ctx.arcTo(rx + rw, ry,      rx + rw, ry + r,      r);
+      ctx.lineTo(rx + rw, ry + rh - r);
+      ctx.arcTo(rx + rw, ry + rh, rx + rw - r, ry + rh, r);
+      ctx.lineTo(rx + r, ry + rh);
+      ctx.arcTo(rx,      ry + rh, rx,      ry + rh - r, r);
+      ctx.lineTo(rx,      ry + r);
+      ctx.arcTo(rx,      ry,      rx + r,  ry,          r);
+      ctx.closePath();
+      ctx.fill();
+      // Badge text
+      ctx.globalAlpha  = 1;
+      ctx.fillStyle    = '#000000';
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(tfMod, bx, ry + rh / 2);
+      ctx.textBaseline = 'alphabetic';
       ctx.restore();
     }
   });
@@ -15964,11 +16027,17 @@ function renderChart(data) {
   ctx.fillStyle = CHART_BG;
   ctx.fillRect(0, 0, W, H);
 
-  const candles          = (data && data.candles)            || [];
-  const currentTrade     = (data && data.current_trade)      || null;
-  const tradeHistory     = (data && data.trade_history)      || [];
-  const forming          = (data && data.forming)            || null;
+  const allCandles        = (data && data.candles)            || [];
+  const currentTrade      = (data && data.current_trade)      || null;
+  const tradeHistory      = (data && data.trade_history)      || [];
+  const forming           = (data && data.forming)            || null;
   const formingSchematics = (data && data.forming_schematics) || [];
+
+  // Apply view window (zoom/pan state)
+  const _vn  = allCandles.length;
+  const _vs  = _vn > 0 ? Math.max(0, Math.min(_viewStart, _vn - 1)) : 0;
+  const _vl  = (_viewLen !== null) ? Math.min(_viewLen, _vn - _vs) : (_vn - _vs);
+  const candles = allCandles.slice(_vs, _vs + _vl);
 
   if (!candles.length) {
     ctx.fillStyle = '#888';
@@ -15983,31 +16052,28 @@ function renderChart(data) {
   const cw = W - m.left - m.right;
   const ch = H - m.top  - m.bottom;
 
-  // Price range — candles + any open trade levels + forming schematic levels
-  let pMin = Math.min(...candles.map(c => c.l));
-  let pMax = Math.max(...candles.map(c => c.h));
-  if (currentTrade) {
-    const lvls = [currentTrade.entry_price, currentTrade.stop_price, currentTrade.target_price].filter(Boolean);
-    if (lvls.length) {
-      pMin = Math.min(pMin, ...lvls);
-      pMax = Math.max(pMax, ...lvls);
+  // Price range — always start from visible candles
+  let pMin = candles.length ? Math.min(...candles.map(c => c.l)) : 0;
+  let pMax = candles.length ? Math.max(...candles.map(c => c.h)) : 1;
+
+  // When _fitToCandles is OFF, expand to include trade levels and forming schematic levels
+  if (!_fitToCandles) {
+    if (currentTrade) {
+      const lvls = [currentTrade.entry_price, currentTrade.stop_price, currentTrade.target_price].filter(Boolean);
+      if (lvls.length) { pMin = Math.min(pMin, ...lvls); pMax = Math.max(pMax, ...lvls); }
     }
+    formingSchematics.slice(0, 3).forEach(function(fs) {
+      const levels = [];
+      if (fs.tap1 && fs.tap1.price) levels.push(fs.tap1.price);
+      if (fs.tap2 && fs.tap2.price) levels.push(fs.tap2.price);
+      if (fs.tap3 && fs.tap3.price) levels.push(fs.tap3.price);
+      if (fs.range_high) levels.push(fs.range_high);
+      if (fs.range_low)  levels.push(fs.range_low);
+      if (fs.target)     levels.push(fs.target);
+      if (fs.stop_loss)  levels.push(fs.stop_loss);
+      if (levels.length) { pMin = Math.min(pMin, ...levels); pMax = Math.max(pMax, ...levels); }
+    });
   }
-  // Expand range to include forming schematic tap prices, targets, and stops
-  formingSchematics.slice(0, 3).forEach(function(fs) {
-    const levels = [];
-    if (fs.tap1 && fs.tap1.price) levels.push(fs.tap1.price);
-    if (fs.tap2 && fs.tap2.price) levels.push(fs.tap2.price);
-    if (fs.tap3 && fs.tap3.price) levels.push(fs.tap3.price);
-    if (fs.range_high) levels.push(fs.range_high);
-    if (fs.range_low)  levels.push(fs.range_low);
-    if (fs.target)     levels.push(fs.target);
-    if (fs.stop_loss)  levels.push(fs.stop_loss);
-    if (levels.length) {
-      pMin = Math.min(pMin, ...levels);
-      pMax = Math.max(pMax, ...levels);
-    }
-  });
   const pRange = pMax - pMin;
   pMin -= pRange * 0.04;
   pMax += pRange * 0.04;
@@ -16174,10 +16240,61 @@ function renderChart(data) {
   ctx.strokeRect(m.left, m.top, cw, ch);
 }
 
-async function loadChart() {
+// ── Chart toolbar actions ──────────────────────────────────────────────────
+
+function chartZoomIn() {
+  if (!_chartData) return;
+  const n   = (_chartData.candles || []).length;
+  const cur = _viewLen !== null ? _viewLen : n;
+  const nxt = Math.max(20, Math.floor(cur * 0.65));
+  const shrunk = cur - nxt;
+  _viewLen   = nxt;
+  _viewStart = Math.max(0, Math.min(n - _viewLen, _viewStart + Math.floor(shrunk / 2)));
+  renderChart(_chartData);
+}
+
+function chartZoomOut() {
+  if (!_chartData) return;
+  const n   = (_chartData.candles || []).length;
+  const cur = _viewLen !== null ? _viewLen : n;
+  const nxt = Math.min(n, Math.ceil(cur * 1.55));
+  if (nxt >= n) { _viewLen = null; _viewStart = 0; }
+  else          { _viewLen = nxt;  _viewStart = Math.max(0, Math.min(n - _viewLen, _viewStart)); }
+  renderChart(_chartData);
+}
+
+function chartFitAll() {
+  if (!_chartData) return;
+  _viewStart = 0; _viewLen = null;
+  renderChart(_chartData);
+}
+
+function chartReset() {
+  _viewStart = 0; _viewLen = null; _fitToCandles = false;
+  const btn = document.getElementById('btnScaleToCandles');
+  if (btn) btn.classList.remove('active');
+  if (_chartData) renderChart(_chartData);
+}
+
+function chartToggleScale() {
+  _fitToCandles = !_fitToCandles;
+  const btn = document.getElementById('btnScaleToCandles');
+  if (btn) btn.classList.toggle('active', _fitToCandles);
+  if (_chartData) renderChart(_chartData);
+}
+
+// resetView=true: resets zoom/pan (use on TF change); false: preserves zoom (auto-refresh)
+async function loadChart(resetView) {
   document.getElementById('chartStatus').textContent = 'Loading...';
   try {
     _chartData = await fetchChartData(_chartTF);
+    const n = (_chartData.candles || []).length;
+    if (resetView || _viewLen === null) {
+      _viewStart = 0; _viewLen = null;
+    } else {
+      // Stay zoomed in but advance to the newest candles
+      _viewStart = Math.max(0, n - _viewLen);
+    }
     renderChart(_chartData);
     document.getElementById('chartStatus').textContent =
       'Updated ' + new Date().toLocaleTimeString();
@@ -16186,24 +16303,35 @@ async function loadChart() {
   }
 }
 
-// TF selector buttons
+// TF selector buttons — reset view on TF change
 document.querySelectorAll('.tf-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     _chartTF = btn.dataset.tf;
-    loadChart();
+    loadChart(true);
   });
 });
+
+// Mouse-wheel zoom on the chart canvas
+(function() {
+  var canvas = document.getElementById('chartCanvas');
+  if (canvas) {
+    canvas.addEventListener('wheel', function(e) {
+      e.preventDefault();
+      if (e.deltaY < 0) chartZoomIn(); else chartZoomOut();
+    }, { passive: false });
+  }
+})();
 
 // Re-render on window resize (no refetch needed)
 window.addEventListener('resize', () => { if (_chartData) renderChart(_chartData); });
 
-// Auto-refresh chart every 30 s (aligned with trade state refresh)
+// Auto-refresh chart every 30 s — preserve zoom/pan
 setInterval(loadChart, 30000);
 
 // Initial chart load
-loadChart();
+loadChart(true);
 </script>
 </body>
 </html>"""
