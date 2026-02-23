@@ -183,10 +183,12 @@ _TELEGRAM_API = "https://api.telegram.org"
 
 
 def _telegram_5b_send(text: str) -> bool:
-    """Fire-and-forget Telegram message to TELEGRAM_CHAT_ID_3."""
+    """Fire-and-forget Telegram message.
+    Uses TELEGRAM_CHAT_ID_3 if set; falls back to TELEGRAM_CHAT_ID."""
     token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID_3")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID_3") or os.getenv("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
+        logger.warning("[5B-TELEGRAM] Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID — notifications disabled")
         return False
 
     url = f"{_TELEGRAM_API}/bot{token}/sendMessage"
@@ -194,7 +196,11 @@ def _telegram_5b_send(text: str) -> bool:
 
     def _send():
         try:
-            requests.post(url, json=payload, timeout=5)
+            resp = requests.post(url, json=payload, timeout=5)
+            if resp.status_code != 200:
+                logger.error(f"[5B-TELEGRAM] API error {resp.status_code}: {resp.text}")
+            else:
+                logger.info(f"[5B-TELEGRAM] Sent OK to chat_id={chat_id[:6]}…")
         except Exception as e:
             logger.error(f"[5B-TELEGRAM] Send error: {e}")
 
