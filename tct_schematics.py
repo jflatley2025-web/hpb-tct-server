@@ -110,8 +110,7 @@ class TCTSchematicDetector:
 
     def __init__(self, candles: pd.DataFrame):
         """Initialize with candle data."""
-        self.candles = candles.copy()
-        self.candles.reset_index(drop=True, inplace=True)
+        self.candles = candles.reset_index(drop=True)
 
     def detect_all_schematics(self, detected_ranges: List[Dict] = None) -> Dict:
         """
@@ -2749,8 +2748,7 @@ class TCTSchematicDetector:
             search_start = max(0, tap3_idx - 15)
             search_end = min(tap3_idx + 20, len(self.candles) - 5)
 
-            inner_candles = self.candles.iloc[search_start:search_end].copy()
-            inner_candles.reset_index(drop=True, inplace=True)
+            inner_candles = self.candles.iloc[search_start:search_end].reset_index(drop=True)
 
             if len(inner_candles) < 15:
                 return result
