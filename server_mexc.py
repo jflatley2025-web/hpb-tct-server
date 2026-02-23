@@ -2556,6 +2556,7 @@ _scanner_consecutive_errors = 0  # Track consecutive fetch errors for adaptive b
 # Candle cache: keyed by (symbol, interval, limit), value is (timestamp, DataFrame)
 _candle_cache: Dict[tuple, tuple] = {}
 CANDLE_CACHE_TTL_SEC = 60  # Cache candles for 60 seconds (keeps data fresh for live schematic detection)
+MAX_CANDLE_CACHE_SIZE = 2000  # Hard cap: evict oldest by insertion order if exceeded
 
 # Invalid symbols: 400 errors → never retry during this process lifetime
 _invalid_symbols: set = set()
@@ -2727,6 +2728,13 @@ def _evict_stale_cache():
         del _candle_cache[k]
     if stale_keys:
         logger.info(f"[CACHE] Evicted {len(stale_keys)} stale cache entries")
+    # Hard cap: trim oldest-inserted entries if cache still exceeds max size
+    overflow = len(_candle_cache) - MAX_CANDLE_CACHE_SIZE
+    if overflow > 0:
+        oldest_keys = list(_candle_cache.keys())[:overflow]
+        for k in oldest_keys:
+            del _candle_cache[k]
+        logger.info(f"[CACHE] Trimmed {overflow} entries to enforce size cap ({MAX_CANDLE_CACHE_SIZE})")
 
 
 async def detect_best_range(candles: List) -> Optional[Dict]:

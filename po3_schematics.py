@@ -70,8 +70,7 @@ class PO3SchematicDetector:
 
     def __init__(self, candles: pd.DataFrame):
         """Initialize with OHLC candle data."""
-        self.candles = candles.copy()
-        self.candles.reset_index(drop=True, inplace=True)
+        self.candles = candles.reset_index(drop=True)
 
     def detect_po3_schematics(self, detected_ranges: List[Dict] = None) -> Dict:
         """
@@ -165,8 +164,7 @@ class PO3SchematicDetector:
                 # RTZ quality: how many times does price return to equilibrium?
                 eq = (high + low) / 2
                 eq_zone_size = range_size * 0.2
-                touches = sum(1 for _, c in segment.iterrows()
-                              if abs(float(c["close"]) - eq) < eq_zone_size)
+                touches = int((abs(segment["close"].astype(float) - eq) < eq_zone_size).sum())
                 rtz_quality = min(1.0, touches / (len(segment) * 0.3))
 
                 # Compression detection: check if range narrows over time
@@ -177,10 +175,8 @@ class PO3SchematicDetector:
                 has_compression = second_range < first_range * (1 - self.COMPRESSION_THRESHOLD) if first_range > 0 else False
 
                 # Liquidity building: check for wicks on both sides
-                upper_wicks = sum(1 for _, c in segment.iterrows()
-                                  if float(c["high"]) > high - range_size * 0.1)
-                lower_wicks = sum(1 for _, c in segment.iterrows()
-                                  if float(c["low"]) < low + range_size * 0.1)
+                upper_wicks = int((segment["high"].astype(float) > high - range_size * 0.1).sum())
+                lower_wicks = int((segment["low"].astype(float) < low + range_size * 0.1).sum())
                 has_liquidity_both_sides = upper_wicks >= 2 and lower_wicks >= 2
 
                 ranges.append({
@@ -311,10 +307,11 @@ class PO3SchematicDetector:
         expansion_high = range_high
         if manipulation_end and manipulation_end < len(self.candles) - 1:
             expansion_candles = self.candles.iloc[manipulation_end:]
-            for _, c in expansion_candles.iterrows():
-                if float(c["high"]) > range_high:
-                    has_expansion = True
-                    expansion_high = max(expansion_high, float(c["high"]))
+            _exp_highs = expansion_candles["high"].astype(float)
+            _above_range = _exp_highs[_exp_highs > range_high]
+            if not _above_range.empty:
+                has_expansion = True
+                expansion_high = max(expansion_high, float(_above_range.max()))
 
         # Calculate quality score
         quality = self._calculate_quality(
@@ -485,10 +482,11 @@ class PO3SchematicDetector:
         expansion_low = range_low
         if manipulation_end and manipulation_end < len(self.candles) - 1:
             expansion_candles = self.candles.iloc[manipulation_end:]
-            for _, c in expansion_candles.iterrows():
-                if float(c["low"]) < range_low:
-                    has_expansion = True
-                    expansion_low = min(expansion_low, float(c["low"]))
+            _exp_lows = expansion_candles["low"].astype(float)
+            _below_range = _exp_lows[_exp_lows < range_low]
+            if not _below_range.empty:
+                has_expansion = True
+                expansion_low = min(expansion_low, float(_below_range.min()))
 
         # Calculate quality
         quality = self._calculate_quality(
@@ -675,8 +673,8 @@ class PO3SchematicDetector:
             return False
 
         if model_type == "accumulation":
-            lows = [float(c["low"]) for _, c in segment.iterrows()]
-            closes = [float(c["close"]) for _, c in segment.iterrows()]
+            lows = segment["low"].astype(float).tolist()
+            closes = segment["close"].astype(float).tolist()
 
             if len(lows) < 3:
                 return False
@@ -710,8 +708,8 @@ class PO3SchematicDetector:
             return has_higher_low
 
         elif model_type == "distribution":
-            highs = [float(c["high"]) for _, c in segment.iterrows()]
-            closes = [float(c["close"]) for _, c in segment.iterrows()]
+            highs = segment["high"].astype(float).tolist()
+            closes = segment["close"].astype(float).tolist()
 
             if len(highs) < 3:
                 return False
@@ -765,10 +763,7 @@ class PO3SchematicDetector:
         if direction == "bullish":
             # Count how many times price dips below range low
             range_low = rng["range_low"]
-            dip_count = 0
-            for _, c in segment.iterrows():
-                if float(c["low"]) < range_low:
-                    dip_count += 1
+            dip_count = int((segment["low"].astype(float) < range_low).sum())
 
             # Exception 1: only 1-2 dips (2-tap), needs excellent RTZ
             if dip_count <= 2 and rng["rtz_quality"] > 0.7:
@@ -782,10 +777,7 @@ class PO3SchematicDetector:
 
         elif direction == "bearish":
             range_high = rng["range_high"]
-            spike_count = 0
-            for _, c in segment.iterrows():
-                if float(c["high"]) > range_high:
-                    spike_count += 1
+            spike_count = int((segment["high"].astype(float) > range_high).sum())
 
             if spike_count <= 2 and rng["rtz_quality"] > 0.7:
                 return "exception_1_two_tap"

@@ -551,6 +551,13 @@ def refine_schematic_bos_with_ltf(
         try:
             detector = TCTSchematicDetector(ltf_df_reset)
 
+            # Pre-extract column arrays once to avoid repeated Series creation
+            # inside the per-candle loops below (.iloc[i]["col"] allocates a
+            # Series per call; direct array indexing is ~10x faster).
+            _ltf_highs = ltf_df_reset["high"].to_numpy()
+            _ltf_lows = ltf_df_reset["low"].to_numpy()
+            _ltf_closes = ltf_df_reset["close"].to_numpy()
+
             # PRIMARY: scan LTF candles BETWEEN tap2 and tap3 for internal
             # swing structure.  TCT methodology: the market structure drawn
             # between tap2 and tap3 (swing highs for bullish, swing lows for
@@ -563,7 +570,7 @@ def refine_schematic_bos_with_ltf(
                     ltf_swings = []
                     for i in range(tap2_ltf_pos + 1, tap3_ltf_pos):
                         if detector._is_swing_high(i, lookback=1):
-                            sh_price = float(ltf_df_reset.iloc[i]["high"])
+                            sh_price = _ltf_highs[i]
                             # Must be within the tap2-tap3 window (below MTF struct high)
                             if ref_low < sh_price < ref_high:
                                 ltf_swings.append({"idx": i, "price": sh_price})
@@ -571,18 +578,18 @@ def refine_schematic_bos_with_ltf(
                         # Fallback to coarser swings within the same window
                         for i in range(tap2_ltf_pos + 2, tap3_ltf_pos - 1):
                             if detector._is_swing_high(i, lookback=2):
-                                sh_price = float(ltf_df_reset.iloc[i]["high"])
+                                sh_price = _ltf_highs[i]
                                 if ref_low < sh_price < ref_high:
                                     ltf_swings.append({"idx": i, "price": sh_price})
                     # Lowest first → earliest entry at best R:R
                     ltf_swings.sort(key=lambda s: s["price"])
                     for sh in ltf_swings:
                         for i in range(tap3_ltf_pos, len(ltf_df_reset)):
-                            if float(ltf_df_reset.iloc[i]["close"]) > sh["price"]:
+                            if _ltf_closes[i] > sh["price"]:
                                 bos = {
                                     "idx": i,
                                     "price": sh["price"],
-                                    "confirmation_close": float(ltf_df_reset.iloc[i]["close"]),
+                                    "confirmation_close": _ltf_closes[i],
                                     "is_inside_range": True,
                                     "bos_method": "ltf_internal_structure",
                                 }
@@ -594,24 +601,24 @@ def refine_schematic_bos_with_ltf(
                     ltf_swings = []
                     for i in range(tap2_ltf_pos + 1, tap3_ltf_pos):
                         if detector._is_swing_low(i, lookback=1):
-                            sl_price = float(ltf_df_reset.iloc[i]["low"])
+                            sl_price = _ltf_lows[i]
                             if ref_low < sl_price < ref_high:
                                 ltf_swings.append({"idx": i, "price": sl_price})
                     if not ltf_swings:
                         for i in range(tap2_ltf_pos + 2, tap3_ltf_pos - 1):
                             if detector._is_swing_low(i, lookback=2):
-                                sl_price = float(ltf_df_reset.iloc[i]["low"])
+                                sl_price = _ltf_lows[i]
                                 if ref_low < sl_price < ref_high:
                                     ltf_swings.append({"idx": i, "price": sl_price})
                     # Highest first → earliest entry at best R:R
                     ltf_swings.sort(key=lambda s: s["price"], reverse=True)
                     for sl in ltf_swings:
                         for i in range(tap3_ltf_pos, len(ltf_df_reset)):
-                            if float(ltf_df_reset.iloc[i]["close"]) < sl["price"]:
+                            if _ltf_closes[i] < sl["price"]:
                                 bos = {
                                     "idx": i,
                                     "price": sl["price"],
-                                    "confirmation_close": float(ltf_df_reset.iloc[i]["close"]),
+                                    "confirmation_close": _ltf_closes[i],
                                     "is_inside_range": True,
                                     "bos_method": "ltf_internal_structure",
                                 }
