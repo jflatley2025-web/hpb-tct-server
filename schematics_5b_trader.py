@@ -930,6 +930,43 @@ class Schematics5BTrader:
                     "evaluations": tf_evals[:10],
                 }
 
+            # Collect forming (unconfirmed) schematics for chart display —
+            # all 3 taps present, bias-filtered, sorted newest tap3 first.
+            forming_schematics = []
+            for _ftf, _fsch_list in all_schematics_by_tf.items():
+                for _fs in _fsch_list:
+                    if not isinstance(_fs, dict):
+                        continue
+                    if _fs.get("is_confirmed", False):
+                        continue  # only unconfirmed / in-formation
+                    _fdir = _fs.get("direction", "unknown")
+                    if htf_bias == "bullish" and _fdir == "bearish":
+                        continue
+                    if htf_bias == "bearish" and _fdir == "bullish":
+                        continue
+                    if not (_fs.get("tap1") and _fs.get("tap2") and _fs.get("tap3")):
+                        continue  # all 3 taps required
+                    _range = _fs.get("range") or {}
+                    _sl = _fs.get("stop_loss")
+                    _tgt = _fs.get("target")
+                    forming_schematics.append({
+                        "tf": _ftf,
+                        "direction": _fdir,
+                        "model": _fs.get("model", ""),
+                        "tap1": _fs.get("tap1"),
+                        "tap2": _fs.get("tap2"),
+                        "tap3": _fs.get("tap3"),
+                        "range_high": _range.get("high") if _range else None,
+                        "range_low": _range.get("low") if _range else None,
+                        "target": _tgt.get("price") if isinstance(_tgt, dict) else _tgt,
+                        "stop_loss": _sl.get("price") if isinstance(_sl, dict) else _sl,
+                        "quality_score": _fs.get("quality_score", 0),
+                    })
+            forming_schematics.sort(
+                key=lambda x: (x.get("tap3") or {}).get("idx", 0), reverse=True
+            )
+            forming_schematics = forming_schematics[:5]
+
             # Store debug
             self.last_debug = {
                 "timestamp": cycle_result["timestamp"],
@@ -938,6 +975,7 @@ class Schematics5BTrader:
                 "best_tf": best_tf,
                 "best_score": best_score,
                 "htf_cascade_active": True,
+                "forming_schematics": forming_schematics,
             }
 
             # 5. Enter trade if qualifying setup found
