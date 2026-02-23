@@ -15185,11 +15185,28 @@ async def schematics_5b_candles(tf: str = "15m", limit: int = 200):
             "price": debug.get("current_price"),
             "tf": debug.get("best_tf"),
         }
+    # Convert forming schematic tap timestamps (strings) to UNIX ms for chart
+    raw_forming = debug.get("forming_schematics", [])
+    forming_schematics = []
+    for fs in raw_forming:
+        fs_out = dict(fs)
+        for tap_key in ("tap1", "tap2", "tap3"):
+            tap = fs_out.get(tap_key)
+            if tap and isinstance(tap, dict) and "time" in tap:
+                try:
+                    import pandas as _pd
+                    tap_copy = dict(tap)
+                    tap_copy["t"] = int(_pd.Timestamp(tap["time"]).timestamp() * 1000)
+                    fs_out[tap_key] = tap_copy
+                except Exception:
+                    pass
+        forming_schematics.append(fs_out)
     return convert_numpy_types({
         "candles": candles,
         "current_trade": snap.get("current_trade"),
         "trade_history": snap.get("trade_history", []),
         "forming": forming,
+        "forming_schematics": forming_schematics,
     })
 
 
@@ -15372,6 +15389,8 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
     <span class="legend-item"><span class="legend-dot win"></span> Win (closed)</span>
     <span class="legend-item"><span class="legend-dot loss"></span> Loss (closed)</span>
     <span class="legend-item"><span class="legend-dot forming"></span> Forming (detected, not yet executed)</span>
+    <span class="legend-item"><span style="display:inline-flex;align-items:center;justify-content:center;width:12px;height:12px;border-radius:50%;background:#00c853;color:#fff;font-size:6px;font-weight:bold">T1</span> T1 tap (forming schematic)</span>
+    <span class="legend-item"><span style="display:inline-flex;align-items:center;justify-content:center;width:12px;height:12px;border-radius:50%;background:#00c853;color:#fff;font-size:6px;font-weight:bold">T3</span> T3 potential tap</span>
   </div>
 </div>
 
@@ -15790,6 +15809,130 @@ function drawExitMarker(ctx, x, y, color) {
   ctx.restore();
 }
 
+// Draw forming TCT schematics (T1 / T2 / T3 tap markers, range box, target & stop lines).
+// Called after candles are drawn so markers appear on top.
+function drawFormingSchematics(ctx, schematics, candles, toX, toY, W, m) {
+  if (!schematics || !schematics.length) return;
+
+  // Show at most 3 (sorted newest tap3 first by the backend)
+  const toShow = schematics.slice(0, 3);
+
+  toShow.forEach(function(fs, idx) {
+    const isBull   = fs.direction === 'bullish';
+    const schColor = isBull ? '#00c853' : '#ff6b35';
+
+    const t1 = fs.tap1 || null;
+    const t2 = fs.tap2 || null;
+    const t3 = fs.tap3 || null;
+
+    // Candle indices for each tap (using UNIX ms timestamp 't' added by backend)
+    const ci1 = (t1 && t1.t) ? nearestCandleIdx(candles, t1.t) : -1;
+    const ci2 = (t2 && t2.t) ? nearestCandleIdx(candles, t2.t) : -1;
+    const ci3 = (t3 && t3.t) ? nearestCandleIdx(candles, t3.t) : -1;
+
+    // ── Range box (range_low → range_high) from tap1 candle to right edge ──
+    if (fs.range_high && fs.range_low && ci1 >= 0) {
+      const ry1 = toY(fs.range_high);
+      const ry2 = toY(fs.range_low);
+      const rx  = toX(ci1) - (W / candles.length) * 0.5;
+      const rw  = (W - m.right) - rx;
+      ctx.save();
+      ctx.fillStyle   = isBull ? 'rgba(0,200,83,0.06)' : 'rgba(255,107,53,0.06)';
+      ctx.strokeStyle = isBull ? 'rgba(0,200,83,0.35)' : 'rgba(255,107,53,0.35)';
+      ctx.lineWidth   = 1;
+      ctx.setLineDash([4, 3]);
+      ctx.fillRect(rx, ry1, rw, ry2 - ry1);
+      ctx.strokeRect(rx, ry1, rw, ry2 - ry1);
+      ctx.restore();
+    }
+
+    // ── Target line (dashed) ──────────────────────────────────────────────
+    if (fs.target) {
+      const ty = toY(fs.target);
+      ctx.save();
+      ctx.strokeStyle = isBull ? 'rgba(0,200,83,0.75)' : 'rgba(255,107,53,0.75)';
+      ctx.lineWidth   = 1.5;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath();
+      ctx.moveTo(m.left, ty);
+      ctx.lineTo(W - m.right, ty);
+      ctx.stroke();
+      ctx.fillStyle   = isBull ? 'rgba(0,200,83,0.75)' : 'rgba(255,107,53,0.75)';
+      ctx.font        = '9px monospace';
+      ctx.textAlign   = 'right';
+      ctx.setLineDash([]);
+      ctx.fillText('TGT ' + (fs.tf || '').toUpperCase(), W - m.right - 4, ty - 3);
+      ctx.restore();
+    }
+
+    // ── Stop loss line (dashed red) ───────────────────────────────────────
+    if (fs.stop_loss) {
+      const sy = toY(fs.stop_loss);
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,23,68,0.45)';
+      ctx.lineWidth   = 1;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(m.left, sy);
+      ctx.lineTo(W - m.right, sy);
+      ctx.stroke();
+      ctx.fillStyle  = 'rgba(255,23,68,0.55)';
+      ctx.font       = '9px monospace';
+      ctx.textAlign  = 'right';
+      ctx.setLineDash([]);
+      ctx.fillText('SL', W - m.right - 4, sy - 3);
+      ctx.restore();
+    }
+
+    // ── Tap dot helper ────────────────────────────────────────────────────
+    function drawTap(ci, price, label) {
+      if (ci < 0 || price == null) return;
+      const tx = toX(ci);
+      const ty = toY(price);
+      ctx.save();
+      // Outer glow circle
+      ctx.beginPath();
+      ctx.arc(tx, ty, 9, 0, 2 * Math.PI);
+      ctx.fillStyle = isBull ? 'rgba(0,200,83,0.15)' : 'rgba(255,107,53,0.15)';
+      ctx.fill();
+      // Filled circle
+      ctx.beginPath();
+      ctx.arc(tx, ty, 6, 0, 2 * Math.PI);
+      ctx.fillStyle   = schColor;
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth   = 1.5;
+      ctx.setLineDash([]);
+      ctx.fill();
+      ctx.stroke();
+      // Label inside dot
+      ctx.fillStyle     = '#ffffff';
+      ctx.font          = 'bold 7px sans-serif';
+      ctx.textAlign     = 'center';
+      ctx.textBaseline  = 'middle';
+      ctx.fillText(label, tx, ty);
+      ctx.textBaseline  = 'alphabetic';
+      ctx.restore();
+    }
+
+    if (ci1 >= 0 && t1) drawTap(ci1, t1.price, 'T1');
+    if (ci2 >= 0 && t2) drawTap(ci2, t2.price, 'T2');
+    if (ci3 >= 0 && t3) drawTap(ci3, t3.price, 'T3');
+
+    // ── TF + model badge above T3 ─────────────────────────────────────────
+    if (ci3 >= 0 && t3 && (fs.tf || fs.model)) {
+      const badge = ((fs.tf || '').toUpperCase() + (fs.model ? ' ' + fs.model : '')).trim();
+      const bx = toX(ci3);
+      const by = toY(t3.price) - 16;
+      ctx.save();
+      ctx.fillStyle  = schColor;
+      ctx.font       = 'bold 8px monospace';
+      ctx.textAlign  = 'center';
+      ctx.fillText(badge, bx, by);
+      ctx.restore();
+    }
+  });
+}
+
 function renderChart(data) {
   const canvas = document.getElementById('chartCanvas');
   if (!canvas) return;
@@ -15813,10 +15956,11 @@ function renderChart(data) {
   ctx.fillStyle = CHART_BG;
   ctx.fillRect(0, 0, W, H);
 
-  const candles = (data && data.candles) || [];
-  const currentTrade  = (data && data.current_trade)  || null;
-  const tradeHistory  = (data && data.trade_history)  || [];
-  const forming       = (data && data.forming)        || null;
+  const candles          = (data && data.candles)            || [];
+  const currentTrade     = (data && data.current_trade)      || null;
+  const tradeHistory     = (data && data.trade_history)      || [];
+  const forming          = (data && data.forming)            || null;
+  const formingSchematics = (data && data.forming_schematics) || [];
 
   if (!candles.length) {
     ctx.fillStyle = '#888';
@@ -15831,7 +15975,7 @@ function renderChart(data) {
   const cw = W - m.left - m.right;
   const ch = H - m.top  - m.bottom;
 
-  // Price range — candles + any open trade levels so lines stay visible
+  // Price range — candles + any open trade levels + forming schematic levels
   let pMin = Math.min(...candles.map(c => c.l));
   let pMax = Math.max(...candles.map(c => c.h));
   if (currentTrade) {
@@ -15841,6 +15985,21 @@ function renderChart(data) {
       pMax = Math.max(pMax, ...lvls);
     }
   }
+  // Expand range to include forming schematic tap prices, targets, and stops
+  formingSchematics.slice(0, 3).forEach(function(fs) {
+    const levels = [];
+    if (fs.tap1 && fs.tap1.price) levels.push(fs.tap1.price);
+    if (fs.tap2 && fs.tap2.price) levels.push(fs.tap2.price);
+    if (fs.tap3 && fs.tap3.price) levels.push(fs.tap3.price);
+    if (fs.range_high) levels.push(fs.range_high);
+    if (fs.range_low)  levels.push(fs.range_low);
+    if (fs.target)     levels.push(fs.target);
+    if (fs.stop_loss)  levels.push(fs.stop_loss);
+    if (levels.length) {
+      pMin = Math.min(pMin, ...levels);
+      pMax = Math.max(pMax, ...levels);
+    }
+  });
   const pRange = pMax - pMin;
   pMin -= pRange * 0.04;
   pMax += pRange * 0.04;
@@ -15930,6 +16089,9 @@ function renderChart(data) {
       }
     }
   }
+
+  // ── Forming TCT schematics (T1/T2/T3 tap markers, range box, target/stop) ─
+  drawFormingSchematics(ctx, formingSchematics, candles, toX, toY, W, m);
 
   // ── Forming setup marker (detected schematic, score < 50) ────
   if (forming && forming.price) {
