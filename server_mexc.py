@@ -15807,6 +15807,39 @@ function hLine(ctx, x1, y, x2, color, label, dashed) {
   ctx.restore();
 }
 
+// Draw a colored pill badge just inside the right edge of the chart area.
+// Keeps trade labels (Entry / SL / TP) from bleeding into the price-axis column.
+function drawLineBadge(ctx, x, y, text, color) {
+  ctx.save();
+  ctx.font = 'bold 9px monospace';
+  const tw   = ctx.measureText(text).width;
+  const padX = 5, bh = 14, r = 3;
+  const bw   = tw + padX * 2;
+  const bx   = x - bw - 6;   // 6px gap from right chart edge
+  const by   = y - bh / 2;
+  ctx.fillStyle   = color;
+  ctx.globalAlpha = 0.88;
+  ctx.beginPath();
+  ctx.moveTo(bx + r, by);
+  ctx.lineTo(bx + bw - r, by);
+  ctx.arcTo(bx + bw, by,      bx + bw, by + r,      r);
+  ctx.lineTo(bx + bw, by + bh - r);
+  ctx.arcTo(bx + bw, by + bh, bx + bw - r, by + bh, r);
+  ctx.lineTo(bx + r,  by + bh);
+  ctx.arcTo(bx,       by + bh, bx,      by + bh - r, r);
+  ctx.lineTo(bx,      by + r);
+  ctx.arcTo(bx,       by,      bx + r,  by,          r);
+  ctx.closePath();
+  ctx.fill();
+  ctx.globalAlpha  = 1;
+  ctx.fillStyle    = '#ffffff';
+  ctx.textAlign    = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, bx + bw / 2, y);
+  ctx.textBaseline = 'alphabetic';
+  ctx.restore();
+}
+
 // Draw entry triangle marker (direction: 'up' = bullish, 'down' = bearish)
 function drawEntryMarker(ctx, x, y, dir, color) {
   const s = 6;
@@ -15839,7 +15872,7 @@ function drawExitMarker(ctx, x, y, color) {
 
 // Draw forming TCT schematics (T1/T2/T3 tap markers, range box, target & stop lines).
 // Up to 3 schematics shown. Each gets a distinct color palette by index so they
-// never visually merge. TGT/SL labels include TF+model to disambiguate overlapping lines.
+// never visually merge. TCT/SL labels include TF+model+Accum/Dist to disambiguate overlapping lines.
 function drawFormingSchematics(ctx, schematics, candles, toX, toY, W, m) {
   if (!schematics || !schematics.length) return;
 
@@ -15883,9 +15916,13 @@ function drawFormingSchematics(ctx, schematics, candles, toX, toY, W, m) {
       ctx.restore();
     }
 
-    // Label suffix: "TF Model" — e.g. "[1H Model_1]" — disambiguates overlapping lines
-    const tfMod    = ((fs.tf || '').toUpperCase() + (fs.model ? ' ' + fs.model : '')).trim();
-    const tfSuffix = tfMod ? ' [' + tfMod + ']' : '';
+    // Label: "TF Model Accum/Dist" — e.g. "1H Model_1 Accum" — disambiguates overlapping lines
+    const dirLabel  = isBull ? 'Accum' : 'Dist';
+    const modelBase = (fs.model || '').replace(/_Accumulation|_Distribution/gi, '');
+    const tfMod     = ((fs.tf || '').toUpperCase()
+                      + (modelBase ? ' ' + modelBase : '')
+                      + ' ' + dirLabel).trim();
+    const tfSuffix  = tfMod ? ' [' + tfMod + ']' : '';
 
     // ── Target line (dashed, schematic color) ────────────────────────────
     if (fs.target) {
@@ -15904,7 +15941,7 @@ function drawFormingSchematics(ctx, schematics, candles, toX, toY, W, m) {
       ctx.fillStyle   = schColor;
       ctx.font        = 'bold 9px monospace';
       ctx.textAlign   = 'right';
-      ctx.fillText('TGT' + tfSuffix, W - m.right - 4, ty - 3);
+      ctx.fillText('TCT' + tfSuffix, W - m.right - 4, ty - 3);
       ctx.restore();
     }
 
@@ -16205,12 +16242,9 @@ function renderChart(data) {
       ctx.restore();
     }
 
-    if (ep) hLine(ctx, m.left, toY(ep), W - m.right, '#00bcd4',
-                  'ENTRY $' + ep.toLocaleString(), false);
-    if (tp) hLine(ctx, m.left, toY(tp), W - m.right, '#00c853',
-                  'TP $' + tp.toLocaleString(), true);
-    if (sl) hLine(ctx, m.left, toY(sl), W - m.right, '#ff1744',
-                  'SL $' + sl.toLocaleString(), true);
+    if (ep) { hLine(ctx, m.left, toY(ep), W - m.right, '#00bcd4', null, false); drawLineBadge(ctx, W - m.right, toY(ep), 'Entry', '#00bcd4'); }
+    if (tp) { hLine(ctx, m.left, toY(tp), W - m.right, '#00c853', null, true);  drawLineBadge(ctx, W - m.right, toY(tp), 'TP',    '#00c853'); }
+    if (sl) { hLine(ctx, m.left, toY(sl), W - m.right, '#ff1744', null, true);  drawLineBadge(ctx, W - m.right, toY(sl), 'SL',    '#ff1744'); }
 
     // Entry marker at the opened_at candle
     const entryTs = currentTrade.opened_at ? new Date(currentTrade.opened_at).getTime() : null;
