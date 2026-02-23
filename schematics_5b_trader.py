@@ -196,7 +196,11 @@ def _telegram_5b_send(text: str) -> bool:
 
     def _send():
         try:
-            requests.post(url, json=payload, timeout=5)
+            resp = requests.post(url, json=payload, timeout=5)
+            if resp.status_code != 200:
+                logger.error(f"[5B-TELEGRAM] API error {resp.status_code}: {resp.text}")
+            else:
+                logger.info(f"[5B-TELEGRAM] Sent OK to chat_id={chat_id[:6]}…")
         except Exception as e:
             logger.error(f"[5B-TELEGRAM] Send error: {e}")
 

@@ -15218,6 +15218,19 @@ async def schematics_5b_candles(tf: str = "15m", limit: int = 200):
     })
 
 
+@app.get("/api/schematics-5b-trader/test-telegram")
+async def schematics_5b_test_telegram():
+    """Send a test Telegram message to verify TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID are working."""
+    import os as _os
+    from schematics_5b_trader import _telegram_5b_send
+    token  = _os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = _os.getenv("TELEGRAM_CHAT_ID_3") or _os.getenv("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        return {"ok": False, "error": "TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set in environment"}
+    sent = _telegram_5b_send("✅ <b>5B Trader — Telegram test</b>\nNotifications are working.")
+    return {"ok": sent, "chat_id_prefix": chat_id[:6] + "…", "token_set": bool(token)}
+
+
 @app.get("/schematics-5B", response_class=HTMLResponse)
 async def schematics_5b_page():
     """
