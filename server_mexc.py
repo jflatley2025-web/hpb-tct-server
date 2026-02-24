@@ -15358,6 +15358,15 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
 .tool-btn.active{border-color:#00c853;color:#00c853;background:rgba(0,200,83,.1)}
 .tool-sep{width:1px;height:16px;background:#333;margin:0 2px;flex-shrink:0}
 .tool-hint{color:#444;font-size:.65rem;margin-left:auto;white-space:nowrap}
+.overlay-toggles{display:flex;align-items:center;gap:6px;padding:6px 14px;background:#0e0e1c;border-top:1px solid #1e1e2d;flex-wrap:wrap}
+.overlay-btn{padding:3px 10px;border:1px solid #333;border-radius:3px;background:#12121e;color:#888;font-size:.72rem;cursor:pointer;transition:all .15s;white-space:nowrap;user-select:none}
+.overlay-btn:hover{border-color:#ffc107;color:#e0e0e0}
+.overlay-btn.active{border-color:#ffc107;color:#ffc107;background:rgba(255,193,7,.1)}
+.overlay-label{color:#555;font-size:.65rem}
+.chart-wrap canvas{cursor:grab}
+.chart-wrap canvas.dragging{cursor:grabbing}
+.chart-wrap canvas.price-scale-cursor{cursor:ns-resize}
+.chart-wrap canvas.time-scale-cursor{cursor:ew-resize}
 </style>
 </head>
 <body>
@@ -15415,7 +15424,7 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
     <button class="tool-btn" onclick="chartReset()">Reset</button>
     <div class="tool-sep"></div>
     <button class="tool-btn" id="btnScaleToCandles" onclick="chartToggleScale()">Scale to Candles</button>
-    <span class="tool-hint">Scroll to zoom &middot; Shift+drag to pan</span>
+    <span class="tool-hint">Scroll to zoom &middot; Drag chart to pan &middot; Drag right axis to scale price &middot; Drag bottom axis to scale time</span>
   </div>
   <div class="chart-wrap">
     <canvas id="chartCanvas"></canvas>
@@ -15429,6 +15438,18 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
     <span class="legend-item"><span class="legend-dot forming"></span> Forming (detected, not yet executed)</span>
     <span class="legend-item"><span style="display:inline-flex;align-items:center;justify-content:center;width:12px;height:12px;border-radius:50%;background:#00c853;color:#fff;font-size:6px;font-weight:bold">T1</span> T1 tap (forming schematic)</span>
     <span class="legend-item"><span style="display:inline-flex;align-items:center;justify-content:center;width:12px;height:12px;border-radius:50%;background:#00c853;color:#fff;font-size:6px;font-weight:bold">T3</span> T3 potential tap</span>
+    <span class="legend-item"><span style="display:inline-block;width:24px;height:2px;background:#ffc107;vertical-align:middle"></span> Range Hi/Lo</span>
+    <span class="legend-item"><span style="display:inline-block;width:24px;height:2px;background:#e0e0e0;border-top:1px dashed #e0e0e0;vertical-align:middle"></span> EQ</span>
+    <span class="legend-item"><span style="display:inline-block;width:24px;height:2px;background:#ff6b35;border-top:1px dashed #ff6b35;vertical-align:middle"></span> Deviation Limits</span>
+  </div>
+  <div class="overlay-toggles">
+    <span class="overlay-label">Show on chart:</span>
+    <button id="btnShowForming" class="overlay-btn active" onclick="toggleOverlay('forming')">Forming</button>
+    <button id="btnShowT1"      class="overlay-btn"        onclick="toggleOverlay('t1')">T1 Tap</button>
+    <button id="btnShowT3"      class="overlay-btn"        onclick="toggleOverlay('t3')">T3 Potential</button>
+    <div class="tool-sep"></div>
+    <span class="overlay-label">TF filter: <span id="overlayTFLabel" style="color:#ffc107;font-weight:700">ALL</span></span>
+    <button id="btnTFFilter" class="overlay-btn" onclick="toggleTFFilter()" style="margin-left:2px">Filter to active TF</button>
   </div>
 </div>
 
@@ -15799,6 +15820,32 @@ let _viewStart      = 0;      // index of first visible candle in the all-candle
 let _viewLen        = null;   // number of candles to show; null = show all
 let _fitToCandles   = false;  // true = Y-axis fits only visible candle prices (ignores trade levels)
 
+// Overlay toggle state
+let _showForming  = true;
+let _showT1       = false;
+let _showT3       = false;
+let _filterToTF   = false;    // when true, only show schematics whose TF matches _chartTF
+
+// Manual price-scale override (null = auto-fit)
+let _manualPMin   = null;
+let _manualPMax   = null;
+
+// Drag interaction state — tracks what the user is dragging
+let _dragMode     = null;     // null | 'pan' | 'priceScale' | 'timeScale'
+let _dragStartX   = 0;
+let _dragStartY   = 0;
+let _dragViewStart = 0;
+let _dragViewLen  = null;
+let _dragPMin     = 0;
+let _dragPMax     = 1;
+
+// Last-render layout metrics — needed by drag handlers
+let _lastM   = { top: 24, right: 88, bottom: 46, left: 8 };
+let _lastW   = 800;
+let _lastH   = 440;
+let _lastPMin = 0;
+let _lastPMax = 1;
+
 // Fetch OHLC + trade data from our new endpoint
 async function fetchChartData(tf) {
   const r = await fetch('/api/schematics-5b-trader/candles?tf=' + tf + '&limit=200');
@@ -16077,6 +16124,120 @@ function drawFormingSchematics(ctx, schematics, candles, toX, toY, W, m) {
   });
 }
 
+// Draw Range High, EQ, Range Low, and Deviation Limits (0.5× range extension)
+// for the first forming schematic whose TF matches the current chart TF.
+// These run on every render regardless of toggle state.
+function drawRangeLevels(ctx, schematics, tf, toY, W, m) {
+  const tfNorm = (tf || '').toLowerCase();
+  const fs = schematics.find(s =>
+    (s.tf || '').toLowerCase() === tfNorm && s.range_high != null && s.range_low != null
+  );
+  if (!fs) return;
+
+  const rh   = fs.range_high;
+  const rl   = fs.range_low;
+  const eq   = (rh + rl) / 2;
+  const sz   = rh - rl;
+  const devH = rh + sz * 0.5;   // 50% extension above Range High
+  const devL = rl - sz * 0.5;   // 50% extension below Range Low
+  const x1   = m.left;
+  const x2   = W - m.right;
+
+  function solidLine(price, color, label) {
+    const y = toY(price);
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([]);
+    ctx.beginPath(); ctx.moveTo(x1, y); ctx.lineTo(x2, y); ctx.stroke();
+    ctx.fillStyle = color; ctx.font = 'bold 9px monospace'; ctx.textAlign = 'left';
+    ctx.fillText(label, x2 + 4, y + 4);
+    ctx.restore();
+  }
+
+  function dashedLine(price, color, label) {
+    const y = toY(price);
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = 0.75;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([5, 4]);
+    ctx.beginPath(); ctx.moveTo(x1, y); ctx.lineTo(x2, y); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = color; ctx.font = 'bold 9px monospace'; ctx.textAlign = 'left';
+    ctx.fillText(label, x2 + 4, y + 4);
+    ctx.restore();
+  }
+
+  solidLine(devH,  '#ff6b35', 'Dev Hi');
+  solidLine(rh,    '#ffc107', 'Range Hi');
+  dashedLine(eq,   '#e0e0e0', 'EQ');
+  solidLine(rl,    '#ffc107', 'Range Lo');
+  solidLine(devL,  '#ff6b35', 'Dev Lo');
+}
+
+// Draw a horizontal line at each T1 tap price for TF-matched forming schematics.
+function drawT1Levels(ctx, schematics, tf, toY, W, m) {
+  const tfNorm = (tf || '').toLowerCase();
+  const COLORS = ['#00c853', '#00b4d8', '#ffd600'];
+  schematics
+    .filter(s => (s.tf || '').toLowerCase() === tfNorm && s.tap1 && s.tap1.price != null)
+    .slice(0, 3)
+    .forEach(function(fs, idx) {
+      const y = toY(fs.tap1.price);
+      const c = COLORS[idx] || COLORS[0];
+      const modelShort = (fs.model || '').replace(/_Accumulation|_Distribution/gi, '');
+      const label = 'T1' + (modelShort ? ' [' + modelShort + ']' : '');
+      ctx.save();
+      ctx.strokeStyle = c;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([8, 4]);
+      ctx.globalAlpha = 0.9;
+      ctx.beginPath(); ctx.moveTo(m.left, y); ctx.lineTo(W - m.right, y); ctx.stroke();
+      ctx.setLineDash([]); ctx.globalAlpha = 1;
+      ctx.fillStyle = c; ctx.font = 'bold 9px monospace'; ctx.textAlign = 'left';
+      ctx.fillText(label, W - m.right + 4, y - 2);
+      ctx.restore();
+    });
+}
+
+// Draw a horizontal line at each T3 tap (or estimated T3) price for TF-matched forming schematics.
+function drawT3Levels(ctx, schematics, tf, toY, W, m) {
+  const tfNorm = (tf || '').toLowerCase();
+  const COLORS = ['#ce93d8', '#80cbc4', '#ffcc02'];
+  schematics
+    .filter(s => (s.tf || '').toLowerCase() === tfNorm)
+    .slice(0, 3)
+    .forEach(function(fs, idx) {
+      // Use tap3 if it exists; otherwise estimate from range extremes
+      let price = null;
+      let estimated = false;
+      if (fs.tap3 && fs.tap3.price != null) {
+        price = fs.tap3.price;
+      } else if (fs.direction === 'bullish' && fs.range_low != null) {
+        price = fs.range_low; estimated = true;
+      } else if (fs.direction === 'bearish' && fs.range_high != null) {
+        price = fs.range_high; estimated = true;
+      }
+      if (price == null) return;
+      const y = toY(price);
+      const c = COLORS[idx] || COLORS[0];
+      const modelShort = (fs.model || '').replace(/_Accumulation|_Distribution/gi, '');
+      const label = (estimated ? 'T3 est' : 'T3') + (modelShort ? ' [' + modelShort + ']' : '');
+      ctx.save();
+      ctx.strokeStyle = c;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4, 4]);
+      ctx.globalAlpha = 0.9;
+      ctx.beginPath(); ctx.moveTo(m.left, y); ctx.lineTo(W - m.right, y); ctx.stroke();
+      ctx.setLineDash([]); ctx.globalAlpha = 1;
+      ctx.fillStyle = c; ctx.font = 'bold 9px monospace'; ctx.textAlign = 'left';
+      ctx.fillText(label, W - m.right + 4, y - 2);
+      ctx.restore();
+    });
+}
+
 function renderChart(data) {
   const canvas = document.getElementById('chartCanvas');
   if (!canvas) return;
@@ -16120,22 +16281,48 @@ function renderChart(data) {
     return;
   }
 
-  // Layout margins: left is minimal; right gives room for price labels
+  // Layout margins: left is minimal; right gives room for price labels + drag zone indicator
   const m = { top: 24, right: 88, bottom: 46, left: 8 };
   const cw = W - m.left - m.right;
   const ch = H - m.top  - m.bottom;
 
-  // Price range — always start from visible candles
+  // Store layout for drag handlers
+  _lastM = m; _lastW = W; _lastH = H;
+
+  // Filter schematics: if TF filter is on, only keep those matching _chartTF
+  const tfNorm = _chartTF.toLowerCase();
+  const visibleSchematics = _filterToTF
+    ? formingSchematics.filter(s => (s.tf || '').toLowerCase() === tfNorm)
+    : formingSchematics;
+
+  // Determine if a 4H-matched schematic exists for range levels
+  const hasTFRangeSchematic = formingSchematics.some(
+    s => (s.tf || '').toLowerCase() === tfNorm && s.range_high != null && s.range_low != null
+  );
+
+  // Price range — start from visible candles
   let pMin = candles.length ? Math.min(...candles.map(c => c.l)) : 0;
   let pMax = candles.length ? Math.max(...candles.map(c => c.h)) : 1;
 
-  // When _fitToCandles is OFF, expand to include trade levels and forming schematic levels
+  // When not fitting only to candles, expand to include relevant overlay levels
   if (!_fitToCandles) {
     if (currentTrade) {
-      const lvls = [currentTrade.entry_price, currentTrade.stop_price, currentTrade.target_price].filter(Boolean);
+      const lvls = [currentTrade.entry_price, currentTrade.stop_price,
+                    currentTrade.target_price, currentTrade.tp1_price].filter(Boolean);
       if (lvls.length) { pMin = Math.min(pMin, ...lvls); pMax = Math.max(pMax, ...lvls); }
     }
-    formingSchematics.slice(0, 3).forEach(function(fs) {
+    // Always include range/deviation levels for the active TF schematic
+    if (hasTFRangeSchematic) {
+      const rfs = formingSchematics.find(
+        s => (s.tf || '').toLowerCase() === tfNorm && s.range_high != null && s.range_low != null
+      );
+      if (rfs) {
+        const sz = rfs.range_high - rfs.range_low;
+        pMin = Math.min(pMin, rfs.range_low  - sz * 0.5);
+        pMax = Math.max(pMax, rfs.range_high + sz * 0.5);
+      }
+    }
+    visibleSchematics.slice(0, 3).forEach(function(fs) {
       const levels = [];
       if (fs.tap1 && fs.tap1.price) levels.push(fs.tap1.price);
       if (fs.tap2 && fs.tap2.price) levels.push(fs.tap2.price);
@@ -16147,15 +16334,31 @@ function renderChart(data) {
       if (levels.length) { pMin = Math.min(pMin, ...levels); pMax = Math.max(pMax, ...levels); }
     });
   }
-  const pRange = pMax - pMin;
-  pMin -= pRange * 0.04;
-  pMax += pRange * 0.04;
+
+  // Apply manual price scale override if set
+  if (_manualPMin !== null && _manualPMax !== null) {
+    pMin = _manualPMin;
+    pMax = _manualPMax;
+  } else {
+    const pRange = pMax - pMin;
+    pMin -= pRange * 0.04;
+    pMax += pRange * 0.04;
+  }
+
+  _lastPMin = pMin; _lastPMax = pMax;
 
   const toY = p  => m.top + ch - ((p - pMin) / (pMax - pMin)) * ch;
   const n   = candles.length;
   const gap = cw / n;                          // px per candle slot
   const bw  = Math.max(1.5, gap * 0.65);       // body width
   const toX = i  => m.left + (i + 0.5) * gap;
+
+  // ── Draggable axis background hints ──────────────────────────
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.04)';
+  ctx.fillRect(W - m.right, m.top, m.right, ch);    // right price-axis zone
+  ctx.fillRect(m.left, H - m.bottom, cw, m.bottom); // bottom time-axis zone
+  ctx.restore();
 
   // ── Horizontal price grid ─────────────────────────────────────
   const steps = 8;
@@ -16213,6 +16416,9 @@ function renderChart(data) {
     }
   }
 
+  // ── Range High / EQ / Range Low / Deviation lines (always on when TF schematic exists) ──
+  drawRangeLevels(ctx, formingSchematics, _chartTF, toY, W, m);
+
   // ── Trade history markers (completed / executed) ─────────────
   for (const t of tradeHistory) {
     const isBull = t.direction === 'bullish';
@@ -16237,8 +16443,16 @@ function renderChart(data) {
     }
   }
 
-  // ── Forming TCT schematics (T1/T2/T3 tap markers, range box, target/stop) ─
-  drawFormingSchematics(ctx, formingSchematics, candles, toX, toY, W, m);
+  // ── Toggle overlays ───────────────────────────────────────────
+  if (_showForming) {
+    drawFormingSchematics(ctx, visibleSchematics, candles, toX, toY, W, m);
+  }
+  if (_showT1) {
+    drawT1Levels(ctx, formingSchematics, _chartTF, toY, W, m);
+  }
+  if (_showT3) {
+    drawT3Levels(ctx, formingSchematics, _chartTF, toY, W, m);
+  }
 
   // ── Forming setup marker (detected schematic, score < 50) ────
   if (forming && forming.price) {
@@ -16261,14 +16475,15 @@ function renderChart(data) {
     ctx.restore();
   }
 
-  // ── Active trade overlay (entry / TP / SL lines) ─────────────
+  // ── Active trade overlay (entry / TP1 / TP2 / SL lines) ──────
   if (currentTrade) {
-    const ep = currentTrade.entry_price;
-    const tp = currentTrade.target_price;
-    const sl = currentTrade.stop_price;
+    const ep  = currentTrade.entry_price;
+    const tp  = currentTrade.target_price;
+    const sl  = currentTrade.stop_price;
+    const tp1 = currentTrade.tp1_price;
     const dir = currentTrade.direction;
 
-    // Shaded profit zone between entry and target
+    // Shaded profit zone between entry and full target
     if (ep && tp) {
       const y1 = toY(Math.max(ep, tp));
       const y2 = toY(Math.min(ep, tp));
@@ -16278,9 +16493,16 @@ function renderChart(data) {
       ctx.restore();
     }
 
-    if (ep) { hLine(ctx, m.left, toY(ep), W - m.right, '#00bcd4', null, false); drawLineBadge(ctx, W - m.right, toY(ep), 'Entry', '#00bcd4'); }
-    if (tp) { hLine(ctx, m.left, toY(tp), W - m.right, '#00c853', null, true);  drawLineBadge(ctx, W - m.right, toY(tp), 'TP',    '#00c853'); }
-    if (sl) { hLine(ctx, m.left, toY(sl), W - m.right, '#ff1744', null, true);  drawLineBadge(ctx, W - m.right, toY(sl), 'SL',    '#ff1744'); }
+    if (ep)  { hLine(ctx, m.left, toY(ep),  W - m.right, '#00bcd4', null, false); drawLineBadge(ctx, W - m.right, toY(ep),  'Entry', '#00bcd4'); }
+    if (tp1) { hLine(ctx, m.left, toY(tp1), W - m.right, '#26c6da', null, true);  drawLineBadge(ctx, W - m.right, toY(tp1), 'TP1',   '#26c6da'); }
+    if (tp)  { hLine(ctx, m.left, toY(tp),  W - m.right, '#00c853', null, true);  drawLineBadge(ctx, W - m.right, toY(tp),  'TP2',   '#00c853'); }
+    if (sl)  {
+      const slIsBreakEven = currentTrade.tp1_hit && Math.abs(sl - ep) < 1;
+      const slColor = slIsBreakEven ? '#ffc107' : '#ff1744';
+      const slLabel = slIsBreakEven ? 'BE' : 'SL';
+      hLine(ctx, m.left, toY(sl), W - m.right, slColor, null, true);
+      drawLineBadge(ctx, W - m.right, toY(sl), slLabel, slColor);
+    }
 
     // Entry marker at the opened_at candle
     const entryTs = currentTrade.opened_at ? new Date(currentTrade.opened_at).getTime() : null;
@@ -16303,11 +16525,24 @@ function renderChart(data) {
     ctx.fillText(lbl, toX(i), H - m.bottom + 16);
   }
 
+  // ── Right-axis drag hint label ────────────────────────────────
+  ctx.save();
+  ctx.fillStyle = 'rgba(100,100,100,0.5)';
+  ctx.font = '8px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('↕ drag', W - m.right / 2, H - m.bottom + 14);
+  ctx.fillText('⟺ drag', m.left + cw / 2, H - m.bottom + 14);
+  ctx.restore();
+
   // ── Chart border ──────────────────────────────────────────────
   ctx.strokeStyle = CHART_GRID;
   ctx.lineWidth   = 1;
   ctx.setLineDash([]);
   ctx.strokeRect(m.left, m.top, cw, ch);
+
+  // ── Update overlay TF label in DOM ───────────────────────────
+  const tfLabelEl = document.getElementById('overlayTFLabel');
+  if (tfLabelEl) tfLabelEl.textContent = _filterToTF ? _chartTF.toUpperCase() : 'ALL';
 }
 
 // ── Chart toolbar actions ──────────────────────────────────────────────────
@@ -16341,8 +16576,31 @@ function chartFitAll() {
 
 function chartReset() {
   _viewStart = 0; _viewLen = null; _fitToCandles = false;
+  _manualPMin = null; _manualPMax = null;  // also clear manual price scale
   const btn = document.getElementById('btnScaleToCandles');
   if (btn) btn.classList.remove('active');
+  if (_chartData) renderChart(_chartData);
+}
+
+// Toggle overlay visibility (Forming / T1 / T3)
+function toggleOverlay(key) {
+  if (key === 'forming') {
+    _showForming = !_showForming;
+    document.getElementById('btnShowForming').classList.toggle('active', _showForming);
+  } else if (key === 't1') {
+    _showT1 = !_showT1;
+    document.getElementById('btnShowT1').classList.toggle('active', _showT1);
+  } else if (key === 't3') {
+    _showT3 = !_showT3;
+    document.getElementById('btnShowT3').classList.toggle('active', _showT3);
+  }
+  if (_chartData) renderChart(_chartData);
+}
+
+// Toggle TF filter — when ON, overlay draws only use schematics matching the active TF
+function toggleTFFilter() {
+  _filterToTF = !_filterToTF;
+  document.getElementById('btnTFFilter').classList.toggle('active', _filterToTF);
   if (_chartData) renderChart(_chartData);
 }
 
@@ -16383,15 +16641,108 @@ document.querySelectorAll('.tf-btn').forEach(btn => {
   });
 });
 
-// Mouse-wheel zoom on the chart canvas
+// ── Canvas mouse interactions: pan, price-scale drag, time-scale drag ──────
 (function() {
   var canvas = document.getElementById('chartCanvas');
-  if (canvas) {
-    canvas.addEventListener('wheel', function(e) {
-      e.preventDefault();
-      if (e.deltaY < 0) chartZoomIn(); else chartZoomOut();
-    }, { passive: false });
-  }
+  if (!canvas) return;
+
+  // Scroll-wheel zoom (existing)
+  canvas.addEventListener('wheel', function(e) {
+    e.preventDefault();
+    if (e.deltaY < 0) chartZoomIn(); else chartZoomOut();
+  }, { passive: false });
+
+  // Cursor feedback — show the right cursor based on mouse position
+  canvas.addEventListener('mousemove', function(e) {
+    if (_dragMode) return;  // don't update cursor while dragging
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    canvas.className = '';
+    if (x > _lastW - _lastM.right) {
+      canvas.classList.add('price-scale-cursor');
+    } else if (y > _lastH - _lastM.bottom) {
+      canvas.classList.add('time-scale-cursor');
+    }
+  });
+
+  canvas.addEventListener('mouseleave', function() {
+    if (!_dragMode) canvas.className = '';
+  });
+
+  // Mousedown — determine drag mode from pointer position
+  canvas.addEventListener('mousedown', function(e) {
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    _dragStartX  = x;
+    _dragStartY  = y;
+    _dragViewStart = _viewStart;
+    _dragViewLen   = _viewLen;
+    _dragPMin = _lastPMin;
+    _dragPMax = _lastPMax;
+
+    if (x > _lastW - _lastM.right) {
+      _dragMode = 'priceScale';
+    } else if (y > _lastH - _lastM.bottom) {
+      _dragMode = 'timeScale';
+    } else {
+      _dragMode = 'pan';
+    }
+    canvas.classList.add('dragging');
+    e.preventDefault();
+  });
+
+  // Mousemove — apply the active drag mode
+  window.addEventListener('mousemove', function(e) {
+    if (!_dragMode || !_chartData) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const dx = x - _dragStartX;
+    const dy = y - _dragStartY;
+    const n  = (_chartData.candles || []).length;
+
+    if (_dragMode === 'pan') {
+      const curLen = _dragViewLen !== null ? _dragViewLen : n;
+      const cw = _lastW - _lastM.left - _lastM.right;
+      const gap = cw / Math.max(curLen, 1);
+      const delta = -Math.round(dx / gap);
+      _viewStart = Math.max(0, Math.min(n - (curLen || n), _dragViewStart + delta));
+      _viewLen   = _dragViewLen;
+      renderChart(_chartData);
+
+    } else if (_dragMode === 'priceScale') {
+      // Drag up (dy < 0) → zoom in (compress price range); drag down → expand
+      const pRange = _dragPMax - _dragPMin;
+      const center = (_dragPMin + _dragPMax) / 2;
+      const scale  = Math.exp(dy * 0.005);
+      _manualPMin  = center - (pRange * scale) / 2;
+      _manualPMax  = center + (pRange * scale) / 2;
+      renderChart(_chartData);
+
+    } else if (_dragMode === 'timeScale') {
+      // Drag right (dx > 0) → zoom out (show more candles); left → zoom in
+      const curLen = _dragViewLen !== null ? _dragViewLen : n;
+      const newLen = Math.max(20, Math.min(n, Math.round(curLen * Math.exp(dx * 0.008))));
+      _viewLen = newLen >= n ? null : newLen;
+      if (_viewLen !== null) {
+        _viewStart = Math.max(0, Math.min(n - _viewLen, _viewStart));
+      } else {
+        _viewStart = 0;
+      }
+      renderChart(_chartData);
+    }
+  });
+
+  // Mouseup — end drag
+  window.addEventListener('mouseup', function() {
+    if (_dragMode) {
+      _dragMode = null;
+      canvas.classList.remove('dragging');
+      canvas.className = '';
+    }
+  });
 })();
 
 // Re-render on window resize (no refetch needed)
