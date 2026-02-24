@@ -6,31 +6,31 @@
     "symbol": "BTCUSDT",
     "direction": "bearish",
     "model": "Model_2",
-    "entry_price": 63060.47,
+    "entry_price": 63037.48,
     "stop_price": 63375.19,
     "target_price": 62500.0,
-    "position_size": 9043.63,
-    "margin": 904.36,
+    "position_size": 8424.91,
+    "margin": 842.49,
     "risk_amount": 45.14,
     "leverage": 10,
-    "rr": 1.78,
+    "rr": 1.59,
     "entry_score": 73,
     "entry_reasons": [
       "BOS confirmed",
-      "Acceptable R:R (1.8)",
+      "Acceptable R:R (1.6)",
       "Schematic quality 1.00 (+15 pts)",
       "HTF bias aligned (bearish distribution on 4h)",
       "Model 2 \u2014 higher low / lower high",
       "Tightened entry (3+ losses) \u2014 need score >= 70"
     ],
     "htf_bias": "bearish",
-    "liquidation_price": 69051.21,
+    "liquidation_price": 69026.04,
     "liquidation_safe": true,
-    "opened_at": "2026-02-24T13:11:03.651218+00:00",
+    "opened_at": "2026-02-24T13:42:32.286710+00:00",
     "status": "open",
     "timeframe": "15m",
-    "live_pnl_pct": 0.24,
-    "current_price": 62911.31
+    "live_pnl_pct": 0.28,
+    "current_price": 62858.74
   },
   "trade_history": [
     {
@@ -170,7 +170,7 @@
     "No specific adaptation needed \u2014 loss within normal parameters",
     "Switched to high-confidence-only mode (score >= 70) after 3 consecutive losses"
   ],
-  "last_scan_time": "2026-02-24T13:32:12.585879+00:00",
+  "last_scan_time": "2026-02-24T14:31:53.383173+00:00",
   "last_scan_action": "holding",
   "last_error": null
 }
