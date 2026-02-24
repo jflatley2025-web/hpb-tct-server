@@ -15166,12 +15166,15 @@ async def schematics_5b_debug():
 
 
 @app.get("/api/schematics-5b-trader/candles")
-async def schematics_5b_candles(tf: str = "15m", limit: int = 200):
-    """Return BTCUSDT OHLC candles + trade overlays for the candlestick chart."""
+async def schematics_5b_candles(tf: str = "15m", limit: int = 200, symbol: str = "BTCUSDT"):
+    """Return OHLC candles + trade overlays for the 5B candlestick chart.
+    symbol defaults to BTCUSDT; accepts any pair from the top-5 universe."""
     from tensor_tct_trader import fetch_candles_sync
     limit = max(50, min(int(limit), 500))
+    # Sanitise: only allow alphanumeric symbols (e.g. BTCUSDT, SOLUSDT)
+    safe_symbol = symbol if symbol.isalnum() else "BTCUSDT"
     loop = asyncio.get_event_loop()
-    df = await loop.run_in_executor(None, fetch_candles_sync, "BTCUSDT", tf, limit)
+    df = await loop.run_in_executor(None, fetch_candles_sync, safe_symbol, tf, limit)
     candles = []
     if df is not None and len(df) > 0:
         for _, row in df.iterrows():
@@ -15367,12 +15370,32 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
 .chart-wrap canvas.dragging{cursor:grabbing}
 .chart-wrap canvas.price-scale-cursor{cursor:ns-resize}
 .chart-wrap canvas.time-scale-cursor{cursor:ew-resize}
+
+/* ===== TOP 5 RANGES PANEL (reuses dashboard API + styling) ===== */
+.top5b-panel{background:linear-gradient(135deg,rgba(224,64,251,.08) 0%,rgba(0,212,255,.05) 100%);border:1px solid rgba(224,64,251,.3);border-radius:8px;padding:10px 14px;margin:0 24px 16px}
+.top5b-panel h3{font-size:.8rem;color:#e040fb;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid rgba(224,64,251,.2);display:flex;justify-content:space-between;align-items:center}
+.top5b-status{font-size:.55rem;color:#666;padding:2px 6px;border-radius:3px;background:rgba(255,255,255,.05)}
+.top5b-status.scanning{color:#ffc107;background:rgba(255,193,7,.15);animation:spin5b 1.5s infinite}
+@keyframes spin5b{0%,100%{opacity:1}50%{opacity:.5}}
+.top5b-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px}
+.top5b-item{padding:8px;border-radius:6px;background:rgba(255,255,255,.03);border-left:3px solid #e040fb;cursor:pointer;transition:background .2s}
+.top5b-item:hover{background:rgba(255,255,255,.07)}
+.top5b-item.active-pair{border-left-color:#00d4ff;background:rgba(0,212,255,.06)}
+.top5b-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:3px}
+.top5b-pair{font-size:.85rem;font-weight:700;color:#e0e0e0}
+.top5b-rank{font-size:.6rem;color:#e040fb;font-weight:700;margin-right:5px}
+.top5b-tf{font-size:.6rem;color:#888;background:rgba(255,255,255,.05);padding:1px 5px;border-radius:3px}
+.top5b-rps{font-size:.72rem;font-weight:700;color:#e040fb;margin-bottom:2px}
+.top5b-rps .rval{color:#00d4ff}
+.top5b-levels{display:flex;gap:6px;font-size:.58rem;color:#888;flex-wrap:wrap}
+.top5b-levels .eq{color:#ffc107;font-weight:600}
+.top5b-empty{text-align:center;padding:16px;color:#555;font-size:.75rem}
 </style>
 </head>
 <body>
 
 <div class="header">
-  <h1>Schematics 5B <span class="subtitle">Simulated Trading — BTCUSDT</span></h1>
+  <h1>Schematics 5B <span class="subtitle">Simulated Trading — Multi-Pair</span></h1>
   <div class="header-right">
     <a href="/tensor-trade" class="back-link">Tensor Trade</a>
     <a href="/dashboard" class="back-link">Dashboard</a>
@@ -15404,10 +15427,18 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
   <div class="stat-card"><div class="stat-label">Wins / Losses</div><div class="stat-value white" id="statWL">0 / 0</div></div>
 </div>
 
-<!-- BTCUSDT Candlestick Chart — Blue (bearish) / White (bullish) -->
+<!-- Top 5 Range Pairs — pulled from dashboard's /api/top-setups (no duplicate scan) -->
+<div class="top5b-panel" id="top5bPanel">
+  <h3>Top 5 Range Pairs <span class="top5b-status" id="top5bStatus">Loading...</span></h3>
+  <div class="top5b-grid" id="top5bContent">
+    <div class="top5b-empty">Waiting for range scan...</div>
+  </div>
+</div>
+
+<!-- Candlestick Chart — Blue (bearish) / White (bullish) -->
 <div class="chart-section">
   <div class="chart-header">
-    <span class="chart-title">BTCUSDT — Trade Chart</span>
+    <span class="chart-title" id="chartTitle">BTCUSDT — Trade Chart</span>
     <div class="tf-buttons">
       <button class="tf-btn" data-tf="1m">1M</button>
       <button class="tf-btn" data-tf="5m">5M</button>
@@ -15818,6 +15849,7 @@ const BEAR_FILL   = '#1565C0';
 const WICK_COLOR  = '#1565C0';
 
 let _chartTF        = '1h';
+let _chartSymbol    = 'BTCUSDT';   // active chart pair — updated when user clicks a top-5 item
 let _chartData      = null;
 let _viewStart      = 0;      // index of first visible candle in the all-candles array
 let _viewLen        = null;   // number of candles to show; null = show all
@@ -15855,7 +15887,7 @@ const _TF_LIMITS = {'1m': 500, '5m': 500, '15m': 300, '30m': 300, '1h': 200, '4h
 // Fetch OHLC + trade data from our new endpoint
 async function fetchChartData(tf) {
   const limit = _TF_LIMITS[tf] || 200;
-  const params = new URLSearchParams({ tf, limit });
+  const params = new URLSearchParams({ tf, limit, symbol: _chartSymbol });
   const r = await fetch('/api/schematics-5b-trader/candles?' + params);
   if (!r.ok) {
     const body = await r.text().catch(() => '');
@@ -16623,9 +16655,11 @@ function chartToggleScale() {
   if (_chartData) renderChart(_chartData);
 }
 
-// resetView=true: resets zoom/pan (use on TF change); false: preserves zoom (auto-refresh)
+// resetView=true: resets zoom/pan (use on TF change or symbol change); false: preserves zoom (auto-refresh)
 async function loadChart(resetView) {
   document.getElementById('chartStatus').textContent = 'Loading...';
+  const titleEl = document.getElementById('chartTitle');
+  if (titleEl) titleEl.textContent = _chartSymbol + ' — Trade Chart';
   try {
     _chartData = await fetchChartData(_chartTF);
     const n = (_chartData.candles || []).length;
@@ -16763,6 +16797,88 @@ window.addEventListener('resize', () => { if (_chartData) renderChart(_chartData
 // Auto-refresh chart every 30 s — preserve zoom/pan
 setInterval(loadChart, 30000);
 
+// ================================================================
+// TOP 5 RANGE PAIRS PANEL — reuses /api/top-setups from the dashboard
+// Clicking a pair switches the chart to that symbol.
+// ================================================================
+
+async function fetchTop5Pairs5B() {
+  try {
+    const data = await fetchJSON('/api/top-setups');
+    renderTop5Pairs5B(data.top_setups || [], data.scanner_status || {});
+  } catch(e) {
+    console.warn('[5B top5] fetch failed:', e.message);
+  }
+}
+
+function renderTop5Pairs5B(setups, status) {
+  const statusEl = document.getElementById('top5bStatus');
+  if (statusEl) {
+    if (status.is_scanning) {
+      statusEl.textContent = 'Scanning ' + (status.pairs_scanned || 0) + '/' + (status.total_pairs || 0) + '…';
+      statusEl.className = 'top5b-status scanning';
+    } else if (status.last_scan) {
+      const ago = Math.round((Date.now() - new Date(status.last_scan + 'Z').getTime()) / 60000);
+      statusEl.textContent = (ago < 60 ? ago + 'm ago' : Math.round(ago / 60) + 'h ago');
+      statusEl.className = 'top5b-status';
+    } else {
+      statusEl.textContent = 'Pending first scan';
+      statusEl.className = 'top5b-status';
+    }
+  }
+
+  const contentEl = document.getElementById('top5bContent');
+  if (!contentEl) return;
+  if (!setups || setups.length === 0) {
+    contentEl.innerHTML = '<div class="top5b-empty">' +
+      (status.is_scanning ? 'Scanning pairs for ranges…' : 'Waiting for first range scan to complete…') +
+      '</div>';
+    return;
+  }
+
+  const fmt = (p) => {
+    if (p >= 1000) return '$' + p.toLocaleString(undefined, {maximumFractionDigits: 0});
+    if (p >= 1)    return '$' + p.toFixed(2);
+    return '$' + p.toPrecision(4);
+  };
+
+  let html = '';
+  setups.forEach((s, i) => {
+    const base = s.symbol.replace('USDT', '');
+    const isActive = s.symbol === _chartSymbol;
+    html += '<div class="top5b-item' + (isActive ? ' active-pair' : '') + '" data-symbol="' + s.symbol + '">';
+    html += '<div class="top5b-header">';
+    html += '<span><span class="top5b-rank">#' + (i + 1) + '</span><span class="top5b-pair">' + base + '</span></span>';
+    html += '<span class="top5b-tf">' + (s.timeframe || '1d').toUpperCase() + '</span>';
+    html += '</div>';
+    html += '<div class="top5b-rps">Score: <span class="rval">' + s.RPS + '</span>/10</div>';
+    html += '<div class="top5b-levels">';
+    html += '<span>Hi: ' + fmt(s.range_high) + '</span>';
+    html += '<span class="eq">EQ: ' + fmt(s.range_eq) + '</span>';
+    html += '<span>Lo: ' + fmt(s.range_low) + '</span>';
+    html += '</div>';
+    html += '</div>';
+  });
+  contentEl.innerHTML = html;
+
+  // Click handler: switch chart to this pair
+  contentEl.querySelectorAll('.top5b-item').forEach(item => {
+    item.addEventListener('click', () => {
+      _chartSymbol = item.dataset.symbol;
+      // Update active highlight
+      contentEl.querySelectorAll('.top5b-item').forEach(el => el.classList.remove('active-pair'));
+      item.classList.add('active-pair');
+      // Reset zoom and reload chart for the new symbol
+      _viewStart = 0; _viewLen = null;
+      loadChart(true);
+    });
+  });
+}
+
+// Poll top-5 pairs every 5 minutes (the underlying scan runs every 12 h — no need to hammer it)
+setInterval(fetchTop5Pairs5B, 5 * 60 * 1000);
+fetchTop5Pairs5B();
+
 // Initial chart load
 loadChart(true);
 </script>
@@ -16797,7 +16913,10 @@ async def schematics_5b_auto_scan_loop():
         try:
             trader = get_5b_trader()
             loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, trader.scan_and_trade)
+            # Snapshot top_5_setups to avoid concurrent-mutation issues;
+            # passes an empty list before the first range scan fires (falls back to BTCUSDT).
+            pairs_snapshot = list(top_5_setups)
+            result = await loop.run_in_executor(None, trader.scan_and_trade, pairs_snapshot)
             action = result.get("action", "unknown")
             ts = result.get("timestamp", "")
             logger.info(f"[5B-TRADE] Auto-scan result: {action} @ {ts}")
