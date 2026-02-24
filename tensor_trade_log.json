@@ -185,7 +185,7 @@
     "Switched to high-confidence-only mode (score >= 70) after 3 consecutive losses",
     "Switched to high-confidence-only mode (score >= 70) after 3 consecutive losses | Raising minimum R:R from 1.6 \u2014 will require R:R >= 2.5 for next trade"
   ],
-  "last_scan_time": "2026-02-24T21:56:37.420864+00:00",
+  "last_scan_time": "2026-02-24T22:37:43.204724+00:00",
   "last_scan_action": "no_qualifying_setups",
   "last_error": null
 }
