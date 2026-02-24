@@ -210,9 +210,11 @@ def _telegram_5b_send(text: str) -> bool:
 
 def _notify_5b_entry(trade: Dict) -> None:
     direction = trade.get("direction", "?")
+    symbol = trade.get("symbol", "BTCUSDT")
+    timeframe = (trade.get("timeframe") or "?").upper()
     arrow = "BUY" if direction == "bullish" else "SELL"
     text = (
-        f"<b>5B {arrow} — Trade Entered</b>\n"
+        f"<b>5B {arrow} — {symbol} | {timeframe}</b>\n"
         f"Entry: ${trade.get('entry_price', 0):,.2f}\n"
         f"Stop: ${trade.get('stop_price', 0):,.2f}\n"
         f"Target: ${trade.get('target_price', 0):,.2f}\n"
@@ -224,11 +226,13 @@ def _notify_5b_entry(trade: Dict) -> None:
 def _notify_5b_tp1(trade: Dict) -> None:
     """Telegram alert when TP1 (halfway) is hit and half position closed."""
     direction = trade.get("direction", "?")
+    symbol = trade.get("symbol", "BTCUSDT")
+    timeframe = (trade.get("timeframe") or "?").upper()
     arrow = "BUY" if direction == "bullish" else "SELL"
     tp1_pnl = trade.get("tp1_pnl_dollars", 0)
     sign = "+" if tp1_pnl >= 0 else ""
     text = (
-        f"<b>5B {arrow} — TP1 Hit (½ Closed)</b>\n"
+        f"<b>5B {arrow} — {symbol} | {timeframe} — TP1 Hit (½ Closed)</b>\n"
         f"Entry: ${trade.get('entry_price', 0):,.2f}\n"
         f"TP1: ${trade.get('tp1_exit_price', 0):,.2f}\n"
         f"½ P&L: {sign}${tp1_pnl:,.2f} ({sign}{trade.get('tp1_pnl_pct', 0):.2f}%)\n"
@@ -240,6 +244,8 @@ def _notify_5b_tp1(trade: Dict) -> None:
 
 def _notify_5b_exit(trade: Dict) -> None:
     result = "WIN" if trade.get("is_win") else "LOSS"
+    symbol = trade.get("symbol", "BTCUSDT")
+    timeframe = (trade.get("timeframe") or "?").upper()
     pnl = trade.get("pnl_dollars", 0)
     sign = "+" if pnl >= 0 else ""
     if trade.get("tp1_hit"):
@@ -248,7 +254,7 @@ def _notify_5b_exit(trade: Dict) -> None:
         total_pnl = pnl + tp1_pnl
         total_sign = "+" if total_pnl >= 0 else ""
         text = (
-            f"<b>5B Trade Closed — {result}</b>\n"
+            f"<b>5B Trade Closed — {symbol} | {timeframe} — {result}</b>\n"
             f"Entry: ${trade.get('entry_price', 0):,.2f}\n"
             f"Exit: ${trade.get('exit_price', 0):,.2f}\n"
             f"TP1 P&L (½): {tp1_sign}${tp1_pnl:,.2f}\n"
@@ -257,7 +263,7 @@ def _notify_5b_exit(trade: Dict) -> None:
         )
     else:
         text = (
-            f"<b>5B Trade Closed — {result}</b>\n"
+            f"<b>5B Trade Closed — {symbol} | {timeframe} — {result}</b>\n"
             f"Entry: ${trade.get('entry_price', 0):,.2f}\n"
             f"Exit: ${trade.get('exit_price', 0):,.2f}\n"
             f"P&L: {sign}${pnl:,.2f} ({sign}{trade.get('pnl_pct', 0):.2f}%)\n"
@@ -788,11 +794,18 @@ class Schematics5BTrader:
         self.state = Schematics5BTradeState()
         self.evaluator = Schematics5BEvaluator()
         self.last_debug: Dict = {}
-        self._htf_bias_cache: str = "neutral"
-        self._htf_bias_expiry: float = 0.0
+        # Per-symbol HTF bias cache: symbol → (bias_str, expiry_timestamp)
+        self._htf_bias_cache: Dict[str, str] = {}
+        self._htf_bias_expiry: Dict[str, float] = {}
 
-    def scan_and_trade(self) -> Dict:
-        """Main cycle: fetch, detect, evaluate, trade."""
+    def scan_and_trade(self, top_5_pairs=None) -> Dict:
+        """Main cycle: fetch, detect, evaluate, trade.
+
+        top_5_pairs: optional list of {symbol, timeframe, ...} dicts from the
+        dashboard range scanner.  When provided, each symbol is scanned for TCT
+        setups; the highest-scoring qualifying setup across all symbols is traded.
+        Falls back to BTCUSDT when empty or None (e.g. before first range scan).
+        """
         cycle_result = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "action": "none",
@@ -800,19 +813,21 @@ class Schematics5BTrader:
         }
 
         try:
-            # 1. Current price
-            df_price = fetch_candles_sync(SYMBOL, "1m", 10)
-            if df_price is None or len(df_price) == 0:
-                self.state.last_error = "Could not fetch price data"
-                self.state.save()
-                cycle_result["action"] = "error"
-                cycle_result["details"] = {"error": "Could not fetch price data"}
-                return cycle_result
+            # Build symbol universe from top_5_pairs; fall back to module default.
+            symbols = [p["symbol"] for p in (top_5_pairs or []) if p.get("symbol")] or [SYMBOL]
 
-            current_price = float(df_price.iloc[-1]["close"])
-
-            # 2. Manage open trade
+            # 1. Manage open trade first — use the trade's own symbol for price.
             if self.state.current_trade:
+                trade_sym = self.state.current_trade.get("symbol", SYMBOL)
+                df_price = fetch_candles_sync(trade_sym, "1m", 10)
+                if df_price is None or len(df_price) == 0:
+                    self.state.last_error = "Could not fetch price data"
+                    self.state.save()
+                    cycle_result["action"] = "error"
+                    cycle_result["details"] = {"error": "Could not fetch price data"}
+                    return cycle_result
+
+                current_price = float(df_price.iloc[-1]["close"])
                 result = self._manage_open_trade(current_price)
                 cycle_result["action"] = result.get("action", "manage")
                 cycle_result["details"] = result
@@ -821,228 +836,77 @@ class Schematics5BTrader:
                 self.state.save()
                 return cycle_result
 
-            # 3. HTF bias gate (with cache)
-            now_ts = time.time()
-            if now_ts < self._htf_bias_expiry:
-                htf_bias = self._htf_bias_cache
-                htf_debug = {"status": "cached", "htf_bias": htf_bias,
-                             "expires_in_s": round(self._htf_bias_expiry - now_ts)}
-            else:
-                htf_bias = "neutral"
-                htf_debug = {"status": "not_fetched"}
-                try:
-                    df_htf = fetch_candles_sync(SYMBOL, HTF_TIMEFRAME, 200)
-                    if df_htf is not None and len(df_htf) >= 50:
-                        htf_schematics = detect_tct_schematics(df_htf, [])
-                        htf_acc = [s for s in htf_schematics.get("accumulation_schematics", [])
-                                   if isinstance(s, dict) and s.get("is_confirmed")]
-                        htf_dist = [s for s in htf_schematics.get("distribution_schematics", [])
-                                    if isinstance(s, dict) and s.get("is_confirmed")]
-                        if htf_acc and not htf_dist:
-                            htf_bias = "bullish"
-                        elif htf_dist and not htf_acc:
-                            htf_bias = "bearish"
-                        htf_debug = {"status": "scanned", "candles": len(df_htf),
-                                     "confirmed_acc": len(htf_acc), "confirmed_dist": len(htf_dist),
-                                     "htf_bias": htf_bias}
-                    else:
-                        htf_debug = {"status": "insufficient_data",
-                                     "candles": 0 if df_htf is None else len(df_htf)}
-                except Exception as e:
-                    logger.warning(f"[5B] HTF gate error: {e}", exc_info=True)
-                    htf_debug = {"status": "error", "error": str(e), "fetch_error": True}
-
-                self._htf_bias_cache = htf_bias
-                self._htf_bias_expiry = now_ts + self._HTF_CACHE_TTL.get(htf_bias, 900)
-
-            # 4. Parallel fetch — MTF at increased limits + LTF for BOS cascade
+            # 2. Scan each symbol for qualifying TCT setups.
             best_setup = None
             best_score = 0
             best_tf = None
-            # HTF_TIMEFRAME bias result is always shown first in the debug output
-            all_tf_results = {HTF_TIMEFRAME: htf_debug}
+            best_symbol = None
+            best_current_price = 0.0
+            best_htf_bias = "neutral"
+            all_forming: List[Dict] = []
+            per_symbol_results: Dict[str, Dict] = {}
 
-            mtf_dfs: Dict[str, Optional[pd.DataFrame]] = {}
-            ltf_dfs: Dict[str, Optional[pd.DataFrame]] = {}
-            all_tfs = {
-                **{tf: _MTF_CANDLE_LIMITS.get(tf, 300) for tf in MTF_TIMEFRAMES},
-                **{ltf: _LTF_CANDLE_LIMITS[ltf] for ltf in LTF_BOS_TIMEFRAMES},
-            }
-            with ThreadPoolExecutor(max_workers=len(all_tfs)) as ex:
-                futures = {ex.submit(fetch_candles_sync, SYMBOL, tf, lim): tf
-                           for tf, lim in all_tfs.items()}
-                for future in as_completed(futures):
-                    tf = futures[future]
-                    try:
-                        df_result = future.result()
-                        # A TF can be in both lists (5m, 1m) — populate whichever apply.
-                        if tf in MTF_TIMEFRAMES:
-                            mtf_dfs[tf] = df_result
-                        if tf in LTF_BOS_TIMEFRAMES:
-                            ltf_dfs[tf] = df_result
-                    except Exception as e:
-                        logger.warning(f"[5B] Fetch failed for {tf}: {e}")
-                        if tf in MTF_TIMEFRAMES:
-                            mtf_dfs[tf] = None
-                        if tf in LTF_BOS_TIMEFRAMES:
-                            ltf_dfs[tf] = None
+            for sym in symbols:
+                sym_result = self._scan_single_symbol(sym)
+                per_symbol_results[sym] = sym_result
+                all_forming.extend(sym_result.get("forming", []))
+                if sym_result.get("best_setup") and sym_result.get("best_score", 0) > best_score:
+                    best_score = sym_result["best_score"]
+                    best_setup = sym_result["best_setup"]
+                    best_tf = sym_result["best_tf"]
+                    best_symbol = sym
+                    best_current_price = sym_result["current_price"]
+                    best_htf_bias = sym_result["htf_bias"]
 
-            # Phase A: collect all detected schematics per TF (needed for HTF cascade)
-            all_schematics_by_tf: Dict[str, List[Dict]] = {}
-            for tf in MTF_TIMEFRAMES:
-                df = mtf_dfs.get(tf)
-                if df is None or len(df) < 50:
-                    all_schematics_by_tf[tf] = []
-                    all_tf_results[tf] = {
-                        "status": "insufficient_data",
-                        "candles": 0 if df is None else len(df),
-                        "fetch_error": df is None,
-                    }
-                    continue
-                try:
-                    result = detect_tct_schematics(df, [])
-                    all_schematics_by_tf[tf] = (
-                        result.get("accumulation_schematics", [])
-                        + result.get("distribution_schematics", [])
-                    )
-                except Exception as e:
-                    logger.warning(f"[5B] Detection error on {tf}: {e}", exc_info=True)
-                    all_schematics_by_tf[tf] = []
-                    all_tf_results[tf] = {"status": "error", "error": str(e)}
+            # Keep at most 5 forming schematics, newest tap3 first.
+            all_forming.sort(key=lambda x: (x.get("tap3") or {}).get("idx", 0), reverse=True)
 
-            # Phase B: evaluate with HTF cascade.
-            # Walk MTF_TIMEFRAMES in reverse (lowest → highest TF) so the cascade
-            # check finds upgrades from the smaller-granularity schematics first.
-            for tf in reversed(MTF_TIMEFRAMES):
-                df = mtf_dfs.get(tf)
-                if tf not in all_schematics_by_tf or all_tf_results.get(tf, {}).get("status") in {"error", "insufficient_data"}:
-                    continue  # already recorded as error/insufficient above
-
-                all_sch = all_schematics_by_tf[tf]
-                tf_evals = []
-                htf_upgraded_count = 0
-
-                for s in all_sch:
-                    if not isinstance(s, dict):
-                        continue
-                    s_dir = s.get("direction", "unknown")
-                    if htf_bias == "bullish" and s_dir == "bearish":
-                        continue
-                    if htf_bias == "bearish" and s_dir == "bullish":
-                        continue
-
-                    # LTF BOS refinement: sharpen the entry price.
-                    if s.get("is_confirmed"):
-                        s = self._refine_schematic_bos_with_ltf(s, ltf_dfs)
-
-                    # HTF upgrade cascade: prefer the highest TF that covers this pattern.
-                    effective_tf = tf
-                    if s.get("is_confirmed"):
-                        s, effective_tf = _find_htf_upgrade(s, tf, all_schematics_by_tf)
-                        if effective_tf != tf:
-                            htf_upgraded_count += 1
-
-                    # Evaluate against the *effective* TF's candle count and stale limit.
-                    eff_df = mtf_dfs.get(effective_tf) if mtf_dfs.get(effective_tf) is not None else df
-                    eval_result = self.evaluator.evaluate_schematic(
-                        s, htf_bias, current_price,
-                        total_candles=len(eff_df),
-                        max_stale_candles=_MAX_STALE.get(effective_tf, 5),
-                    )
-                    eval_result["source_tf"] = tf
-                    eval_result["effective_tf"] = effective_tf
-                    if effective_tf != tf:
-                        eval_result["htf_upgraded"] = True
-
-                    tf_evals.append(eval_result)
-                    if eval_result["pass"] and eval_result["score"] > best_score:
-                        best_score = eval_result["score"]
-                        best_setup = (s, eval_result)
-                        best_tf = effective_tf
-
-                total_candles = len(df) if df is not None else 0
-                all_tf_results[tf] = {
-                    "status": "scanned",
-                    "candles": total_candles,
-                    "schematics_found": len(all_sch),
-                    "confirmed": sum(
-                        1 for s in all_sch if isinstance(s, dict) and s.get("is_confirmed")
-                    ),
-                    "htf_upgraded": htf_upgraded_count,
-                    "htf_bias": htf_bias,
-                    "best_score": max((e["score"] for e in tf_evals), default=0),
-                    "evaluations": tf_evals[:10],
-                }
-
-            # Collect forming (unconfirmed) schematics for chart display —
-            # all 3 taps present, bias-filtered, sorted newest tap3 first.
-            forming_schematics = []
-            for _ftf, _fsch_list in all_schematics_by_tf.items():
-                for _fs in _fsch_list:
-                    if not isinstance(_fs, dict):
-                        continue
-                    if _fs.get("is_confirmed", False):
-                        continue  # only unconfirmed / in-formation
-                    _fdir = _fs.get("direction", "unknown")
-                    if htf_bias == "bullish" and _fdir == "bearish":
-                        continue
-                    if htf_bias == "bearish" and _fdir == "bullish":
-                        continue
-                    if not (_fs.get("tap1") and _fs.get("tap2") and _fs.get("tap3")):
-                        continue  # all 3 taps required
-                    _range = _fs.get("range") or {}
-                    _sl = _fs.get("stop_loss")
-                    _tgt = _fs.get("target")
-                    forming_schematics.append({
-                        "tf": _ftf,
-                        "direction": _fdir,
-                        "model": _fs.get("model", ""),
-                        "tap1": _fs.get("tap1"),
-                        "tap2": _fs.get("tap2"),
-                        "tap3": _fs.get("tap3"),
-                        "range_high": _range.get("high") if _range else None,
-                        "range_low": _range.get("low") if _range else None,
-                        "target": _tgt.get("price") if isinstance(_tgt, dict) else _tgt,
-                        "stop_loss": _sl.get("price") if isinstance(_sl, dict) else _sl,
-                        "quality_score": _fs.get("quality_score", 0),
-                    })
-            forming_schematics.sort(
-                key=lambda x: (x.get("tap3") or {}).get("idx", 0), reverse=True
-            )
-            forming_schematics = forming_schematics[:5]
-
-            # Store debug
             self.last_debug = {
                 "timestamp": cycle_result["timestamp"],
-                "current_price": current_price,
-                "timeframes": all_tf_results,
+                "symbols_scanned": symbols,
+                "current_price": best_current_price,
+                "best_symbol": best_symbol,
                 "best_tf": best_tf,
                 "best_score": best_score,
                 "htf_cascade_active": True,
-                "forming_schematics": forming_schematics,
+                "forming_schematics": all_forming[:5],
+                "per_symbol": per_symbol_results,
             }
 
-            # 5. Enter trade if qualifying setup found
+            # 3. Enter trade on highest-scoring qualifying setup across all symbols.
             if best_setup:
                 schematic, evaluation = best_setup
                 entry_info = schematic.get("entry", {})
-                candidate_price = entry_info.get("price", current_price)
+                candidate_price = entry_info.get("price", best_current_price)
 
                 if self._is_duplicate_setup(candidate_price, evaluation["direction"]):
                     cycle_result["action"] = "duplicate_setup_skipped"
                     cycle_result["details"] = {
-                        "price": current_price,
+                        "price": best_current_price,
+                        "symbol": best_symbol,
                         "skipped_entry": candidate_price,
                         "reason": "Same setup as recent trade — cooldown active",
                     }
                 else:
-                    trade = self._enter_trade(schematic, evaluation, current_price, htf_bias)
-                    trade["timeframe"] = best_tf
+                    trade = self._enter_trade(
+                        schematic, evaluation, best_current_price, best_htf_bias,
+                        best_symbol, best_tf,
+                    )
                     cycle_result["action"] = "trade_entered"
                     cycle_result["details"] = trade
             else:
                 cycle_result["action"] = "no_qualifying_setups"
-                cycle_result["details"] = {"price": current_price, "timeframes_scanned": all_tf_results}
+                cycle_result["details"] = {
+                    "symbols": symbols,
+                    "per_symbol": {
+                        sym: {
+                            "best_score": r.get("best_score", 0),
+                            "htf_bias": r.get("htf_bias", "neutral"),
+                            "error": r.get("error"),
+                        }
+                        for sym, r in per_symbol_results.items()
+                    },
+                }
 
             self.state.last_scan_time = cycle_result["timestamp"]
             self.state.last_scan_action = cycle_result["action"]
@@ -1059,13 +923,258 @@ class Schematics5BTrader:
 
         return cycle_result
 
+    # ----------------------------------------------------------------
+    # HTF BIAS HELPER — per-symbol TTL cache
+    # ----------------------------------------------------------------
+
+    def _get_htf_bias(self, symbol: str) -> Tuple[str, Dict]:
+        """Return (bias_str, debug_dict) for symbol, using a per-symbol TTL cache."""
+        now_ts = time.time()
+        expiry = self._htf_bias_expiry.get(symbol, 0.0)
+        if now_ts < expiry:
+            cached = self._htf_bias_cache.get(symbol, "neutral")
+            return cached, {
+                "status": "cached", "htf_bias": cached,
+                "expires_in_s": round(expiry - now_ts),
+            }
+
+        htf_bias = "neutral"
+        htf_debug: Dict = {"status": "not_fetched"}
+        try:
+            df_htf = fetch_candles_sync(symbol, HTF_TIMEFRAME, 200)
+            if df_htf is not None and len(df_htf) >= 50:
+                htf_schematics = detect_tct_schematics(df_htf, [])
+                htf_acc = [s for s in htf_schematics.get("accumulation_schematics", [])
+                           if isinstance(s, dict) and s.get("is_confirmed")]
+                htf_dist = [s for s in htf_schematics.get("distribution_schematics", [])
+                            if isinstance(s, dict) and s.get("is_confirmed")]
+                if htf_acc and not htf_dist:
+                    htf_bias = "bullish"
+                elif htf_dist and not htf_acc:
+                    htf_bias = "bearish"
+                htf_debug = {
+                    "status": "scanned", "candles": len(df_htf),
+                    "confirmed_acc": len(htf_acc), "confirmed_dist": len(htf_dist),
+                    "htf_bias": htf_bias,
+                }
+            else:
+                htf_debug = {
+                    "status": "insufficient_data",
+                    "candles": 0 if df_htf is None else len(df_htf),
+                }
+        except Exception as e:
+            logger.warning(f"[5B] HTF gate error for {symbol}: {e}", exc_info=True)
+            htf_debug = {"status": "error", "error": str(e), "fetch_error": True}
+
+        self._htf_bias_cache[symbol] = htf_bias
+        self._htf_bias_expiry[symbol] = now_ts + self._HTF_CACHE_TTL.get(htf_bias, 900)
+        return htf_bias, htf_debug
+
+    # ----------------------------------------------------------------
+    # SINGLE-SYMBOL SCAN — extracted so scan_and_trade can loop over pairs
+    # ----------------------------------------------------------------
+
+    def _scan_single_symbol(self, symbol: str) -> Dict:
+        """
+        Fetch candles, detect TCT schematics, and evaluate all candidates for
+        one symbol.  Returns a result dict keyed by: current_price, htf_bias,
+        best_setup, best_score, best_tf, forming, timeframes, error.
+        """
+        out: Dict = {
+            "symbol": symbol,
+            "current_price": 0.0,
+            "htf_bias": "neutral",
+            "best_setup": None,
+            "best_score": 0,
+            "best_tf": None,
+            "forming": [],
+            "timeframes": {},
+            "error": None,
+        }
+
+        try:
+            # Current price
+            df_price = fetch_candles_sync(symbol, "1m", 10)
+            if df_price is None or len(df_price) == 0:
+                out["error"] = f"No price data for {symbol}"
+                return out
+            current_price = float(df_price.iloc[-1]["close"])
+            out["current_price"] = current_price
+
+            # HTF bias (per-symbol cache)
+            htf_bias, htf_debug = self._get_htf_bias(symbol)
+            out["htf_bias"] = htf_bias
+            all_tf_results: Dict = {HTF_TIMEFRAME: htf_debug}
+
+            # Parallel MTF + LTF candle fetch
+            mtf_dfs: Dict[str, Optional[pd.DataFrame]] = {}
+            ltf_dfs: Dict[str, Optional[pd.DataFrame]] = {}
+            all_tfs = {
+                **{tf: _MTF_CANDLE_LIMITS.get(tf, 300) for tf in MTF_TIMEFRAMES},
+                **{ltf: _LTF_CANDLE_LIMITS[ltf] for ltf in LTF_BOS_TIMEFRAMES},
+            }
+            with ThreadPoolExecutor(max_workers=len(all_tfs)) as ex:
+                futures = {
+                    ex.submit(fetch_candles_sync, symbol, tf, lim): tf
+                    for tf, lim in all_tfs.items()
+                }
+                for future in as_completed(futures):
+                    tf = futures[future]
+                    try:
+                        df_result = future.result()
+                        if tf in MTF_TIMEFRAMES:
+                            mtf_dfs[tf] = df_result
+                        if tf in LTF_BOS_TIMEFRAMES:
+                            ltf_dfs[tf] = df_result
+                    except Exception as e:
+                        logger.warning(f"[5B] Fetch failed for {symbol}/{tf}: {e}")
+                        if tf in MTF_TIMEFRAMES:
+                            mtf_dfs[tf] = None
+                        if tf in LTF_BOS_TIMEFRAMES:
+                            ltf_dfs[tf] = None
+
+            # Phase A: collect all schematics per TF (needed for HTF cascade)
+            all_schematics_by_tf: Dict[str, List[Dict]] = {}
+            for tf in MTF_TIMEFRAMES:
+                df = mtf_dfs.get(tf)
+                if df is None or len(df) < 50:
+                    all_schematics_by_tf[tf] = []
+                    all_tf_results[tf] = {
+                        "status": "insufficient_data",
+                        "candles": 0 if df is None else len(df),
+                        "fetch_error": df is None,
+                    }
+                    continue
+                try:
+                    det = detect_tct_schematics(df, [])
+                    all_schematics_by_tf[tf] = (
+                        det.get("accumulation_schematics", [])
+                        + det.get("distribution_schematics", [])
+                    )
+                except Exception as e:
+                    logger.warning(f"[5B] Detection error on {symbol}/{tf}: {e}", exc_info=True)
+                    all_schematics_by_tf[tf] = []
+                    all_tf_results[tf] = {"status": "error", "error": str(e)}
+
+            # Phase B: evaluate with HTF cascade (lowest → highest TF walk)
+            best_setup: Optional[Tuple] = None
+            best_score = 0
+            best_tf_local: Optional[str] = None
+
+            for tf in reversed(MTF_TIMEFRAMES):
+                df = mtf_dfs.get(tf)
+                if tf not in all_schematics_by_tf or all_tf_results.get(tf, {}).get("status") in {"error", "insufficient_data"}:
+                    continue
+
+                all_sch = all_schematics_by_tf[tf]
+                tf_evals: List[Dict] = []
+                htf_upgraded_count = 0
+
+                for s in all_sch:
+                    if not isinstance(s, dict):
+                        continue
+                    s_dir = s.get("direction", "unknown")
+                    if htf_bias == "bullish" and s_dir == "bearish":
+                        continue
+                    if htf_bias == "bearish" and s_dir == "bullish":
+                        continue
+
+                    if s.get("is_confirmed"):
+                        s = self._refine_schematic_bos_with_ltf(s, ltf_dfs)
+
+                    effective_tf = tf
+                    if s.get("is_confirmed"):
+                        s, effective_tf = _find_htf_upgrade(s, tf, all_schematics_by_tf)
+                        if effective_tf != tf:
+                            htf_upgraded_count += 1
+
+                    eff_df = mtf_dfs.get(effective_tf) if mtf_dfs.get(effective_tf) is not None else df
+                    eval_result = self.evaluator.evaluate_schematic(
+                        s, htf_bias, current_price,
+                        total_candles=len(eff_df),
+                        max_stale_candles=_MAX_STALE.get(effective_tf, 5),
+                    )
+                    eval_result["source_tf"] = tf
+                    eval_result["effective_tf"] = effective_tf
+                    if effective_tf != tf:
+                        eval_result["htf_upgraded"] = True
+
+                    tf_evals.append(eval_result)
+                    if eval_result["pass"] and eval_result["score"] > best_score:
+                        best_score = eval_result["score"]
+                        best_setup = (s, eval_result)
+                        best_tf_local = effective_tf
+
+                total_candles = len(df) if df is not None else 0
+                all_tf_results[tf] = {
+                    "status": "scanned",
+                    "candles": total_candles,
+                    "schematics_found": len(all_sch),
+                    "confirmed": sum(
+                        1 for s in all_sch if isinstance(s, dict) and s.get("is_confirmed")
+                    ),
+                    "htf_upgraded": htf_upgraded_count,
+                    "htf_bias": htf_bias,
+                    "best_score": max((e["score"] for e in tf_evals), default=0),
+                    "evaluations": tf_evals[:10],
+                }
+
+            # Collect forming (unconfirmed, all 3 taps present) schematics for display
+            forming: List[Dict] = []
+            for _ftf, _fsch_list in all_schematics_by_tf.items():
+                for _fs in _fsch_list:
+                    if not isinstance(_fs, dict) or _fs.get("is_confirmed", False):
+                        continue
+                    _fdir = _fs.get("direction", "unknown")
+                    if htf_bias == "bullish" and _fdir == "bearish":
+                        continue
+                    if htf_bias == "bearish" and _fdir == "bullish":
+                        continue
+                    if not (_fs.get("tap1") and _fs.get("tap2") and _fs.get("tap3")):
+                        continue
+                    _range = _fs.get("range") or {}
+                    _sl = _fs.get("stop_loss")
+                    _tgt = _fs.get("target")
+                    forming.append({
+                        "symbol": symbol,
+                        "tf": _ftf,
+                        "direction": _fdir,
+                        "model": _fs.get("model", ""),
+                        "tap1": _fs.get("tap1"),
+                        "tap2": _fs.get("tap2"),
+                        "tap3": _fs.get("tap3"),
+                        "range_high": _range.get("high") if _range else None,
+                        "range_low": _range.get("low") if _range else None,
+                        "target": _tgt.get("price") if isinstance(_tgt, dict) else _tgt,
+                        "stop_loss": _sl.get("price") if isinstance(_sl, dict) else _sl,
+                        "quality_score": _fs.get("quality_score", 0),
+                    })
+            forming.sort(key=lambda x: (x.get("tap3") or {}).get("idx", 0), reverse=True)
+
+            out.update({
+                "current_price": current_price,
+                "htf_bias": htf_bias,
+                "best_setup": best_setup,
+                "best_score": best_score,
+                "best_tf": best_tf_local,
+                "forming": forming[:5],
+                "timeframes": all_tf_results,
+            })
+
+        except Exception as e:
+            logger.error(f"[5B] _scan_single_symbol error for {symbol}: {e}", exc_info=True)
+            out["error"] = str(e)
+
+        return out
+
     def _refine_schematic_bos_with_ltf(
         self, schematic: Dict, ltf_dfs: Dict[str, Optional[pd.DataFrame]]
     ) -> Dict:
         """Delegate to the shared module-level helper with a 5B-specific log label."""
         return refine_schematic_bos_with_ltf(schematic, ltf_dfs, label="5B-LTF")
 
-    def _enter_trade(self, schematic: Dict, evaluation: Dict, current_price: float, htf_bias: str) -> Dict:
+    def _enter_trade(self, schematic: Dict, evaluation: Dict, current_price: float, htf_bias: str,
+                     symbol: str = SYMBOL, timeframe: str = "unknown") -> Dict:
         direction = evaluation["direction"]
         stop_info = schematic.get("stop_loss", {})
         target_info = schematic.get("target", {})
@@ -1125,7 +1234,8 @@ class Schematics5BTrader:
 
         trade = {
             "id": len(self.state.trade_history) + 1,
-            "symbol": SYMBOL,
+            "symbol": symbol,
+            "timeframe": timeframe,
             "direction": direction,
             "model": evaluation.get("model", "unknown"),
             "entry_price": round(entry_price, 2),
@@ -1149,7 +1259,7 @@ class Schematics5BTrader:
 
         self.state.current_trade = trade
         self.state.save()
-        logger.info(f"[5B] Entered {direction} @ {entry_price} | SL={stop_price} | TP={target_price} | Score={evaluation['score']}")
+        logger.info(f"[5B] Entered {direction} @ {entry_price} | {symbol} {timeframe} | SL={stop_price} | TP={target_price} | Score={evaluation['score']}")
         _notify_5b_entry(trade)
         return trade
 
@@ -1304,7 +1414,8 @@ class Schematics5BTrader:
     def force_close(self) -> Dict:
         if not self.state.current_trade:
             return {"action": "no_trade"}
-        price = fetch_live_price(SYMBOL)
+        trade_sym = self.state.current_trade.get("symbol", SYMBOL)
+        price = fetch_live_price(trade_sym)
         if not price:
             return {"action": "error", "details": "Could not fetch live price"}
         return self._close_trade(price, "force_closed")
