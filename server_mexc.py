@@ -15855,7 +15855,12 @@ const _TF_LIMITS = {'1m': 500, '5m': 500, '15m': 300, '30m': 300, '1h': 200, '4h
 // Fetch OHLC + trade data from our new endpoint
 async function fetchChartData(tf) {
   const limit = _TF_LIMITS[tf] || 200;
-  const r = await fetch('/api/schematics-5b-trader/candles?tf=' + tf + '&limit=' + limit);
+  const params = new URLSearchParams({ tf, limit });
+  const r = await fetch('/api/schematics-5b-trader/candles?' + params);
+  if (!r.ok) {
+    const body = await r.text().catch(() => '');
+    throw new Error('Candles fetch failed: HTTP ' + r.status + (body ? ' — ' + body.slice(0, 120) : ''));
+  }
   return r.json();
 }
 
