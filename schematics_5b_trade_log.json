@@ -1,34 +1,7 @@
 {
-  "balance": 4768.46,
+  "balance": 4711.85,
   "starting_balance": 5000.0,
-  "current_trade": {
-    "id": 4,
-    "symbol": "BTCUSDT",
-    "direction": "bullish",
-    "model": "Model_1",
-    "entry_price": 64251.57,
-    "stop_price": 64058.07,
-    "target_price": 66599.99,
-    "position_size": 15833.67,
-    "margin": 1583.37,
-    "risk_amount": 47.68,
-    "leverage": 10,
-    "rr": 12.14,
-    "entry_score": 95,
-    "entry_reasons": [
-      "BOS confirmed",
-      "Excellent R:R (12.1)",
-      "HTF bias aligned (bullish)",
-      "Quality 1.00 (+15)",
-      "Model 1 \u2014 deeper deviation"
-    ],
-    "htf_bias": "bullish",
-    "liquidation_price": 58147.67,
-    "liquidation_safe": true,
-    "opened_at": "2026-02-24T01:29:14.981869+00:00",
-    "status": "open",
-    "timeframe": "15m"
-  },
+  "current_trade": null,
   "trade_history": [
     {
       "id": 1,
@@ -140,11 +113,48 @@
       "is_win": false,
       "closed_at": "2026-02-24T01:16:51.731745+00:00",
       "balance_after": 4768.46
+    },
+    {
+      "id": 4,
+      "symbol": "BTCUSDT",
+      "direction": "bullish",
+      "model": "Model_1",
+      "entry_price": 64251.57,
+      "stop_price": 64058.07,
+      "target_price": 66599.99,
+      "position_size": 15833.67,
+      "margin": 1583.37,
+      "risk_amount": 47.68,
+      "leverage": 10,
+      "rr": 12.14,
+      "entry_score": 95,
+      "entry_reasons": [
+        "BOS confirmed",
+        "Excellent R:R (12.1)",
+        "HTF bias aligned (bullish)",
+        "Quality 1.00 (+15)",
+        "Model 1 \u2014 deeper deviation"
+      ],
+      "htf_bias": "bullish",
+      "liquidation_price": 58147.67,
+      "liquidation_safe": true,
+      "opened_at": "2026-02-24T01:29:14.981869+00:00",
+      "status": "closed",
+      "timeframe": "15m",
+      "live_pnl_pct": -0.36,
+      "current_price": 64021.83,
+      "exit_price": 64021.83,
+      "exit_reason": "stop_hit",
+      "pnl_pct": -0.36,
+      "pnl_dollars": -56.62,
+      "is_win": false,
+      "closed_at": "2026-02-24T02:04:52.590753+00:00",
+      "balance_after": 4711.85
     }
   ],
   "total_wins": 0,
-  "total_losses": 3,
-  "last_scan_time": "2026-02-24T01:24:14.263297+00:00",
-  "last_scan_action": "trade_entered",
+  "total_losses": 4,
+  "last_scan_time": "2026-02-24T02:11:28.370705+00:00",
+  "last_scan_action": "no_qualifying_setups",
   "last_error": null
 }
