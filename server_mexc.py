@@ -15613,19 +15613,36 @@ function updateCurrentTrade(trade) {
   const dir = trade.direction || 'unknown';
   const pnl = trade.live_pnl_pct || 0;
   const pnlColor = pnl >= 0 ? '#00e676' : '#ff4444';
+  const tp1Hit = trade.tp1_hit || false;
+  const stopLabel = tp1Hit ? 'Stop (Break-Even)' : 'Stop Loss';
+  const stopColor = tp1Hit ? '#ffc107' : '#ff4444';
+  const tp1Row = trade.tp1_price
+    ? `<div class="trade-row">
+         <span class="label">TP1 (½ target)</span>
+         <span class="value" style="color:#00bcd4">$${(trade.tp1_price||0).toLocaleString()}${tp1Hit ? ' <span style="color:#00e676;font-size:.75rem">&#10003; LOCKED</span>' : ''}</span>
+       </div>`
+    : '';
+  const tp1PartialRow = tp1Hit
+    ? `<div class="trade-row">
+         <span class="label">TP1 P&L (½)</span>
+         <span class="value" style="color:#00e676">+$${(trade.tp1_pnl_dollars||0).toFixed(2)} (+${(trade.tp1_pnl_pct||0).toFixed(2)}%)</span>
+       </div>`
+    : '';
   panel.innerHTML = `
     <div class="trade-card ${dir}">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
         <span class="badge badge-${dir}">${dir.toUpperCase()}</span>
-        <span class="badge badge-open">OPEN</span>
+        ${tp1Hit ? '<span class="badge" style="background:#00bcd4;color:#000;font-size:.7rem">TP1 HIT</span>' : '<span class="badge badge-open">OPEN</span>'}
         <span style="color:${pnlColor};font-size:.9rem;font-weight:700">${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%</span>
       </div>
       <div class="trade-row"><span class="label">Model</span><span class="value">${trade.model || '-'}</span></div>
       <div class="trade-row"><span class="label">Timeframe</span><span class="value" style="color:#ffc107">${trade.timeframe || '-'}</span></div>
       <div class="trade-row"><span class="label">Entry</span><span class="value">$${(trade.entry_price||0).toLocaleString()}</span></div>
       <div class="trade-row"><span class="label">Current</span><span class="value" style="color:${pnlColor}">$${(trade.current_price||trade.entry_price||0).toLocaleString()}</span></div>
-      <div class="trade-row"><span class="label">Stop Loss</span><span class="value" style="color:#ff4444">$${(trade.stop_price||0).toLocaleString()}</span></div>
-      <div class="trade-row"><span class="label">Target</span><span class="value" style="color:#00e676">$${(trade.target_price||0).toLocaleString()}</span></div>
+      <div class="trade-row"><span class="label">${stopLabel}</span><span class="value" style="color:${stopColor}">$${(trade.stop_price||0).toLocaleString()}</span></div>
+      ${tp1Row}
+      ${tp1PartialRow}
+      <div class="trade-row"><span class="label">Target (TP2)</span><span class="value" style="color:#00e676">$${(trade.target_price||0).toLocaleString()}</span></div>
       <div class="trade-row"><span class="label">R:R</span><span class="value">${(trade.rr||0).toFixed(1)}</span></div>
       <div class="trade-row"><span class="label">Position Size</span><span class="value">$${(trade.position_size||0).toLocaleString()}</span></div>
       <div class="trade-row"><span class="label">Risk</span><span class="value">$${(trade.risk_amount||0).toFixed(2)}</span></div>
@@ -15645,13 +15662,19 @@ function updateHistory(trades) {
   const reversed = [...trades].reverse();
   tbody.innerHTML = reversed.map(t => {
     const pnlColor = t.is_win ? '#00e676' : '#ff4444';
+    // When TP1 was hit show combined P&L (TP1 partial + final close)
+    const totalDollars = t.tp1_hit ? (t.tp1_pnl_dollars||0) + (t.pnl_dollars||0) : (t.pnl_dollars||0);
+    const totalPct    = t.tp1_hit ? (t.tp1_pnl_pct||0) + (t.pnl_pct||0) : (t.pnl_pct||0);
+    const pnlLabel = t.tp1_hit
+      ? `${totalPct >= 0 ? '+' : ''}${totalPct.toFixed(2)}% ($${totalDollars.toFixed(2)}) <span style="font-size:.7rem;color:#00bcd4">TP1+TP2</span>`
+      : `${t.pnl_pct >= 0 ? '+' : ''}${(t.pnl_pct||0).toFixed(2)}% ($${(t.pnl_dollars||0).toFixed(2)})`;
     return `<tr>
       <td style="color:#00d4ff">#${t.id||'-'}</td>
       <td><span class="badge badge-${t.direction}">${(t.direction||'?').slice(0,4).toUpperCase()}</span></td>
       <td style="color:#888">${(t.model||'-').replace('_',' ')}</td>
       <td>$${(t.entry_price||0).toLocaleString()}</td>
       <td>$${(t.exit_price||0).toLocaleString()}</td>
-      <td style="color:${pnlColor};font-weight:600">${t.pnl_pct >= 0 ? '+' : ''}${(t.pnl_pct||0).toFixed(2)}% ($${(t.pnl_dollars||0).toFixed(2)})</td>
+      <td style="color:${pnlColor};font-weight:600">${pnlLabel}</td>
       <td><span class="badge ${t.is_win ? 'badge-win' : 'badge-loss'}">${t.is_win ? 'WIN' : 'LOSS'}</span></td>
       <td style="color:#00d4ff">$${(t.balance_after||0).toLocaleString(undefined,{minimumFractionDigits:2})}</td>
     </tr>`;
