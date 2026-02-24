@@ -50,10 +50,11 @@ DEFAULT_LEVERAGE = 10
 # HTF bias gate — daily candle tells us the dominant directional context.
 # 4h was too narrow; 1d changes once a day so the cache TTL matches.
 HTF_TIMEFRAME = "1d"
-# Scan TFs — ordered high to low.  4h is now scanned for setups (not just bias);
-# 3D is not available on MEXC Spot so 1d is the longest granularity available.
-# 30m added to give the HTF cascade a stepping-stone between 15m and 1h.
-MTF_TIMEFRAMES = ["1d", "4h", "1h", "30m", "15m", "5m", "1m"]
+# Scan TFs — 30m and above only.  Lower TFs (15m, 5m, 1m) produce too many
+# low-quality setups across 5 pairs; 30m+ keeps signal quality high.
+# Note: 5m/1m are still fetched separately for LTF BOS *entry refinement*
+# after a setup is confirmed on one of these TFs (see LTF_BOS_TIMEFRAMES).
+MTF_TIMEFRAMES = ["1d", "4h", "1h", "30m"]
 AUTO_SCAN_INTERVAL = int(os.getenv("SCHEMATICS_5B_SCAN_INTERVAL", "60"))
 ENTRY_THRESHOLD = 50  # Fixed — never changes
 
