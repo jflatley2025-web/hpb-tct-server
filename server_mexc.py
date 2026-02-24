@@ -15409,8 +15409,11 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
   <div class="chart-header">
     <span class="chart-title">BTCUSDT — Trade Chart</span>
     <div class="tf-buttons">
-      <button class="tf-btn active" data-tf="15m">15M</button>
-      <button class="tf-btn" data-tf="1h">1H</button>
+      <button class="tf-btn" data-tf="1m">1M</button>
+      <button class="tf-btn" data-tf="5m">5M</button>
+      <button class="tf-btn" data-tf="15m">15M</button>
+      <button class="tf-btn" data-tf="30m">30M</button>
+      <button class="tf-btn active" data-tf="1h">1H</button>
       <button class="tf-btn" data-tf="4h">4H</button>
       <button class="tf-btn" data-tf="1d">1D</button>
     </div>
@@ -15814,7 +15817,7 @@ const BULL_BORDER = '#1565C0';
 const BEAR_FILL   = '#1565C0';
 const WICK_COLOR  = '#1565C0';
 
-let _chartTF        = '15m';
+let _chartTF        = '1h';
 let _chartData      = null;
 let _viewStart      = 0;      // index of first visible candle in the all-candles array
 let _viewLen        = null;   // number of candles to show; null = show all
@@ -15846,9 +15849,13 @@ let _lastH   = 440;
 let _lastPMin = 0;
 let _lastPMax = 1;
 
+// Per-TF candle limits: shorter TFs need more candles to show meaningful context
+const _TF_LIMITS = {'1m': 500, '5m': 500, '15m': 300, '30m': 300, '1h': 200, '4h': 200, '1d': 200};
+
 // Fetch OHLC + trade data from our new endpoint
 async function fetchChartData(tf) {
-  const r = await fetch('/api/schematics-5b-trader/candles?tf=' + tf + '&limit=200');
+  const limit = _TF_LIMITS[tf] || 200;
+  const r = await fetch('/api/schematics-5b-trader/candles?tf=' + tf + '&limit=' + limit);
   return r.json();
 }
 
