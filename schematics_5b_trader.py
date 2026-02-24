@@ -221,16 +221,47 @@ def _notify_5b_entry(trade: Dict) -> None:
     _telegram_5b_send(text)
 
 
+def _notify_5b_tp1(trade: Dict) -> None:
+    """Telegram alert when TP1 (halfway) is hit and half position closed."""
+    direction = trade.get("direction", "?")
+    arrow = "BUY" if direction == "bullish" else "SELL"
+    tp1_pnl = trade.get("tp1_pnl_dollars", 0)
+    sign = "+" if tp1_pnl >= 0 else ""
+    text = (
+        f"<b>5B {arrow} — TP1 Hit (½ Closed)</b>\n"
+        f"Entry: ${trade.get('entry_price', 0):,.2f}\n"
+        f"TP1: ${trade.get('tp1_exit_price', 0):,.2f}\n"
+        f"½ P&L: {sign}${tp1_pnl:,.2f} ({sign}{trade.get('tp1_pnl_pct', 0):.2f}%)\n"
+        f"Stop → Break-Even @ ${trade.get('entry_price', 0):,.2f}\n"
+        f"Remaining ½ targets ${trade.get('target_price', 0):,.2f}\n"
+    )
+    _telegram_5b_send(text)
+
+
 def _notify_5b_exit(trade: Dict) -> None:
     result = "WIN" if trade.get("is_win") else "LOSS"
     pnl = trade.get("pnl_dollars", 0)
     sign = "+" if pnl >= 0 else ""
-    text = (
-        f"<b>5B Trade Closed — {result}</b>\n"
-        f"Entry: ${trade.get('entry_price', 0):,.2f}\n"
-        f"Exit: ${trade.get('exit_price', 0):,.2f}\n"
-        f"P&L: {sign}${pnl:,.2f} ({sign}{trade.get('pnl_pct', 0):.2f}%)\n"
-    )
+    if trade.get("tp1_hit"):
+        tp1_pnl = trade.get("tp1_pnl_dollars", 0)
+        tp1_sign = "+" if tp1_pnl >= 0 else ""
+        total_pnl = pnl + tp1_pnl
+        total_sign = "+" if total_pnl >= 0 else ""
+        text = (
+            f"<b>5B Trade Closed — {result}</b>\n"
+            f"Entry: ${trade.get('entry_price', 0):,.2f}\n"
+            f"Exit: ${trade.get('exit_price', 0):,.2f}\n"
+            f"TP1 P&L (½): {tp1_sign}${tp1_pnl:,.2f}\n"
+            f"Final P&L (½): {sign}${pnl:,.2f} ({sign}{trade.get('pnl_pct', 0):.2f}%)\n"
+            f"Total P&L: {total_sign}${total_pnl:,.2f}\n"
+        )
+    else:
+        text = (
+            f"<b>5B Trade Closed — {result}</b>\n"
+            f"Entry: ${trade.get('entry_price', 0):,.2f}\n"
+            f"Exit: ${trade.get('exit_price', 0):,.2f}\n"
+            f"P&L: {sign}${pnl:,.2f} ({sign}{trade.get('pnl_pct', 0):.2f}%)\n"
+        )
     _telegram_5b_send(text)
 
 
@@ -1086,6 +1117,12 @@ class Schematics5BTrader:
         liq_price = calculate_liquidation_price(entry_price, DEFAULT_LEVERAGE, liq_dir)
         safety = check_liquidation_safety(liq_price, stop_price, entry_price, liq_dir)
 
+        # TP1 = halfway between entry and final target
+        if direction == "bullish":
+            tp1_price = round(entry_price + (target_price - entry_price) / 2, 2)
+        else:
+            tp1_price = round(entry_price - (entry_price - target_price) / 2, 2)
+
         trade = {
             "id": len(self.state.trade_history) + 1,
             "symbol": SYMBOL,
@@ -1094,6 +1131,8 @@ class Schematics5BTrader:
             "entry_price": round(entry_price, 2),
             "stop_price": round(stop_price, 2),
             "target_price": round(target_price, 2),
+            "tp1_price": tp1_price,
+            "tp1_hit": False,
             "position_size": round(position_size, 2),
             "margin": round(margin, 2),
             "risk_amount": round(risk_amount, 2),
@@ -1123,26 +1162,74 @@ class Schematics5BTrader:
         entry_price = trade["entry_price"]
         stop_price = trade["stop_price"]
         target_price = trade["target_price"]
+        tp1_price = trade.get("tp1_price")
+        tp1_hit = trade.get("tp1_hit", False)
 
         if direction == "bullish":
             pnl_pct = ((current_price - entry_price) / entry_price) * 100
             hit_target = current_price >= target_price
             hit_stop = current_price <= stop_price
+            hit_tp1 = tp1_price is not None and not tp1_hit and current_price >= tp1_price
         else:
             pnl_pct = ((entry_price - current_price) / entry_price) * 100
             hit_target = current_price <= target_price
             hit_stop = current_price >= stop_price
+            hit_tp1 = tp1_price is not None and not tp1_hit and current_price <= tp1_price
 
         trade["live_pnl_pct"] = round(pnl_pct, 2)
         trade["current_price"] = round(current_price, 2)
 
         if hit_target:
             return self._close_trade(current_price, "target_hit")
+        elif hit_tp1:
+            # Take half off at TP1, slide SL to break-even, keep trade open
+            return self._take_partial_profit(current_price)
         elif hit_stop:
             return self._close_trade(current_price, "stop_hit")
         else:
             return {"action": "holding", "pnl_pct": round(pnl_pct, 2),
                     "current_price": current_price, "direction": direction}
+
+    def _take_partial_profit(self, exit_price: float) -> Dict:
+        """Close half the position at TP1 and move the stop to break-even."""
+        trade = self.state.current_trade
+        if not trade:
+            return {"action": "no_trade"}
+
+        direction = trade["direction"]
+        entry_price = trade["entry_price"]
+        half_size = trade["position_size"] / 2
+
+        if direction == "bullish":
+            pnl_pct = ((exit_price - entry_price) / entry_price) * 100
+        else:
+            pnl_pct = ((entry_price - exit_price) / entry_price) * 100
+
+        pnl_dollars = half_size * (pnl_pct / 100)
+        self.state.balance += pnl_dollars
+
+        # Record TP1 details in the live trade dict and halve the remaining size
+        trade["tp1_hit"] = True
+        trade["tp1_exit_price"] = round(exit_price, 2)
+        trade["tp1_pnl_pct"] = round(pnl_pct, 2)
+        trade["tp1_pnl_dollars"] = round(pnl_dollars, 2)
+        trade["position_size"] = round(half_size, 2)   # remaining half
+        trade["stop_price"] = round(entry_price, 2)    # slide SL to break-even
+
+        self.state.save()
+        logger.info(
+            f"[5B] TP1 hit @ {exit_price} | ½ P&L={pnl_pct:.2f}% (${pnl_dollars:.2f}) "
+            f"| SL → BE={entry_price} | Balance=${self.state.balance:.2f}"
+        )
+        _notify_5b_tp1(trade)
+
+        return {
+            "action": "tp1_hit",
+            "exit_price": round(exit_price, 2),
+            "pnl_pct": round(pnl_pct, 2),
+            "pnl_dollars": round(pnl_dollars, 2),
+            "new_stop": round(entry_price, 2),
+        }
 
     def _close_trade(self, exit_price: float, reason: str) -> Dict:
         trade = self.state.current_trade
@@ -1157,7 +1244,10 @@ class Schematics5BTrader:
         else:
             pnl_pct = ((entry_price - exit_price) / entry_price) * 100
 
-        is_win = reason == "target_hit"
+        # A stop hit after TP1 lands at break-even — still a net win overall
+        is_win = reason == "target_hit" or (
+            reason == "stop_hit" and trade.get("tp1_hit", False)
+        )
         position_size = trade.get("position_size", 0)
         pnl_dollars = position_size * (pnl_pct / 100)
         self.state.balance += pnl_dollars
