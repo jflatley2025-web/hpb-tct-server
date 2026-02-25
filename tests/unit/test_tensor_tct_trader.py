@@ -425,10 +425,10 @@ class TestEvaluateSchematics:
         assert result["pass"] is False
         assert result["reasons"] == ["No BOS confirmation"]
 
-    # --- Consecutive loss tightening still works ---
+    # --- Required score is fixed (reward learning disabled) ---
 
-    def test_consecutive_loss_raises_required_score(self, evaluator):
-        """After 3 losses, required score must be >= 70."""
+    def test_required_score_fixed_regardless_of_loss_streak(self, evaluator):
+        """Reward learning is disabled — required score is always 50, even after many losses."""
         evaluator.consecutive_losses = 3
         s = _make_schematic(quality_score=0.80, bos_idx=197,
                             stop_price=95_000.0, target_price=110_000.0)
@@ -436,7 +436,9 @@ class TestEvaluateSchematics:
             s, htf_bias="bullish", current_price=100_000.0,
             total_candles=200, max_stale_candles=5
         )
-        assert result["required_score"] == 70
+        assert result["required_score"] == 50, (
+            "Reward learning is disabled — required_score must always be 50, not adaptive"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -550,6 +552,19 @@ class TestTradeLifecycle:
         result = trader._enter_trade(schematic, evaluation, 100_000.0, "bullish")
         assert "error" in result
         assert "R:R" in result["error"]
+
+    def test_enter_trade_rejected_rr_between_1_and_1_5(self, trader):
+        """actual_rr >= 1.0 but < 1.5 must also be rejected (minimum is now 1.5:1)."""
+        # stop=99000, target=101200 at entry=100000 → risk=1000, reward=1200 → R:R=1.2
+        schematic = _make_schematic(
+            direction="bullish", stop_price=99_000.0,
+            target_price=101_200.0, bos_idx=197
+        )
+        evaluation = {"direction": "bullish", "model": "Model_1_Accumulation",
+                      "score": 70, "reasons": []}
+        result = trader._enter_trade(schematic, evaluation, 100_000.0, "bullish")
+        assert "error" in result
+        assert "1.5" in result["error"], "Error message must reference the 1.5 minimum"
 
     # --- Duplicate suppression ---
 
