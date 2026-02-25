@@ -104,6 +104,24 @@ def notify_trade_closed(closed_trade: Dict) -> bool:
     return send_message(text)
 
 
+def notify_half_tp_taken(trade: Dict, exit_price: float, pnl_dollars: float) -> bool:
+    """Send alert when the half take profit is triggered and stop moved to break even."""
+    direction = trade.get("direction", "?")
+    arrow = "BUY" if direction == "bullish" else "SELL"
+
+    text = (
+        f"<b>Half TP Hit — {arrow}</b>\n"
+        f"Symbol: {trade.get('symbol', 'BTCUSDT')}\n"
+        f"Entry: ${trade.get('entry_price', 0):,.2f}\n"
+        f"Half TP exit: ${exit_price:,.2f}\n"
+        f"Half P&amp;L: +${pnl_dollars:,.2f}\n"
+        f"Stop moved to break even: ${trade.get('stop_price', 0):,.2f}\n"
+        f"Target: ${trade.get('target_price', 0):,.2f}\n"
+    )
+
+    return send_message(text)
+
+
 def notify_trade_force_closed(closed_trade: Dict) -> bool:
     """Send simple alert when a trade is force-closed."""
     pnl_pct = closed_trade.get("pnl_pct", 0)

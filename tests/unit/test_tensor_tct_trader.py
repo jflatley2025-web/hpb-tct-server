@@ -694,3 +694,217 @@ class TestBosNoFallback:
             "Issue 12: _find_bearish_bos must return None when no valid LTF swing lows "
             "pass the EQ filter — the last-resort fallback was removed (Issue 4)"
         )
+
+
+# ---------------------------------------------------------------------------
+# Half Take Profit — entry, trigger, break-even stop, P&L accounting
+# ---------------------------------------------------------------------------
+
+class TestHalfTakeProfit:
+    """Tests for the 1/2 take profit feature:
+    - half_tp_price set at 49% of technical target distance on entry
+    - half TP fires when price crosses that level
+    - stop_price moved to entry (break even) after half TP
+    - position_size halved after half TP
+    - balance credited immediately; not double-counted on close
+    - trade is_win=True when stopped at break even after half TP
+    - bearish direction handled correctly
+    """
+
+    @pytest.fixture
+    def trader(self, tmp_path):
+        from tensor_tct_trader import TensorTCTTrader, STARTING_BALANCE
+        log = tmp_path / "tl.json"
+        data = {
+            "balance": STARTING_BALANCE, "starting_balance": STARTING_BALANCE,
+            "current_trade": None, "trade_history": [], "reward_history": [],
+            "total_wins": 0, "total_losses": 0, "solutions_applied": [],
+            "last_scan_time": None, "last_scan_action": None, "last_error": None,
+        }
+        log.write_text(json.dumps(data))
+        with patch("tensor_tct_trader.TRADE_LOG_PATH", str(log)), \
+             patch("tensor_tct_trader.TRADE_LOG_BACKUP_PATH", str(tmp_path / "backup.json")), \
+             patch("github_storage.fetch_trade_log", return_value=None), \
+             patch("tensor_tct_trader.notify_trade_entered"), \
+             patch("tensor_tct_trader.notify_trade_closed"), \
+             patch("tensor_tct_trader.notify_trade_force_closed"), \
+             patch("tensor_tct_trader.notify_half_tp_taken"):
+            t = TensorTCTTrader()
+        return t
+
+    def _open_trade(self, trader, entry=100_000.0, stop=95_000.0,
+                    target=110_000.0, direction="bullish"):
+        schematic = _make_schematic(
+            direction=direction, stop_price=stop, target_price=target,
+            bos_idx=197, quality_score=0.80,
+        )
+        evaluation = {
+            "direction": direction, "model": "Model_1_Accumulation",
+            "score": 70, "reasons": ["test"],
+        }
+        with patch("tensor_tct_trader.notify_trade_entered"):
+            return trader._enter_trade(schematic, evaluation, entry, "bullish")
+
+    def test_enter_trade_sets_half_tp_price_bullish(self, trader):
+        """half_tp_price = entry + 49% of (target - entry) for bullish trades."""
+        # entry=100k, target=110k → distance=10k → 49% = 4900 → half_tp=104900
+        self._open_trade(trader, entry=100_000.0, stop=95_000.0, target=110_000.0)
+        trade = trader.state.current_trade
+        expected = round(100_000.0 + (110_000.0 - 100_000.0) * 0.49, 2)
+        assert trade["half_tp_price"] == expected
+        assert trade["half_tp_taken"] is False
+        assert trade["half_tp_pnl_dollars"] == 0.0
+
+    def test_enter_trade_sets_original_position_size(self, trader):
+        """original_position_size must equal position_size at entry."""
+        self._open_trade(trader)
+        trade = trader.state.current_trade
+        assert trade["original_position_size"] == trade["position_size"]
+
+    def test_half_tp_not_triggered_below_level(self, trader):
+        """No half TP event when price is between entry and half_tp_price."""
+        self._open_trade(trader, entry=100_000.0, stop=95_000.0, target=110_000.0)
+        # half_tp_price = 104900; 102000 is below it
+        with patch("tensor_tct_trader.notify_half_tp_taken") as mock_notify:
+            result = trader._manage_open_trade(102_000.0)
+        assert result["action"] == "holding"
+        assert trader.state.current_trade["half_tp_taken"] is False
+        mock_notify.assert_not_called()
+
+    def test_half_tp_triggered_at_level(self, trader):
+        """half_tp_taken event fires when price reaches half_tp_price."""
+        self._open_trade(trader, entry=100_000.0, stop=95_000.0, target=110_000.0)
+        with patch("tensor_tct_trader.notify_half_tp_taken"):
+            result = trader._manage_open_trade(104_900.0)
+        assert result["action"] == "half_tp_taken"
+        assert trader.state.current_trade["half_tp_taken"] is True
+
+    def test_half_tp_moves_stop_to_break_even(self, trader):
+        """After half TP, stop_price must equal entry_price."""
+        self._open_trade(trader, entry=100_000.0, stop=95_000.0, target=110_000.0)
+        with patch("tensor_tct_trader.notify_half_tp_taken"):
+            trader._manage_open_trade(105_000.0)
+        trade = trader.state.current_trade
+        assert trade["stop_price"] == 100_000.0
+        assert trade["stop_is_breakeven"] is True
+
+    def test_half_tp_reduces_position_size_by_half(self, trader):
+        """Position size must be halved after half TP is taken."""
+        self._open_trade(trader, entry=100_000.0, stop=95_000.0, target=110_000.0)
+        original_size = trader.state.current_trade["position_size"]
+        with patch("tensor_tct_trader.notify_half_tp_taken"):
+            trader._manage_open_trade(105_000.0)
+        trade = trader.state.current_trade
+        assert abs(trade["position_size"] - original_size / 2) < 0.01
+
+    def test_half_tp_credits_balance_immediately(self, trader):
+        """Balance must increase by half TP P&L as soon as it fires."""
+        self._open_trade(trader, entry=100_000.0, stop=95_000.0, target=110_000.0)
+        balance_before = trader.state.balance
+        with patch("tensor_tct_trader.notify_half_tp_taken"):
+            trader._manage_open_trade(105_000.0)
+        assert trader.state.balance > balance_before
+
+    def test_half_tp_sends_telegram_notification(self, trader):
+        """notify_half_tp_taken must be called exactly once when half TP fires."""
+        self._open_trade(trader, entry=100_000.0, stop=95_000.0, target=110_000.0)
+        with patch("tensor_tct_trader.notify_half_tp_taken") as mock_notify:
+            trader._manage_open_trade(105_000.0)
+        mock_notify.assert_called_once()
+
+    def test_half_tp_only_fires_once(self, trader):
+        """Half TP must not fire again if price stays at the same level."""
+        self._open_trade(trader, entry=100_000.0, stop=95_000.0, target=110_000.0)
+        with patch("tensor_tct_trader.notify_half_tp_taken"):
+            trader._manage_open_trade(105_000.0)  # first pass — fires
+        balance_after_half_tp = trader.state.balance
+        with patch("tensor_tct_trader.notify_half_tp_taken") as mock_notify:
+            result = trader._manage_open_trade(105_000.0)  # second pass — must NOT re-fire
+        assert mock_notify.call_count == 0
+        assert result["action"] == "holding"
+        assert trader.state.balance == balance_after_half_tp
+
+    def test_close_at_target_after_half_tp_includes_combined_pnl(self, trader):
+        """pnl_dollars on close reflects total P&L: half TP profit + remaining position profit."""
+        self._open_trade(trader, entry=100_000.0, stop=95_000.0, target=110_000.0)
+        with patch("tensor_tct_trader.notify_half_tp_taken"):
+            trader._manage_open_trade(105_000.0)
+        half_tp_pnl = trader.state.current_trade["half_tp_pnl_dollars"]
+        with patch("tensor_tct_trader.notify_trade_closed"):
+            result = trader._close_trade(110_000.0, "target_hit")
+        closed = result["trade"]
+        # Total P&L must exceed just the half TP portion
+        assert closed["pnl_dollars"] > half_tp_pnl
+        assert closed["is_win"] is True
+
+    def test_balance_not_double_counted_on_close(self, trader):
+        """Balance after half TP + close must equal half_pnl + remaining_pnl, not double the half."""
+        self._open_trade(trader, entry=100_000.0, stop=95_000.0, target=110_000.0)
+        start_balance = trader.state.balance
+        original_size = trader.state.current_trade["position_size"]
+
+        with patch("tensor_tct_trader.notify_half_tp_taken"):
+            trader._manage_open_trade(105_000.0)
+        balance_after_half_tp = trader.state.balance
+
+        with patch("tensor_tct_trader.notify_trade_closed"):
+            trader._close_trade(110_000.0, "target_hit")
+        final_balance = trader.state.balance
+
+        # Half TP P&L = (half_size) * pnl_pct_at_105k
+        # Remaining P&L = (half_size) * pnl_pct_at_110k
+        half_size = original_size / 2
+        half_pnl = half_size * ((105_000.0 - 100_000.0) / 100_000.0)
+        remaining_pnl = half_size * ((110_000.0 - 100_000.0) / 100_000.0)
+        expected_final = start_balance + half_pnl + remaining_pnl
+
+        assert abs(final_balance - expected_final) < 0.01
+
+    def test_stop_at_break_even_after_half_tp_is_win(self, trader):
+        """Stop hit at break even after half TP → is_win=True (positive total P&L)."""
+        self._open_trade(trader, entry=100_000.0, stop=95_000.0, target=110_000.0)
+        with patch("tensor_tct_trader.notify_half_tp_taken"):
+            trader._manage_open_trade(105_000.0)
+        with patch("tensor_tct_trader.notify_trade_closed"):
+            result = trader._close_trade(100_000.0, "stop_hit")
+        closed = result["trade"]
+        # Half TP booked positive dollars; remaining closed at break even (0 P&L)
+        assert closed["is_win"] is True
+        assert closed["pnl_dollars"] > 0
+
+    def test_stop_at_break_even_counts_as_total_win(self, trader):
+        """total_wins increments when stopped at break even after half TP."""
+        self._open_trade(trader, entry=100_000.0, stop=95_000.0, target=110_000.0)
+        with patch("tensor_tct_trader.notify_half_tp_taken"):
+            trader._manage_open_trade(105_000.0)
+        with patch("tensor_tct_trader.notify_trade_closed"):
+            trader._close_trade(100_000.0, "stop_hit")
+        assert trader.state.total_wins == 1
+        assert trader.state.total_losses == 0
+
+    def test_bearish_half_tp_price_calculated_correctly(self, trader):
+        """For bearish trades, half_tp_price = entry - 49% of (entry - target)."""
+        # entry=100k, stop=105k, target=90k → distance=10k → 49%=4900 → half_tp=95100
+        self._open_trade(trader, entry=100_000.0, stop=105_000.0,
+                         target=90_000.0, direction="bearish")
+        trade = trader.state.current_trade
+        expected = round(100_000.0 - (100_000.0 - 90_000.0) * 0.49, 2)
+        assert trade["half_tp_price"] == expected
+
+    def test_bearish_half_tp_triggers_on_downward_move(self, trader):
+        """For bearish trades, half TP fires when price drops to the half_tp level."""
+        self._open_trade(trader, entry=100_000.0, stop=105_000.0,
+                         target=90_000.0, direction="bearish")
+        half_tp = trader.state.current_trade["half_tp_price"]
+        with patch("tensor_tct_trader.notify_half_tp_taken"):
+            result = trader._manage_open_trade(half_tp)
+        assert result["action"] == "half_tp_taken"
+        assert trader.state.current_trade["half_tp_taken"] is True
+
+    def test_bearish_stop_moved_to_break_even(self, trader):
+        """Bearish: stop_price moved to entry after half TP."""
+        self._open_trade(trader, entry=100_000.0, stop=105_000.0,
+                         target=90_000.0, direction="bearish")
+        with patch("tensor_tct_trader.notify_half_tp_taken"):
+            trader._manage_open_trade(95_000.0)
+        assert trader.state.current_trade["stop_price"] == 100_000.0
