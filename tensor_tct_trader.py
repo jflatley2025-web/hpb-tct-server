@@ -37,6 +37,7 @@ from telegram_notifications import (
     notify_trade_entered,
     notify_trade_closed,
     notify_trade_force_closed,
+    notify_half_tp_taken,
 )
 
 logger = logging.getLogger("TensorTCT")
@@ -899,6 +900,12 @@ class TensorTCTTrader:
         liq_price = calculate_liquidation_price(entry_price, DEFAULT_LEVERAGE, liq_dir)
         safety = check_liquidation_safety(liq_price, stop_price, entry_price, liq_dir)
 
+        # Half take profit at 49% of the technical target distance from entry
+        if direction == "bullish":
+            half_tp_price = round(entry_price + (target_price - entry_price) * 0.49, 2)
+        else:
+            half_tp_price = round(entry_price - (entry_price - target_price) * 0.49, 2)
+
         trade = {
             "id": len(self.state.trade_history) + 1,
             "symbol": SYMBOL,
@@ -907,6 +914,10 @@ class TensorTCTTrader:
             "entry_price": round(entry_price, 2),
             "stop_price": round(stop_price, 2),
             "target_price": round(target_price, 2),
+            "half_tp_price": half_tp_price,
+            "half_tp_taken": False,
+            "half_tp_pnl_dollars": 0.0,
+            "original_position_size": round(position_size, 2),
             "position_size": round(position_size, 2),
             "margin": round(margin, 2),
             "risk_amount": round(risk_amount, 2),
@@ -928,7 +939,7 @@ class TensorTCTTrader:
         return trade
 
     def _manage_open_trade(self, current_price: float) -> Dict:
-        """Check if the open trade hit SL or TP."""
+        """Check if the open trade hit SL, half TP, or full TP."""
         trade = self.state.current_trade
         if not trade:
             return {"action": "no_trade"}
@@ -937,25 +948,57 @@ class TensorTCTTrader:
         entry_price = trade["entry_price"]
         stop_price = trade["stop_price"]
         target_price = trade["target_price"]
-        risk_amount = trade["risk_amount"]
+        half_tp_price = trade.get("half_tp_price")
+        half_tp_taken = trade.get("half_tp_taken", False)
 
         # Calculate current P&L
         if direction == "bullish":
             pnl_pct = ((current_price - entry_price) / entry_price) * 100
             hit_target = current_price >= target_price
             hit_stop = current_price <= stop_price
+            hit_half_tp = (
+                half_tp_price is not None
+                and not half_tp_taken
+                and current_price >= half_tp_price
+            )
         else:
             pnl_pct = ((entry_price - current_price) / entry_price) * 100
             hit_target = current_price <= target_price
             hit_stop = current_price >= stop_price
+            hit_half_tp = (
+                half_tp_price is not None
+                and not half_tp_taken
+                and current_price <= half_tp_price
+            )
 
         trade["live_pnl_pct"] = round(pnl_pct, 2)
         trade["current_price"] = round(current_price, 2)
+
+        # Process half TP before full TP/SL — takes profit on half position
+        # and moves stop to break even. Full TP/SL are then re-evaluated.
+        if hit_half_tp:
+            self._take_half_profit(current_price)
+            # Refresh stop from trade (now at break even)
+            stop_price = trade["stop_price"]
+            if direction == "bullish":
+                hit_stop = current_price <= stop_price
+            else:
+                hit_stop = current_price >= stop_price
 
         if hit_target:
             return self._close_trade(current_price, "target_hit")
         elif hit_stop:
             return self._close_trade(current_price, "stop_hit")
+        elif hit_half_tp:
+            # Half TP taken but trade still open
+            return {
+                "action": "half_tp_taken",
+                "pnl_pct": round(pnl_pct, 2),
+                "current_price": current_price,
+                "entry_price": entry_price,
+                "direction": direction,
+                "half_tp_pnl_dollars": trade.get("half_tp_pnl_dollars", 0),
+            }
         else:
             # Issue 14: Do not save here — live_pnl_pct and current_price are display-only
             # fields. The per-cycle save() in scan_and_trade() persists the trade state.
@@ -968,6 +1011,50 @@ class TensorTCTTrader:
                 "direction": direction,
             }
 
+    def _take_half_profit(self, current_price: float) -> None:
+        """Close half the position and move stop to break even.
+
+        Called by _manage_open_trade when price reaches half_tp_price.
+        Modifies the current_trade dict in-place: halves position_size,
+        sets stop_price to entry_price, and credits the half P&L to balance.
+        """
+        trade = self.state.current_trade
+        if not trade:
+            return
+
+        direction = trade["direction"]
+        entry_price = trade["entry_price"]
+        position_size = trade["position_size"]
+
+        # P&L on the half being closed now
+        half_size = position_size / 2
+        if direction == "bullish":
+            half_pnl_pct = ((current_price - entry_price) / entry_price) * 100
+        else:
+            half_pnl_pct = ((entry_price - current_price) / entry_price) * 100
+        half_pnl_dollars = half_size * (half_pnl_pct / 100)
+
+        # Credit half profit to balance immediately
+        self.state.balance += half_pnl_dollars
+
+        # Update trade state in-place
+        trade["half_tp_taken"] = True
+        trade["half_tp_pnl_dollars"] = round(half_pnl_dollars, 2)
+        trade["half_tp_exit_price"] = round(current_price, 2)
+        trade["position_size"] = round(half_size, 2)
+        trade["stop_price"] = round(entry_price, 2)  # move SL to break even
+        trade["stop_is_breakeven"] = True
+
+        self.state.save()
+
+        logger.info(
+            f"[TRADE] Half TP taken @ {current_price} | "
+            f"P&L on half: +${half_pnl_dollars:.2f} | "
+            f"SL moved to break even @ {entry_price} | "
+            f"Remaining position: ${half_size:.2f}"
+        )
+        notify_half_tp_taken(trade, current_price, half_pnl_dollars)
+
     def _close_trade(self, exit_price: float, reason: str) -> Dict:
         """Close the current trade and record results."""
         trade = self.state.current_trade
@@ -979,20 +1066,24 @@ class TensorTCTTrader:
         risk_amount = trade["risk_amount"]
         rr = trade.get("rr", 1)
 
-        # Calculate actual P&L
+        # P&L on the remaining position (already halved if half TP was taken)
+        position_size = trade.get("position_size", 0)
         if direction == "bullish":
             pnl_pct = ((exit_price - entry_price) / entry_price) * 100
         else:
             pnl_pct = ((entry_price - exit_price) / entry_price) * 100
+        remaining_pnl_dollars = position_size * (pnl_pct / 100)
 
-        is_win = reason == "target_hit"
+        # Total P&L includes the already-booked half TP profit
+        half_tp_pnl = trade.get("half_tp_pnl_dollars", 0.0)
+        pnl_dollars = remaining_pnl_dollars + half_tp_pnl
 
-        # Calculate dollar P&L based on position size
-        position_size = trade.get("position_size", 0)
-        pnl_dollars = position_size * (pnl_pct / 100)
+        # Update balance with ONLY the remaining position P&L
+        # (half TP profit was already credited to balance when taken)
+        self.state.balance += remaining_pnl_dollars
 
-        # Update balance
-        self.state.balance += pnl_dollars
+        # Trade is a win if total P&L is positive
+        is_win = pnl_dollars > 0
 
         # Compute reward for this trade
         reward_value = pnl_pct / 100  # normalized
@@ -1001,7 +1092,14 @@ class TensorTCTTrader:
         if is_win:
             self.state.total_wins += 1
             self.evaluator.adapt_after_win()
-            analysis = f"WIN: {trade['model']} {direction} trade hit target. R:R={rr:.1f}, reward bias was aligned."
+            if trade.get("half_tp_taken"):
+                analysis = (
+                    f"WIN (half TP): {trade['model']} {direction} — "
+                    f"half taken at ${trade.get('half_tp_exit_price', 0):,.0f} "
+                    f"(+${half_tp_pnl:.2f}), remaining closed at ${exit_price:,.0f}."
+                )
+            else:
+                analysis = f"WIN: {trade['model']} {direction} trade hit target. R:R={rr:.1f}, reward bias was aligned."
             solution = "Continue with current strategy — reward alignment confirmed."
         else:
             self.state.total_losses += 1

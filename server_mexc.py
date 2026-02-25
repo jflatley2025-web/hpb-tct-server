@@ -14890,6 +14890,23 @@ function updateCurrentTrade(trade) {
   const dir = trade.direction || 'unknown';
   const pnl = trade.live_pnl_pct || 0;
   const pnlColor = pnl >= 0 ? '#00e676' : '#ff4444';
+
+  // Half TP row — shows price, status badge, and booked P&L if taken
+  const halfTpRow = trade.half_tp_price ? `
+      <div class="trade-row">
+        <span class="label">Half TP (49%)</span>
+        <span class="value" style="color:#ffc107">
+          $${(trade.half_tp_price).toLocaleString()}
+          ${trade.half_tp_taken
+            ? ` <span class="badge" style="background:#ffc10722;color:#ffc107;border:1px solid #ffc10744;font-size:.6rem">TAKEN +$${(trade.half_tp_pnl_dollars||0).toFixed(2)}</span>`
+            : ` <span class="badge" style="background:#88888822;color:#888;border:1px solid #33333344;font-size:.6rem">PENDING</span>`}
+        </span>
+      </div>` : '';
+
+  // Stop label changes to "Break Even" once half TP is taken
+  const stopLabel = trade.stop_is_breakeven ? 'Stop (Break Even)' : 'Stop Loss';
+  const stopColor = trade.stop_is_breakeven ? '#ffc107' : '#ff4444';
+
   panel.innerHTML = `
     <div class="trade-card ${dir}">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
@@ -14901,7 +14918,8 @@ function updateCurrentTrade(trade) {
       <div class="trade-row"><span class="label">Timeframe</span><span class="value" style="color:#ffc107">${trade.timeframe || '—'}</span></div>
       <div class="trade-row"><span class="label">Entry</span><span class="value">$${(trade.entry_price||0).toLocaleString()}</span></div>
       <div class="trade-row"><span class="label">Current</span><span class="value" style="color:${pnlColor}">$${(trade.current_price||trade.entry_price||0).toLocaleString()}</span></div>
-      <div class="trade-row"><span class="label">Stop Loss</span><span class="value" style="color:#ff4444">$${(trade.stop_price||0).toLocaleString()}</span></div>
+      <div class="trade-row"><span class="label">${stopLabel}</span><span class="value" style="color:${stopColor}">$${(trade.stop_price||0).toLocaleString()}</span></div>
+      ${halfTpRow}
       <div class="trade-row"><span class="label">Target</span><span class="value" style="color:#00e676">$${(trade.target_price||0).toLocaleString()}</span></div>
       <div class="trade-row"><span class="label">R:R</span><span class="value">${(trade.rr||0).toFixed(1)}</span></div>
       <div class="trade-row"><span class="label">Position Size</span><span class="value">$${(trade.position_size||0).toLocaleString()}</span></div>
