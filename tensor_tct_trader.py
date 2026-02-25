@@ -506,15 +506,8 @@ class TCTTradeEvaluator:
                 score += 3
                 reasons.append("Model 2 — higher low / lower high")
 
-        # Consecutive loss adaptation — tighten entry requirements
-        if self.consecutive_losses >= 3:
-            required = 70
-            reasons.append(f"Tightened entry (3+ losses) — need score >= {required}")
-        elif self.consecutive_losses >= 2:
-            required = 60
-            reasons.append(f"Cautious mode (2 losses) — need score >= {required}")
-        else:
-            required = 50
+        # Reward learning disabled — fixed entry threshold regardless of loss streak.
+        required = 50
 
         # Check price relative to entry
         entry_info = schematic.get("entry", {})
@@ -603,8 +596,10 @@ class TensorTCTTrader:
         }
 
         try:
-            # Refresh learned model weights from trade history before scanning
-            self.evaluator.model_weights = self.state.compute_model_weights()
+            # Reward learning disabled — always use fixed cold-start model defaults.
+            # compute_model_weights() is intentionally not called here so model
+            # preferences never shift based on historical win rates.
+            self.evaluator.model_weights = {}
 
             # 1. Get current price from the fastest feed (1m)
             df_price = fetch_candles_sync(SYMBOL, "1m", 10)
@@ -875,12 +870,12 @@ class TensorTCTTrader:
 
         actual_rr = actual_reward / actual_risk if actual_risk > 0 else 0
 
-        if actual_rr < 1.0:
+        if actual_rr < 1.5:
             logger.warning(
                 f"[TRADE] REJECTED: R:R at market price is {actual_rr:.2f} — "
-                f"risking more than reward (risk=${actual_risk:,.2f}, reward=${actual_reward:,.2f})"
+                f"minimum required is 1.5:1 (risk=${actual_risk:,.2f}, reward=${actual_reward:,.2f})"
             )
-            return {"error": f"R:R too low at market price ({actual_rr:.2f}:1) — risk exceeds reward"}
+            return {"error": f"R:R too low at market price ({actual_rr:.2f}:1) — minimum is 1.5:1"}
 
         # Calculate position sizing (1% risk)
         risk_amount = self.state.balance * (RISK_PER_TRADE_PCT / 100)
