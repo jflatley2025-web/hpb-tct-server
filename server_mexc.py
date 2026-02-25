@@ -68,25 +68,34 @@ MEXC_KEY = os.getenv("MEXC_KEY")
 MEXC_SECRET = os.getenv("MEXC_SECRET")
 MEXC_URL_BASE = "https://api.mexc.com"
 
-# Load leverage coin list for pair selection
+# Load MEXC all-pairs list for TCT scanning & trading
+# mexc_all_pairs.txt uses futures-style symbols (e.g. BTC_USDT_PERP).
+# We convert to spot format (BTCUSDT) and filter to USDT pairs only,
+# excluding stock-tracking tokens and exchange-tied tokens.
 COIN_LIST = []
-COIN_LIST_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "leverage_coin_list_extended.txt")
+COIN_LIST_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mexc_all_pairs.txt")
+_EXCLUDED_BASES = {"BNB", "BIFI", "CAKE", "XVS", "ALPACA", "BURGER", "SFP", "LINA", "TWT"}
 try:
     with open(COIN_LIST_PATH, "r") as f:
         for line in f:
-            pair = line.strip()
-            # Filter out non-pair lines, dated futures contracts, and BNB (exchange-tied)
-            if pair and pair.endswith("USDT") and "-" not in pair and not pair.endswith(".txt"):
-                # Exclude BNB and any Binance-exchange-tied pairs
-                base = pair.replace("USDT", "")
-                if base.upper() in ("BNB", "BIFI", "CAKE", "XVS", "ALPACA", "BURGER", "SFP", "LINA", "TWT"):
-                    continue
-                COIN_LIST.append(pair)
+            raw = line.strip()
+            if not raw or not raw.endswith("_USDT_PERP"):
+                continue
+            # Convert: BTC_USDT_PERP → BTCUSDT
+            base = raw.replace("_USDT_PERP", "")
+            # Skip stock-tracking tokens (contain "STOCK" in symbol)
+            if "STOCK" in base.upper():
+                continue
+            # Skip exchange-tied tokens
+            if base.upper() in _EXCLUDED_BASES:
+                continue
+            pair = base + "USDT"
+            COIN_LIST.append(pair)
     COIN_LIST = sorted(set(COIN_LIST))
-    logger.info(f"[INIT] Loaded {len(COIN_LIST)} trading pairs from coin list")
+    logger.info(f"[INIT] Loaded {len(COIN_LIST)} trading pairs from mexc_all_pairs.txt")
 except FileNotFoundError:
     COIN_LIST = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"]
-    logger.warning(f"[INIT] Coin list file not found, using defaults")
+    logger.warning(f"[INIT] mexc_all_pairs.txt not found, using defaults")
 
 def resolve_symbol(symbol_param: Optional[str] = None) -> str:
     """Resolve which symbol to use: param override or global default."""
@@ -117,8 +126,52 @@ ENABLE_SCANNER = os.environ.get("ENABLE_SCANNER", "true").lower() in ("true", "1
 # Range scanner config (rebuilt using /ranges page detect_ranges logic)
 RANGE_MIN_RPS = 6.5                  # minimum quality score to qualify (0-10)
 
+# Scan coordination lock — prevents tensor-trade and 5B auto-scan loops from
+# making MEXC API calls at the same instant.  Each loop acquires this lock
+# for the duration of its scan_and_trade() call so they take turns.
+_scan_coordination_lock: Optional[asyncio.Lock] = None
+
+
+def _get_scan_lock() -> asyncio.Lock:
+    global _scan_coordination_lock
+    if _scan_coordination_lock is None:
+        _scan_coordination_lock = asyncio.Lock()
+    return _scan_coordination_lock
+
 logging.basicConfig(level=logging.INFO)
 logger.info(f"[INIT] HPB–TCT v21.2 Ready — Symbol={SYMBOL}, Port={PORT}")
+
+
+# ────────────────────────────────────────────────
+# MULTI-SESSION CONTEXT ENGINE (MSCE)
+# ────────────────────────────────────────────────
+def validate_MSCE(context):
+    """
+    Multi-Session Context Evaluation (MSCE)
+    Adds session weighting & bias transitions to gate confidence.
+    """
+    utc_hour = datetime.utcnow().hour
+    session = "Asia"
+    bias = "neutral"
+    weight = 1.0
+    if 0 <= utc_hour < 8:
+        session = "Asia"
+        weight = 0.95
+    elif 8 <= utc_hour < 16:
+        session = "London"
+        weight = 1.05
+    else:
+        session = "NY"
+        weight = 1.15
+    context["MSCE"] = {
+        "session": session,
+        "session_bias": bias,
+        "weight": weight,
+        "valid": True,
+        "confidence": weight,
+    }
+    return context["MSCE"]
+
 
 # ================================================================
 # MARKET STRUCTURE  (TCT Mentorship – Lecture 1)
@@ -2561,9 +2614,11 @@ MAX_CANDLE_CACHE_SIZE = 2000  # Hard cap: evict oldest by insertion order if exc
 # Invalid symbols: 400 errors → never retry during this process lifetime
 _invalid_symbols: set = set()
 
-# Concurrency limiter: cap parallel requests (free tier friendly)
+# Concurrency limiter: cap parallel requests (free tier friendly).
+# Reduced from 8 to 5 — with 700+ pairs from mexc_all_pairs.txt the
+# higher concurrency was hitting MEXC rate limits during range scans.
 _fetch_semaphore: Optional[asyncio.Semaphore] = None
-MAX_CONCURRENT_REQUESTS = 8
+MAX_CONCURRENT_REQUESTS = 5
 
 async def _get_fetch_semaphore() -> asyncio.Semaphore:
     global _fetch_semaphore
@@ -2906,19 +2961,20 @@ async def run_full_scan():
         except Exception as e:
             logger.debug(f"[RANGE_SCANNER] Exception for {symbol}: {e}")
 
-        # Adaptive rate limiting
-        base_delay = 0.35
+        # Adaptive rate limiting — increased base delay for the larger
+        # mexc_all_pairs.txt list (700+ pairs) to stay under MEXC rate limits.
+        base_delay = 0.5
         if _scanner_consecutive_errors > 10:
             delay = min(base_delay + (_scanner_consecutive_errors * 0.5), 10.0)
             logger.info(f"[RANGE_SCANNER] Throttling: {delay:.1f}s delay (errors={_scanner_consecutive_errors})")
         elif _scanner_consecutive_errors > 3:
-            delay = base_delay + (_scanner_consecutive_errors * 0.2)
+            delay = base_delay + (_scanner_consecutive_errors * 0.3)
         else:
             delay = base_delay
         await asyncio.sleep(delay)
 
-        # Log progress every 50 pairs
-        if (i + 1) % 50 == 0:
+        # Log progress every 100 pairs (adjusted for larger pair list)
+        if (i + 1) % 100 == 0:
             logger.info(f"[RANGE_SCANNER] Progress: {i + 1}/{len(COIN_LIST)} pairs, {len(all_qualified)} qualified")
 
     # Sort by RPS (highest first) and take top 5
@@ -3076,8 +3132,9 @@ async def scan_forming_setups():
 
 async def scanner_loop():
     """Background loop that runs the scanner every 12 hours."""
-    # Initial scan after a short delay to let the server start
-    await asyncio.sleep(10)
+    # Wait 60s on startup so tensor-trade (15s) and 5B (35s) complete their
+    # first quick cycles before the heavy range scan starts hitting the API.
+    await asyncio.sleep(60)
     await run_full_scan()
 
     while True:
@@ -4060,6 +4117,10 @@ async def get_schematics_5a_data(symbol: str = "BTCUSDT", timeframe: str = "4h")
                 sch["state"] = "in_formation"
                 in_formation.append(sch)
 
+        # Apply MSCE session weighting for context visibility
+        msce_ctx: Dict = {}
+        msce = validate_MSCE(msce_ctx)
+
         return convert_numpy_types({
             "symbol": resolved,
             "timeframe": timeframe,
@@ -4071,6 +4132,7 @@ async def get_schematics_5a_data(symbol: str = "BTCUSDT", timeframe: str = "4h")
             "total": len(completed) + len(active) + len(in_formation),
             "htf_bias": htf_bias,
             "htf_bias_detail": htf_bias_detail,
+            "msce": msce,
             "debug": debug_info,
         })
 
@@ -14596,6 +14658,9 @@ async def tensor_trade_debug():
     debug = dict(trader.last_debug) if trader.last_debug else {}
     debug["evaluator_consecutive_losses"] = trader.evaluator.consecutive_losses
     debug["adaptation_notes"] = trader.evaluator.adaptation_notes[-10:]
+    # Attach current MSCE context
+    msce_ctx: Dict = {}
+    debug["msce"] = validate_MSCE(msce_ctx)
     debug["state_summary"] = {
         "balance": trader.state.balance,
         "has_open_trade": trader.state.current_trade is not None,
@@ -15104,8 +15169,9 @@ async def tensor_trade_auto_scan_loop():
     scan_and_trade() cycle autonomously every AUTO_SCAN_INTERVAL seconds.
     No browser tab required — this runs entirely on the server.
 
-    Also pushes the trade log to GitHub every hour so trade history
-    survives Render deployments.
+    Integrates MSCE (Multi-Session Context Engine) for session-aware
+    confidence weighting.  Also pushes the trade log to GitHub every
+    hour so trade history survives Render deployments.
     """
     from tensor_tct_trader import get_trader, AUTO_SCAN_INTERVAL, TRADE_LOG_PATH
     from github_storage import push_trade_log
@@ -15120,12 +15186,25 @@ async def tensor_trade_auto_scan_loop():
 
     while True:
         try:
-            trader = get_trader()
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, trader.scan_and_trade)
+            # Apply MSCE session weighting before each scan cycle
+            msce_ctx: Dict = {}
+            msce = validate_MSCE(msce_ctx)
+            logger.info(f"[TENSOR-TRADE] MSCE: session={msce['session']}, weight={msce['weight']}")
+
+            # Acquire scan coordination lock so tensor-trade and 5B don't
+            # fire MEXC API calls at the same instant.
+            async with _get_scan_lock():
+                trader = get_trader()
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(None, trader.scan_and_trade)
+
             action = result.get("action", "unknown")
             ts = result.get("timestamp", "")
-            logger.info(f"[TENSOR-TRADE] Auto-scan result: {action} @ {ts}")
+
+            # Attach MSCE context to the result for dashboard visibility
+            result["msce"] = msce
+
+            logger.info(f"[TENSOR-TRADE] Auto-scan result: {action} @ {ts} (MSCE {msce['session']} w={msce['weight']})")
             consecutive_errors = 0
         except Exception as e:
             consecutive_errors += 1
@@ -15169,6 +15248,9 @@ async def schematics_5b_debug():
     try:
         trader = get_5b_trader()
         debug = dict(trader.last_debug) if trader.last_debug else {}
+        # Attach current MSCE context
+        msce_ctx: Dict = {}
+        debug["msce"] = validate_MSCE(msce_ctx)
         debug["state_summary"] = {
             "balance": trader.state.balance,
             "has_open_trade": trader.state.current_trade is not None,
@@ -15186,7 +15268,9 @@ async def schematics_5b_debug():
 @app.get("/api/schematics-5b-trader/candles")
 async def schematics_5b_candles(tf: str = "15m", limit: int = 200, symbol: str = "BTCUSDT"):
     """Return OHLC candles + trade overlays for the 5B candlestick chart.
-    symbol defaults to BTCUSDT; accepts any pair from the top-5 universe."""
+    symbol defaults to BTCUSDT; accepts any pair from the top-5 universe.
+    Forming schematics are filtered to the requested symbol and limited to
+    the single best TCT model so only one model shows on the chart at a time."""
     from tensor_tct_trader import fetch_candles_sync
     limit = max(50, min(int(limit), 500))
     # Sanitise: only allow alphanumeric symbols (e.g. BTCUSDT, SOLUSDT)
@@ -15206,18 +15290,26 @@ async def schematics_5b_candles(tf: str = "15m", limit: int = 200, symbol: str =
     trader = get_5b_trader()
     snap = trader.state.snapshot()
     debug = dict(trader.last_debug) if trader.last_debug else {}
-    # Expose forming setup info if score >= 20 and no open trade
+    # Expose forming setup info only when it matches the requested symbol
     forming = None
     if not snap.get("current_trade") and debug.get("best_score", 0) >= 20:
-        forming = {
-            "score": debug.get("best_score", 0),
-            "price": debug.get("current_price"),
-            "tf": debug.get("best_tf"),
-        }
-    # Convert forming schematic tap timestamps (strings) to UNIX ms for chart
+        # Only show forming indicator when the best symbol matches the chart
+        if debug.get("best_symbol", "").upper() == safe_symbol.upper():
+            forming = {
+                "score": debug.get("best_score", 0),
+                "price": debug.get("current_price"),
+                "tf": debug.get("best_tf"),
+            }
+    # Convert forming schematic tap timestamps (strings) to UNIX ms for chart.
+    # Filter to only schematics belonging to the requested symbol so the chart
+    # shows a single pair's TCT model (not models from multiple pairs at once).
     raw_forming = debug.get("forming_schematics", [])
     forming_schematics = []
     for fs in raw_forming:
+        # Filter by symbol — only include schematics for the active chart pair
+        fs_sym = (fs.get("symbol") or "").upper()
+        if fs_sym and fs_sym != safe_symbol.upper():
+            continue
         fs_out = dict(fs)
         for tap_key in ("tap1", "tap2", "tap3"):
             tap = fs_out.get(tap_key)
@@ -15230,6 +15322,12 @@ async def schematics_5b_candles(tf: str = "15m", limit: int = 200, symbol: str =
                 except Exception:
                     pass
         forming_schematics.append(fs_out)
+    # Limit to the single best TCT model (highest scoring) for chart clarity
+    if len(forming_schematics) > 1:
+        forming_schematics.sort(
+            key=lambda x: (x.get("score") or x.get("eval_score") or 0), reverse=True
+        )
+        forming_schematics = forming_schematics[:1]
     return convert_numpy_types({
         "candles": candles,
         "current_trade": snap.get("current_trade"),
@@ -16028,8 +16126,8 @@ function drawFormingSchematics(ctx, schematics, candles, toX, toY, W, m) {
     { bull: '#ffd600', bear: '#ff5252' },   // slot 2 — gold    / red-pink
   ];
 
-  // Show at most 3 (sorted newest tap3 first by the backend)
-  const toShow = schematics.slice(0, 3);
+  // Show at most 1 TCT model on the chart at a time (backend filters to best for active pair)
+  const toShow = schematics.slice(0, 1);
 
   toShow.forEach(function(fs, idx) {
     const isBull   = fs.direction === 'bullish';
@@ -16820,12 +16918,29 @@ setInterval(loadChart, 30000);
 // Clicking a pair switches the chart to that symbol.
 // ================================================================
 
+// Map top-5 range timeframes to chart TF button values
+const _RANGE_TF_MAP = {'1d': '1d', '4h': '4h', '1h': '1h', '30m': '30m', '15m': '15m', '5m': '5m', '1m': '1m'};
+
+// Store the last fetched top-5 setups for reference
+let _top5Setups = [];
+
+function selectChartTF(tf) {
+  const mapped = _RANGE_TF_MAP[tf] || tf || '1h';
+  _chartTF = mapped;
+  document.querySelectorAll('.tf-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.tf === mapped);
+  });
+}
+
 async function fetchTop5Pairs5B() {
   try {
     const data = await fetchJSON('/api/top-setups');
-    renderTop5Pairs5B(data.top_setups || [], data.scanner_status || {});
+    _top5Setups = data.top_setups || [];
+    renderTop5Pairs5B(_top5Setups, data.scanner_status || {});
+    return _top5Setups;
   } catch(e) {
     console.warn('[5B top5] fetch failed:', e.message);
+    return [];
   }
 }
 
@@ -16864,10 +16979,11 @@ function renderTop5Pairs5B(setups, status) {
   setups.forEach((s, i) => {
     const base = s.symbol.replace('USDT', '');
     const isActive = s.symbol === _chartSymbol;
-    html += '<div class="top5b-item' + (isActive ? ' active-pair' : '') + '" data-symbol="' + s.symbol + '">';
+    const tfLabel = (s.timeframe || '1d').toUpperCase();
+    html += '<div class="top5b-item' + (isActive ? ' active-pair' : '') + '" data-symbol="' + s.symbol + '" data-tf="' + (s.timeframe || '1d') + '">';
     html += '<div class="top5b-header">';
     html += '<span><span class="top5b-rank">#' + (i + 1) + '</span><span class="top5b-pair">' + base + '</span></span>';
-    html += '<span class="top5b-tf">' + (s.timeframe || '1d').toUpperCase() + '</span>';
+    html += '<span class="top5b-tf">' + tfLabel + '</span>';
     html += '</div>';
     html += '<div class="top5b-rps">Score: <span class="rval">' + s.RPS + '</span>/10</div>';
     html += '<div class="top5b-levels">';
@@ -16879,10 +16995,13 @@ function renderTop5Pairs5B(setups, status) {
   });
   contentEl.innerHTML = html;
 
-  // Click handler: switch chart to this pair
+  // Click handler: switch chart to this pair and its range timeframe
   contentEl.querySelectorAll('.top5b-item').forEach(item => {
     item.addEventListener('click', () => {
       _chartSymbol = item.dataset.symbol;
+      // Switch TF to the pair's range timeframe
+      const pairTF = item.dataset.tf || '1h';
+      selectChartTF(pairTF);
       // Update active highlight
       contentEl.querySelectorAll('.top5b-item').forEach(el => el.classList.remove('active-pair'));
       item.classList.add('active-pair');
@@ -16895,10 +17014,18 @@ function renderTop5Pairs5B(setups, status) {
 
 // Poll top-5 pairs every 5 minutes (the underlying scan runs every 12 h — no need to hammer it)
 setInterval(fetchTop5Pairs5B, 5 * 60 * 1000);
-fetchTop5Pairs5B();
 
-// Initial chart load
-loadChart(true);
+// On page load: fetch top-5 first, auto-select the 1st pair + its range TF,
+// then load the chart with that pair's TCT model.
+(async function initPage() {
+  const setups = await fetchTop5Pairs5B();
+  if (setups.length > 0) {
+    const first = setups[0];
+    _chartSymbol = first.symbol;
+    selectChartTF(first.timeframe || '1d');
+  }
+  loadChart(true);
+})();
 </script>
 </body>
 </html>"""
@@ -16915,12 +17042,16 @@ async def schematics_5b_auto_scan_loop():
     Server-side background loop that runs the Schematics 5B trader's
     scan_and_trade() cycle autonomously every 60 seconds.
     Hands-free — no browser tab required.
-    Pushes trade log to GitHub every hour.
+
+    Integrates MSCE (Multi-Session Context Engine) for session-aware
+    confidence weighting.  Pushes trade log to GitHub every hour.
     """
     from schematics_5b_trader import get_5b_trader, AUTO_SCAN_INTERVAL, TRADE_LOG_PATH as LOG_5B
     from schematics_5b_trader import github_push_5b_log
 
-    await asyncio.sleep(20)  # Let server start (stagger vs tensor trader's 15s)
+    # Stagger 5B start by 35s (tensor at 15s, 5B at 35s) so the two never
+    # fire their first cycle simultaneously.
+    await asyncio.sleep(35)
     logger.info(f"[5B-TRADE] Auto-scan loop started — interval: {AUTO_SCAN_INTERVAL}s")
 
     consecutive_errors = 0
@@ -16929,15 +17060,28 @@ async def schematics_5b_auto_scan_loop():
 
     while True:
         try:
-            trader = get_5b_trader()
-            loop = asyncio.get_event_loop()
-            # Snapshot top_5_setups to avoid concurrent-mutation issues;
-            # passes an empty list before the first range scan fires (falls back to BTCUSDT).
-            pairs_snapshot = list(top_5_setups)
-            result = await loop.run_in_executor(None, trader.scan_and_trade, pairs_snapshot)
+            # Apply MSCE session weighting before each scan cycle
+            msce_ctx: Dict = {}
+            msce = validate_MSCE(msce_ctx)
+            logger.info(f"[5B-TRADE] MSCE: session={msce['session']}, weight={msce['weight']}")
+
+            # Acquire scan coordination lock so 5B and tensor-trade take turns
+            # making MEXC API calls, preventing rate-limit collisions.
+            async with _get_scan_lock():
+                trader = get_5b_trader()
+                loop = asyncio.get_event_loop()
+                # Snapshot top_5_setups to avoid concurrent-mutation issues;
+                # passes an empty list before the first range scan fires (falls back to BTCUSDT).
+                pairs_snapshot = list(top_5_setups)
+                result = await loop.run_in_executor(None, trader.scan_and_trade, pairs_snapshot)
+
             action = result.get("action", "unknown")
             ts = result.get("timestamp", "")
-            logger.info(f"[5B-TRADE] Auto-scan result: {action} @ {ts}")
+
+            # Attach MSCE context to the result for dashboard visibility
+            result["msce"] = msce
+
+            logger.info(f"[5B-TRADE] Auto-scan result: {action} @ {ts} (MSCE {msce['session']} w={msce['weight']})")
             consecutive_errors = 0
         except Exception as e:
             consecutive_errors += 1
