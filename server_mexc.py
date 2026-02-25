@@ -3142,6 +3142,29 @@ async def scanner_loop():
         await run_full_scan()
 
 
+async def _auto_scan_supervisor(coro_fn, name: str, restart_delay: int = 30) -> None:
+    """
+    Supervisor wrapper for background auto-scan loops.
+
+    Runs coro_fn() and restarts it after restart_delay seconds if it exits for
+    any reason other than intentional task cancellation (i.e. server shutdown).
+    This prevents a one-time CancelledError or unhandled exception from silently
+    killing a scan loop until the next full server restart.
+    """
+    while True:
+        try:
+            await coro_fn()
+            # coro_fn returned normally — it should loop forever, so this is unexpected.
+            logger.warning(f"[{name}] Auto-scan loop returned unexpectedly — restarting in {restart_delay}s")
+        except asyncio.CancelledError:
+            # Propagate intentional cancellation (server shutdown etc.)
+            logger.info(f"[{name}] Supervisor task cancelled — stopping")
+            raise
+        except Exception as e:
+            logger.error(f"[{name}] Auto-scan loop crashed: {e} — restarting in {restart_delay}s", exc_info=True)
+        await asyncio.sleep(restart_delay)
+
+
 @app.on_event("startup")
 async def startup_event():
     """Start background scanners on server startup."""
@@ -3151,13 +3174,16 @@ async def startup_event():
     else:
         logger.info("[SCANNER] Scanner DISABLED via ENABLE_SCANNER env var — web-only mode")
 
-    # Always start the tensor-trade auto-scan loop (hands-free trading)
-    asyncio.create_task(tensor_trade_auto_scan_loop())
-    logger.info("[TENSOR-TRADE] Background auto-scan loop launched")
+    # Always start the tensor-trade auto-scan loop (hands-free trading).
+    # Wrapped in _auto_scan_supervisor so the loop restarts automatically if it
+    # ever exits due to an unhandled exception or an unexpected CancelledError
+    # (e.g. from a zero-downtime deploy signal).
+    asyncio.create_task(_auto_scan_supervisor(tensor_trade_auto_scan_loop, "TENSOR-TRADE"))
+    logger.info("[TENSOR-TRADE] Background auto-scan loop launched (supervised)")
 
     # Start the schematics-5B auto-scan loop (hands-free trading, separate engine)
-    asyncio.create_task(schematics_5b_auto_scan_loop())
-    logger.info("[5B-TRADE] Background auto-scan loop launched")
+    asyncio.create_task(_auto_scan_supervisor(schematics_5b_auto_scan_loop, "5B-TRADE"))
+    logger.info("[5B-TRADE] Background auto-scan loop launched (supervised)")
 
 
 @app.on_event("shutdown")
@@ -15196,7 +15222,12 @@ async def tensor_trade_auto_scan_loop():
             async with _get_scan_lock():
                 trader = get_trader()
                 loop = asyncio.get_event_loop()
-                result = await loop.run_in_executor(None, trader.scan_and_trade)
+                # Cap each scan cycle at 5 minutes; a hung thread in the executor
+                # would otherwise hold the lock and stall both auto-scan loops.
+                result = await asyncio.wait_for(
+                    loop.run_in_executor(None, trader.scan_and_trade),
+                    timeout=300,
+                )
 
             action = result.get("action", "unknown")
             ts = result.get("timestamp", "")
@@ -17073,7 +17104,12 @@ async def schematics_5b_auto_scan_loop():
                 # Snapshot top_5_setups to avoid concurrent-mutation issues;
                 # passes an empty list before the first range scan fires (falls back to BTCUSDT).
                 pairs_snapshot = list(top_5_setups)
-                result = await loop.run_in_executor(None, trader.scan_and_trade, pairs_snapshot)
+                # Cap each scan cycle at 5 minutes; a hung thread would otherwise
+                # hold the lock and stall both auto-scan loops indefinitely.
+                result = await asyncio.wait_for(
+                    loop.run_in_executor(None, trader.scan_and_trade, pairs_snapshot),
+                    timeout=300,
+                )
 
             action = result.get("action", "unknown")
             ts = result.get("timestamp", "")
