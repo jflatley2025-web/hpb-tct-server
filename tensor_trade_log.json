@@ -29,8 +29,8 @@
     "opened_at": "2026-02-24T23:07:42.955606+00:00",
     "status": "open",
     "timeframe": "15m",
-    "live_pnl_pct": 0.07,
-    "current_price": 63874.4
+    "live_pnl_pct": -0.17,
+    "current_price": 64030.83
   },
   "trade_history": [
     {
@@ -215,7 +215,7 @@
     "Switched to high-confidence-only mode (score >= 70) after 3 consecutive losses",
     "Switched to high-confidence-only mode (score >= 70) after 3 consecutive losses | Raising minimum R:R from 1.6 \u2014 will require R:R >= 2.5 for next trade"
   ],
-  "last_scan_time": "2026-02-24T23:09:55.733763+00:00",
+  "last_scan_time": "2026-02-25T00:11:37.760444+00:00",
   "last_scan_action": "holding",
   "last_error": null
 }
