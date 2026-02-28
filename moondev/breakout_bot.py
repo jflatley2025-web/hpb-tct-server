@@ -288,9 +288,14 @@ def ask_bid() -> tuple:
 
 
 def fetch_15m_data() -> pd.DataFrame:
-    """Fetch 289 15m candles (3 days), compute 20-SMA, support, resistance."""
+    """Fetch 15m candles (3 days), compute 20-SMA, support, resistance.
+
+    Phemex kline endpoint only accepts discrete limit values: 5, 10, 50, 100, 500, 1000.
+    We request 500 (the nearest valid value above LOOKBACK_BARS=289) and use the
+    rolling window for support/resistance so the extra bars don't affect the result.
+    """
     phemex = _get_phemex()
-    bars = phemex.fetch_ohlcv(SYMBOL, timeframe='15m', limit=LOOKBACK_BARS)
+    bars = phemex.fetch_ohlcv(SYMBOL, timeframe='15m', limit=500)
     df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     df['sma20'] = df['close'].rolling(SMA_PERIOD).mean()
