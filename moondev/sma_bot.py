@@ -22,7 +22,7 @@ logger = logging.getLogger("SMA-BOT")
 # ================================================================
 # CONFIGURATION
 # ================================================================
-SYMBOL = 'BTC/USD:USD'
+SYMBOL = 'BTC/USD:BTC'
 POS_SIZE = 30           # total position size in contracts
 TARGET_PCT = 8          # take profit at 8% PnL
 MAX_LOSS_PCT = -9       # stop loss at -9% PnL
