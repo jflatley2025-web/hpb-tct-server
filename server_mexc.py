@@ -32,6 +32,7 @@ from moondev.sma_bot import get_sma_bot, scan_cycle as sma_scan_cycle, SCAN_INTE
 from moondev.breakout_bot import get_breakout_bot, scan_cycle as breakout_scan_cycle, SCAN_INTERVAL as BREAKOUT_SCAN_INTERVAL
 from moondev.engulfing_bot import get_engulfing_bot, scan_cycle as engulfing_scan_cycle, SCAN_INTERVAL as ENGULFING_SCAN_INTERVAL
 from moondev.turtle_bot import get_turtle_bot, scan_cycle as turtle_scan_cycle, SCAN_INTERVAL as TURTLE_SCAN_INTERVAL
+from moondev.consolidation_pop_bot import get_consolidation_pop_bot, scan_cycle as consol_scan_cycle, SCAN_INTERVAL as CONSOL_SCAN_INTERVAL
 
 
 # ================================================================
@@ -3205,6 +3206,10 @@ async def startup_event():
     # Start the Turtle Strategy bot auto-scan loop (Phemex simulated trading)
     asyncio.create_task(_auto_scan_supervisor(turtle_bot_auto_scan_loop, "TURTLE-BOT"))
     logger.info("[TURTLE-BOT] Background auto-scan loop launched (supervised)")
+
+    # Start the Consolidation Pop bot auto-scan loop (Phemex simulated trading)
+    asyncio.create_task(_auto_scan_supervisor(consol_pop_auto_scan_loop, "CONSOL-BOT"))
+    logger.info("[CONSOL-BOT] Background auto-scan loop launched (supervised)")
 
 
 @app.on_event("shutdown")
@@ -18263,3 +18268,299 @@ async def turtle_bot_auto_scan_loop():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("server_mexc:app", host="0.0.0.0", port=PORT, reload=True)
+
+
+# ================================================================
+# CONSOLIDATION POP BOT — API ENDPOINTS
+# ================================================================
+
+@app.get("/api/consol-bot/state")
+async def consol_bot_state():
+    """Return current Consolidation Pop bot state for the dashboard."""
+    bot = get_consolidation_pop_bot()
+    return convert_numpy_types(bot.snapshot())
+
+
+@app.get("/api/consol-bot/scan")
+async def consol_bot_scan():
+    """Run a single Consolidation Pop bot scan cycle manually."""
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, consol_scan_cycle)
+    return convert_numpy_types(result)
+
+
+@app.get("/consol-bot", response_class=HTMLResponse)
+async def consol_bot_dashboard():
+    """Consolidation Pop Bot Simulated Trading Dashboard."""
+    html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Consolidation Pop Bot — Simulated Trading</title>
+<style>
+    body { background: #0a0a12; color: #e0e0e0; font-family: 'Segoe UI', sans-serif; margin: 0; padding: 20px; }
+    h1 { color: #a78bfa; font-size: 1.4rem; margin-bottom: 4px; }
+    .subtitle { color: #888; font-size: 0.85rem; margin-bottom: 20px; }
+    .back-link { color: #00d4ff; text-decoration: none; font-size: 0.85rem; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 20px; }
+    .card { background: #12121a; border: 1px solid #1e1e2d; border-radius: 8px; padding: 16px; }
+    .card h2 { font-size: 1rem; color: #aaa; margin: 0 0 12px 0; }
+    .stat { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #1a1a2a; }
+    .stat:last-child { border-bottom: none; }
+    .stat-label { color: #888; }
+    .stat-value { font-weight: 600; }
+    .positive { color: #00ff88; }
+    .negative { color: #ff4444; }
+    .neutral { color: #ffc107; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    th { text-align: left; padding: 8px; color: #888; border-bottom: 2px solid #1e1e2d; }
+    td { padding: 8px; border-bottom: 1px solid #1a1a2a; }
+    tr:hover { background: rgba(255,255,255,0.03); }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; }
+    .badge-long { background: rgba(0,255,136,0.15); color: #00ff88; }
+    .badge-short { background: rgba(255,68,68,0.15); color: #ff4444; }
+    .badge-buy { background: rgba(0,212,255,0.15); color: #00d4ff; }
+    .badge-sell { background: rgba(224,64,251,0.15); color: #e040fb; }
+    .badge-consol { background: rgba(167,139,250,0.15); color: #a78bfa; }
+    .badge-no-consol { background: rgba(136,136,136,0.15); color: #888; }
+    .no-data { color: #555; text-align: center; padding: 20px; }
+    .auto-refresh { color: #555; font-size: 0.75rem; text-align: right; }
+    .pending-order { background: rgba(255,193,7,0.08); }
+    .action-bar { margin-bottom: 16px; }
+    .btn { background: #1e1e2d; border: 1px solid #2d2d44; color: #e0e0e0; padding: 8px 16px;
+           border-radius: 6px; cursor: pointer; font-size: 0.85rem; }
+    .btn:hover { background: #2d2d44; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+</style>
+</head>
+<body>
+    <a href="/" class="back-link">← Back to Dashboard</a>
+    <h1>Consolidation Pop Bot — Simulated Trading</h1>
+    <div class="subtitle">Phemex BTC/USD:BTC | 5m Consolidation Range Entry | TP 0.3% · SL 0.25% | All trades simulated</div>
+
+    <div class="action-bar">
+        <button class="btn" id="scanBtn" onclick="manualScan()">Run Manual Scan</button>
+        <span id="scanStatus" style="margin-left: 10px; color: #888; font-size: 0.8rem;"></span>
+    </div>
+
+    <div class="grid">
+        <div class="card">
+            <h2>Account</h2>
+            <div class="stat"><span class="stat-label">Balance</span><span class="stat-value" id="balance">—</span></div>
+            <div class="stat"><span class="stat-label">Starting</span><span class="stat-value" id="starting">—</span></div>
+            <div class="stat"><span class="stat-label">Total P&L</span><span class="stat-value" id="pnl">—</span></div>
+            <div class="stat"><span class="stat-label">P&L %</span><span class="stat-value" id="pnl_pct">—</span></div>
+        </div>
+        <div class="card">
+            <h2>Performance</h2>
+            <div class="stat"><span class="stat-label">Total Trades</span><span class="stat-value" id="total_trades">—</span></div>
+            <div class="stat"><span class="stat-label">Wins</span><span class="stat-value positive" id="wins">—</span></div>
+            <div class="stat"><span class="stat-label">Losses</span><span class="stat-value negative" id="losses">—</span></div>
+            <div class="stat"><span class="stat-label">Win Rate</span><span class="stat-value" id="win_rate">—</span></div>
+        </div>
+        <div class="card">
+            <h2>Current State</h2>
+            <div class="stat"><span class="stat-label">Signal</span><span class="stat-value" id="signal">—</span></div>
+            <div class="stat"><span class="stat-label">TR Deviance</span><span class="stat-value" id="tr_dev">—</span></div>
+            <div class="stat"><span class="stat-label">Range Low</span><span class="stat-value positive" id="consol_low">—</span></div>
+            <div class="stat"><span class="stat-label">Range High</span><span class="stat-value negative" id="consol_high">—</span></div>
+            <div class="stat"><span class="stat-label">Last Bid</span><span class="stat-value" id="last_bid">—</span></div>
+            <div class="stat"><span class="stat-label">Last Action</span><span class="stat-value" id="last_action" style="font-size:0.8rem;word-break:break-all;">—</span></div>
+            <div class="stat"><span class="stat-label">Last Scan</span><span class="stat-value" id="last_scan">—</span></div>
+        </div>
+    </div>
+
+    <div class="card" style="margin-bottom: 16px;">
+        <h2>Current Position</h2>
+        <div id="position"><div class="no-data">No open position</div></div>
+    </div>
+
+    <div class="card" style="margin-bottom: 16px;">
+        <h2>Pending Orders</h2>
+        <div id="orders"><div class="no-data">No pending orders</div></div>
+    </div>
+
+    <div class="card">
+        <h2>Trade History</h2>
+        <div id="history"><div class="no-data">No trades yet</div></div>
+    </div>
+
+    <div class="auto-refresh">Auto-refreshes every 15s</div>
+
+<script>
+async function fetchState() {
+    try {
+        const res = await fetch('/api/consol-bot/state');
+        const s = await res.json();
+
+        // Account
+        document.getElementById('balance').textContent = '$' + s.balance.toFixed(2);
+        document.getElementById('starting').textContent = '$' + s.starting_balance.toFixed(2);
+        const pnlEl = document.getElementById('pnl');
+        pnlEl.textContent = (s.pnl_total >= 0 ? '+' : '') + '$' + s.pnl_total.toFixed(2);
+        pnlEl.className = 'stat-value ' + (s.pnl_total >= 0 ? 'positive' : 'negative');
+        const pctEl = document.getElementById('pnl_pct');
+        pctEl.textContent = (s.pnl_pct >= 0 ? '+' : '') + s.pnl_pct.toFixed(2) + '%';
+        pctEl.className = 'stat-value ' + (s.pnl_pct >= 0 ? 'positive' : 'negative');
+
+        // Performance
+        document.getElementById('total_trades').textContent = s.total_trades;
+        document.getElementById('wins').textContent = s.wins;
+        document.getElementById('losses').textContent = s.losses;
+        const wrEl = document.getElementById('win_rate');
+        wrEl.textContent = s.win_rate.toFixed(1) + '%';
+        wrEl.className = 'stat-value ' + (s.win_rate >= 50 ? 'positive' : s.win_rate > 0 ? 'neutral' : '');
+
+        // State
+        const sig = s.last_signal || '—';
+        const sigEl = document.getElementById('signal');
+        if (sig === 'LONG_ENTRY') {
+            sigEl.innerHTML = '<span class="badge badge-buy">LONG ENTRY</span>';
+        } else if (sig === 'SHORT_ENTRY') {
+            sigEl.innerHTML = '<span class="badge badge-sell">SHORT ENTRY</span>';
+        } else if (sig.startsWith('CONSOLIDATING')) {
+            sigEl.innerHTML = '<span class="badge badge-consol">' + sig + '</span>';
+        } else {
+            sigEl.innerHTML = '<span class="badge badge-no-consol">' + sig + '</span>';
+        }
+
+        const cfg = s.config || {};
+        const dev = s.last_tr_deviance;
+        const devEl = document.getElementById('tr_dev');
+        if (dev != null) {
+            const isConsol = dev < (cfg.consolidation_pct || 0.7);
+            devEl.textContent = dev.toFixed(3) + '%';
+            devEl.className = 'stat-value ' + (isConsol ? 'positive' : 'neutral');
+        } else {
+            devEl.textContent = '—';
+        }
+
+        document.getElementById('consol_low').textContent  = s.last_consol_low  ? '$' + s.last_consol_low.toFixed(2)  : '—';
+        document.getElementById('consol_high').textContent = s.last_consol_high ? '$' + s.last_consol_high.toFixed(2) : '—';
+        document.getElementById('last_bid').textContent    = s.last_bid ? '$' + s.last_bid.toFixed(2) : '—';
+        document.getElementById('last_action').textContent = s.last_cycle_action || '—';
+        document.getElementById('last_scan').textContent   = s.last_cycle_time ? new Date(s.last_cycle_time).toLocaleTimeString() : '—';
+
+        // Position
+        const posDiv = document.getElementById('position');
+        if (s.current_position) {
+            const p = s.current_position;
+            const sideBadge = p.side === 'long' ? 'badge-long' : 'badge-short';
+            const tpHtml = p.take_profit ? `<div class="stat"><span class="stat-label">Take Profit</span><span class="stat-value positive">$${p.take_profit.toFixed(2)}</span></div>` : '';
+            const slHtml = p.stop_loss  ? `<div class="stat"><span class="stat-label">Stop Loss</span><span class="stat-value negative">$${p.stop_loss.toFixed(2)}</span></div>` : '';
+            posDiv.innerHTML = `
+                <div class="stat"><span class="stat-label">Side</span><span class="badge ${sideBadge}">${p.side.toUpperCase()}</span></div>
+                <div class="stat"><span class="stat-label">Size</span><span class="stat-value">${p.size}</span></div>
+                <div class="stat"><span class="stat-label">Entry</span><span class="stat-value">$${p.entry_price.toFixed(2)}</span></div>
+                <div class="stat"><span class="stat-label">Opened</span><span class="stat-value">${new Date(p.opened_at).toLocaleString()}</span></div>
+                ${tpHtml}${slHtml}
+            `;
+        } else {
+            posDiv.innerHTML = '<div class="no-data">No open position — scanning every ' + (s.config?.scan_interval || 20) + 's</div>';
+        }
+
+        // Pending orders
+        const ordDiv = document.getElementById('orders');
+        if (s.pending_orders && s.pending_orders.length > 0) {
+            let html = '<table><tr><th>Side</th><th>Size</th><th>Price</th><th>TP</th><th>SL</th><th>Placed</th></tr>';
+            s.pending_orders.forEach(o => {
+                const badge = o.side === 'buy' ? 'badge-buy' : 'badge-sell';
+                const tp = o.take_profit ? '$' + o.take_profit.toFixed(2) : '—';
+                const sl = o.stop_loss  ? '$' + o.stop_loss.toFixed(2)  : '—';
+                html += `<tr class="pending-order">
+                    <td><span class="badge ${badge}">${o.side.toUpperCase()}</span></td>
+                    <td>${o.size}</td><td>$${o.price.toFixed(2)}</td>
+                    <td class="positive">${tp}</td><td class="negative">${sl}</td>
+                    <td>${new Date(o.placed_at).toLocaleTimeString()}</td>
+                </tr>`;
+            });
+            html += '</table>';
+            ordDiv.innerHTML = html;
+        } else {
+            ordDiv.innerHTML = '<div class="no-data">No pending orders</div>';
+        }
+
+        // Trade history
+        const histDiv = document.getElementById('history');
+        if (s.trade_history && s.trade_history.length > 0) {
+            let html = '<table><tr><th>#</th><th>Side</th><th>Entry</th><th>Exit</th><th>P&L %</th><th>P&L $</th><th>Balance</th><th>Reason</th><th>Closed</th></tr>';
+            [...s.trade_history].reverse().forEach(t => {
+                const sideBadge = t.side === 'long' ? 'badge-long' : 'badge-short';
+                const pnlClass = t.pnl_pct > 0 ? 'positive' : 'negative';
+                html += `<tr>
+                    <td>${t.id}</td>
+                    <td><span class="badge ${sideBadge}">${t.side.toUpperCase()}</span></td>
+                    <td>$${t.entry_price.toFixed(2)}</td>
+                    <td>$${t.exit_price.toFixed(2)}</td>
+                    <td class="${pnlClass}">${t.pnl_pct > 0 ? '+' : ''}${t.pnl_pct.toFixed(2)}%</td>
+                    <td class="${pnlClass}">${t.pnl_usd > 0 ? '+' : ''}$${t.pnl_usd.toFixed(2)}</td>
+                    <td>$${t.balance_after.toFixed(2)}</td>
+                    <td>${t.reason}</td>
+                    <td>${new Date(t.closed_at).toLocaleString()}</td>
+                </tr>`;
+            });
+            html += '</table>';
+            histDiv.innerHTML = html;
+        } else {
+            histDiv.innerHTML = '<div class="no-data">No completed trades yet</div>';
+        }
+
+    } catch(e) {
+        console.error('Failed to fetch consolidation pop bot state:', e);
+    }
+}
+
+async function manualScan() {
+    const btn = document.getElementById('scanBtn');
+    const status = document.getElementById('scanStatus');
+    btn.disabled = true;
+    status.textContent = 'Scanning...';
+    try {
+        const res = await fetch('/api/consol-bot/scan');
+        const r = await res.json();
+        status.textContent = 'Done: ' + (r.action || 'ok');
+        fetchState();
+    } catch(e) {
+        status.textContent = 'Error: ' + e.message;
+    }
+    btn.disabled = false;
+    setTimeout(() => { status.textContent = ''; }, 5000);
+}
+
+fetchState();
+setInterval(fetchState, 15000);
+</script>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
+
+
+# ================================================================
+# CONSOLIDATION POP BOT — BACKGROUND AUTO-SCAN LOOP
+# ================================================================
+
+async def consol_pop_auto_scan_loop():
+    """Background loop that runs the Consolidation Pop bot scan cycle every SCAN_INTERVAL seconds."""
+    await asyncio.sleep(40)  # stagger after Turtle bot (35s)
+    logger.info(f"[CONSOL-BOT] Auto-scan loop started — interval: {CONSOL_SCAN_INTERVAL}s")
+
+    consecutive_errors = 0
+
+    while True:
+        try:
+            loop = asyncio.get_event_loop()
+            result = await asyncio.wait_for(
+                loop.run_in_executor(None, consol_scan_cycle),
+                timeout=300,
+            )
+            action = result.get("action", "unknown")
+            logger.info(f"[CONSOL-BOT] Scan result: {action}")
+            consecutive_errors = 0
+        except Exception as e:
+            consecutive_errors += 1
+            logger.error(f"[CONSOL-BOT] Scan error ({consecutive_errors}): {e}", exc_info=True)
+            if consecutive_errors >= 5:
+                logger.critical(f"[CONSOL-BOT] {consecutive_errors} consecutive failures")
+
+        await asyncio.sleep(CONSOL_SCAN_INTERVAL)
