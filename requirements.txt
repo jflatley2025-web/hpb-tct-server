@@ -40,7 +40,7 @@ stable-baselines3==2.3.2   # optional RL testing integration
 # ─── Crypto API Connectors ───
 pycoingecko==3.1.0
 python-binance==1.0.19
-ccxt==4.2.97              # unified Bybit/OKX REST API adapter
+ccxt==4.5.40              # unified Bybit/OKX REST API adapter (upgraded from 4.2.97 — fixes Phemex 30000 error)
 
 # ─── Utilities ───
 loguru==0.7.2             # advanced logging (for /logs pipeline)
