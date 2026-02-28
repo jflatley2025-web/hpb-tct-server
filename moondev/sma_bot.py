@@ -22,7 +22,7 @@ logger = logging.getLogger("SMA-BOT")
 # ================================================================
 # CONFIGURATION
 # ================================================================
-SYMBOL = 'uBTCUSD'
+SYMBOL = 'BTC/USD:USD'
 POS_SIZE = 30           # total position size in contracts
 TARGET_PCT = 8          # take profit at 8% PnL
 MAX_LOSS_PCT = -9       # stop loss at -9% PnL
@@ -42,18 +42,16 @@ _phemex_client: Optional[ccxt.phemex] = None
 
 
 def _get_phemex() -> ccxt.phemex:
-    """Lazy-init Phemex CCXT client from environment variables."""
+    """Lazy-init Phemex CCXT client. Only public endpoints are used (order book, candles)."""
     global _phemex_client
     if _phemex_client is None:
+        opts = {'enableRateLimit': True}
         api_key = os.getenv("PHEMEX_API_KEY", "")
         api_secret = os.getenv("PHEMEX_API_SECRET", "")
-        if not api_key or not api_secret:
-            logger.warning("[PHEMEX] PHEMEX_API_KEY or PHEMEX_API_SECRET not set")
-        _phemex_client = ccxt.phemex({
-            'enableRateLimit': True,
-            'apiKey': api_key,
-            'secret': api_secret,
-        })
+        if api_key and api_secret:
+            opts['apiKey'] = api_key
+            opts['secret'] = api_secret
+        _phemex_client = ccxt.phemex(opts)
     return _phemex_client
 
 
