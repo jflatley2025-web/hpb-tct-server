@@ -28,6 +28,8 @@ from schematics_5b_trader import (
     _LTF_CANDLE_LIMITS,
 )
 
+from moondev.sma_bot import get_sma_bot, scan_cycle as sma_scan_cycle, SCAN_INTERVAL as SMA_SCAN_INTERVAL
+
 
 # ================================================================
 # NUMPY SERIALIZATION HELPER
@@ -3184,6 +3186,10 @@ async def startup_event():
     # Start the schematics-5B auto-scan loop (hands-free trading, separate engine)
     asyncio.create_task(_auto_scan_supervisor(schematics_5b_auto_scan_loop, "5B-TRADE"))
     logger.info("[5B-TRADE] Background auto-scan loop launched (supervised)")
+
+    # Start the SMA bot auto-scan loop (Phemex simulated trading)
+    asyncio.create_task(_auto_scan_supervisor(sma_bot_auto_scan_loop, "SMA-BOT"))
+    logger.info("[SMA-BOT] Background auto-scan loop launched (supervised)")
 
 
 @app.on_event("shutdown")
@@ -17132,6 +17138,269 @@ async def schematics_5b_auto_scan_loop():
             _last_github_push = now
 
         await asyncio.sleep(AUTO_SCAN_INTERVAL)
+
+
+# ================================================================
+# SMA BOT — API ENDPOINTS
+# ================================================================
+
+@app.get("/api/sma-bot/state")
+async def sma_bot_state():
+    """Return current SMA bot state for the dashboard."""
+    bot = get_sma_bot()
+    return convert_numpy_types(bot.snapshot())
+
+
+@app.get("/api/sma-bot/scan")
+async def sma_bot_scan():
+    """Run a single SMA bot scan cycle manually."""
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, sma_scan_cycle)
+    return convert_numpy_types(result)
+
+
+@app.get("/sma-bot", response_class=HTMLResponse)
+async def sma_bot_dashboard():
+    """SMA Bot Simulated Trading Dashboard — live view of trades."""
+    html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SMA Bot — Simulated Trading</title>
+<style>
+    body { background: #0a0a12; color: #e0e0e0; font-family: 'Segoe UI', sans-serif; margin: 0; padding: 20px; }
+    h1 { color: #00ff88; font-size: 1.4rem; margin-bottom: 4px; }
+    .subtitle { color: #888; font-size: 0.85rem; margin-bottom: 20px; }
+    .back-link { color: #00d4ff; text-decoration: none; font-size: 0.85rem; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 20px; }
+    .card { background: #12121a; border: 1px solid #1e1e2d; border-radius: 8px; padding: 16px; }
+    .card h2 { font-size: 1rem; color: #aaa; margin: 0 0 12px 0; }
+    .stat { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #1a1a2a; }
+    .stat:last-child { border-bottom: none; }
+    .stat-label { color: #888; }
+    .stat-value { font-weight: 600; }
+    .positive { color: #00ff88; }
+    .negative { color: #ff4444; }
+    .neutral { color: #ffc107; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    th { text-align: left; padding: 8px; color: #888; border-bottom: 2px solid #1e1e2d; }
+    td { padding: 8px; border-bottom: 1px solid #1a1a2a; }
+    tr:hover { background: rgba(255,255,255,0.03); }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; }
+    .badge-long { background: rgba(0,255,136,0.15); color: #00ff88; }
+    .badge-short { background: rgba(255,68,68,0.15); color: #ff4444; }
+    .badge-buy { background: rgba(0,212,255,0.15); color: #00d4ff; }
+    .badge-sell { background: rgba(224,64,251,0.15); color: #e040fb; }
+    .no-data { color: #555; text-align: center; padding: 20px; }
+    .auto-refresh { color: #555; font-size: 0.75rem; text-align: right; }
+    .pending-order { background: rgba(255,193,7,0.08); }
+    .action-bar { margin-bottom: 16px; }
+    .btn { background: #1e1e2d; border: 1px solid #2d2d44; color: #e0e0e0; padding: 8px 16px;
+           border-radius: 6px; cursor: pointer; font-size: 0.85rem; }
+    .btn:hover { background: #2d2d44; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+</style>
+</head>
+<body>
+    <a href="/" class="back-link">← Back to Dashboard</a>
+    <h1>SMA Bot — Simulated Trading</h1>
+    <div class="subtitle">Phemex uBTCUSD | Daily 20-SMA Bias + 15m Entry | All trades simulated</div>
+
+    <div class="action-bar">
+        <button class="btn" id="scanBtn" onclick="manualScan()">Run Manual Scan</button>
+        <span id="scanStatus" style="margin-left: 10px; color: #888; font-size: 0.8rem;"></span>
+    </div>
+
+    <div class="grid">
+        <div class="card">
+            <h2>Account</h2>
+            <div id="account">
+                <div class="stat"><span class="stat-label">Balance</span><span class="stat-value" id="balance">—</span></div>
+                <div class="stat"><span class="stat-label">Starting</span><span class="stat-value" id="starting">—</span></div>
+                <div class="stat"><span class="stat-label">Total P&L</span><span class="stat-value" id="pnl">—</span></div>
+                <div class="stat"><span class="stat-label">P&L %</span><span class="stat-value" id="pnl_pct">—</span></div>
+            </div>
+        </div>
+        <div class="card">
+            <h2>Performance</h2>
+            <div id="perf">
+                <div class="stat"><span class="stat-label">Total Trades</span><span class="stat-value" id="total_trades">—</span></div>
+                <div class="stat"><span class="stat-label">Wins</span><span class="stat-value positive" id="wins">—</span></div>
+                <div class="stat"><span class="stat-label">Losses</span><span class="stat-value negative" id="losses">—</span></div>
+                <div class="stat"><span class="stat-label">Win Rate</span><span class="stat-value" id="win_rate">—</span></div>
+            </div>
+        </div>
+        <div class="card">
+            <h2>Current State</h2>
+            <div id="state_info">
+                <div class="stat"><span class="stat-label">Signal</span><span class="stat-value" id="signal">—</span></div>
+                <div class="stat"><span class="stat-label">Last Bid</span><span class="stat-value" id="last_bid">—</span></div>
+                <div class="stat"><span class="stat-label">Last Action</span><span class="stat-value" id="last_action">—</span></div>
+                <div class="stat"><span class="stat-label">Last Scan</span><span class="stat-value" id="last_scan">—</span></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card" style="margin-bottom: 16px;">
+        <h2>Current Position</h2>
+        <div id="position"><div class="no-data">No open position</div></div>
+    </div>
+
+    <div class="card" style="margin-bottom: 16px;">
+        <h2>Pending Orders</h2>
+        <div id="orders"><div class="no-data">No pending orders</div></div>
+    </div>
+
+    <div class="card">
+        <h2>Trade History</h2>
+        <div id="history"><div class="no-data">No trades yet</div></div>
+    </div>
+
+    <div class="auto-refresh">Auto-refreshes every 15s</div>
+
+<script>
+async function fetchState() {
+    try {
+        const res = await fetch('/api/sma-bot/state');
+        const s = await res.json();
+
+        // Account
+        document.getElementById('balance').textContent = '$' + s.balance.toFixed(2);
+        document.getElementById('starting').textContent = '$' + s.starting_balance.toFixed(2);
+        const pnlEl = document.getElementById('pnl');
+        pnlEl.textContent = '$' + s.pnl_total.toFixed(2);
+        pnlEl.className = 'stat-value ' + (s.pnl_total >= 0 ? 'positive' : 'negative');
+        const pctEl = document.getElementById('pnl_pct');
+        pctEl.textContent = s.pnl_pct.toFixed(2) + '%';
+        pctEl.className = 'stat-value ' + (s.pnl_pct >= 0 ? 'positive' : 'negative');
+
+        // Performance
+        document.getElementById('total_trades').textContent = s.total_trades;
+        document.getElementById('wins').textContent = s.wins;
+        document.getElementById('losses').textContent = s.losses;
+        const wrEl = document.getElementById('win_rate');
+        wrEl.textContent = s.win_rate.toFixed(1) + '%';
+        wrEl.className = 'stat-value ' + (s.win_rate >= 50 ? 'positive' : s.win_rate > 0 ? 'neutral' : '');
+
+        // State
+        document.getElementById('signal').textContent = s.last_signal || '—';
+        document.getElementById('last_bid').textContent = s.last_bid ? '$' + s.last_bid.toFixed(2) : '—';
+        document.getElementById('last_action').textContent = s.last_cycle_action || '—';
+        document.getElementById('last_scan').textContent = s.last_cycle_time ? new Date(s.last_cycle_time).toLocaleTimeString() : '—';
+
+        // Position
+        const posDiv = document.getElementById('position');
+        if (s.current_position) {
+            const p = s.current_position;
+            const sideBadge = p.side === 'long' ? 'badge-long' : 'badge-short';
+            posDiv.innerHTML = `
+                <div class="stat"><span class="stat-label">Side</span><span class="badge ${sideBadge}">${p.side.toUpperCase()}</span></div>
+                <div class="stat"><span class="stat-label">Size</span><span class="stat-value">${p.size}</span></div>
+                <div class="stat"><span class="stat-label">Entry</span><span class="stat-value">$${p.entry_price.toFixed(2)}</span></div>
+                <div class="stat"><span class="stat-label">Opened</span><span class="stat-value">${new Date(p.opened_at).toLocaleString()}</span></div>
+            `;
+        } else {
+            posDiv.innerHTML = '<div class="no-data">No open position — scanning every ' + (s.config?.scan_interval || 28) + 's</div>';
+        }
+
+        // Pending orders
+        const ordDiv = document.getElementById('orders');
+        if (s.pending_orders && s.pending_orders.length > 0) {
+            let html = '<table><tr><th>Side</th><th>Size</th><th>Price</th><th>Placed</th></tr>';
+            s.pending_orders.forEach(o => {
+                const badge = o.side === 'buy' ? 'badge-buy' : 'badge-sell';
+                html += `<tr class="pending-order"><td><span class="badge ${badge}">${o.side.toUpperCase()}</span></td><td>${o.size}</td><td>$${o.price.toFixed(2)}</td><td>${new Date(o.placed_at).toLocaleTimeString()}</td></tr>`;
+            });
+            html += '</table>';
+            ordDiv.innerHTML = html;
+        } else {
+            ordDiv.innerHTML = '<div class="no-data">No pending orders</div>';
+        }
+
+        // Trade history
+        const histDiv = document.getElementById('history');
+        if (s.trade_history && s.trade_history.length > 0) {
+            let html = '<table><tr><th>#</th><th>Side</th><th>Entry</th><th>Exit</th><th>P&L %</th><th>P&L $</th><th>Balance</th><th>Reason</th><th>Closed</th></tr>';
+            [...s.trade_history].reverse().forEach(t => {
+                const sideBadge = t.side === 'long' ? 'badge-long' : 'badge-short';
+                const pnlClass = t.pnl_pct > 0 ? 'positive' : 'negative';
+                html += `<tr>
+                    <td>${t.id}</td>
+                    <td><span class="badge ${sideBadge}">${t.side.toUpperCase()}</span></td>
+                    <td>$${t.entry_price.toFixed(2)}</td>
+                    <td>$${t.exit_price.toFixed(2)}</td>
+                    <td class="${pnlClass}">${t.pnl_pct > 0 ? '+' : ''}${t.pnl_pct.toFixed(2)}%</td>
+                    <td class="${pnlClass}">${t.pnl_usd > 0 ? '+' : ''}$${t.pnl_usd.toFixed(2)}</td>
+                    <td>$${t.balance_after.toFixed(2)}</td>
+                    <td>${t.reason}</td>
+                    <td>${new Date(t.closed_at).toLocaleString()}</td>
+                </tr>`;
+            });
+            html += '</table>';
+            histDiv.innerHTML = html;
+        } else {
+            histDiv.innerHTML = '<div class="no-data">No completed trades yet</div>';
+        }
+
+    } catch(e) {
+        console.error('Failed to fetch SMA bot state:', e);
+    }
+}
+
+async function manualScan() {
+    const btn = document.getElementById('scanBtn');
+    const status = document.getElementById('scanStatus');
+    btn.disabled = true;
+    status.textContent = 'Scanning...';
+    try {
+        const res = await fetch('/api/sma-bot/scan');
+        const r = await res.json();
+        status.textContent = 'Done: ' + (r.action || 'ok');
+        fetchState();
+    } catch(e) {
+        status.textContent = 'Error: ' + e.message;
+    }
+    btn.disabled = false;
+    setTimeout(() => { status.textContent = ''; }, 5000);
+}
+
+fetchState();
+setInterval(fetchState, 15000);
+</script>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
+
+
+# ================================================================
+# SMA BOT — BACKGROUND AUTO-SCAN LOOP
+# ================================================================
+
+async def sma_bot_auto_scan_loop():
+    """Background loop that runs the SMA bot scan cycle every SCAN_INTERVAL seconds."""
+    await asyncio.sleep(20)  # let server finish startup
+    logger.info(f"[SMA-BOT] Auto-scan loop started — interval: {SMA_SCAN_INTERVAL}s")
+
+    consecutive_errors = 0
+
+    while True:
+        try:
+            loop = asyncio.get_event_loop()
+            result = await asyncio.wait_for(
+                loop.run_in_executor(None, sma_scan_cycle),
+                timeout=300,
+            )
+            action = result.get("action", "unknown")
+            logger.info(f"[SMA-BOT] Scan result: {action}")
+            consecutive_errors = 0
+        except Exception as e:
+            consecutive_errors += 1
+            logger.error(f"[SMA-BOT] Scan error ({consecutive_errors}): {e}", exc_info=True)
+            if consecutive_errors >= 5:
+                logger.critical(f"[SMA-BOT] {consecutive_errors} consecutive failures")
+
+        await asyncio.sleep(SMA_SCAN_INTERVAL)
 
 
 # ================================================================
