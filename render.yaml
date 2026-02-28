@@ -31,6 +31,10 @@ services:
         value: https://hpb-tct-server.onrender.com
       - key: AUTO_TRAIN_DEFAULT_EPISODES
         value: 5
+      - key: PHEMEX_API_KEY
+        sync: false
+      - key: PHEMEX_API_SECRET
+        sync: false
 
     autoDeploy: true
 
