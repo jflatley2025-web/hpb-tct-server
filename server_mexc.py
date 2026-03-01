@@ -13,12 +13,9 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 from fastapi import FastAPI
-# PAUSED: chromadb + SentenceTransformer imports disabled — loading all-MiniLM-L6-v2 at startup
-# was consuming >512MB RAM and crashing the Render deployment before the port could open.
-# Re-enable when upgrading to a higher-memory instance or moving PDF indexing to a separate service.
-# from pypdf import PdfReader
-# import chromadb
-# from chromadb.utils import embedding_functions
+from pypdf import PdfReader
+import chromadb
+from chromadb.utils import embedding_functions
 import uuid
 import re
 
@@ -28,90 +25,98 @@ logging.basicConfig(level=logging.INFO)
 # Initialize FastAPI app
 app = FastAPI()
 
-# PAUSED: ChromaDB client + SentenceTransformer model disabled to reduce memory usage at startup.
-# All three objects (embedding_function, chroma_client, collection) are only used by the
-# /index-pdf and /index-pdf-folder endpoints below, which are also paused.
-# Re-enable by restoring the imports above and uncommenting the block below.
-# embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
-#     model_name="all-MiniLM-L6-v2"
-# )
-# chroma_client = chromadb.Client(
-#     chromadb.config.Settings(
-#         persist_directory="/opt/render/project/chroma_db",
-#         is_persistent=True
-#     )
-# )
-# collection = chroma_client.get_or_create_collection(
-#     name="algo_docs",
-#     embedding_function=embedding_function
-# )
+# ChromaDB + SentenceTransformer are initialized lazily on first use so the
+# heavy model weights (all-MiniLM-L6-v2 + torch) don't load at startup and
+# exhaust the 512MB Render instance before the port can open.
+_chroma_collection = None
 
-# PAUSED: PDF helper functions and /index-pdf endpoints disabled along with ChromaDB above.
-# Re-enable by restoring the chromadb imports and the block below.
-#
-# def extract_text_from_pdf(filepath: str) -> str:
-#     text = ""
-#     try:
-#         reader = PdfReader(filepath)
-#         for page in reader.pages:
-#             extracted = page.extract_text()
-#             if extracted:
-#                 text += extracted
-#     except Exception as e:
-#         logging.error(f"Error reading {filepath}: {e}")
-#     return text
-#
-# def chunk_text_by_sentences(text: str, max_chunk_size: int = 1200) -> list[str]:
-#     sentences = re.split(r'(?<=[.!?])\s+', text)
-#     chunks = []
-#     current_chunk = ""
-#     for sentence in sentences:
-#         if len(current_chunk) + len(sentence) + 1 > max_chunk_size:
-#             if current_chunk:
-#                 chunks.append(current_chunk.strip())
-#             current_chunk = sentence
-#         else:
-#             current_chunk += " " + sentence if current_chunk else sentence
-#     if current_chunk:
-#         chunks.append(current_chunk.strip())
-#     return chunks
-#
-# @app.post("/index-pdf")
-# def index_pdf_from_disk(filepath: str) -> Dict[str, str | int]:
-#     if not os.path.isfile(filepath):
-#         return {"status": "error", "message": f"File not found: {filepath}"}
-#     text = extract_text_from_pdf(filepath)
-#     if not text:
-#         return {"status": "error", "message": "No text extracted from PDF"}
-#     chunks = chunk_text_by_sentences(text)
-#     ids = [str(uuid.uuid4()) for _ in chunks]
-#     try:
-#         collection.add(documents=chunks, ids=ids)
-#         logging.info(f"Indexed {len(chunks)} chunks from {filepath}")
-#         return {"status": "PDF indexed", "chunks_added": len(chunks)}
-#     except Exception as e:
-#         logging.error(f"Failed to add chunks from {filepath}: {e}")
-#         return {"status": "error", "message": f"Failed to add chunks: {e}"}
-#
-# @app.post("/index-pdf-folder")
-# def index_pdf_folder(folderpath: str) -> Dict[str, str | int]:
-#     if not os.path.isdir(folderpath):
-#         return {"status": "error", "message": f"Folder not found: {folderpath}"}
-#     total_chunks = 0
-#     for filename in os.listdir(folderpath):
-#         if filename.lower().endswith(".pdf"):
-#             filepath = os.path.join(folderpath, filename)
-#             text = extract_text_from_pdf(filepath)
-#             if text:
-#                 chunks = chunk_text_by_sentences(text)
-#                 ids = [str(uuid.uuid4()) for _ in chunks]
-#                 try:
-#                     collection.add(documents=chunks, ids=ids)
-#                     total_chunks += len(chunks)
-#                     logging.info(f"Indexed {len(chunks)} chunks from {filename}")
-#                 except Exception as e:
-#                     logging.error(f"Failed to add chunks from {filename}: {e}")
-#     return {"status": "Folder indexed", "total_chunks_added": total_chunks}
+def _get_collection():
+    global _chroma_collection
+    if _chroma_collection is None:
+        ef = embedding_functions.SentenceTransformerEmbeddingFunction(
+            model_name="all-MiniLM-L6-v2"
+        )
+        client = chromadb.Client(
+            chromadb.config.Settings(
+                persist_directory="/opt/render/project/chroma_db",
+                is_persistent=True
+            )
+        )
+        _chroma_collection = client.get_or_create_collection(
+            name="algo_docs",
+            embedding_function=ef
+        )
+    return _chroma_collection
+
+
+# Helper function to read PDF and return text
+def extract_text_from_pdf(filepath: str) -> str:
+    text = ""
+    try:
+        reader = PdfReader(filepath)
+        for page in reader.pages:
+            extracted = page.extract_text()
+            if extracted:
+                text += extracted
+    except Exception as e:
+        logging.error(f"Error reading {filepath}: {e}")
+    return text
+
+# Helper function to split text into chunks by sentences
+def chunk_text_by_sentences(text: str, max_chunk_size: int = 1200) -> list[str]:
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    chunks = []
+    current_chunk = ""
+    for sentence in sentences:
+        if len(current_chunk) + len(sentence) + 1 > max_chunk_size:
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+            current_chunk = sentence
+        else:
+            current_chunk += " " + sentence if current_chunk else sentence
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+    return chunks
+
+# Endpoint to index a single PDF from disk
+@app.post("/index-pdf")
+def index_pdf_from_disk(filepath: str) -> Dict[str, str | int]:
+    if not os.path.isfile(filepath):
+        return {"status": "error", "message": f"File not found: {filepath}"}
+    text = extract_text_from_pdf(filepath)
+    if not text:
+        return {"status": "error", "message": "No text extracted from PDF"}
+    chunks = chunk_text_by_sentences(text)
+    ids = [str(uuid.uuid4()) for _ in chunks]
+    try:
+        _get_collection().add(documents=chunks, ids=ids)
+        logging.info(f"Indexed {len(chunks)} chunks from {filepath}")
+        return {"status": "PDF indexed", "chunks_added": len(chunks)}
+    except Exception as e:
+        logging.error(f"Failed to add chunks from {filepath}: {e}")
+        return {"status": "error", "message": f"Failed to add chunks: {e}"}
+
+# Endpoint to index all PDFs in a folder
+@app.post("/index-pdf-folder")
+def index_pdf_folder(folderpath: str) -> Dict[str, str | int]:
+    if not os.path.isdir(folderpath):
+        return {"status": "error", "message": f"Folder not found: {folderpath}"}
+    total_chunks = 0
+    for filename in os.listdir(folderpath):
+        if filename.lower().endswith(".pdf"):
+            filepath = os.path.join(folderpath, filename)
+            text = extract_text_from_pdf(filepath)
+            if text:
+                chunks = chunk_text_by_sentences(text)
+                ids = [str(uuid.uuid4()) for _ in chunks]
+                try:
+                    _get_collection().add(documents=chunks, ids=ids)
+                    total_chunks += len(chunks)
+                    logging.info(f"Indexed {len(chunks)} chunks from {filename}")
+                except Exception as e:
+                    logging.error(f"Failed to add chunks from {filename}: {e}")
+    return {"status": "Folder indexed", "total_chunks_added": total_chunks}
+
 
 from loguru import logger
 
