@@ -46,7 +46,7 @@ PDF_DIR = Path(__file__).parent / "PDFs"
 CHROMA_DIR = Path(__file__).parent / ".chromadb"
 
 COLLECTION_NAME = "tct_lectures"
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 # Chunk size in characters (~500 tokens at ~4 chars/token)
 CHUNK_SIZE = 2000
