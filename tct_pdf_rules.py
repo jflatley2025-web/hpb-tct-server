@@ -17,7 +17,7 @@ Design decisions:
   - Startup-only extraction: ChromaDB is never queried during the trading loop.
   - Explicit model: all-MiniLM-L6-v2 must be pre-cached locally before startup.
   - Single collection: "tct_lectures" with lecture_layer metadata for filtering.
-  - Fail loudly on startup errors: missing model or PDF causes SystemExit.
+  - Fail loudly on startup errors: missing model or PDF raises RuntimeError.
 """
 
 from __future__ import annotations
@@ -171,7 +171,7 @@ def _check_embedding_model_cached() -> None:
     model_cache = cache_base / EMBEDDING_MODEL.replace("/", "_")
 
     if not model_cache.exists():
-        raise SystemExit(
+        raise RuntimeError(
             f"\n[FATAL] Embedding model not cached locally.\n"
             f"Expected: {model_cache}\n\n"
             f"Pre-download the model before starting the server:\n"
@@ -325,13 +325,13 @@ def load_tct_rules(force_repopulate: bool = False) -> TCTRuleSet:
     Called once at server startup. Returns a TCTRuleSet that the trading
     loop uses without ever touching ChromaDB again.
 
-    Raises SystemExit on any unrecoverable startup error (missing model,
+    Raises RuntimeError on any unrecoverable startup error (missing model,
     empty PDF directory, zero documents extracted).
     """
     _check_embedding_model_cached()
 
     if not PDF_DIR.exists():
-        raise SystemExit(
+        raise RuntimeError(
             f"[FATAL] PDF directory not found: {PDF_DIR}\n"
             "Place the TCT lecture PDFs in the PDFs/ directory."
         )
@@ -343,7 +343,7 @@ def load_tct_rules(force_repopulate: bool = False) -> TCTRuleSet:
     _populate_collection(collection, force_repopulate=force_repopulate)
 
     if collection.count() == 0:
-        raise SystemExit(
+        raise RuntimeError(
             "[FATAL] ChromaDB collection is empty after ingestion. "
             "Check that PDFs contain extractable text."
         )
@@ -357,7 +357,7 @@ def load_tct_rules(force_repopulate: bool = False) -> TCTRuleSet:
             layer for layer, lr in rule_set.layers.items()
             if not lr.is_populated()
         ]
-        raise SystemExit(
+        raise RuntimeError(
             f"[FATAL] Rule extraction incomplete. Empty layers: {unpopulated}\n"
             "Verify PDFs for those layers contain extractable text."
         )
