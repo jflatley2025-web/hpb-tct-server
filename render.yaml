@@ -37,8 +37,6 @@ services:
         sync: false
       - key: PHEMEX_API_SECRET
         sync: false
-      - key: PHEMEX_SYMBOL
-        value: BTC/USDT:USDT
 
     autoDeploy: true
 
