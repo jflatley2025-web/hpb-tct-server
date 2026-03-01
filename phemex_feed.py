@@ -75,7 +75,12 @@ _exchange: Optional[ccxt.phemex] = None
 
 
 def _get_exchange() -> ccxt.phemex:
-    """Return the ccxt.phemex singleton, creating it on first call."""
+    """Return the ccxt.phemex singleton, creating it on first call.
+
+    load_markets() is called once at init time so ccxt can resolve symbol
+    IDs correctly (e.g. 'BTC/USDT' → 'sBTCUSDT' for spot). Without it,
+    Phemex returns code:30000 "Please double check input arguments".
+    """
     global _exchange
     if _exchange is None:
         api_key = os.getenv("PHEMEX_API_KEY", "")
@@ -87,7 +92,11 @@ def _get_exchange() -> ccxt.phemex:
                 "enableRateLimit": True,
             }
         )
-        logger.info("Phemex exchange initialised (symbol=%s)", SYMBOL)
+        try:
+            _exchange.load_markets()
+            logger.info("Phemex exchange initialised (symbol=%s)", SYMBOL)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Phemex market load failed — candle fetches may error: %s", exc)
     return _exchange
 
 
