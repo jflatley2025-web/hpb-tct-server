@@ -4014,8 +4014,9 @@ async def schematic_chart_page(symbol: str = "BTCUSDT", timeframe: str = "4h", t
         initChart();
         loadData();
 
-        // Auto-refresh every 60 seconds
-        setInterval(loadData, 60000);
+        // PAUSED: Auto-refresh disabled to reduce memory/bandwidth while we work on other features.
+        // Re-enable by uncommenting the line below.
+        // setInterval(loadData, 60000);
     </script>
 </body>
 </html>"""
@@ -5826,8 +5827,9 @@ async def po3_chart_page(symbol: str = "BTCUSDT", timeframe: str = "4h"):
         initChart();
         loadData();
 
-        // Auto-refresh every 60 seconds
-        setInterval(loadData, 60000);
+        // PAUSED: Auto-refresh disabled to reduce memory/bandwidth while we work on other features.
+        // Re-enable by uncommenting the line below.
+        // setInterval(loadData, 60000);
     </script>
 </body>
 </html>"""
@@ -10304,13 +10306,16 @@ async def dashboard():
         // Initialize
         initChart();
         refreshData();
-        fetchTop5Setups();
+        // PAUSED: fetchTop5Setups() — Top 5 Ranges script disabled to reduce memory/bandwidth
+        // while we work on other features. Re-enable by uncommenting the lines below.
+        // fetchTop5Setups();
 
         // Auto-refresh every 30 seconds (forming models derived within refreshData)
         setInterval(refreshData, 30000);
 
-        // Refresh top 5 every 60 seconds (lightweight — reads cached results)
-        setInterval(fetchTop5Setups, 60000);
+        // PAUSED: Top 5 Ranges auto-refresh disabled to reduce memory/bandwidth.
+        // Re-enable by uncommenting the line below.
+        // setInterval(fetchTop5Setups, 60000);
     </script>
 </body>
 </html>
@@ -15305,13 +15310,15 @@ function renderDebug(d) {
   grid.innerHTML = html;
 }
 
-// Auto-refresh debug if open
-setInterval(() => {
-  if (document.getElementById('debugBodyWrap').classList.contains('dopen')) refreshDebug();
-}, 15000);
+// PAUSED: Debug auto-refresh disabled to reduce memory/bandwidth while we work on other features.
+// Re-enable by uncommenting the block below.
+// setInterval(() => {
+//   if (document.getElementById('debugBodyWrap').classList.contains('dopen')) refreshDebug();
+// }, 15000);
 
-// Auto-refresh dashboard every 15s to reflect server-side auto-scan results
-setInterval(refreshState, 15000);
+// PAUSED: Dashboard auto-refresh disabled to reduce memory/bandwidth while we work on other features.
+// Re-enable by uncommenting the line below.
+// setInterval(refreshState, 15000);
 
 // Initial load
 refreshState();
@@ -17078,8 +17085,9 @@ document.querySelectorAll('.tf-btn').forEach(btn => {
 // Re-render on window resize (no refetch needed)
 window.addEventListener('resize', () => { if (_chartData) renderChart(_chartData); });
 
-// Auto-refresh chart every 30 s — preserve zoom/pan
-setInterval(loadChart, 30000);
+// PAUSED: Chart auto-refresh disabled to reduce memory/bandwidth while we work on other features.
+// Re-enable by uncommenting the line below.
+// setInterval(loadChart, 30000);
 
 // ================================================================
 // TOP 5 RANGE PAIRS PANEL — reuses /api/top-setups from the dashboard
@@ -17180,20 +17188,22 @@ function renderTop5Pairs5B(setups, status) {
   });
 }
 
-// Poll top-5 pairs every 5 minutes (the underlying scan runs every 12 h — no need to hammer it)
-setInterval(fetchTop5Pairs5B, 5 * 60 * 1000);
+// PAUSED: Top 5 Ranges polling disabled to reduce memory/bandwidth while we work on other features.
+// Re-enable by uncommenting the line below.
+// setInterval(fetchTop5Pairs5B, 5 * 60 * 1000);
 
-// On page load: fetch top-5 first, auto-select the 1st pair + its range TF,
-// then load the chart with that pair's TCT model.
-(async function initPage() {
-  const setups = await fetchTop5Pairs5B();
-  if (setups.length > 0) {
-    const first = setups[0];
-    _chartSymbol = first.symbol;
-    selectChartTF(first.timeframe || '1d');
-  }
-  loadChart(true);
-})();
+// PAUSED: initPage auto-fetch of Top 5 Ranges disabled — loads chart with default symbol instead.
+// Re-enable by uncommenting the initPage block below and removing the plain loadChart() call.
+// (async function initPage() {
+//   const setups = await fetchTop5Pairs5B();
+//   if (setups.length > 0) {
+//     const first = setups[0];
+//     _chartSymbol = first.symbol;
+//     selectChartTF(first.timeframe || '1d');
+//   }
+//   loadChart(true);
+// })();
+loadChart(true);
 </script>
 </body>
 </html>"""
