@@ -3322,6 +3322,10 @@ async def startup_event():
     asyncio.create_task(_auto_scan_supervisor(stoch_nadarya_auto_scan_loop, "STOCH-NADARYA-BOT"))
     logger.info("[STOCH-NADARYA-BOT] Background auto-scan loop launched (supervised)")
 
+    # Start the Phemex TCT 6-gate simulated trading bot
+    asyncio.create_task(_auto_scan_supervisor(phemex_tct_auto_scan_loop, "PHEMEX-TCT"))
+    logger.info("[PHEMEX-TCT] Background auto-scan loop launched (supervised)")
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -3341,6 +3345,14 @@ async def shutdown_event():
         await loop.run_in_executor(None, github_push_5b_log, TRADE_LOG_PATH_5B)
     except Exception as e:
         logger.warning(f"[SHUTDOWN] GitHub push failed (5B): {e}")
+
+    try:
+        from github_storage import push_phemex_log
+        from phemex_tct_trader import TRADE_LOG_PATH as PHEMEX_LOG_PATH
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, push_phemex_log, PHEMEX_LOG_PATH)
+    except Exception as e:
+        logger.warning(f"[SHUTDOWN] GitHub push failed (phemex-tct): {e}")
 
     global _shared_client
     if _shared_client and not _shared_client.is_closed:
@@ -18984,3 +18996,324 @@ async def stoch_nadarya_auto_scan_loop():
                 logger.critical(f"[STOCH-NADARYA-BOT] {consecutive_errors} consecutive failures")
 
         await asyncio.sleep(STOCH_NADARYA_SCAN_INTERVAL)
+
+
+# ================================================================
+# PHEMEX TCT BOT — BACKGROUND AUTO-SCAN LOOP + ROUTES
+# ================================================================
+
+async def phemex_tct_auto_scan_loop():
+    """Background loop for the Phemex TCT 6-gate simulated trading bot."""
+    from phemex_tct_trader import get_trader, SCAN_INTERVAL
+    await asyncio.sleep(60)  # stagger after other bots
+    logger.info(f"[PHEMEX-TCT] Auto-scan loop started — interval: {SCAN_INTERVAL}s")
+
+    consecutive_errors = 0
+
+    while True:
+        try:
+            trader = get_trader()
+            loop = asyncio.get_event_loop()
+            result = await asyncio.wait_for(
+                loop.run_in_executor(None, trader.scan),
+                timeout=120,
+            )
+            logger.info(f"[PHEMEX-TCT] Scan result: {result.get('action', 'unknown')}")
+            consecutive_errors = 0
+        except Exception as e:
+            consecutive_errors += 1
+            logger.error(f"[PHEMEX-TCT] Scan error ({consecutive_errors}): {e}", exc_info=True)
+            if consecutive_errors >= 5:
+                logger.critical(f"[PHEMEX-TCT] {consecutive_errors} consecutive failures")
+
+        await asyncio.sleep(SCAN_INTERVAL)
+
+
+@app.get("/api/phemex-tct/state")
+async def phemex_tct_state():
+    """JSON snapshot of the Phemex TCT trader state."""
+    from phemex_tct_trader import get_trader
+    return get_trader().snapshot()
+
+
+@app.get("/api/phemex-tct/scan")
+async def phemex_tct_scan():
+    """Force an immediate scan of the Phemex TCT pipeline."""
+    from phemex_tct_trader import get_trader
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, get_trader().scan)
+    return result
+
+
+@app.get("/api/phemex-tct/debug")
+async def phemex_tct_debug():
+    """Return last pipeline gate results for debugging."""
+    from phemex_tct_trader import get_trader
+    return get_trader().debug()
+
+
+@app.get("/phemex-tct", response_class=HTMLResponse)
+async def phemex_tct_page():
+    """
+    Phemex TCT 6-Gate Simulated Trading Dashboard.
+    Shows current trade, historical trades, and performance stats.
+    Auto-refreshes every 30s — no user input required.
+    """
+    html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Phemex TCT — 6-Gate Algo Trading</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-serif;overflow-x:hidden}
+
+.header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;padding:10px 24px;background:#101018;border-bottom:1px solid #1e1e2d}
+.header h1{font-size:1.1rem;color:#ffa726;display:flex;align-items:center;gap:8px}
+.header .subtitle{color:#666;font-size:.8rem;font-weight:400}
+.header-right{display:flex;align-items:center;gap:10px}
+.back-link{color:#888;text-decoration:none;font-size:.75rem;padding:4px 10px;border:1px solid #333;border-radius:4px}
+.back-link:hover{color:#e0e0e0;border-color:#555}
+
+.status-bar{padding:6px 24px;background:#0d0d16;border-bottom:1px solid #1a1a28;display:flex;align-items:center;gap:16px;font-size:.72rem;color:#666}
+.status-dot{width:8px;height:8px;border-radius:50%;background:#ffa726;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.status-dot.inactive{background:#444;animation:none}
+
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;padding:16px 24px}
+.stat-card{background:#12121e;border:1px solid #1e1e2d;border-radius:8px;padding:14px;text-align:center}
+.stat-label{color:#666;font-size:.7rem;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}
+.stat-value{font-size:1.3rem;font-weight:700}
+.green{color:#00e676}
+.red{color:#ff4444}
+.orange{color:#ffa726}
+.cyan{color:#00d4ff}
+.white{color:#e0e0e0}
+
+.main{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:0 24px 24px}
+@media(max-width:900px){.main{grid-template-columns:1fr}}
+
+.panel{background:#12121e;border:1px solid #1e1e2d;border-radius:8px;overflow:hidden}
+.panel-header{padding:10px 16px;background:#181828;border-bottom:1px solid #1e1e2d;font-size:.85rem;font-weight:600;display:flex;align-items:center;gap:8px}
+.panel-body{padding:12px 16px;max-height:520px;overflow-y:auto}
+
+.trade-card{background:#181828;border:1px solid #2d2d44;border-radius:6px;padding:14px;margin-bottom:8px}
+.trade-card.long{border-left:3px solid #00e676}
+.trade-card.short{border-left:3px solid #ff4444}
+.trade-row{display:flex;justify-content:space-between;align-items:center;padding:3px 0;font-size:.78rem}
+.trade-row .label{color:#888}
+.trade-row .value{font-weight:600}
+.badge{display:inline-block;padding:2px 8px;border-radius:3px;font-size:.7rem;font-weight:600;text-transform:uppercase;letter-spacing:.5px}
+.badge-long{background:#00e67622;color:#00e676;border:1px solid #00e67644}
+.badge-short{background:#ff444422;color:#ff4444;border:1px solid #ff444444}
+.badge-open{background:#ffa72622;color:#ffa726;border:1px solid #ffa72644}
+.badge-win{background:#00e67622;color:#00e676}
+.badge-loss{background:#ff444422;color:#ff4444}
+.no-trade{color:#555;font-size:.85rem;padding:30px;text-align:center;line-height:1.6}
+
+.history-table{width:100%;border-collapse:collapse;font-size:.73rem}
+.history-table th{color:#666;text-align:left;padding:6px 8px;border-bottom:1px solid #1e1e2d;font-weight:600;text-transform:uppercase;font-size:.64rem;letter-spacing:.5px;white-space:nowrap}
+.history-table td{padding:6px 8px;border-bottom:1px solid #1a1a28}
+.history-table tr:hover{background:#181828}
+
+.gate-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.gate-item{background:#181828;border:1px solid #222;border-radius:4px;padding:8px 10px;font-size:.73rem}
+.gate-name{color:#888;margin-bottom:2px;font-size:.68rem}
+.gate-status{font-weight:700}
+.gate-status.pass{color:#00e676}
+.gate-status.fail{color:#ff4444}
+
+::-webkit-scrollbar{width:6px}
+::-webkit-scrollbar-track{background:#0a0a0f}
+::-webkit-scrollbar-thumb{background:#333;border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:#555}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>&#9889; Phemex TCT <span class="subtitle">6-Gate Algo &mdash; Paper Trading</span></h1>
+  <div class="header-right">
+    <a href="/dashboard" class="back-link">&#8592; Dashboard</a>
+  </div>
+</div>
+
+<div class="status-bar">
+  <span class="status-dot" id="liveDot"></span>
+  <span id="statusText">Loading...</span>
+  <span style="margin-left:auto">Auto-refresh every 30s</span>
+</div>
+
+<div class="stats" id="statsRow">
+  <div class="stat-card"><div class="stat-label">Balance</div><div class="stat-value white" id="statBalance">—</div></div>
+  <div class="stat-card"><div class="stat-label">Total P&amp;L</div><div class="stat-value" id="statPnl">—</div></div>
+  <div class="stat-card"><div class="stat-label">Win Rate</div><div class="stat-value cyan" id="statWinRate">—</div></div>
+  <div class="stat-card"><div class="stat-label">Trades</div><div class="stat-value white" id="statTrades">—</div></div>
+  <div class="stat-card"><div class="stat-label">Wins</div><div class="stat-value green" id="statWins">—</div></div>
+  <div class="stat-card"><div class="stat-label">Losses</div><div class="stat-value red" id="statLosses">—</div></div>
+</div>
+
+<div class="main">
+  <div class="panel">
+    <div class="panel-header">&#9679; Current Trade</div>
+    <div class="panel-body" id="currentTradePanel">
+      <div class="no-trade">No open position.<br>Scanner running every 15 min.</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-header">&#9889; Last Pipeline Result</div>
+    <div class="panel-body" id="pipelinePanel">
+      <div class="no-trade">Waiting for first scan...</div>
+    </div>
+  </div>
+</div>
+
+<div style="padding:0 24px 24px">
+  <div class="panel">
+    <div class="panel-header">&#128200; Trade History</div>
+    <div class="panel-body">
+      <table class="history-table">
+        <thead>
+          <tr>
+            <th>Time</th><th>Dir</th><th>Entry</th><th>Exit</th>
+            <th>Stop</th><th>Target</th><th>R:R</th>
+            <th>Risk $</th><th>P&amp;L</th><th>Balance</th><th>Result</th>
+          </tr>
+        </thead>
+        <tbody id="historyBody">
+          <tr><td colspan="11" style="color:#555;text-align:center;padding:20px">No trades yet</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+const fmt = (v, dp=4) => v != null ? Number(v).toFixed(dp) : '—';
+const fmtPct = v => v != null ? Number(v).toFixed(1) + '%' : '—';
+
+function renderCurrentTrade(trade) {
+  const panel = document.getElementById('currentTradePanel');
+  if (!trade) {
+    panel.innerHTML = '<div class="no-trade">No open position.<br>Scanner running every 15 min.</div>';
+    return;
+  }
+  const dir = trade.signal === 'LONG' ? 'long' : 'short';
+  const badgeCls = dir === 'long' ? 'badge-long' : 'badge-short';
+  const opened = trade.opened_at ? new Date(trade.opened_at).toLocaleString() : '—';
+  panel.innerHTML = `
+    <div class="trade-card ${dir}">
+      <div class="trade-row"><span class="label">Direction</span>
+        <span><span class="badge ${badgeCls}">${trade.signal}</span>
+        <span class="badge badge-open" style="margin-left:4px">OPEN</span></span></div>
+      <div class="trade-row"><span class="label">Opened</span><span class="value">${opened}</span></div>
+      <div class="trade-row"><span class="label">Entry</span><span class="value">${fmt(trade.entry)}</span></div>
+      <div class="trade-row"><span class="label">Stop</span><span class="value red">${fmt(trade.stop)}</span></div>
+      <div class="trade-row"><span class="label">Target</span><span class="value green">${fmt(trade.target)}</span></div>
+      <div class="trade-row"><span class="label">R:R</span><span class="value cyan">${fmt(trade.rr, 2)}</span></div>
+      <div class="trade-row"><span class="label">Confidence</span><span class="value orange">${fmtPct(trade.confidence * 100)}</span></div>
+      <div class="trade-row"><span class="label">Risk $</span><span class="value">${fmt(trade.risk_amount, 2)}</span></div>
+    </div>`;
+}
+
+function renderPipeline(debug) {
+  const panel = document.getElementById('pipelinePanel');
+  const r = debug.last_pipeline_result;
+  if (!r) {
+    panel.innerHTML = '<div class="no-trade">Waiting for first scan...</div>';
+    return;
+  }
+  const sigColor = r.signal === 'LONG' ? 'green' : r.signal === 'SHORT' ? 'red' : 'white';
+  let gateHtml = '';
+  if (r.gates && r.gates.length) {
+    gateHtml = '<div class="gate-grid" style="margin-top:10px">' +
+      r.gates.map(g => `
+        <div class="gate-item">
+          <div class="gate-name">Gate ${g.layer}: ${g.name}</div>
+          <div class="gate-status ${g.passed ? 'pass' : 'fail'}">${g.passed ? '✓ PASS' : '✗ FAIL'}</div>
+        </div>`).join('') + '</div>';
+  }
+  panel.innerHTML = `
+    <div style="margin-bottom:8px">
+      <span style="color:#888;font-size:.72rem">Signal: </span>
+      <span class="${sigColor}" style="font-weight:700;font-size:1rem">${r.signal}</span>
+      ${r.blocking_gate ? `<span style="color:#666;font-size:.7rem;margin-left:8px">Blocked at Gate ${r.blocking_gate}</span>` : ''}
+    </div>
+    <div style="font-size:.75rem;color:#888;margin-bottom:4px">
+      Conf: <span class="orange">${fmtPct((r.confidence||0)*100)}</span> &nbsp;
+      R:R: <span class="cyan">${fmt(r.rr,2)}</span> &nbsp;
+      Entry: <span class="white">${fmt(r.entry)}</span>
+    </div>
+    ${gateHtml}`;
+}
+
+function renderHistory(trades) {
+  const body = document.getElementById('historyBody');
+  if (!trades || !trades.length) {
+    body.innerHTML = '<tr><td colspan="11" style="color:#555;text-align:center;padding:20px">No trades yet</td></tr>';
+    return;
+  }
+  body.innerHTML = trades.map(t => {
+    const outcome = t.outcome || '—';
+    const badgeCls = outcome === 'WIN' ? 'badge-win' : outcome === 'LOSS' ? 'badge-loss' : '';
+    const dirCls = t.signal === 'LONG' ? 'badge-long' : 'badge-short';
+    const pnlColor = (t.pnl || 0) >= 0 ? 'green' : 'red';
+    const time = t.closed_at ? new Date(t.closed_at).toLocaleString() : '—';
+    return `<tr>
+      <td style="color:#666">${time}</td>
+      <td><span class="badge ${dirCls}">${t.signal||'—'}</span></td>
+      <td>${fmt(t.entry)}</td>
+      <td>${fmt(t.exit_price)}</td>
+      <td class="red">${fmt(t.stop)}</td>
+      <td class="green">${fmt(t.target)}</td>
+      <td class="cyan">${fmt(t.rr,2)}</td>
+      <td>$${fmt(t.risk_amount,2)}</td>
+      <td class="${pnlColor}">${t.pnl != null ? '$' + (t.pnl >= 0 ? '+' : '') + fmt(t.pnl,2) : '—'}</td>
+      <td>$${fmt(t.balance_after,2)}</td>
+      <td><span class="badge ${badgeCls}">${outcome}</span></td>
+    </tr>`;
+  }).join('');
+}
+
+async function refresh() {
+  try {
+    const [state, debug] = await Promise.all([
+      fetch('/api/phemex-tct/state').then(r => r.json()),
+      fetch('/api/phemex-tct/debug').then(r => r.json()),
+    ]);
+
+    // Stats
+    document.getElementById('statBalance').textContent = '$' + Number(state.balance).toFixed(2);
+    const pnl = state.pnl_total || 0;
+    const pnlEl = document.getElementById('statPnl');
+    pnlEl.textContent = (pnl >= 0 ? '+$' : '-$') + Math.abs(pnl).toFixed(2);
+    pnlEl.className = 'stat-value ' + (pnl >= 0 ? 'green' : 'red');
+    document.getElementById('statWinRate').textContent = (state.win_rate || 0) + '%';
+    document.getElementById('statTrades').textContent = state.total_trades || 0;
+    document.getElementById('statWins').textContent = state.wins || 0;
+    document.getElementById('statLosses').textContent = state.losses || 0;
+
+    // Status bar
+    const hasOpenTrade = !!state.current_trade;
+    const dot = document.getElementById('liveDot');
+    dot.className = 'status-dot' + (hasOpenTrade ? '' : ' inactive');
+    const lastScan = state.last_scan ? new Date(state.last_scan * 1000).toLocaleTimeString() : 'never';
+    document.getElementById('statusText').textContent =
+      `Last scan: ${lastScan} — Signal: ${state.last_signal || 'NO_TRADE'} — ${hasOpenTrade ? 'Position OPEN' : 'No position'}`;
+
+    renderCurrentTrade(state.current_trade);
+    renderPipeline(debug);
+    renderHistory(state.trade_history);
+  } catch(e) {
+    document.getElementById('statusText').textContent = 'Error loading data — ' + e.message;
+  }
+}
+
+refresh();
+setInterval(refresh, 30000);
+</script>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
