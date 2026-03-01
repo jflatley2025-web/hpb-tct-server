@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse, JSONResponse
 from pypdf import PdfReader
 import chromadb
 from chromadb.utils import embedding_functions
