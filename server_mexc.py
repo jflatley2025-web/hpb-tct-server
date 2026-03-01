@@ -25,22 +25,29 @@ logging.basicConfig(level=logging.INFO)
 # Initialize FastAPI app
 app = FastAPI()
 
-# Initialize ChromaDB client and collection
-embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
-    model_name="all-MiniLM-L6-v2"
-)
+# ChromaDB + SentenceTransformer are initialized lazily on first use so the
+# heavy model weights (all-MiniLM-L6-v2 + torch) don't load at startup and
+# exhaust the 512MB Render instance before the port can open.
+_chroma_collection = None
 
-chroma_client = chromadb.Client(
-    chromadb.config.Settings(
-        persist_directory="/opt/render/project/chroma_db",
-        is_persistent=True
-    )
-)
+def _get_collection():
+    global _chroma_collection
+    if _chroma_collection is None:
+        ef = embedding_functions.SentenceTransformerEmbeddingFunction(
+            model_name="all-MiniLM-L6-v2"
+        )
+        client = chromadb.Client(
+            chromadb.config.Settings(
+                persist_directory="/opt/render/project/chroma_db",
+                is_persistent=True
+            )
+        )
+        _chroma_collection = client.get_or_create_collection(
+            name="algo_docs",
+            embedding_function=ef
+        )
+    return _chroma_collection
 
-collection = chroma_client.get_or_create_collection(
-    name="algo_docs",
-    embedding_function=embedding_function
-)
 
 # Helper function to read PDF and return text
 def extract_text_from_pdf(filepath: str) -> str:
@@ -57,23 +64,18 @@ def extract_text_from_pdf(filepath: str) -> str:
 
 # Helper function to split text into chunks by sentences
 def chunk_text_by_sentences(text: str, max_chunk_size: int = 1200) -> list[str]:
-    # Split text into sentences using a regex
     sentences = re.split(r'(?<=[.!?])\s+', text)
     chunks = []
     current_chunk = ""
-
     for sentence in sentences:
-        # Check if adding this sentence exceeds chunk size
         if len(current_chunk) + len(sentence) + 1 > max_chunk_size:
             if current_chunk:
                 chunks.append(current_chunk.strip())
             current_chunk = sentence
         else:
             current_chunk += " " + sentence if current_chunk else sentence
-
     if current_chunk:
         chunks.append(current_chunk.strip())
-
     return chunks
 
 # Endpoint to index a single PDF from disk
@@ -81,16 +83,13 @@ def chunk_text_by_sentences(text: str, max_chunk_size: int = 1200) -> list[str]:
 def index_pdf_from_disk(filepath: str) -> Dict[str, str | int]:
     if not os.path.isfile(filepath):
         return {"status": "error", "message": f"File not found: {filepath}"}
-
     text = extract_text_from_pdf(filepath)
     if not text:
         return {"status": "error", "message": "No text extracted from PDF"}
-
     chunks = chunk_text_by_sentences(text)
     ids = [str(uuid.uuid4()) for _ in chunks]
-
     try:
-        collection.add(documents=chunks, ids=ids)
+        _get_collection().add(documents=chunks, ids=ids)
         logging.info(f"Indexed {len(chunks)} chunks from {filepath}")
         return {"status": "PDF indexed", "chunks_added": len(chunks)}
     except Exception as e:
@@ -102,7 +101,6 @@ def index_pdf_from_disk(filepath: str) -> Dict[str, str | int]:
 def index_pdf_folder(folderpath: str) -> Dict[str, str | int]:
     if not os.path.isdir(folderpath):
         return {"status": "error", "message": f"Folder not found: {folderpath}"}
-
     total_chunks = 0
     for filename in os.listdir(folderpath):
         if filename.lower().endswith(".pdf"):
@@ -112,13 +110,13 @@ def index_pdf_folder(folderpath: str) -> Dict[str, str | int]:
                 chunks = chunk_text_by_sentences(text)
                 ids = [str(uuid.uuid4()) for _ in chunks]
                 try:
-                    collection.add(documents=chunks, ids=ids)
+                    _get_collection().add(documents=chunks, ids=ids)
                     total_chunks += len(chunks)
                     logging.info(f"Indexed {len(chunks)} chunks from {filename}")
                 except Exception as e:
                     logging.error(f"Failed to add chunks from {filename}: {e}")
-
     return {"status": "Folder indexed", "total_chunks_added": total_chunks}
+
 
 from loguru import logger
 
@@ -4014,8 +4012,9 @@ async def schematic_chart_page(symbol: str = "BTCUSDT", timeframe: str = "4h", t
         initChart();
         loadData();
 
-        // Auto-refresh every 60 seconds
-        setInterval(loadData, 60000);
+        // PAUSED: Auto-refresh disabled to reduce memory/bandwidth while we work on other features.
+        // Re-enable by uncommenting the line below.
+        // setInterval(loadData, 60000);
     </script>
 </body>
 </html>"""
@@ -5826,8 +5825,9 @@ async def po3_chart_page(symbol: str = "BTCUSDT", timeframe: str = "4h"):
         initChart();
         loadData();
 
-        // Auto-refresh every 60 seconds
-        setInterval(loadData, 60000);
+        // PAUSED: Auto-refresh disabled to reduce memory/bandwidth while we work on other features.
+        // Re-enable by uncommenting the line below.
+        // setInterval(loadData, 60000);
     </script>
 </body>
 </html>"""
@@ -10304,13 +10304,16 @@ async def dashboard():
         // Initialize
         initChart();
         refreshData();
-        fetchTop5Setups();
+        // PAUSED: fetchTop5Setups() — Top 5 Ranges script disabled to reduce memory/bandwidth
+        // while we work on other features. Re-enable by uncommenting the lines below.
+        // fetchTop5Setups();
 
         // Auto-refresh every 30 seconds (forming models derived within refreshData)
         setInterval(refreshData, 30000);
 
-        // Refresh top 5 every 60 seconds (lightweight — reads cached results)
-        setInterval(fetchTop5Setups, 60000);
+        // PAUSED: Top 5 Ranges auto-refresh disabled to reduce memory/bandwidth.
+        // Re-enable by uncommenting the line below.
+        // setInterval(fetchTop5Setups, 60000);
     </script>
 </body>
 </html>
@@ -15305,13 +15308,15 @@ function renderDebug(d) {
   grid.innerHTML = html;
 }
 
-// Auto-refresh debug if open
-setInterval(() => {
-  if (document.getElementById('debugBodyWrap').classList.contains('dopen')) refreshDebug();
-}, 15000);
+// PAUSED: Debug auto-refresh disabled to reduce memory/bandwidth while we work on other features.
+// Re-enable by uncommenting the block below.
+// setInterval(() => {
+//   if (document.getElementById('debugBodyWrap').classList.contains('dopen')) refreshDebug();
+// }, 15000);
 
-// Auto-refresh dashboard every 15s to reflect server-side auto-scan results
-setInterval(refreshState, 15000);
+// PAUSED: Dashboard auto-refresh disabled to reduce memory/bandwidth while we work on other features.
+// Re-enable by uncommenting the line below.
+// setInterval(refreshState, 15000);
 
 // Initial load
 refreshState();
@@ -17078,8 +17083,9 @@ document.querySelectorAll('.tf-btn').forEach(btn => {
 // Re-render on window resize (no refetch needed)
 window.addEventListener('resize', () => { if (_chartData) renderChart(_chartData); });
 
-// Auto-refresh chart every 30 s — preserve zoom/pan
-setInterval(loadChart, 30000);
+// PAUSED: Chart auto-refresh disabled to reduce memory/bandwidth while we work on other features.
+// Re-enable by uncommenting the line below.
+// setInterval(loadChart, 30000);
 
 // ================================================================
 // TOP 5 RANGE PAIRS PANEL — reuses /api/top-setups from the dashboard
@@ -17180,20 +17186,22 @@ function renderTop5Pairs5B(setups, status) {
   });
 }
 
-// Poll top-5 pairs every 5 minutes (the underlying scan runs every 12 h — no need to hammer it)
-setInterval(fetchTop5Pairs5B, 5 * 60 * 1000);
+// PAUSED: Top 5 Ranges polling disabled to reduce memory/bandwidth while we work on other features.
+// Re-enable by uncommenting the line below.
+// setInterval(fetchTop5Pairs5B, 5 * 60 * 1000);
 
-// On page load: fetch top-5 first, auto-select the 1st pair + its range TF,
-// then load the chart with that pair's TCT model.
-(async function initPage() {
-  const setups = await fetchTop5Pairs5B();
-  if (setups.length > 0) {
-    const first = setups[0];
-    _chartSymbol = first.symbol;
-    selectChartTF(first.timeframe || '1d');
-  }
-  loadChart(true);
-})();
+// PAUSED: initPage auto-fetch of Top 5 Ranges disabled — loads chart with default symbol instead.
+// Re-enable by uncommenting the initPage block below and removing the plain loadChart() call.
+// (async function initPage() {
+//   const setups = await fetchTop5Pairs5B();
+//   if (setups.length > 0) {
+//     const first = setups[0];
+//     _chartSymbol = first.symbol;
+//     selectChartTF(first.timeframe || '1d');
+//   }
+//   loadChart(true);
+// })();
+loadChart(true);
 </script>
 </body>
 </html>"""
