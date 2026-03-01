@@ -34,7 +34,10 @@ logger = logging.getLogger("TCT-PhemexFeed")
 # Timeframe constants
 # ---------------------------------------------------------------------------
 
-SYMBOL = os.getenv("PHEMEX_SYMBOL", "BTC/USDT")
+# BTC/USDT:USDT = Phemex linear (USDT-margined) perpetual.
+# BTC/USDT (spot) uses a different Phemex endpoint and returns code:30000
+# on fetch_ohlcv calls, even after load_markets() succeeds.
+SYMBOL = os.getenv("PHEMEX_SYMBOL", "BTC/USDT:USDT")
 
 # Candle counts per timeframe. LTF needs more history for tap spacing detection;
 # HTF needs fewer because each 4h candle covers 4 hours of context.
