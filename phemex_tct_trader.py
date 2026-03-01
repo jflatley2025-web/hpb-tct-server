@@ -90,7 +90,7 @@ class PhemexTCTTrader:
             except Exception as exc:
                 logger.warning("[PHEMEX-TCT] Could not load TCT rules: %s — using empty ruleset", exc)
                 from tct_pdf_rules import TCTRuleSet
-                self._rules = TCTRuleSet(rules={})
+                self._rules = TCTRuleSet()
         return self._rules
 
     # ------------------------------------------------------------------
