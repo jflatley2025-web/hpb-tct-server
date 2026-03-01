@@ -2662,14 +2662,6 @@ def validate_RCM(context: Dict) -> Dict:
     except Exception as e:
         return {"valid": False, "confidence": 0.0, "error": str(e)}
 
-def validate_MSCE(context: Dict) -> Dict:
-    utc = datetime.utcnow().hour
-    if utc < 8:
-        return {"confidence": 0.95}
-    elif utc < 16:
-        return {"confidence": 1.05}
-    return {"confidence": 1.15}
-
 def validate_RIG(context: Dict) -> Dict:
     rcm = context.get("RCM", {})
     if rcm.get("valid"):
