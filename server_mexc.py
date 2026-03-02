@@ -3034,8 +3034,11 @@ async def scan_pair_range(symbol: str) -> Optional[Dict]:
 
         current_price = float(df.iloc[-1]["close"])
 
-        # Use the same detect_ranges() function as the /ranges page
-        all_ranges = detect_ranges(df, lookback=len(df))
+        # detect_ranges() is CPU-bound (nested Python loops + iterrows).
+        # Run it in the thread pool so the event loop stays free to handle
+        # incoming HTTP requests and health checks while the scan is running.
+        loop = asyncio.get_event_loop()
+        all_ranges = await loop.run_in_executor(None, detect_ranges, df, len(df))
         if not all_ranges:
             return None
 
