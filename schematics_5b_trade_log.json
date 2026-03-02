@@ -1,5 +1,5 @@
 {
-  "balance": 4571.01,
+  "balance": 4516.78,
   "starting_balance": 5000.0,
   "current_trade": null,
   "trade_history": [
@@ -228,11 +228,50 @@
       "is_win": false,
       "closed_at": "2026-02-24T21:04:18.042299+00:00",
       "balance_after": 4571.01
+    },
+    {
+      "id": 7,
+      "symbol": "OKBUSDT",
+      "timeframe": "30m",
+      "direction": "bullish",
+      "model": "Model_1",
+      "entry_price": 76.6,
+      "stop_price": 76.21,
+      "target_price": 77.36,
+      "tp1_price": 76.98,
+      "tp1_hit": false,
+      "position_size": 9109.79,
+      "margin": 910.98,
+      "risk_amount": 45.71,
+      "leverage": 10,
+      "rr": 1.98,
+      "entry_score": 75,
+      "entry_reasons": [
+        "BOS confirmed",
+        "Acceptable R:R (2.0)",
+        "HTF bias aligned (bullish)",
+        "Quality 1.00 (+15)",
+        "Model 1 \u2014 deeper deviation"
+      ],
+      "htf_bias": "bullish",
+      "liquidation_price": 69.32,
+      "liquidation_safe": true,
+      "opened_at": "2026-03-02T02:08:50.209612+00:00",
+      "status": "closed",
+      "live_pnl_pct": -0.6,
+      "current_price": 76.14,
+      "exit_price": 76.14,
+      "exit_reason": "stop_hit",
+      "pnl_pct": -0.6,
+      "pnl_dollars": -54.23,
+      "is_win": false,
+      "closed_at": "2026-03-02T02:15:40.104103+00:00",
+      "balance_after": 4516.78
     }
   ],
   "total_wins": 0,
-  "total_losses": 6,
-  "last_scan_time": "2026-03-02T00:58:05.317396+00:00",
+  "total_losses": 7,
+  "last_scan_time": "2026-03-02T02:08:00.011658+00:00",
   "last_scan_action": "no_qualifying_setups",
   "last_error": null
 }
