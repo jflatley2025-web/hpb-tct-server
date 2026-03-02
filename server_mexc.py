@@ -3183,7 +3183,8 @@ async def scan_pair_for_forming(symbol: str, timeframe: str) -> List[Dict]:
         detected_range = await detect_best_range(candles_list)
         range_list = [detected_range] if detected_range and not isinstance(detected_range, list) else (detected_range or [])
 
-        schematics_result = detect_tct_schematics(df, range_list)
+        loop = asyncio.get_event_loop()
+        schematics_result = await loop.run_in_executor(None, detect_tct_schematics, df, range_list)
 
         all_schematics = (
             schematics_result.get("accumulation_schematics", []) +
@@ -3586,7 +3587,8 @@ async def get_schematic_data(symbol: str, timeframe: str = "4h", type: str = "tc
             # that _create_tab() requires.  detect_best_range() returns
             # {high, low} without _idx fields, causing every schematic to be
             # silently skipped.
-            schematics_result = detect_tct_schematics(df, [])
+            loop = asyncio.get_event_loop()
+            schematics_result = await loop.run_in_executor(None, detect_tct_schematics, df, [])
 
             all_schematics = (
                 schematics_result.get("accumulation_schematics", []) +
@@ -5510,7 +5512,8 @@ async def get_po3_data(symbol: str, timeframe: str = "4h"):
         # Also get TCT schematics for the manipulation phase overlay
         # Pass [] to use internal range detection (detect_best_range returns
         # wrong format without _idx keys)
-        tct_result = detect_tct_schematics(df, [])
+        loop = asyncio.get_event_loop()
+        tct_result = await loop.run_in_executor(None, detect_tct_schematics, df, [])
         all_tct = (
             tct_result.get("accumulation_schematics", []) +
             tct_result.get("distribution_schematics", [])
@@ -11150,7 +11153,8 @@ async def get_tct_schematics(symbol: Optional[str] = None, timeframe: Optional[s
             detected_range = await detect_best_range(candles_list)
             range_list = [detected_range] if detected_range and not isinstance(detected_range, list) else (detected_range or [])
 
-            schematics_result = detect_tct_schematics(df, range_list)
+            loop = asyncio.get_event_loop()
+            schematics_result = await loop.run_in_executor(None, detect_tct_schematics, df, range_list)
             all_schematics = (
                 schematics_result.get("accumulation_schematics", []) +
                 schematics_result.get("distribution_schematics", [])
@@ -12377,17 +12381,24 @@ async def get_ranges_debug_data(symbol: str = "BTC_USDT_PERP", timeframe: str = 
             })
 
         # Detect ranges on primary timeframe
-        primary_ranges = detect_ranges(df_primary, lookback=limit)
+        loop = asyncio.get_event_loop()
+        primary_ranges = await loop.run_in_executor(None, detect_ranges, df_primary, limit)
 
         # Fetch and detect ranges on HTF
         htf_tf = tf_config["htf"]
         df_htf = await fetch_mexc_candles(sym, htf_tf, limit)
-        htf_ranges = detect_ranges(df_htf, lookback=limit) if df_htf is not None and not df_htf.empty else []
+        if df_htf is not None and not df_htf.empty:
+            htf_ranges = await loop.run_in_executor(None, detect_ranges, df_htf, limit)
+        else:
+            htf_ranges = []
 
         # Fetch and detect ranges on LTF
         ltf_tf = tf_config["ltf"]
         df_ltf = await fetch_mexc_candles(sym, ltf_tf, limit * 2)
-        ltf_ranges = detect_ranges(df_ltf, lookback=limit * 2) if df_ltf is not None and not df_ltf.empty else []
+        if df_ltf is not None and not df_ltf.empty:
+            ltf_ranges = await loop.run_in_executor(None, detect_ranges, df_ltf, limit * 2)
+        else:
+            ltf_ranges = []
 
         response = {
             "symbol": symbol,
@@ -13103,8 +13114,9 @@ async def get_supply_demand_data(symbol: str = "BTC_USDT_PERP", timeframe: str =
                     if 0 <= fidx < len(df_ref):
                         fvg["time"] = int(df_ref.iloc[fidx]["open_time"].timestamp())
 
-        # Run detection on primary TF
-        primary_sd = _detect_supply_demand_zones(df_primary)
+        # Run detection on primary TF (_detect_supply_demand_zones is CPU-bound)
+        loop = asyncio.get_event_loop()
+        primary_sd = await loop.run_in_executor(None, _detect_supply_demand_zones, df_primary)
         _add_times(primary_sd["order_blocks"], df_primary)
         _add_times(primary_sd["structure_zones"], df_primary)
         _add_times(primary_sd.get("scored_zones", []), df_primary)
@@ -13122,14 +13134,14 @@ async def get_supply_demand_data(symbol: str = "BTC_USDT_PERP", timeframe: str =
         # Run detection on HTF
         htf_sd = None
         if df_htf is not None and not df_htf.empty:
-            htf_sd = _detect_supply_demand_zones(df_htf)
+            htf_sd = await loop.run_in_executor(None, _detect_supply_demand_zones, df_htf)
             _add_times(htf_sd["order_blocks"], df_htf)
             _add_times(htf_sd["structure_zones"], df_htf)
 
         # Run detection on LTF
         ltf_sd = None
         if df_ltf is not None and not df_ltf.empty:
-            ltf_sd = _detect_supply_demand_zones(df_ltf)
+            ltf_sd = await loop.run_in_executor(None, _detect_supply_demand_zones, df_ltf)
             _add_times(ltf_sd["order_blocks"], df_ltf)
             _add_times(ltf_sd["structure_zones"], df_ltf)
 
