@@ -45,8 +45,17 @@ STARTING_BALANCE: float = float(os.getenv("PHEMEX_TCT_STARTING_BALANCE", "5000")
 RISK_PER_TRADE_PCT: float = 1.0          # 1 % of balance risked per trade
 SCAN_INTERVAL: int = int(os.getenv("PHEMEX_TCT_SCAN_INTERVAL", "900"))  # 15 min
 
-_DIR = os.path.dirname(os.path.abspath(__file__))
-TRADE_LOG_PATH = os.path.join(_DIR, "phemex_trade_log.json")
+# Trade log stored on Render's persistent chroma_db directory so it
+# survives restarts between deploys.  Override via PHEMEX_TRADE_LOG_DIR
+# for local development.
+_DEFAULT_TRADE_LOG_DIR = "/opt/render/project/chroma_db"
+_TRADE_LOG_DIR = (os.getenv("PHEMEX_TRADE_LOG_DIR", _DEFAULT_TRADE_LOG_DIR) or "").strip() or _DEFAULT_TRADE_LOG_DIR
+try:
+    os.makedirs(_TRADE_LOG_DIR, exist_ok=True)
+except OSError as exc:
+    logger.error("[PHEMEX-TCT] Invalid PHEMEX_TRADE_LOG_DIR=%r: %s", _TRADE_LOG_DIR, exc)
+    raise
+TRADE_LOG_PATH = os.path.join(_TRADE_LOG_DIR, "phemex_trade_log.json")
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +85,9 @@ class PhemexTCTTrader:
         self.consecutive_errors: int = 0
 
         self._load_state()
+        # Write initial state to disk immediately so the file exists on
+        # the Render persistent volume even before the first trade occurs.
+        self.save_state()
 
     # ------------------------------------------------------------------
     # Rule loading
@@ -116,6 +128,9 @@ class PhemexTCTTrader:
             self.starting_balance = data.get("starting_balance", STARTING_BALANCE)
             self.current_trade = data.get("current_trade")
             self.trade_history = data.get("trade_history", [])
+            self.last_scan_time = data.get("last_scan_time")
+            self.last_signal = data.get("last_signal", "NO_TRADE")
+            self.last_pipeline_result = data.get("last_pipeline_result")
             logger.info(
                 "[PHEMEX-TCT] State restored — balance=%.2f trades=%d",
                 self.balance, len(self.trade_history),
@@ -130,6 +145,9 @@ class PhemexTCTTrader:
             "starting_balance": self.starting_balance,
             "current_trade": self.current_trade,
             "trade_history": self.trade_history,
+            "last_scan_time": self.last_scan_time,
+            "last_signal": self.last_signal,
+            "last_pipeline_result": self.last_pipeline_result,
             "last_updated": datetime.now(timezone.utc).isoformat(),
         }
         try:
@@ -310,6 +328,9 @@ class PhemexTCTTrader:
             if self.current_trade is not None:
                 self._check_position(current_price)
                 action = "monitor"
+                # _check_position calls save_state only on close; persist
+                # scan timestamp on every monitor tick as well.
+                self.save_state()
             else:
                 # Run the full 6-gate pipeline
                 try:
@@ -338,6 +359,9 @@ class PhemexTCTTrader:
                     action = "trade_opened"
                 else:
                     action = "no_trade"
+                    # _open_trade already calls save_state; persist here
+                    # for the no-trade path so last_scan_time is on disk.
+                    self.save_state()
 
         return {"action": action, "price": current_price}
 

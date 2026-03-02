@@ -37,6 +37,8 @@ services:
         sync: false
       - key: PHEMEX_API_SECRET
         sync: false
+      - key: PHEMEX_TRADE_LOG_DIR
+        value: /opt/render/project/chroma_db
 
     autoDeploy: true
 
