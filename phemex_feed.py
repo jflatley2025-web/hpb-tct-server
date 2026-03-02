@@ -1,20 +1,24 @@
 """
-phemex_feed.py — Phemex OHLCV Feed with TTL Cache
+phemex_feed.py — OHLCV Feed with TTL Cache
 
-Fetches candle data from Phemex via ccxt for three timeframes:
+Fetches BTC/USDT candle data from MEXC's public REST API for three timeframes:
   HTF = 4h  (100 candles)
   MTF = 1h  (150 candles)
   LTF = 15m (200 candles)
 
+Switched from ccxt+Phemex to httpx+MEXC because Phemex's exchange API
+returns code:30000 for OHLCV calls regardless of symbol format or ccxt
+version. MEXC provides identical BTC/USDT price data and is already used
+by all other bots in this codebase. Trade execution on Phemex is separate.
+
 Design decisions:
   - TTL cache per timeframe: HTF candles change every 4h, so fetching every 15s
-    wastes 479 out of 480 calls and risks Phemex rate limits.
+    wastes 479 out of 480 calls and risks rate limits.
   - Read-only DataFrames: the feed marks returned DataFrames as not writeable.
-    Gate functions that need to annotate data take an explicit .copy() at that
-    point — not at every gate entry.
+    Gate functions that need to annotate data take an explicit .copy().
   - Explicit candle limits: more candles for LTF (needs tap history),
     fewer for HTF (each candle covers 4 hours of context).
-  - Fail loudly on exchange init errors; return None on per-fetch errors so
+  - Fail loudly on unsupported timeframe; return None on per-fetch errors so
     the trading loop can skip gracefully rather than crashing.
 """
 
@@ -25,7 +29,7 @@ import os
 import time
 from typing import Optional
 
-import ccxt
+import httpx
 import pandas as pd
 
 logger = logging.getLogger("TCT-PhemexFeed")
@@ -34,10 +38,9 @@ logger = logging.getLogger("TCT-PhemexFeed")
 # Timeframe constants
 # ---------------------------------------------------------------------------
 
-SYMBOL = os.getenv("PHEMEX_SYMBOL", "BTC/USDT")
+# MEXC spot symbol — BTCUSDT format (no slash or colon suffix)
+SYMBOL = os.getenv("MEXC_FEED_SYMBOL", "BTCUSDT")
 
-# Candle counts per timeframe. LTF needs more history for tap spacing detection;
-# HTF needs fewer because each 4h candle covers 4 hours of context.
 LTF_TF = "15m"
 MTF_TF = "1h"
 HTF_TF = "4h"
@@ -60,55 +63,24 @@ _LIMITS: dict[str, int] = {
     HTF_TF: HTF_LIMIT,
 }
 
+# MEXC uses "60m" for 1-hour intervals; "15m" and "4h" match directly.
+_MEXC_INTERVAL: dict[str, str] = {
+    LTF_TF: "15m",
+    MTF_TF: "60m",
+    HTF_TF: "4h",
+}
+
+MEXC_KLINES_URL = "https://api.mexc.com/api/v3/klines"
+
 # DataFrame column names — consistent with the rest of this codebase.
 OHLCV_COLUMNS = ["open_time", "open", "high", "low", "close", "volume"]
 
 # ---------------------------------------------------------------------------
-# Module-level cache and exchange singleton
+# Module-level cache
 # ---------------------------------------------------------------------------
 
 # Structure: {timeframe: (DataFrame, expires_at)}
 _cache: dict[str, tuple[pd.DataFrame, float]] = {}
-
-# Exchange is initialized once on first use (lazy) so tests can inject mocks.
-_exchange: Optional[ccxt.phemex] = None
-
-
-def _get_exchange() -> ccxt.phemex:
-    """Return the ccxt.phemex singleton, creating it on first call.
-
-    load_markets() is called once at init time so ccxt can resolve symbol
-    IDs correctly (e.g. 'BTC/USDT' → 'sBTCUSDT' for spot). Without it,
-    Phemex returns code:30000 "Please double check input arguments".
-    """
-    global _exchange
-    if _exchange is None:
-        api_key = os.getenv("PHEMEX_API_KEY", "")
-        api_secret = os.getenv("PHEMEX_API_SECRET", "")
-        _exchange = ccxt.phemex(
-            {
-                "apiKey": api_key,
-                "secret": api_secret,
-                "enableRateLimit": True,
-            }
-        )
-        try:
-            _exchange.load_markets()
-            logger.info("Phemex exchange initialised (symbol=%s)", SYMBOL)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Phemex market load failed — candle fetches may error: %s", exc)
-    return _exchange
-
-
-def set_exchange(exchange: ccxt.phemex) -> None:
-    """
-    Inject a mock or pre-configured exchange instance.
-
-    Intended for testing — call this before fetch_candles() to replace the
-    ccxt.phemex singleton without touching environment variables.
-    """
-    global _exchange
-    _exchange = exchange
 
 
 def clear_cache() -> None:
@@ -122,11 +94,14 @@ def clear_cache() -> None:
 
 def _ohlcv_to_dataframe(raw: list) -> pd.DataFrame:
     """
-    Convert ccxt raw OHLCV list to a typed DataFrame.
+    Convert MEXC raw klines list to a typed DataFrame.
 
-    ccxt format: [[timestamp_ms, open, high, low, close, volume], ...]
+    MEXC format: [[timestamp_ms, open, high, low, close, volume, ...], ...]
+    Variable column count (8 or 12); only the first 6 fields are used.
+    Numeric fields may be strings — astype(float) handles both.
     """
-    df = pd.DataFrame(raw, columns=OHLCV_COLUMNS)
+    rows = [[row[0], row[1], row[2], row[3], row[4], row[5]] for row in raw]
+    df = pd.DataFrame(rows, columns=OHLCV_COLUMNS)
     df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
     for col in ("open", "high", "low", "close", "volume"):
         df[col] = df[col].astype(float)
@@ -152,8 +127,8 @@ def fetch_candles(timeframe: str) -> Optional[pd.DataFrame]:
     """
     Return a read-only OHLCV DataFrame for the given timeframe.
 
-    Uses a TTL cache — only calls the exchange API when the cached data has
-    expired. Returns None if the exchange call fails, so the caller can skip
+    Uses a TTL cache — only calls the MEXC API when the cached data has
+    expired. Returns None if the API call fails, so the caller can skip
     the tick gracefully.
 
     Args:
@@ -180,16 +155,22 @@ def fetch_candles(timeframe: str) -> Optional[pd.DataFrame]:
                          expires_at - time.time())
             return cached_df
 
-    # Fetch from exchange
+    # Fetch from MEXC
     limit = _LIMITS[timeframe]
+    interval = _MEXC_INTERVAL[timeframe]
     try:
-        exchange = _get_exchange()
-        raw = exchange.fetch_ohlcv(SYMBOL, timeframe=timeframe, limit=limit)
-    except ccxt.NetworkError as exc:
-        logger.error("Network error fetching %s candles: %s", timeframe, exc)
+        response = httpx.get(
+            MEXC_KLINES_URL,
+            params={"symbol": SYMBOL, "interval": interval, "limit": limit},
+            timeout=10.0,
+        )
+        response.raise_for_status()
+        raw = response.json()
+    except httpx.HTTPStatusError as exc:
+        logger.error("HTTP error fetching %s candles: %s", timeframe, exc)
         return None
-    except ccxt.ExchangeError as exc:
-        logger.error("Exchange error fetching %s candles: %s", timeframe, exc)
+    except httpx.RequestError as exc:
+        logger.error("Network error fetching %s candles: %s", timeframe, exc)
         return None
     except Exception as exc:  # noqa: BLE001
         logger.error("Unexpected error fetching %s candles: %s", timeframe, exc)
