@@ -186,7 +186,14 @@ MEXC_URL_BASE = "https://api.mexc.com"
 # excluding stock-tracking tokens and exchange-tied tokens.
 COIN_LIST = []
 COIN_LIST_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mexc_all_pairs.txt")
-INVALID_SYMBOLS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mexc_invalid_symbols.txt")
+# Use the Render-persistent chroma_db dir so this file survives redeployments.
+# Fall back to the script directory for local dev (where chroma_db won't exist).
+_RENDER_PERSIST_DIR = "/opt/render/project/chroma_db"
+INVALID_SYMBOLS_PATH = (
+    os.path.join(_RENDER_PERSIST_DIR, "mexc_invalid_symbols.txt")
+    if os.path.isdir(_RENDER_PERSIST_DIR)
+    else os.path.join(os.path.dirname(os.path.abspath(__file__)), "mexc_invalid_symbols.txt")
+)
 _EXCLUDED_BASES = {"BNB", "BIFI", "CAKE", "XVS", "ALPACA", "BURGER", "SFP", "LINA", "TWT"}
 try:
     with open(COIN_LIST_PATH, "r") as f:
