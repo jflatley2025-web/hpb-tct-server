@@ -2773,9 +2773,29 @@ async def fetch_mexc_candles(symbol: str, interval: str, limit: int = 200) -> Op
                 return None
 
             if r.status_code == 400:
-                # Mark symbol as invalid — never retry
-                _invalid_symbols.add(symbol)
-                logger.info(f"[MEXC] 400 for {symbol} — marked invalid, won't retry")
+                # Parse MEXC error body — code -1121 means "Invalid symbol" (permanent).
+                # Other 400 codes (bad params, etc.) are transient; don't blacklist.
+                try:
+                    err_body = r.json()
+                    err_code = err_body.get("code")
+                    err_msg = err_body.get("msg", "unknown")
+                except Exception:
+                    err_code = None
+                    err_msg = r.text[:200]
+
+                if err_code == -1121:
+                    _invalid_symbols.add(symbol)
+                    logger.warning(
+                        f"[MEXC] 400 for {symbol} (code={err_code}, msg={err_msg!r}) "
+                        f"— marked invalid, won't retry"
+                    )
+                else:
+                    # Transient 400 — back off but allow retry on future scans
+                    _scanner_consecutive_errors += 1
+                    logger.warning(
+                        f"[MEXC] 400 for {symbol} (code={err_code}, msg={err_msg!r}) "
+                        f"— transient, will retry later"
+                    )
                 return None
 
             if r.status_code != 200:
@@ -2825,6 +2845,10 @@ async def fetch_mexc_candles_paginated(symbol: str, interval: str, pages: int = 
     The schematics-5A page is user-triggered so the extra API calls are
     acceptable.  Do NOT use this in the 5B auto-scan loop.
     """
+    # Skip symbols permanently marked invalid by fetch_mexc_candles (code -1121)
+    if symbol in _invalid_symbols:
+        return None
+
     MEXC_MAX = 1000
     _MEXC_INTERVAL_MAP = {"1h": "60m", "2h": "4h"}
     mexc_interval = _MEXC_INTERVAL_MAP.get(interval, interval)
