@@ -17294,9 +17294,8 @@ async def schematics_5b_auto_scan_loop():
     from schematics_5b_trader import get_5b_trader, AUTO_SCAN_INTERVAL, TRADE_LOG_PATH as LOG_5B
     from schematics_5b_trader import github_push_5b_log
 
-    # Stagger 5B start by 35s (tensor at 15s, 5B at 35s) so the two never
-    # fire their first cycle simultaneously.
-    await asyncio.sleep(35)
+    # Stagger 5B start to 55s so it doesn't overlap with Tensor (15s) or any short-interval bots.
+    await asyncio.sleep(55)
     logger.info(f"[5B-TRADE] Auto-scan loop started — interval: {AUTO_SCAN_INTERVAL}s")
 
     consecutive_errors = 0
@@ -17583,8 +17582,8 @@ setInterval(fetchState, 15000);
 
 async def breakout_bot_auto_scan_loop():
     """Background loop that runs the Breakout bot scan cycle every SCAN_INTERVAL seconds."""
-    await asyncio.sleep(25)  # stagger after SMA bot (20s)
-    logger.info(f"[BREAKOUT-BOT] Auto-scan loop started — interval: {BREAKOUT_SCAN_INTERVAL}s")
+    await asyncio.sleep(35)  # stagger: 35s after startup
+    logger.info(f"[BREAKOUT-BOT] Auto-scan loop started — interval: 97s")
 
     consecutive_errors = 0
 
@@ -17604,7 +17603,7 @@ async def breakout_bot_auto_scan_loop():
             if consecutive_errors >= 5:
                 logger.critical(f"[BREAKOUT-BOT] {consecutive_errors} consecutive failures")
 
-        await asyncio.sleep(BREAKOUT_SCAN_INTERVAL)
+        await asyncio.sleep(97)  # prime interval — prevents sync with other bots
 
 
 # ================================================================
@@ -17846,8 +17845,8 @@ setInterval(fetchState, 15000);
 
 async def sma_bot_auto_scan_loop():
     """Background loop that runs the SMA bot scan cycle every SCAN_INTERVAL seconds."""
-    await asyncio.sleep(20)  # let server finish startup
-    logger.info(f"[SMA-BOT] Auto-scan loop started — interval: {SMA_SCAN_INTERVAL}s")
+    await asyncio.sleep(25)  # stagger: 25s after startup
+    logger.info(f"[SMA-BOT] Auto-scan loop started — interval: 89s")
 
     consecutive_errors = 0
 
@@ -17867,7 +17866,7 @@ async def sma_bot_auto_scan_loop():
             if consecutive_errors >= 5:
                 logger.critical(f"[SMA-BOT] {consecutive_errors} consecutive failures")
 
-        await asyncio.sleep(SMA_SCAN_INTERVAL)
+        await asyncio.sleep(89)  # prime interval — prevents sync with other bots
 
 
 # ================================================================
@@ -18130,8 +18129,8 @@ setInterval(fetchState, 15000);
 
 async def engulfing_bot_auto_scan_loop():
     """Background loop that runs the Engulfing bot scan cycle every SCAN_INTERVAL seconds."""
-    await asyncio.sleep(30)  # stagger after Breakout bot (25s)
-    logger.info(f"[ENGULFING-BOT] Auto-scan loop started — interval: {ENGULFING_SCAN_INTERVAL}s")
+    await asyncio.sleep(45)  # stagger: 45s after startup
+    logger.info(f"[ENGULFING-BOT] Auto-scan loop started — interval: 101s")
 
     consecutive_errors = 0
 
@@ -18151,7 +18150,7 @@ async def engulfing_bot_auto_scan_loop():
             if consecutive_errors >= 5:
                 logger.critical(f"[ENGULFING-BOT] {consecutive_errors} consecutive failures")
 
-        await asyncio.sleep(ENGULFING_SCAN_INTERVAL)
+        await asyncio.sleep(101)  # prime interval — prevents sync with other bots
 
 
 # ================================================================
@@ -18425,8 +18424,8 @@ setInterval(fetchState, 15000);
 
 async def turtle_bot_auto_scan_loop():
     """Background loop that runs the Turtle bot scan cycle every SCAN_INTERVAL seconds."""
-    await asyncio.sleep(35)  # stagger after Engulfing bot (30s)
-    logger.info(f"[TURTLE-BOT] Auto-scan loop started — interval: {TURTLE_SCAN_INTERVAL}s")
+    await asyncio.sleep(65)  # stagger: 65s after startup
+    logger.info(f"[TURTLE-BOT] Auto-scan loop started — interval: 71s")
 
     consecutive_errors = 0
 
@@ -18446,7 +18445,7 @@ async def turtle_bot_auto_scan_loop():
             if consecutive_errors >= 5:
                 logger.critical(f"[TURTLE-BOT] {consecutive_errors} consecutive failures")
 
-        await asyncio.sleep(TURTLE_SCAN_INTERVAL)
+        await asyncio.sleep(71)  # prime interval — prevents sync with other bots
 
 
 # ================================================================
@@ -18730,8 +18729,8 @@ setInterval(fetchState, 15000);
 
 async def consol_pop_auto_scan_loop():
     """Background loop that runs the Consolidation Pop bot scan cycle every SCAN_INTERVAL seconds."""
-    await asyncio.sleep(40)  # stagger after Turtle bot (35s)
-    logger.info(f"[CONSOL-BOT] Auto-scan loop started — interval: {CONSOL_SCAN_INTERVAL}s")
+    await asyncio.sleep(75)  # stagger: 75s after startup
+    logger.info(f"[CONSOL-BOT] Auto-scan loop started — interval: 59s")
 
     consecutive_errors = 0
 
@@ -18751,7 +18750,7 @@ async def consol_pop_auto_scan_loop():
             if consecutive_errors >= 5:
                 logger.critical(f"[CONSOL-BOT] {consecutive_errors} consecutive failures")
 
-        await asyncio.sleep(CONSOL_SCAN_INTERVAL)
+        await asyncio.sleep(59)  # prime interval — prevents sync with other bots
 
 
 # ================================================================
@@ -19039,8 +19038,8 @@ setInterval(fetchState, 15000);
 
 async def stoch_nadarya_auto_scan_loop():
     """Background loop that runs the Stoch RSI + Nadarya-Watson bot scan cycle."""
-    await asyncio.sleep(45)  # stagger after Consol Pop (40s)
-    logger.info(f"[STOCH-NADARYA-BOT] Auto-scan loop started — interval: {STOCH_NADARYA_SCAN_INTERVAL}s")
+    await asyncio.sleep(85)  # stagger: 85s after startup
+    logger.info(f"[STOCH-NADARYA-BOT] Auto-scan loop started — interval: 83s")
 
     consecutive_errors = 0
 
@@ -19060,7 +19059,7 @@ async def stoch_nadarya_auto_scan_loop():
             if consecutive_errors >= 5:
                 logger.critical(f"[STOCH-NADARYA-BOT] {consecutive_errors} consecutive failures")
 
-        await asyncio.sleep(STOCH_NADARYA_SCAN_INTERVAL)
+        await asyncio.sleep(83)  # prime interval — prevents sync with other bots
 
 
 # ================================================================
@@ -19070,7 +19069,7 @@ async def stoch_nadarya_auto_scan_loop():
 async def phemex_tct_auto_scan_loop():
     """Background loop for the Phemex TCT 6-gate simulated trading bot."""
     from phemex_tct_trader import get_trader, SCAN_INTERVAL
-    await asyncio.sleep(60)  # stagger after other bots
+    await asyncio.sleep(95)  # stagger: 95s after startup
     logger.info(f"[PHEMEX-TCT] Auto-scan loop started — interval: {SCAN_INTERVAL}s")
 
     consecutive_errors = 0
