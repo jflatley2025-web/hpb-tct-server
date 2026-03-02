@@ -186,6 +186,7 @@ MEXC_URL_BASE = "https://api.mexc.com"
 # excluding stock-tracking tokens and exchange-tied tokens.
 COIN_LIST = []
 COIN_LIST_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mexc_all_pairs.txt")
+INVALID_SYMBOLS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mexc_invalid_symbols.txt")
 _EXCLUDED_BASES = {"BNB", "BIFI", "CAKE", "XVS", "ALPACA", "BURGER", "SFP", "LINA", "TWT"}
 try:
     with open(COIN_LIST_PATH, "r") as f:
@@ -2715,8 +2716,19 @@ _candle_cache: Dict[tuple, tuple] = {}
 CANDLE_CACHE_TTL_SEC = 60  # Cache candles for 60 seconds (keeps data fresh for live schematic detection)
 MAX_CANDLE_CACHE_SIZE = 2000  # Hard cap: evict oldest by insertion order if exceeded
 
-# Invalid symbols: 400 errors → never retry during this process lifetime
+# Invalid symbols: 400 / -1121 errors → never retry.
+# Persisted to INVALID_SYMBOLS_PATH so restarts don't re-hit known-bad symbols.
 _invalid_symbols: set = set()
+try:
+    with open(INVALID_SYMBOLS_PATH, "r") as _f:
+        for _line in _f:
+            _sym = _line.strip()
+            if _sym:
+                _invalid_symbols.add(_sym)
+    if _invalid_symbols:
+        logger.info(f"[INIT] Loaded {len(_invalid_symbols)} previously-invalid symbols from disk")
+except FileNotFoundError:
+    pass
 
 # Concurrency limiter: cap parallel requests (free tier friendly).
 # Reduced from 8 to 5 — with 700+ pairs from mexc_all_pairs.txt the
@@ -2789,6 +2801,12 @@ async def fetch_mexc_candles(symbol: str, interval: str, limit: int = 200) -> Op
                         f"[MEXC] 400 for {symbol} (code={err_code}, msg={err_msg!r}) "
                         f"— marked invalid, won't retry"
                     )
+                    # Persist so future restarts skip this symbol immediately
+                    try:
+                        with open(INVALID_SYMBOLS_PATH, "a") as _f:
+                            _f.write(symbol + "\n")
+                    except OSError as _e:
+                        logger.debug(f"[MEXC] Could not persist invalid symbol {symbol}: {_e}")
                 else:
                     # Transient 400 — back off but allow retry on future scans
                     _scanner_consecutive_errors += 1
