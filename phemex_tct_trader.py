@@ -48,8 +48,13 @@ SCAN_INTERVAL: int = int(os.getenv("PHEMEX_TCT_SCAN_INTERVAL", "900"))  # 15 min
 # Trade log stored on Render's persistent chroma_db directory so it
 # survives restarts between deploys.  Override via PHEMEX_TRADE_LOG_DIR
 # for local development.
-_TRADE_LOG_DIR = os.getenv("PHEMEX_TRADE_LOG_DIR", "/opt/render/project/chroma_db")
-os.makedirs(_TRADE_LOG_DIR, exist_ok=True)
+_DEFAULT_TRADE_LOG_DIR = "/opt/render/project/chroma_db"
+_TRADE_LOG_DIR = (os.getenv("PHEMEX_TRADE_LOG_DIR", _DEFAULT_TRADE_LOG_DIR) or "").strip() or _DEFAULT_TRADE_LOG_DIR
+try:
+    os.makedirs(_TRADE_LOG_DIR, exist_ok=True)
+except OSError as exc:
+    logger.error("[PHEMEX-TCT] Invalid PHEMEX_TRADE_LOG_DIR=%r: %s", _TRADE_LOG_DIR, exc)
+    raise
 TRADE_LOG_PATH = os.path.join(_TRADE_LOG_DIR, "phemex_trade_log.json")
 
 
