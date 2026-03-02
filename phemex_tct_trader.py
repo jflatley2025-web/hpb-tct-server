@@ -128,6 +128,9 @@ class PhemexTCTTrader:
             self.starting_balance = data.get("starting_balance", STARTING_BALANCE)
             self.current_trade = data.get("current_trade")
             self.trade_history = data.get("trade_history", [])
+            self.last_scan_time = data.get("last_scan_time")
+            self.last_signal = data.get("last_signal", "NO_TRADE")
+            self.last_pipeline_result = data.get("last_pipeline_result")
             logger.info(
                 "[PHEMEX-TCT] State restored — balance=%.2f trades=%d",
                 self.balance, len(self.trade_history),
@@ -142,6 +145,9 @@ class PhemexTCTTrader:
             "starting_balance": self.starting_balance,
             "current_trade": self.current_trade,
             "trade_history": self.trade_history,
+            "last_scan_time": self.last_scan_time,
+            "last_signal": self.last_signal,
+            "last_pipeline_result": self.last_pipeline_result,
             "last_updated": datetime.now(timezone.utc).isoformat(),
         }
         try:
