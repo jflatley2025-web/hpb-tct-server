@@ -7244,6 +7244,93 @@ async def dashboard():
             border-radius: 4px; padding: 8px; margin-top: 8px;
             font-size: 0.7rem; color: #80deea;
         }
+
+        /* ===== RESPONSIVE LAYOUT ===== */
+
+        /* Tablet: iPad portrait/landscape (768px – 1099px) */
+        @media (max-width: 1099px) {
+            .main-container {
+                grid-template-columns: 1fr 240px;
+                gap: 10px;
+            }
+            .header {
+                flex-wrap: wrap;
+                gap: 6px;
+                padding: 10px 15px;
+            }
+            .header > div:last-child {
+                flex-wrap: wrap;
+                gap: 8px;
+            }
+        }
+
+        /* Mobile: phones ≤ 767px (iPhone, Android) */
+        @media (max-width: 767px) {
+            .header {
+                flex-direction: column;
+                align-items: flex-start;
+                padding: 10px 12px;
+                gap: 6px;
+            }
+            .header h1 { font-size: 1.1rem; }
+            .header .price-display { font-size: 1.4rem; }
+            .header > div:last-child {
+                display: flex;
+                flex-wrap: wrap;
+                align-items: center;
+                gap: 8px;
+                width: 100%;
+            }
+            .timeframe-selector {
+                flex-wrap: wrap;
+                gap: 6px;
+                flex: 1;
+            }
+            .pair-search {
+                min-width: 110px;
+                width: 110px;
+            }
+            .refresh-btn { margin-left: auto; }
+
+            .main-container {
+                grid-template-columns: 1fr;
+                height: auto;
+                padding: 8px;
+                gap: 10px;
+            }
+            /* Chart: fixed height so LightweightCharts has a pixel dimension */
+            .chart-section {
+                height: 330px;
+                min-height: 330px;
+            }
+            #chart {
+                height: 294px !important; /* 330px - 36px controls bar */
+            }
+            /* Metrics panel: let the page scroll rather than inner-scroll */
+            .metrics-panel {
+                overflow-y: visible;
+                max-height: none;
+                padding-right: 0;
+            }
+            /* Reduce control bar wrapping */
+            .chart-controls { flex-wrap: wrap; gap: 4px; padding: 4px 6px; }
+            .chart-ctrl-btn { padding: 5px 8px; font-size: 0.65rem; }
+
+            /* 2-col gate grid instead of 4 — fits narrow screen */
+            .validation-gates { grid-template-columns: repeat(2, 1fr); }
+
+            /* Ensure pair dropdown doesn't overflow off screen */
+            .pair-dropdown { min-width: 200px; max-width: calc(100vw - 24px); }
+        }
+
+        /* Extra-small phones (iPhone SE, 375px) */
+        @media (max-width: 390px) {
+            .header h1 { font-size: 0.95rem; }
+            .pair-search { min-width: 95px; width: 95px; }
+            .chart-section { height: 290px; min-height: 290px; }
+            #chart { height: 254px !important; }
+            .chart-ctrl-btn { padding: 4px 6px; font-size: 0.6rem; }
+        }
     </style>
 </head>
 <body>
