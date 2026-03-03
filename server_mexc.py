@@ -211,8 +211,8 @@ try:
                 continue
             pair = base + "USDT"
             COIN_LIST.append(pair)
-    COIN_LIST = sorted(set(COIN_LIST))
-    logger.info(f"[INIT] Loaded {len(COIN_LIST)} trading pairs from mexc_all_pairs.txt")
+    COIN_LIST = sorted(set(COIN_LIST))[:400]
+    logger.info(f"[INIT] Loaded {len(COIN_LIST)} trading pairs from mexc_all_pairs.txt (capped at 400)")
 except FileNotFoundError:
     COIN_LIST = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"]
     logger.warning(f"[INIT] mexc_all_pairs.txt not found, using defaults")
@@ -3335,8 +3335,9 @@ async def startup_event():
     # Wrapped in _auto_scan_supervisor so the loop restarts automatically if it
     # ever exits due to an unhandled exception or an unexpected CancelledError
     # (e.g. from a zero-downtime deploy signal).
-    asyncio.create_task(_auto_scan_supervisor(tensor_trade_auto_scan_loop, "TENSOR-TRADE"))
-    logger.info("[TENSOR-TRADE] Background auto-scan loop launched (supervised)")
+    # TENSOR-TRADE disabled to reduce thread pool pressure
+    # asyncio.create_task(_auto_scan_supervisor(tensor_trade_auto_scan_loop, "TENSOR-TRADE"))
+    # logger.info("[TENSOR-TRADE] Background auto-scan loop launched (supervised)")
 
     # Start the schematics-5B auto-scan loop (hands-free trading, separate engine)
     asyncio.create_task(_auto_scan_supervisor(schematics_5b_auto_scan_loop, "5B-TRADE"))
