@@ -11294,11 +11294,12 @@ async def get_po3_schematics(symbol: Optional[str] = None, timeframe: Optional[s
                 continue
 
             df = dfs[tf_key]
-            candles_list = df_to_candles(df)
-            detected_range = await detect_best_range(candles_list)
-            range_list = [detected_range] if detected_range and not isinstance(detected_range, list) else (detected_range or [])
 
-            po3_result = detect_po3_schematics(df, range_list)
+            # Do NOT pass externally-detected ranges here: detect_best_range returns
+            # {"high": ..., "low": ...} but po3_schematics expects {"range_high": ...,
+            # "range_low": ..., "end_idx": ..., "rtz_quality": ...}.  Passing None lets
+            # PO3SchematicDetector._detect_ranges() build its own correctly-keyed dicts.
+            po3_result = detect_po3_schematics(df, None)
             all_po3 = po3_result.get("bullish_po3", []) + po3_result.get("bearish_po3", [])
 
             # Tag each PO3 with its timeframe
