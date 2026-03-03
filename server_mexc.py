@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pypdf import PdfReader
 import chromadb
 from chromadb.utils import embedding_functions
@@ -3416,6 +3416,16 @@ async def root():
             "lecture_9": "Trade Execution (Position Sizing, Leverage Safety, Partial TPs, Trailing SL)"
         }
     }
+
+@app.head("/")
+async def root_head():
+    """HEAD handler for / — satisfies Render load-balancer health checks."""
+    return Response()
+
+@app.head("/status")
+async def status_head():
+    """HEAD handler for /status — satisfies Render load-balancer health checks."""
+    return Response()
 
 @app.get("/status")
 async def get_status():
