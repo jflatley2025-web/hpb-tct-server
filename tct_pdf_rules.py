@@ -219,7 +219,7 @@ def _get_or_create_collection(client: "chromadb.Client") -> "chromadb.Collection
     # Lazy imports: chromadb + onnxruntime are heavy (~200-300 MB).
     # Importing here instead of at module level prevents the memory spike from
     # occurring whenever phemex_tct_trader/phemex_tct_algo are imported by route handlers.
-    import chromadb  # noqa: F811 (shadows nothing at module level)
+    chromadb = _import_chromadb()
     from chromadb.utils import embedding_functions  # noqa: F811
     ef = embedding_functions.SentenceTransformerEmbeddingFunction(
         model_name=EMBEDDING_MODEL
