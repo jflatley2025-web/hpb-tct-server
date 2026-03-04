@@ -36,29 +36,29 @@ def _headers() -> dict:
     }
 
 
-def fetch_trade_log(local_path: str) -> bool:
+def _fetch_log(filename: str, local_path: str, label: str) -> bool:
     """
-    Pull tensor_trade_log.json from the `data` branch on GitHub.
-    Writes to local_path only if local file is missing (startup recovery).
-    Returns True on success or if local file already exists.
+    Pull a trade log file from the `data` branch on GitHub.
+    Writes to local_path only if the local file is missing (startup recovery).
+    Returns True on success or if the local file already exists.
     """
     if not _is_configured():
-        logger.info("[GITHUB] GITHUB_TOKEN/GITHUB_REPO not set — skipping fetch")
+        logger.info("[GITHUB] GITHUB_TOKEN/GITHUB_REPO not set — skipping %s fetch", label)
         return False
 
     if os.path.exists(local_path):
-        logger.info("[GITHUB] Local trade log exists — skipping fetch")
+        logger.info("[GITHUB] Local %s exists — skipping fetch", label)
         return True
 
     repo = os.getenv("GITHUB_REPO")
-    url = f"{GITHUB_API}/repos/{repo}/contents/{TRADE_LOG_FILENAME}"
+    url = f"{GITHUB_API}/repos/{repo}/contents/{filename}"
 
     try:
         resp = requests.get(
             url, headers=_headers(), params={"ref": DATA_BRANCH}, timeout=15
         )
         if resp.status_code == 404:
-            logger.info("[GITHUB] No trade log on data branch yet — starting fresh")
+            logger.info("[GITHUB] No %s on data branch yet — starting fresh", label)
             return False
 
         resp.raise_for_status()
@@ -70,29 +70,29 @@ def fetch_trade_log(local_path: str) -> bool:
             f.write(decoded)
 
         trades = len(json.loads(decoded).get("trade_history", []))
-        logger.info(f"[GITHUB] Trade log restored — {trades} trades recovered")
+        logger.info("[GITHUB] %s restored — %d trades recovered", label, trades)
         return True
 
     except Exception as e:
-        logger.warning(f"[GITHUB] Fetch failed: {e}")
+        logger.warning("[GITHUB] %s fetch failed: %s", label, e)
         return False
 
 
-def push_trade_log(local_path: str) -> bool:
+def _push_log(filename: str, local_path: str, label: str, commit_msg: str) -> bool:
     """
-    Push tensor_trade_log.json from local disk to the `data` branch on GitHub.
+    Push a trade log file from local disk to the `data` branch on GitHub.
     Creates or updates the file. Returns True on success.
     """
     if not _is_configured():
-        logger.debug("[GITHUB] GITHUB_TOKEN/GITHUB_REPO not set — skipping push")
+        logger.debug("[GITHUB] GITHUB_TOKEN/GITHUB_REPO not set — skipping %s push", label)
         return False
 
     if not os.path.exists(local_path):
-        logger.warning("[GITHUB] Local trade log not found — nothing to push")
+        logger.warning("[GITHUB] Local %s not found — nothing to push", label)
         return False
 
     repo = os.getenv("GITHUB_REPO")
-    url = f"{GITHUB_API}/repos/{repo}/contents/{TRADE_LOG_FILENAME}"
+    url = f"{GITHUB_API}/repos/{repo}/contents/{filename}"
 
     try:
         with open(local_path, "r") as f:
@@ -109,7 +109,7 @@ def push_trade_log(local_path: str) -> bool:
             sha = get_resp.json().get("sha")
 
         payload: dict = {
-            "message": "chore: hourly trade log sync",
+            "message": commit_msg,
             "content": encoded,
             "branch": DATA_BRANCH,
         }
@@ -119,12 +119,25 @@ def push_trade_log(local_path: str) -> bool:
         put_resp = requests.put(url, headers=_headers(), json=payload, timeout=15)
         put_resp.raise_for_status()
 
-        logger.info("[GITHUB] Trade log pushed to data branch")
+        logger.info("[GITHUB] %s pushed to data branch", label)
         return True
 
     except Exception as e:
-        logger.warning(f"[GITHUB] Push failed: {e}")
+        logger.warning("[GITHUB] %s push failed: %s", label, e)
         return False
+
+
+def fetch_trade_log(local_path: str) -> bool:
+    """Pull tensor_trade_log.json from the `data` branch. Startup recovery only."""
+    return _fetch_log(TRADE_LOG_FILENAME, local_path, "tensor trade log")
+
+
+def push_trade_log(local_path: str) -> bool:
+    """Push tensor_trade_log.json to the `data` branch."""
+    return _push_log(
+        TRADE_LOG_FILENAME, local_path,
+        "tensor trade log", "chore: hourly trade log sync",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -132,91 +145,13 @@ def push_trade_log(local_path: str) -> bool:
 # ---------------------------------------------------------------------------
 
 def fetch_phemex_log(local_path: str) -> bool:
-    """
-    Pull phemex_trade_log.json from the `data` branch on GitHub.
-    Writes to local_path only if local file is missing (startup recovery).
-    Returns True on success or if local file already exists.
-    """
-    if not _is_configured():
-        logger.info("[GITHUB] GITHUB_TOKEN/GITHUB_REPO not set — skipping Phemex log fetch")
-        return False
-
-    if os.path.exists(local_path):
-        logger.info("[GITHUB] Local Phemex trade log exists — skipping fetch")
-        return True
-
-    repo = os.getenv("GITHUB_REPO")
-    url = f"{GITHUB_API}/repos/{repo}/contents/{PHEMEX_LOG_FILENAME}"
-
-    try:
-        resp = requests.get(
-            url, headers=_headers(), params={"ref": DATA_BRANCH}, timeout=15
-        )
-        if resp.status_code == 404:
-            logger.info("[GITHUB] No Phemex trade log on data branch yet — starting fresh")
-            return False
-
-        resp.raise_for_status()
-
-        content = resp.json().get("content", "")
-        decoded = base64.b64decode(content).decode("utf-8")
-
-        with open(local_path, "w") as f:
-            f.write(decoded)
-
-        trades = len(json.loads(decoded).get("trade_history", []))
-        logger.info(f"[GITHUB] Phemex trade log restored — {trades} trades recovered")
-        return True
-
-    except Exception as e:
-        logger.warning(f"[GITHUB] Phemex fetch failed: {e}")
-        return False
+    """Pull phemex_trade_log.json from the `data` branch. Startup recovery only."""
+    return _fetch_log(PHEMEX_LOG_FILENAME, local_path, "Phemex trade log")
 
 
 def push_phemex_log(local_path: str) -> bool:
-    """
-    Push phemex_trade_log.json from local disk to the `data` branch on GitHub.
-    Creates or updates the file. Returns True on success.
-    """
-    if not _is_configured():
-        logger.debug("[GITHUB] GITHUB_TOKEN/GITHUB_REPO not set — skipping Phemex log push")
-        return False
-
-    if not os.path.exists(local_path):
-        logger.warning("[GITHUB] Local Phemex trade log not found — nothing to push")
-        return False
-
-    repo = os.getenv("GITHUB_REPO")
-    url = f"{GITHUB_API}/repos/{repo}/contents/{PHEMEX_LOG_FILENAME}"
-
-    try:
-        with open(local_path, "r") as f:
-            raw = f.read()
-
-        encoded = base64.b64encode(raw.encode("utf-8")).decode("utf-8")
-
-        # GitHub requires the existing file's SHA to update it
-        sha: Optional[str] = None
-        get_resp = requests.get(
-            url, headers=_headers(), params={"ref": DATA_BRANCH}, timeout=10
-        )
-        if get_resp.status_code == 200:
-            sha = get_resp.json().get("sha")
-
-        payload: dict = {
-            "message": "chore: phemex tct trade log sync",
-            "content": encoded,
-            "branch": DATA_BRANCH,
-        }
-        if sha:
-            payload["sha"] = sha
-
-        put_resp = requests.put(url, headers=_headers(), json=payload, timeout=15)
-        put_resp.raise_for_status()
-
-        logger.info("[GITHUB] Phemex trade log pushed to data branch")
-        return True
-
-    except Exception as e:
-        logger.warning(f"[GITHUB] Phemex push failed: {e}")
-        return False
+    """Push phemex_trade_log.json to the `data` branch."""
+    return _push_log(
+        PHEMEX_LOG_FILENAME, local_path,
+        "Phemex trade log", "chore: phemex tct trade log sync",
+    )

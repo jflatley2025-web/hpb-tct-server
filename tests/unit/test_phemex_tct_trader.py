@@ -44,11 +44,23 @@ def _make_pipeline_result(signal="LONG", entry=100.0, stop=95.0, target=110.0,
     return r
 
 
-def _make_ltf(close=100.0):
-    """Build a minimal LTF DataFrame stub with a single row."""
+def _make_ltf(close=100.0, low=None, high=None):
+    """
+    Build a minimal LTF DataFrame stub with a single row.
+
+    low and high default to close so that neutral candles don't trigger
+    any stop/target checks in scan tests. Pass explicit low/high to
+    simulate intrabar wicks for stop/target hit tests.
+    """
     import pandas as pd
-    return pd.DataFrame([{"open_time": 0, "open": close, "high": close,
-                           "low": close, "close": close, "volume": 1.0}])
+    return pd.DataFrame([{
+        "open_time": 0,
+        "open": close,
+        "high": high if high is not None else close,
+        "low": low if low is not None else close,
+        "close": close,
+        "volume": 1.0,
+    }])
 
 
 # ---------------------------------------------------------------------------
@@ -188,54 +200,67 @@ class TestTradeLifecycle:
 
 class TestPositionMonitoring:
 
-    def test_long_stop_hit(self, trader):
+    def test_long_stop_hit_via_wick(self, trader):
+        """Stop is triggered when the candle low wicks below the stop level."""
         result = _make_pipeline_result(signal="LONG", entry=100.0, stop=95.0, target=110.0, rr=2.0)
         trader._open_trade(result)
 
-        trader._check_position(current_price=94.0)  # below stop
+        # Candle wicked below stop (low=94.0) but closed back up (close=97.0)
+        trader._check_position(candle_low=94.0, candle_high=99.0, candle_close=97.0)
 
         assert trader.current_trade is None
         assert trader.trade_history[0]["outcome"] == "LOSS"
+        # Exit price should be the stop level, not the close
+        assert trader.trade_history[0]["exit_price"] == 95.0
 
-    def test_long_target_hit(self, trader):
+    def test_long_target_hit_via_wick(self, trader):
+        """Target is triggered when the candle high wicks above the target level."""
         result = _make_pipeline_result(signal="LONG", entry=100.0, stop=95.0, target=110.0, rr=2.0)
         trader._open_trade(result)
 
-        trader._check_position(current_price=111.0)  # above target
+        # Candle wicked to target (high=111.0) but closed below (close=108.0)
+        trader._check_position(candle_low=101.0, candle_high=111.0, candle_close=108.0)
 
         assert trader.current_trade is None
         assert trader.trade_history[0]["outcome"] == "WIN"
+        # Exit price should be the target level, not the close
+        assert trader.trade_history[0]["exit_price"] == 110.0
 
     def test_long_in_range_no_close(self, trader):
         result = _make_pipeline_result(signal="LONG", entry=100.0, stop=95.0, target=110.0, rr=2.0)
         trader._open_trade(result)
 
-        trader._check_position(current_price=103.0)  # between stop and target
+        # Candle fully between stop and target — no trigger
+        trader._check_position(candle_low=98.0, candle_high=105.0, candle_close=103.0)
 
         assert trader.current_trade is not None
         assert trader.trade_history == []
 
-    def test_short_stop_hit(self, trader):
+    def test_short_stop_hit_via_wick(self, trader):
+        """Short stop triggered when candle high wicks above stop level."""
         result = _make_pipeline_result(signal="SHORT", entry=100.0, stop=105.0, target=90.0, rr=2.0)
         trader._open_trade(result)
 
-        trader._check_position(current_price=106.0)  # above stop
+        trader._check_position(candle_low=99.0, candle_high=106.0, candle_close=101.0)
 
         assert trader.current_trade is None
         assert trader.trade_history[0]["outcome"] == "LOSS"
+        assert trader.trade_history[0]["exit_price"] == 105.0
 
-    def test_short_target_hit(self, trader):
+    def test_short_target_hit_via_wick(self, trader):
+        """Short target triggered when candle low wicks below target level."""
         result = _make_pipeline_result(signal="SHORT", entry=100.0, stop=105.0, target=90.0, rr=2.0)
         trader._open_trade(result)
 
-        trader._check_position(current_price=89.0)  # below target
+        trader._check_position(candle_low=89.0, candle_high=97.0, candle_close=92.0)
 
         assert trader.current_trade is None
         assert trader.trade_history[0]["outcome"] == "WIN"
+        assert trader.trade_history[0]["exit_price"] == 90.0
 
     def test_check_position_no_trade_is_safe(self, trader):
         """check_position with no open trade must not raise or mutate state."""
-        trader._check_position(100.0)
+        trader._check_position(candle_low=99.0, candle_high=101.0, candle_close=100.0)
         assert trader.trade_history == []
 
 
@@ -373,8 +398,11 @@ class TestScan:
     def test_scan_closes_trade_on_target_hit(self, trader):
         trader._open_trade(_make_pipeline_result(signal="LONG", entry=100.0, stop=95.0, target=110.0, rr=2.0))
 
+        # candle high=111.0 wicks above target=110.0 — close stays below at 108.0
+        ltf = _make_ltf(close=108.0, low=100.0, high=111.0)
+        candles = {"4h": ltf.copy(), "1h": ltf.copy(), "15m": ltf}
         with (
-            self._patch_feed(ltf_close=111.0),  # above target
+            patch("phemex_tct_trader.feed_fetch_all", return_value=candles),
             patch("phemex_tct_trader.run_pipeline", MagicMock()),
             patch.object(trader, "_ensure_rules", return_value=MagicMock()),
         ):

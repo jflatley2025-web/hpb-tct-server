@@ -242,53 +242,15 @@ def _gate_2_ranges(
 # Gate 3: Supply & Demand (Lecture 3)
 # ---------------------------------------------------------------------------
 
-def _find_demand_zone(mtf: pd.DataFrame) -> Optional[dict]:
+def _find_zone(mtf: pd.DataFrame, bias: str) -> Optional[dict]:
     """
-    Find the most recent demand zone (bullish order block) on the MTF.
+    Find the most recent supply or demand zone on the MTF.
 
-    Demand zone = last bearish candle before a bullish impulse of
-    SD_IMPULSE_CANDLES consecutive bullish candles each moving >= SD_IMPULSE_PCT.
-    """
-    closes = mtf["close"].values
-    opens = mtf["open"].values
-    highs = mtf["high"].values
-    lows = mtf["low"].values
-    n = len(mtf)
+    For bullish bias (demand zone): last bearish candle before SD_IMPULSE_CANDLES
+    consecutive bullish candles each moving >= SD_IMPULSE_PCT.
 
-    # Search from most recent backwards
-    for i in range(n - SD_IMPULSE_CANDLES - 1, 0, -1):
-        # Check for bearish candle at i (the potential OB)
-        if closes[i] >= opens[i]:
-            continue
-
-        # Check subsequent candles form a bullish impulse
-        impulse_ok = True
-        for j in range(i + 1, i + 1 + SD_IMPULSE_CANDLES):
-            if j >= n:
-                impulse_ok = False
-                break
-            candle_pct = (closes[j] - opens[j]) / (opens[j] + 1e-9)
-            if closes[j] <= opens[j] or candle_pct < SD_IMPULSE_PCT:
-                impulse_ok = False
-                break
-
-        if impulse_ok:
-            return {
-                "zone_type": "demand",
-                "zone_high": float(highs[i]),
-                "zone_low": float(lows[i]),
-                "candle_idx": i,
-            }
-
-    return None
-
-
-def _find_supply_zone(mtf: pd.DataFrame) -> Optional[dict]:
-    """
-    Find the most recent supply zone (bearish order block) on the MTF.
-
-    Supply zone = last bullish candle before a bearish impulse of
-    SD_IMPULSE_CANDLES consecutive bearish candles each moving >= SD_IMPULSE_PCT.
+    For bearish bias (supply zone): last bullish candle before SD_IMPULSE_CANDLES
+    consecutive bearish candles each moving >= SD_IMPULSE_PCT.
     """
     closes = mtf["close"].values
     opens = mtf["open"].values
@@ -296,25 +258,37 @@ def _find_supply_zone(mtf: pd.DataFrame) -> Optional[dict]:
     lows = mtf["low"].values
     n = len(mtf)
 
+    bullish = bias == "bullish"
+    zone_type = "demand" if bullish else "supply"
+
     for i in range(n - SD_IMPULSE_CANDLES - 1, 0, -1):
-        # Check for bullish candle at i (the potential OB)
-        if closes[i] <= opens[i]:
+        # OB candle must be opposite to the impulse direction
+        ob_is_bearish = closes[i] < opens[i]
+        if bullish and not ob_is_bearish:
+            continue
+        if not bullish and ob_is_bearish:
             continue
 
-        # Check subsequent candles form a bearish impulse
+        # Subsequent candles must form an impulse in the bias direction
         impulse_ok = True
         for j in range(i + 1, i + 1 + SD_IMPULSE_CANDLES):
             if j >= n:
                 impulse_ok = False
                 break
-            candle_pct = (opens[j] - closes[j]) / (opens[j] + 1e-9)
-            if closes[j] >= opens[j] or candle_pct < SD_IMPULSE_PCT:
-                impulse_ok = False
-                break
+            if bullish:
+                candle_pct = (closes[j] - opens[j]) / (opens[j] + 1e-9)
+                if closes[j] <= opens[j] or candle_pct < SD_IMPULSE_PCT:
+                    impulse_ok = False
+                    break
+            else:
+                candle_pct = (opens[j] - closes[j]) / (opens[j] + 1e-9)
+                if closes[j] >= opens[j] or candle_pct < SD_IMPULSE_PCT:
+                    impulse_ok = False
+                    break
 
         if impulse_ok:
             return {
-                "zone_type": "supply",
+                "zone_type": zone_type,
                 "zone_high": float(highs[i]),
                 "zone_low": float(lows[i]),
                 "candle_idx": i,
@@ -338,10 +312,8 @@ def _gate_3_supply_demand(
     """
     zone: Optional[dict] = None
 
-    if bias == "bullish":
-        zone = _find_demand_zone(mtf)
-    elif bias == "bearish":
-        zone = _find_supply_zone(mtf)
+    if bias in ("bullish", "bearish"):
+        zone = _find_zone(mtf, bias)
 
     passed = zone is not None
 

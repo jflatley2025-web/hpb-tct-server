@@ -71,7 +71,9 @@ class PhemexTCTTrader:
     """
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        # RLock allows save_state() to acquire the lock itself, so callers
+        # already holding _lock (e.g. _open_trade, _close_trade) don't deadlock.
+        self._lock = threading.RLock()
         self._rules: Optional[TCTRuleSet] = None
 
         # Mutable state — always access under _lock
@@ -139,22 +141,23 @@ class PhemexTCTTrader:
             logger.error("[PHEMEX-TCT] State load failed: %s", exc)
 
     def save_state(self) -> None:
-        """Write current state to disk (call under _lock)."""
-        data = {
-            "balance": self.balance,
-            "starting_balance": self.starting_balance,
-            "current_trade": self.current_trade,
-            "trade_history": self.trade_history,
-            "last_scan_time": self.last_scan_time,
-            "last_signal": self.last_signal,
-            "last_pipeline_result": self.last_pipeline_result,
-            "last_updated": datetime.now(timezone.utc).isoformat(),
-        }
-        try:
-            with open(TRADE_LOG_PATH, "w") as f:
-                json.dump(data, f, indent=2, default=str)
-        except Exception as exc:
-            logger.error("[PHEMEX-TCT] State save failed: %s", exc)
+        """Write current state to disk. Thread-safe: acquires _lock internally."""
+        with self._lock:
+            data = {
+                "balance": self.balance,
+                "starting_balance": self.starting_balance,
+                "current_trade": self.current_trade,
+                "trade_history": self.trade_history,
+                "last_scan_time": self.last_scan_time,
+                "last_signal": self.last_signal,
+                "last_pipeline_result": self.last_pipeline_result,
+                "last_updated": datetime.now(timezone.utc).isoformat(),
+            }
+            try:
+                with open(TRADE_LOG_PATH, "w") as f:
+                    json.dump(data, f, indent=2, default=str)
+            except Exception as exc:
+                logger.error("[PHEMEX-TCT] State save failed: %s", exc)
 
     def _push_to_github(self) -> None:
         """Push trade log to GitHub in a background thread."""
@@ -270,9 +273,14 @@ class PhemexTCTTrader:
     # Stop / target check
     # ------------------------------------------------------------------
 
-    def _check_position(self, current_price: float) -> None:
+    def _check_position(self, candle_low: float, candle_high: float, candle_close: float) -> None:
         """
         Evaluate whether an open position's stop or target has been reached.
+
+        Uses intrabar low/high so that wicks that touch stop or target within
+        a candle are correctly registered — checking only the close would miss
+        intrabar stop-outs and target hits, systematically overstating paper P&L.
+
         Call under _lock.
         """
         trade = self.current_trade
@@ -284,15 +292,19 @@ class PhemexTCTTrader:
         target = trade["target"]
 
         if signal == "LONG":
-            if current_price <= stop:
-                self._close_trade("LOSS", current_price)
-            elif current_price >= target:
-                self._close_trade("WIN", current_price)
+            # Stop triggered if candle low wicked at or below stop level
+            if candle_low <= stop:
+                self._close_trade("LOSS", stop)
+            # Target triggered if candle high wicked at or above target level
+            elif candle_high >= target:
+                self._close_trade("WIN", target)
         else:  # SHORT
-            if current_price >= stop:
-                self._close_trade("LOSS", current_price)
-            elif current_price <= target:
-                self._close_trade("WIN", current_price)
+            # Stop triggered if candle high wicked at or above stop level
+            if candle_high >= stop:
+                self._close_trade("LOSS", stop)
+            # Target triggered if candle low wicked at or below target level
+            elif candle_low <= target:
+                self._close_trade("WIN", target)
 
     # ------------------------------------------------------------------
     # Scan cycle
@@ -318,15 +330,18 @@ class PhemexTCTTrader:
             logger.warning("[PHEMEX-TCT] Candle fetch incomplete — skipping scan")
             return {"action": "skip", "reason": "candle_fetch_failed"}
 
-        # Current price proxy: last close on LTF
-        current_price = float(ltf.iloc[-1]["close"])
+        # Use last completed LTF candle for both position management and price display
+        last_candle = ltf.iloc[-1]
+        candle_low = float(last_candle["low"])
+        candle_high = float(last_candle["high"])
+        current_price = float(last_candle["close"])
 
         with self._lock:
             self.last_scan_time = time.time()
 
             # Priority: manage open position before looking for new signals
             if self.current_trade is not None:
-                self._check_position(current_price)
+                self._check_position(candle_low, candle_high, current_price)
                 action = "monitor"
                 # _check_position calls save_state only on close; persist
                 # scan timestamp on every monitor tick as well.
