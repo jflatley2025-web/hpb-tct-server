@@ -3,7 +3,7 @@
   "starting_balance": 5000.0,
   "current_trade": null,
   "trade_history": [],
-  "last_scan_time": 1772635686.5591185,
+  "last_scan_time": 1772638329.8138115,
   "last_signal": "NO_TRADE",
   "last_pipeline_result": {
     "signal": "NO_TRADE",
@@ -21,5 +21,5 @@
       }
     ]
   },
-  "last_updated": "2026-03-04T14:48:07.860408+00:00"
+  "last_updated": "2026-03-04T15:32:10.729250+00:00"
 }
