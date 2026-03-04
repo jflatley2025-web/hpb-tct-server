@@ -410,6 +410,7 @@ def test_load_tct_rules_raises_when_collection_empty_after_ingestion(tmp_path):
          patch("tct_pdf_rules._import_chromadb", return_value=MagicMock()) as mock_chromadb, \
          patch("tct_pdf_rules._get_or_create_collection", return_value=mock_collection), \
          patch("tct_pdf_rules._populate_collection"):
-        mock_client = mock_chromadb.return_value.PersistentClient.return_value  # noqa: F841
         with pytest.raises(RuntimeError, match="collection is empty"):
             load_tct_rules()
+        mock_chromadb.assert_called_once()
+        mock_chromadb.return_value.PersistentClient.assert_called_once()
