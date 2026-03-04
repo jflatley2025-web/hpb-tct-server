@@ -29,8 +29,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-import chromadb
-from chromadb.utils import embedding_functions
 from pypdf import PdfReader
 
 logger = logging.getLogger("TCT-PDFRules")
@@ -216,8 +214,18 @@ def _chunk_text(text: str) -> list[str]:
 # ChromaDB population
 # ---------------------------------------------------------------------------
 
-def _get_or_create_collection(client: chromadb.Client) -> chromadb.Collection:
+def _import_chromadb():
+    """Lazy-import chromadb so onnxruntime (~200-300 MB) is not loaded at module import time."""
+    import chromadb  # noqa: PLC0415
+    return chromadb
+
+def _get_or_create_collection(client: "chromadb.Client") -> "chromadb.Collection":
     """Return the tct_lectures collection, creating it if it doesn't exist."""
+    # Lazy imports: chromadb + onnxruntime are heavy (~200-300 MB).
+    # Importing here instead of at module level prevents the memory spike from
+    # occurring whenever phemex_tct_trader/phemex_tct_algo are imported by route handlers.
+    _import_chromadb()
+    from chromadb.utils import embedding_functions  # noqa: F811
     ef = embedding_functions.SentenceTransformerEmbeddingFunction(
         model_name=EMBEDDING_MODEL
     )
@@ -337,6 +345,7 @@ def load_tct_rules(force_repopulate: bool = False) -> TCTRuleSet:
         )
 
     CHROMA_DIR.mkdir(parents=True, exist_ok=True)
+    chromadb = _import_chromadb()
     client = chromadb.PersistentClient(path=str(CHROMA_DIR))
     collection = _get_or_create_collection(client)
 
