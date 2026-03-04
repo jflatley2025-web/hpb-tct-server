@@ -214,6 +214,11 @@ def _chunk_text(text: str) -> list[str]:
 # ChromaDB population
 # ---------------------------------------------------------------------------
 
+def _import_chromadb():
+    """Lazy-import chromadb so onnxruntime (~200-300 MB) is not loaded at module import time."""
+    import chromadb  # noqa: PLC0415
+    return chromadb
+
 def _get_or_create_collection(client: "chromadb.Client") -> "chromadb.Collection":
     """Return the tct_lectures collection, creating it if it doesn't exist."""
     # Lazy imports: chromadb + onnxruntime are heavy (~200-300 MB).
@@ -340,7 +345,7 @@ def load_tct_rules(force_repopulate: bool = False) -> TCTRuleSet:
         )
 
     CHROMA_DIR.mkdir(parents=True, exist_ok=True)
-    import chromadb  # noqa: F811 — lazy import, see _get_or_create_collection
+    chromadb = _import_chromadb()
     client = chromadb.PersistentClient(path=str(CHROMA_DIR))
     collection = _get_or_create_collection(client)
 

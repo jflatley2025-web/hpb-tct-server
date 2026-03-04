@@ -407,8 +407,9 @@ def test_load_tct_rules_raises_when_collection_empty_after_ingestion(tmp_path):
     with patch("tct_pdf_rules.PDF_DIR", pdf_dir), \
          patch("tct_pdf_rules.CHROMA_DIR", chroma_dir), \
          patch("tct_pdf_rules.Path.home", return_value=tmp_path), \
-         patch("tct_pdf_rules.chromadb.PersistentClient", return_value=MagicMock()), \
+         patch("tct_pdf_rules._import_chromadb", return_value=MagicMock()) as mock_chromadb, \
          patch("tct_pdf_rules._get_or_create_collection", return_value=mock_collection), \
          patch("tct_pdf_rules._populate_collection"):
+        mock_client = mock_chromadb.return_value.PersistentClient.return_value  # noqa: F841
         with pytest.raises(SystemExit, match="collection is empty"):
             load_tct_rules()
