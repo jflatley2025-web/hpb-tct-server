@@ -60,7 +60,7 @@ pytest-mock==3.12.0       # mocking utilities
 
 # ─── Claude + Chroma RAG ───
 chromadb==0.4.24
-pypdf==4.2.0
+pypdf==4.3.0
 anthropic==0.25.6
 sentence-transformers==2.7.0
 
