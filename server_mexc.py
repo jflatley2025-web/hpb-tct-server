@@ -15,8 +15,6 @@ from typing import Dict, List, Optional
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pypdf import PdfReader
-import chromadb
-from chromadb.utils import embedding_functions
 import uuid
 import re
 
@@ -32,6 +30,10 @@ app = FastAPI()
 _chroma_collection = None
 
 def _get_collection():
+    # Lazy imports: chromadb + onnxruntime are heavy (~200-300 MB).  Deferring
+    # them to first use keeps startup memory low on the 512 MB Render instance.
+    import chromadb
+    from chromadb.utils import embedding_functions
     global _chroma_collection
     if _chroma_collection is None:
         ef = embedding_functions.SentenceTransformerEmbeddingFunction(
@@ -3339,13 +3341,15 @@ async def startup_event():
     asyncio.create_task(_auto_scan_supervisor(schematics_5b_auto_scan_loop, "5B-TRADE"))
     logger.info("[5B-TRADE] Background auto-scan loop launched (supervised)")
 
-    # Start the Consolidation Pop bot auto-scan loop (Phemex simulated trading)
-    asyncio.create_task(_auto_scan_supervisor(consol_pop_auto_scan_loop, "CONSOL-BOT"))
-    logger.info("[CONSOL-BOT] Background auto-scan loop launched (supervised)")
+    # PAUSED: Consolidation Pop bot — uses ccxt/Phemex which can hang threads on Render
+    # asyncio.create_task(_auto_scan_supervisor(consol_pop_auto_scan_loop, "CONSOL-BOT"))
+    # logger.info("[CONSOL-BOT] Background auto-scan loop launched (supervised)")
+    logger.info("[CONSOL-BOT] Auto-scan loop PAUSED (ccxt/Phemex disabled)")
 
-    # Start the Stoch RSI + Nadarya-Watson bot auto-scan loop
-    asyncio.create_task(_auto_scan_supervisor(stoch_nadarya_auto_scan_loop, "STOCH-NADARYA-BOT"))
-    logger.info("[STOCH-NADARYA-BOT] Background auto-scan loop launched (supervised)")
+    # PAUSED: Stoch RSI + Nadarya-Watson bot — uses ccxt/Phemex which can hang threads on Render
+    # asyncio.create_task(_auto_scan_supervisor(stoch_nadarya_auto_scan_loop, "STOCH-NADARYA-BOT"))
+    # logger.info("[STOCH-NADARYA-BOT] Background auto-scan loop launched (supervised)")
+    logger.info("[STOCH-NADARYA-BOT] Auto-scan loop PAUSED (ccxt/Phemex disabled)")
 
     # Start the Phemex TCT 6-gate simulated trading bot
     asyncio.create_task(_auto_scan_supervisor(phemex_tct_auto_scan_loop, "PHEMEX-TCT"))
@@ -17958,8 +17962,11 @@ async def stoch_nadarya_auto_scan_loop():
 
 async def phemex_tct_auto_scan_loop():
     """Background loop for the Phemex TCT 6-gate simulated trading bot."""
-    from phemex_tct_trader import get_trader, SCAN_INTERVAL
+    # Import deferred until after the startup stagger so that the heavy
+    # phemex_tct_algo → tct_pdf_rules → chromadb import chain doesn't run
+    # on the first event-loop tick and spike memory before health checks pass.
     await asyncio.sleep(95)  # stagger: 95s after startup
+    from phemex_tct_trader import get_trader, SCAN_INTERVAL
     logger.info(f"[PHEMEX-TCT] Auto-scan loop started — interval: {SCAN_INTERVAL}s")
 
     consecutive_errors = 0
