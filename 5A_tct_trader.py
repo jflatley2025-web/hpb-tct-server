@@ -72,22 +72,27 @@ _HTF_BIAS_TTL: float = 3600.0
 # MEXC DATA FETCHING
 # ================================================================
 
+_MEXC_INTERVAL_MAP: Dict[str, str] = {"1h": "60m", "2h": "4h"}
+
+
 def fetch_candles_sync(symbol: str, tf: str, limit: int = 300) -> Optional[pd.DataFrame]:
     """
     Fetch OHLCV candles from MEXC synchronously.
 
     Args:
         symbol: e.g. "BTCUSDT"
-        tf: timeframe e.g. "4h"
+        tf: timeframe e.g. "4h" (or "1h" — normalized to MEXC's "60m")
         limit: number of candles (max 1000)
 
     Returns:
         DataFrame with columns [open_time, open, high, low, close, volume], or None on error.
     """
+    # MEXC spot uses "60m" not "1h"; normalize before the request.
+    mexc_interval = _MEXC_INTERVAL_MAP.get(tf, tf)
     try:
         resp = requests.get(
             MEXC_KLINES_URL,
-            params={"symbol": symbol, "interval": tf, "limit": limit},
+            params={"symbol": symbol, "interval": mexc_interval, "limit": limit},
             timeout=20,
             headers={"User-Agent": "5A-TCT-Trader/1.0"},
         )
