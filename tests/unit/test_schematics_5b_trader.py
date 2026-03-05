@@ -402,10 +402,11 @@ class TestSchematics5BTrader:
         from unittest.mock import patch
         from schematics_5b_trader import Schematics5BTrader
 
-        same_idx_sch = lambda d: {
-            "direction": d, "is_confirmed": True,
-            "bos_confirmation": {"bos_idx": 175},
-        }
+        def same_idx_sch(d):
+            return {
+                "direction": d, "is_confirmed": True,
+                "bos_confirmation": {"bos_idx": 175},
+            }
         fake_htf_result = {
             "accumulation_schematics": [same_idx_sch("bullish")],
             "distribution_schematics": [same_idx_sch("bearish")],
