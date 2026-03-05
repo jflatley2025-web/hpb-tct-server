@@ -2710,7 +2710,7 @@ _scanner_consecutive_errors = 0  # Track consecutive fetch errors for adaptive b
 # Candle cache: keyed by (symbol, interval, limit), value is (timestamp, DataFrame)
 _candle_cache: Dict[tuple, tuple] = {}
 CANDLE_CACHE_TTL_SEC = 60  # Cache candles for 60 seconds (keeps data fresh for live schematic detection)
-MAX_CANDLE_CACHE_SIZE = 2000  # Hard cap: evict oldest by insertion order if exceeded
+MAX_CANDLE_CACHE_SIZE = 500  # Hard cap: 400 pairs in COIN_LIST; 500 is sufficient headroom
 
 # Invalid symbols: 400 / -1121 errors → never retry.
 # Persisted to INVALID_SYMBOLS_PATH so restarts don't re-hit known-bad symbols.
@@ -2840,6 +2840,12 @@ async def fetch_mexc_candles(symbol: str, interval: str, limit: int = 200) -> Op
 
             # Store in cache
             _candle_cache[cache_key] = (now, df)
+            # Lazy eviction: flush stale entries when cache reaches half capacity.
+            # _evict_stale_cache() is only called every 12h by run_full_scan(),
+            # so without this, up to MAX_CANDLE_CACHE_SIZE stale DataFrames
+            # (each ~20-50KB) accumulate in RAM and cause OOM kills on Render.
+            if len(_candle_cache) >= MAX_CANDLE_CACHE_SIZE // 2:
+                _evict_stale_cache()
             return df
         except Exception as e:
             _scanner_consecutive_errors += 1
