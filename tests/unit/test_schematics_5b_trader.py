@@ -326,6 +326,102 @@ class TestSchematics5BTrader:
             ]
             assert trader._is_duplicate_setup(100_000.0, "bullish") is False
 
+    def test_htf_bias_both_present_uses_most_recent_bos(self):
+        """When both acc and dist schematics exist on 1D, most-recent BOS wins.
+
+        This covers the common case at market bottoms: old distribution schematics
+        from a prior high co-exist with newly-formed accumulation.  The old logic
+        returned 'neutral' (hard-fail), preventing a valid 4H Model_2 Accum from
+        being traded.  The fix resolves by bos_idx.
+        """
+        import pandas as pd
+        from unittest.mock import patch
+        from schematics_5b_trader import Schematics5BTrader
+
+        acc_schematic = {
+            "direction": "bullish", "is_confirmed": True,
+            "bos_confirmation": {"bos_idx": 190},  # more recent
+        }
+        dist_schematic = {
+            "direction": "bearish", "is_confirmed": True,
+            "bos_confirmation": {"bos_idx": 150},  # older
+        }
+
+        fake_htf_result = {
+            "accumulation_schematics": [acc_schematic],
+            "distribution_schematics": [dist_schematic],
+        }
+        fake_df = pd.DataFrame({"close": [1.0] * 60})
+
+        with patch("schematics_5b_trader.TRADE_LOG_PATH", "/tmp/test_5b_htf_bias.json"), \
+             patch("schematics_5b_trader.TRADE_LOG_BACKUP_PATH", "/tmp/test_5b_htf_bias_bak.json"), \
+             patch("schematics_5b_trader.github_fetch_5b_log", return_value=False), \
+             patch("schematics_5b_trader.fetch_candles_sync", return_value=fake_df), \
+             patch("schematics_5b_trader.detect_tct_schematics", return_value=fake_htf_result):
+            trader = Schematics5BTrader()
+            bias, debug = trader._get_htf_bias("BTCUSDT")
+
+        assert bias == "bullish", f"Expected bullish (acc bos_idx 190 > dist bos_idx 150), got {bias!r}"
+        assert debug["confirmed_acc"] == 1
+        assert debug["confirmed_dist"] == 1
+
+    def test_htf_bias_both_present_dist_more_recent_gives_bearish(self):
+        """When distribution BOS is more recent than accumulation, bias is bearish."""
+        import pandas as pd
+        from unittest.mock import patch
+        from schematics_5b_trader import Schematics5BTrader
+
+        acc_schematic = {
+            "direction": "bullish", "is_confirmed": True,
+            "bos_confirmation": {"bos_idx": 120},  # older
+        }
+        dist_schematic = {
+            "direction": "bearish", "is_confirmed": True,
+            "bos_confirmation": {"bos_idx": 185},  # more recent
+        }
+
+        fake_htf_result = {
+            "accumulation_schematics": [acc_schematic],
+            "distribution_schematics": [dist_schematic],
+        }
+        fake_df = pd.DataFrame({"close": [1.0] * 60})
+
+        with patch("schematics_5b_trader.TRADE_LOG_PATH", "/tmp/test_5b_htf_bias2.json"), \
+             patch("schematics_5b_trader.TRADE_LOG_BACKUP_PATH", "/tmp/test_5b_htf_bias2_bak.json"), \
+             patch("schematics_5b_trader.github_fetch_5b_log", return_value=False), \
+             patch("schematics_5b_trader.fetch_candles_sync", return_value=fake_df), \
+             patch("schematics_5b_trader.detect_tct_schematics", return_value=fake_htf_result):
+            trader = Schematics5BTrader()
+            bias, _ = trader._get_htf_bias("BTCUSDT")
+
+        assert bias == "bearish"
+
+    def test_htf_bias_both_present_equal_bos_stays_neutral(self):
+        """When both have the same bos_idx, genuine ambiguity → neutral."""
+        import pandas as pd
+        from unittest.mock import patch
+        from schematics_5b_trader import Schematics5BTrader
+
+        same_idx_sch = lambda d: {
+            "direction": d, "is_confirmed": True,
+            "bos_confirmation": {"bos_idx": 175},
+        }
+        fake_htf_result = {
+            "accumulation_schematics": [same_idx_sch("bullish")],
+            "distribution_schematics": [same_idx_sch("bearish")],
+        }
+        fake_df = pd.DataFrame({"close": [1.0] * 60})
+
+        with patch("schematics_5b_trader.TRADE_LOG_PATH", "/tmp/test_5b_htf_bias3.json"), \
+             patch("schematics_5b_trader.TRADE_LOG_BACKUP_PATH", "/tmp/test_5b_htf_bias3_bak.json"), \
+             patch("schematics_5b_trader.github_fetch_5b_log", return_value=False), \
+             patch("schematics_5b_trader.fetch_candles_sync", return_value=fake_df), \
+             patch("schematics_5b_trader.detect_tct_schematics", return_value=fake_htf_result):
+            trader = Schematics5BTrader()
+            bias, _ = trader._get_htf_bias("BTCUSDT")
+
+        assert bias == "neutral"
+
 
 # ---------------------------------------------------------------------------
 # Telegram Notification Tests
