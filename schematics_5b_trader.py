@@ -953,6 +953,24 @@ class Schematics5BTrader:
                     htf_bias = "bullish"
                 elif htf_dist and not htf_acc:
                     htf_bias = "bearish"
+                elif htf_acc and htf_dist:
+                    # Both present (common at market turning points: old distribution
+                    # co-exists with newly-formed accumulation).  Resolve by the most
+                    # recently-confirmed BOS — whichever structure formed last defines
+                    # the current market bias.
+                    def _latest_bos(schematics: list) -> int:
+                        return max(
+                            (s.get("bos_confirmation", {}).get("bos_idx") or 0
+                             for s in schematics),
+                            default=0,
+                        )
+                    latest_acc_idx = _latest_bos(htf_acc)
+                    latest_dist_idx = _latest_bos(htf_dist)
+                    if latest_acc_idx > latest_dist_idx:
+                        htf_bias = "bullish"
+                    elif latest_dist_idx > latest_acc_idx:
+                        htf_bias = "bearish"
+                    # equal → stays neutral (genuine ambiguity)
                 htf_debug = {
                     "status": "scanned", "candles": len(df_htf),
                     "confirmed_acc": len(htf_acc), "confirmed_dist": len(htf_dist),
