@@ -127,7 +127,6 @@ from tct_schematics import detect_tct_schematics
 from po3_schematics import detect_po3_schematics
 from trade_execution import generate_execution_plan, calculate_leverage_comparison, calculate_capital_allocation
 from market_structure import MarketStructure, evaluate_rtz
-from tensor_tct_trader import get_trader
 from schematics_5b_trader import (
     get_5b_trader,
     refine_schematic_bos_with_ltf,
@@ -14946,6 +14945,7 @@ document.getElementById('tfSelect').addEventListener('change', loadData);
 @app.get("/api/tensor-trade/scan")
 async def tensor_trade_scan():
     """Run a single TCT scan-and-trade cycle."""
+    from tensor_tct_trader import get_trader
     trader = get_trader()
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(None, trader.scan_and_trade)
@@ -14955,6 +14955,7 @@ async def tensor_trade_scan():
 @app.get("/api/tensor-trade/state")
 async def tensor_trade_state():
     """Return current trading state for the dashboard."""
+    from tensor_tct_trader import get_trader
     trader = get_trader()
     return convert_numpy_types(trader.state.snapshot())
 
@@ -14962,6 +14963,7 @@ async def tensor_trade_state():
 @app.get("/api/tensor-trade/restore")
 async def tensor_trade_restore():
     """Restore trade state from the most recent backup."""
+    from tensor_tct_trader import get_trader
     trader = get_trader()
     success = trader.state.restore_from_backup()
     if success:
@@ -14972,6 +14974,7 @@ async def tensor_trade_restore():
 @app.get("/api/tensor-trade/debug")
 async def tensor_trade_debug():
     """Return detailed debug diagnostics from the last scan cycle."""
+    from tensor_tct_trader import get_trader
     trader = get_trader()
     debug = dict(trader.last_debug) if trader.last_debug else {}
     debug["evaluator_consecutive_losses"] = trader.evaluator.consecutive_losses
