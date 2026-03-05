@@ -127,12 +127,6 @@ from tct_schematics import detect_tct_schematics
 from po3_schematics import detect_po3_schematics
 from trade_execution import generate_execution_plan, calculate_leverage_comparison, calculate_capital_allocation
 from market_structure import MarketStructure, evaluate_rtz
-from schematics_5b_trader import (
-    get_5b_trader,
-    refine_schematic_bos_with_ltf,
-    LTF_BOS_TIMEFRAMES,
-    _LTF_CANDLE_LIMITS,
-)
 
 from moondev.consolidation_pop_bot import get_consolidation_pop_bot, scan_cycle as consol_scan_cycle, SCAN_INTERVAL as CONSOL_SCAN_INTERVAL
 from moondev.stoch_nadarya_bot import get_stoch_nadarya_bot, scan_cycle as stoch_nadarya_scan_cycle, SCAN_INTERVAL as STOCH_NADARYA_SCAN_INTERVAL
@@ -4096,6 +4090,7 @@ async def get_schematics_5a_data(symbol: str = "BTCUSDT", timeframe: str = "4h")
       - in_formation : Taps forming but BOS not yet confirmed
     """
     try:
+        from schematics_5b_trader import LTF_BOS_TIMEFRAMES, refine_schematic_bos_with_ltf
         resolved = resolve_symbol(symbol)
 
         # Parallel fetch: main TF at increased limits + paginated LTF candles for BOS cascade.
@@ -15557,6 +15552,7 @@ async def tensor_trade_auto_scan_loop():
 @app.get("/api/schematics-5b-trader/scan")
 async def schematics_5b_scan():
     """Run a single 5B scan-and-trade cycle."""
+    from schematics_5b_trader import get_5b_trader
     trader = get_5b_trader()
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(None, trader.scan_and_trade)
@@ -15566,6 +15562,7 @@ async def schematics_5b_scan():
 @app.get("/api/schematics-5b-trader/state")
 async def schematics_5b_state():
     """Return current 5B trading state for the dashboard."""
+    from schematics_5b_trader import get_5b_trader
     trader = get_5b_trader()
     return convert_numpy_types(trader.state.snapshot())
 
@@ -15574,6 +15571,7 @@ async def schematics_5b_state():
 async def schematics_5b_debug():
     """Return detailed debug diagnostics from the last 5B scan cycle."""
     try:
+        from schematics_5b_trader import get_5b_trader
         trader = get_5b_trader()
         debug = dict(trader.last_debug) if trader.last_debug else {}
         # Attach current MSCE context
@@ -15615,6 +15613,7 @@ async def schematics_5b_candles(tf: str = "15m", limit: int = 200, symbol: str =
                 "l": float(row["low"]),
                 "c": float(row["close"]),
             })
+    from schematics_5b_trader import get_5b_trader
     trader = get_5b_trader()
     snap = trader.state.snapshot()
     debug = dict(trader.last_debug) if trader.last_debug else {}
