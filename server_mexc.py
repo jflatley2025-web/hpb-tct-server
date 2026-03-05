@@ -14947,7 +14947,7 @@ async def tensor_trade_scan():
     """Run a single TCT scan-and-trade cycle."""
     from tensor_tct_trader import get_trader
     trader = get_trader()
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(None, trader.scan_and_trade)
     return convert_numpy_types(result)
 
