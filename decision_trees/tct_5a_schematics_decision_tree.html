@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TCT Lecture 5A — TCT Schematics Decision Tree</title>
+<style>
+  :root {
+    --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #e6edf3;
+    --muted: #8b949e; --green: #3fb950; --red: #f85149; --yellow: #d29922;
+    --blue: #58a6ff; --purple: #bc8cff; --orange: #ffa657; --teal: #56d364;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 14px; line-height: 1.5; padding: 24px; }
+  h1 { font-size: 22px; font-weight: 700; margin-bottom: 6px; color: var(--blue); }
+  .subtitle { color: var(--muted); margin-bottom: 28px; font-size: 13px; }
+  .legend { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 28px; padding: 12px 16px; background: var(--card); border: 1px solid var(--border); border-radius: 8px; }
+  .legend-item { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+  .dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+  .phase { margin-bottom: 24px; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .phase-header { display: flex; align-items: center; gap: 12px; padding: 12px 16px; background: var(--card); cursor: pointer; user-select: none; }
+  .phase-header:hover { background: #1c2128; }
+  .phase-number { width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 13px; flex-shrink: 0; }
+  .phase-title { font-weight: 600; font-size: 15px; flex: 1; }
+  .phase-toggle { color: var(--muted); font-size: 18px; transition: transform 0.2s; }
+  .phase-toggle.open { transform: rotate(90deg); }
+  .phase-body { border-top: 1px solid var(--border); padding: 16px; display: none; background: var(--bg); }
+  .phase-body.open { display: block; }
+  .node { margin-bottom: 10px; border-left: 3px solid var(--border); padding-left: 14px; }
+  .question { font-weight: 600; color: var(--blue); margin-bottom: 6px; }
+  .question::before { content: "? "; color: var(--muted); }
+  .branch { margin-top: 6px; margin-left: 12px; }
+  .branch-label { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+  .label-yes { color: var(--green); } .label-no { color: var(--red); } .label-if { color: var(--yellow); }
+  .action { background: #1c2128; border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; margin-top: 4px; margin-bottom: 4px; font-size: 13px; }
+  .action.bullish { border-left: 3px solid var(--green); }
+  .action.bearish { border-left: 3px solid var(--red); }
+  .action.neutral { border-left: 3px solid var(--blue); }
+  .action.warn    { border-left: 3px solid var(--yellow); }
+  .action.skip    { border-left: 3px solid var(--muted); color: var(--muted); }
+  .action.purple  { border-left: 3px solid var(--purple); }
+  .action.orange  { border-left: 3px solid var(--orange); }
+  .rule-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; }
+  .rule-table th { background: #1c2128; color: var(--muted); text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .rule-table td { padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .rule-table tr:last-child td { border-bottom: none; }
+  .rule-table tr:nth-child(even) td { background: #12181f; }
+  .cond { color: var(--yellow); font-weight: 600; }
+  .tip { background: #1c2128; border: 1px solid var(--border); border-left: 3px solid var(--purple); border-radius: 6px; padding: 10px 14px; margin-top: 10px; font-size: 13px; color: var(--muted); }
+  .tip strong { color: var(--purple); }
+  .quote { background: #12181f; border: 1px solid var(--border); border-left: 3px solid var(--orange); border-radius: 6px; padding: 10px 14px; margin-top: 10px; font-size: 13px; font-style: italic; }
+  .checklist { margin-top: 8px; padding-left: 0; list-style: none; }
+  .checklist li { padding: 4px 0 4px 22px; position: relative; font-size: 13px; }
+  .checklist li::before { content: "☐"; position: absolute; left: 0; color: var(--muted); }
+  .sub-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); margin-top: 12px; margin-bottom: 4px; font-weight: 700; }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 11px; font-weight: 700; letter-spacing: 0.04em; }
+  .pill-bull { background: #1a3a24; color: var(--green); border: 1px solid var(--green); }
+  .pill-bear { background: #3a1a1a; color: var(--red);   border: 1px solid var(--red); }
+  .pill-neut { background: #1a2a3a; color: var(--blue);  border: 1px solid var(--blue); }
+  .pill-warn { background: #3a2a10; color: var(--yellow); border: 1px solid var(--yellow); }
+  .pill-purp { background: #2a1a3a; color: var(--purple); border: 1px solid var(--purple); }
+  .pill-orng { background: #3a2010; color: var(--orange); border: 1px solid var(--orange); }
+
+  /* schematic diagram */
+  .schematic-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 12px; }
+  @media (max-width: 700px) { .schematic-grid { grid-template-columns: 1fr; } }
+  .schematic-card { background: #12181f; border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
+  .schematic-card h4 { font-size: 13px; font-weight: 700; margin-bottom: 10px; }
+  .schematic-steps { list-style: none; padding: 0; }
+  .schematic-steps li { display: flex; gap: 8px; align-items: flex-start; padding: 4px 0; font-size: 12px; border-bottom: 1px dashed #21262d; }
+  .schematic-steps li:last-child { border-bottom: none; }
+  .step-num { min-width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; flex-shrink: 0; margin-top: 1px; }
+
+  /* tap diagram inline */
+  .tap-diagram { display: flex; align-items: center; gap: 8px; padding: 10px 14px; background: #12181f; border: 1px solid var(--border); border-radius: 6px; margin-top: 8px; font-size: 11px; flex-wrap: wrap; }
+  .tap-box { display: flex; flex-direction: column; align-items: center; gap: 3px; }
+  .tap-label { font-weight: 700; font-size: 10px; }
+  .tap-bar { width: 36px; border-radius: 3px; }
+  .arrow { color: var(--muted); font-size: 18px; padding: 0 4px; }
+</style>
+</head>
+<body>
+
+<h1>TCT Lecture 5A — TCT Schematics: Decision Tree</h1>
+<p class="subtitle">
+  Full decision framework extracted from TCT 2024 Mentorship Lecture 5A | TCT Schematics.<br>
+  Four models, all three-tap structures. Entry is always a BOS. Target is always the opposite range extreme.
+</p>
+
+<div class="legend">
+  <div class="legend-item"><div class="dot" style="background:var(--green)"></div> Bullish / Accumulation / Long</div>
+  <div class="legend-item"><div class="dot" style="background:var(--red)"></div> Bearish / Distribution / Short</div>
+  <div class="legend-item"><div class="dot" style="background:var(--blue)"></div> Neutral / assess</div>
+  <div class="legend-item"><div class="dot" style="background:var(--yellow)"></div> Warning / edge case</div>
+  <div class="legend-item"><div class="dot" style="background:var(--purple)"></div> Refinement / multi-TF</div>
+  <div class="legend-item"><div class="dot" style="background:var(--muted)"></div> Invalid / wait</div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 1 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#1a2a3a;color:var(--blue)">1</div>
+    <div class="phase-title">The Four TCT Schematics at a Glance</div>
+    <div class="phase-toggle open">›</div>
+  </div>
+  <div class="phase-body open">
+    <div class="tip" style="margin-bottom:14px">
+      <strong>Core rule:</strong> Every TCT schematic is a <strong>three-tap model</strong> — no more, no fewer. The range extreme is always tapped exactly three times before the breakout resolves. Entry is always a BOS. Target is always the opposite range extreme (Wyckoff High/Low).
+    </div>
+
+    <div class="schematic-grid">
+      <div class="schematic-card" style="border-top:3px solid var(--green)">
+        <h4 style="color:var(--green)">Model 1 Accumulation <span class="pill pill-bull">LONG</span></h4>
+        <ul class="schematic-steps">
+          <li><div class="step-num" style="background:#1a3a24;color:var(--green)">T1</div><span>Original Range Low (Tap 1)</span></li>
+          <li><div class="step-num" style="background:#1a3a24;color:var(--green)">T2</div><span>Deviation below Range Low — <em>deeper</em> (Tap 2). DL2 must hold.</span></li>
+          <li><div class="step-num" style="background:#1a3a24;color:var(--green)">T3</div><span>Deviation below Tap 2 — <em>deepest</em> (Tap 3). DL2 must hold.</span></li>
+          <li><div class="step-num" style="background:#1a3a24;color:var(--green)">↑</div><span>BOS bullish from Tap 2–3 structure → Enter Long. SL below T3. Target: Range High (Wyckoff High).</span></li>
+        </ul>
+      </div>
+      <div class="schematic-card" style="border-top:3px solid var(--teal)">
+        <h4 style="color:var(--teal)">Model 2 Accumulation <span class="pill pill-bull">LONG</span></h4>
+        <ul class="schematic-steps">
+          <li><div class="step-num" style="background:#1a3a24;color:var(--teal)">T1</div><span>Original Range Low (Tap 1)</span></li>
+          <li><div class="step-num" style="background:#1a3a24;color:var(--teal)">T2</div><span>Deviation below Range Low (Tap 2). DL2 must hold.</span></li>
+          <li><div class="step-num" style="background:#1a3a24;color:var(--teal)">T3</div><span><strong>Higher Low</strong> (does NOT take out T2). Must grab extreme liquidity OR mitigate extreme demand.</span></li>
+          <li><div class="step-num" style="background:#1a3a24;color:var(--teal)">↑</div><span>BOS bullish from Tap 2–3 structure → Enter Long. SL below T3. Target: Range High (Wyckoff High).</span></li>
+        </ul>
+      </div>
+      <div class="schematic-card" style="border-top:3px solid var(--red)">
+        <h4 style="color:var(--red)">Model 1 Distribution <span class="pill pill-bear">SHORT</span></h4>
+        <ul class="schematic-steps">
+          <li><div class="step-num" style="background:#3a1a1a;color:var(--red)">T1</div><span>Original Range High (Tap 1)</span></li>
+          <li><div class="step-num" style="background:#3a1a1a;color:var(--red)">T2</div><span>Deviation above Range High — <em>higher</em> (Tap 2). DL2 must hold.</span></li>
+          <li><div class="step-num" style="background:#3a1a1a;color:var(--red)">T3</div><span>Deviation above Tap 2 — <em>highest</em> (Tap 3). DL2 must hold.</span></li>
+          <li><div class="step-num" style="background:#3a1a1a;color:var(--red)">↓</div><span>BOS bearish from Tap 2–3 structure → Enter Short. SL above T3. Target: Range Low (Wyckoff Low).</span></li>
+        </ul>
+      </div>
+      <div class="schematic-card" style="border-top:3px solid var(--orange)">
+        <h4 style="color:var(--orange)">Model 2 Distribution <span class="pill pill-bear">SHORT</span></h4>
+        <ul class="schematic-steps">
+          <li><div class="step-num" style="background:#3a2010;color:var(--orange)">T1</div><span>Original Range High (Tap 1)</span></li>
+          <li><div class="step-num" style="background:#3a2010;color:var(--orange)">T2</div><span>Deviation above Range High (Tap 2). DL2 must hold.</span></li>
+          <li><div class="step-num" style="background:#3a2010;color:var(--orange)">T3</div><span><strong>Lower High</strong> (does NOT take out T2). Must grab extreme liquidity OR mitigate extreme supply.</span></li>
+          <li><div class="step-num" style="background:#3a2010;color:var(--orange)">↓</div><span>BOS bearish from Tap 2–3 structure → Enter Short. SL above T3. Target: Range Low (Wyckoff Low).</span></li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="sub-label" style="margin-top:16px">Context Labels (Traded Identically Within Each Pair)</div>
+    <table class="rule-table">
+      <tr><th>Prior Trend</th><th>Schematic Type</th><th>Result</th><th>Model</th></tr>
+      <tr><td>Downtrend</td><td>Accumulation</td><td>Reversal → up</td><td>Model 1 or 2 Accumulation</td></tr>
+      <tr><td>Uptrend</td><td>Re-accumulation</td><td>Continuation → up</td><td>Model 1 or 2 Accumulation (identical)</td></tr>
+      <tr><td>Uptrend</td><td>Distribution</td><td>Reversal → down</td><td>Model 1 or 2 Distribution</td></tr>
+      <tr><td>Downtrend</td><td>Re-distribution</td><td>Continuation → down</td><td>Model 1 or 2 Distribution (identical)</td></tr>
+    </table>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 2 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#3a2a10;color:var(--yellow)">2</div>
+    <div class="phase-title">Prerequisite: Confirm the Range</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="tip" style="margin-bottom:12px">
+      <strong>No range = no schematic.</strong> All standard range rules from Lecture 2 apply: six-candle rule, equilibrium touch, DL2 drawn. The schematic only begins after the range is confirmed.
+    </div>
+    <ul class="checklist">
+      <li>Trend direction identified (uptrend = Distribution context; downtrend = Accumulation context)</li>
+      <li>Fibonacci drawn in correct direction (downtrend: bottom→top; uptrend: top→bottom)</li>
+      <li>Six-candle rule passes on the working timeframe</li>
+      <li>Price has returned to the equilibrium (0.5 Fib) — range confirmed</li>
+      <li>DL2 levels drawn at −0.3 / 1.3 (30% extension above Range High / below Range Low)</li>
+      <li>Identify the Wyckoff High (highest point of the full schematic) and Wyckoff Low (lowest point)</li>
+    </ul>
+    <div class="sub-label" style="margin-top:14px">Key Zone Labels</div>
+    <table class="rule-table">
+      <tr><th>Label</th><th>Location</th><th>Use</th></tr>
+      <tr><td>Equilibrium (EQ)</td><td>0.5 Fib</td><td>Range confirmation trigger; midpoint</td></tr>
+      <tr><td>Extreme Discount</td><td>Bottom 25% of range</td><td>Preferred zone for Model 2 Accumulation demand</td></tr>
+      <tr><td>Discount</td><td>EQ → Range Low</td><td>Lower half of range</td></tr>
+      <tr><td>Premium</td><td>EQ → Range High</td><td>Upper half of range</td></tr>
+      <tr><td>Extreme Premium</td><td>Top 25% of range</td><td>Preferred zone for Model 2 Distribution supply</td></tr>
+      <tr><td>DL2</td><td>30% beyond each extreme</td><td>Deviation validity threshold — close beyond = true break</td></tr>
+      <tr><td>Wyckoff High</td><td>Highest point of schematic</td><td>Primary target for Accumulation schematics</td></tr>
+      <tr><td>Wyckoff Low</td><td>Lowest point of schematic</td><td>Primary target for Distribution schematics</td></tr>
+    </table>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 3 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#1a3a24;color:var(--green)">3</div>
+    <div class="phase-title">Identify Schematic Direction: Accumulation or Distribution?</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="node">
+      <div class="question">Which range extreme is being repeatedly tested/deviated?</div>
+      <div class="branch">
+        <div class="branch-label label-if">→ The Range Low is being deviated (price going below)</div>
+        <div class="action bullish">
+          <span class="pill pill-bull">ACCUMULATION schematic</span> — sell-side liquidity is being grabbed. Market maker filling long positions. Expect break <strong>upward</strong>. Target: <strong>Range High / Wyckoff High</strong>.
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-if">→ The Range High is being deviated (price going above)</div>
+        <div class="action bearish">
+          <span class="pill pill-bear">DISTRIBUTION schematic</span> — buy-side liquidity is being grabbed. Market maker filling short positions. Expect break <strong>downward</strong>. Target: <strong>Range Low / Wyckoff Low</strong>.
+        </div>
+      </div>
+    </div>
+    <div class="tip">
+      <strong>Re-accumulation / Re-distribution:</strong> The prior trend direction tells you if it is a reversal or continuation, but the schematic mechanics are <em>identical</em>. Trade the same way regardless of prior context.
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 4 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#3a1a1a;color:var(--red)">4</div>
+    <div class="phase-title">Validate Tap 2 — First Deviation (DL2 Rule)</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="tip" style="margin-bottom:12px">
+      <strong>Tap 1</strong> = the original Range Low (Accumulation) or Range High (Distribution). It is the range extreme itself — no validation needed beyond the confirmed range.
+    </div>
+    <div class="node">
+      <div class="question">Has price moved beyond the Range Low (Acc.) or Range High (Dist.) for the first time?</div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes — price exceeded the range extreme</div>
+        <div class="action neutral">Apply DL2 check below.</div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-no">✗ No — range extreme not yet tested</div>
+        <div class="action skip">Wait. Tap 2 cannot form until the range extreme is first reached.</div>
+      </div>
+    </div>
+    <div class="node">
+      <div class="question">Did any candle <strong>close</strong> beyond the DL2 (30% extension)?</div>
+      <div class="branch">
+        <div class="branch-label label-no">✗ No — wick only, or close stayed within DL2</div>
+        <div class="action neutral">
+          <strong>Tap 2 is valid.</strong> The deviation held within limits. Extend the range extreme to this new Tap 2 level. Recalculate DL2 from the new Tap 2 extreme.
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes — candle closed beyond DL2</div>
+        <div class="action skip">
+          <strong>Tap 2 is INVALID.</strong> This is a true break, not a deviation. The schematic is invalidated. Reassess macro structure.
+        </div>
+      </div>
+    </div>
+    <div class="node">
+      <div class="question">Did price accept back inside the range after the Tap 2 deviation?</div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes</div>
+        <div class="action neutral">Tap 2 confirmed. Proceed to Phase 5 (determine Model 1 or 2).</div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-no">✗ No — price still outside</div>
+        <div class="action skip">Wait for acceptance back inside. Do not proceed without it.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 5 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#2a1a3a;color:var(--purple)">5</div>
+    <div class="phase-title">Anticipate Model 1 or Model 2? (Do Not Force — Confirm)</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="quote" style="margin-bottom:12px">
+      "You don't trade expectations, you trade confirmations." — TCT Lecture 5A
+    </div>
+    <div class="node">
+      <div class="question">At Tap 2, did price grab massive liquidity on the left AND/OR mitigate a strong supply/demand zone?</div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes — large liquidity grab or strong S/D mitigation at Tap 2</div>
+        <div class="action purple">
+          <strong>Model 2 is likely</strong> — the market maker may have filled enough position at Tap 2 with no incentive to deviate again. <em>Anticipate</em> Model 2, but <strong>wait for confirmation</strong>. If the structure doesn't break and price takes out Tap 2, switch to Model 1.
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-no">✗ No — Tap 2 did not grab significant liquidity or mitigate S/D</div>
+        <div class="action neutral">
+          <strong>Model 1 is likely</strong> — the MM probably needs another deviation to fill his position. Wait for a Tap 3 that goes deeper/higher than Tap 2.
+        </div>
+      </div>
+    </div>
+    <div class="tip">
+      <strong>Decision rule:</strong> Always wait. Never enter during or after Tap 2. The schematic is not yet complete. Only enter on the BOS after Tap 3 is confirmed.
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 6 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#1a2a3a;color:var(--blue)">6</div>
+    <div class="phase-title">Validate Tap 3 — Model 1 or Model 2?</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="node">
+      <div class="question">Did price exceed the Tap 2 extreme (go deeper/higher than Tap 2)?</div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes — new deeper/higher deviation</div>
+        <div class="action neutral">
+          <strong>Potential Model 1 Tap 3.</strong> Apply DL2 check (no close beyond DL2 from the new Tap 2 reference). If valid → Tap 3 confirmed for Model 1. Proceed to Phase 7.
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-no">✗ No — price stopped short of Tap 2 (higher low / lower high)</div>
+        <div class="action neutral">
+          <strong>Potential Model 2 Tap 3.</strong> Must pass Model 2 validation below.
+        </div>
+      </div>
+    </div>
+
+    <div class="sub-label" style="margin-top:14px">Model 1 Tap 3 Validation</div>
+    <div class="node">
+      <div class="question">Did the Tap 3 deviation close beyond DL2 (recalculated from Tap 2 extreme)?</div>
+      <div class="branch">
+        <div class="branch-label label-no">✗ No — within DL2</div>
+        <div class="action bullish"><strong>Model 1 Tap 3 VALID.</strong> Proceed to Phase 7.</div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes — closed beyond DL2</div>
+        <div class="action skip"><strong>Model 1 Tap 3 INVALID.</strong> True break — schematic invalidated. Reassess.</div>
+      </div>
+    </div>
+
+    <div class="sub-label" style="margin-top:14px">Model 2 Tap 3 Validation — Must Pass At Least ONE</div>
+    <table class="rule-table">
+      <tr><th>Requirement</th><th>Accumulation (higher low)</th><th>Distribution (lower high)</th></tr>
+      <tr>
+        <td><strong>A — Extreme Liquidity</strong></td>
+        <td>Tap 3 grabs the <strong>first Market Structure Low</strong> (six-candle rule) from Tap 2 upward toward the highest point between T2 and T3.<br><em>Exception: if first MSL is extremely close to the range low → use second MSL instead.</em><br><em>Low-TF exception (1m/2m/3m): if a pivot misses one candle for the rule but looks significant → still valid.</em></td>
+        <td>Tap 3 grabs the <strong>first Market Structure High</strong> (six-candle rule) from Tap 2 downward toward the lowest point between T2 and T3.<br>Same exceptions apply.</td>
+      </tr>
+      <tr>
+        <td><strong>B — Extreme Demand/Supply</strong></td>
+        <td>Tap 3 mitigates the <strong>last order block or structure demand zone</strong> between current price and the Tap 2 low. Preferably in the <strong>extreme discount</strong> (bottom 25% of range). Zone TF must be proportional to range size.</td>
+        <td>Tap 3 mitigates the <strong>last order block or structure supply zone</strong> between current price and the Tap 2 high. Preferably in the <strong>extreme premium</strong> (top 25% of range). Zone TF must be proportional to range size.</td>
+      </tr>
+    </table>
+    <div class="node" style="margin-top:12px">
+      <div class="question">Does the Model 2 Tap 3 candidate meet Requirement A OR Requirement B (or both)?</div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes — at least one requirement met</div>
+        <div class="action bullish">
+          <strong>Model 2 Tap 3 VALID.</strong> Both met = extra confluence. Proceed to Phase 7.
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-no">✗ No — neither requirement met</div>
+        <div class="action skip">
+          <strong>Model 2 Tap 3 INVALID.</strong> This is not a tradeable Tap 3. Do not enter. Continue watching for Model 1 (price may take out Tap 2 next).
+        </div>
+      </div>
+    </div>
+
+    <div class="tip">
+      <strong>Model 2 liquidity rationale:</strong> Traders who entered short at Tap 2 trail stop losses down to the first MS High. Taking that MSH on Tap 3 sweeps all those trailing stop losses (buy-side liquidity) — enabling the MM to fill more shorts before reversing down.
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 7 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#3a2a10;color:var(--yellow)">7</div>
+    <div class="phase-title">Draw the Tap 2–3 Market Structure & Wait for BOS</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="sub-label">How to Draw the Tap 2–3 Structure</div>
+    <table class="rule-table">
+      <tr><th>Schematic Direction</th><th>Structure Starting Point</th><th>Structure Direction</th><th>BOS Signal</th></tr>
+      <tr>
+        <td><span class="pill pill-bull">Accumulation</span></td>
+        <td>The <strong>highest point between Tap 2 and Tap 3</strong></td>
+        <td>Downward structure (lower highs, lower lows) toward Tap 3 low</td>
+        <td>Bullish BOS — break back to the upside through the last LH of that structure</td>
+      </tr>
+      <tr>
+        <td><span class="pill pill-bear">Distribution</span></td>
+        <td>The <strong>lowest point between Tap 2 and Tap 3</strong></td>
+        <td>Upward structure (higher highs, higher lows) toward Tap 3 high</td>
+        <td>Bearish BOS — break back to the downside through the last HL of that structure</td>
+      </tr>
+    </table>
+
+    <div class="node" style="margin-top:14px">
+      <div class="question">Has the Tap 2–3 structure broken in the expected direction (BOS confirmed)?</div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes — BOS confirmed in expected direction</div>
+        <div class="action neutral">
+          Proceed to Phase 8 to check BOS location (inside vs. outside range values).
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-no">✗ No — BOS has NOT occurred</div>
+        <div class="action skip">
+          <strong>Do not enter.</strong> "You trade confirmations, not expectations." The schematic is still forming. Wait for the BOS.
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-if">→ BOS broke in the WRONG direction (Model 2 failure)</div>
+        <div class="action warn">
+          <strong>Model 2 invalidated.</strong> If you were in a Model 2 position, take the loss. Now watch: if price then takes out Tap 2 extreme, the schematic is evolving into a <strong>Model 1</strong>. Re-apply Phase 6 for Model 1 Tap 3 and wait for Model 1 BOS.
+        </div>
+      </div>
+    </div>
+
+    <div class="sub-label" style="margin-top:14px">Multi-Timeframe Structure Color Reference</div>
+    <table class="rule-table">
+      <tr><th>Color</th><th>Timeframe</th><th>Use</th></tr>
+      <tr><td><strong style="color:#fff">Black</strong></td><td>Higher TF structure</td><td>Primary BOS reference; most reliable</td></tr>
+      <tr><td><strong style="color:var(--red)">Red</strong></td><td>Mid TF structure</td><td>Earlier entry option (if inside original range values)</td></tr>
+      <tr><td><strong style="color:var(--blue)">Blue</strong></td><td>Lower TF structure</td><td>Fine-tuning; generally not used as primary BOS</td></tr>
+    </table>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 8 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#1a3a24;color:var(--green)">8</div>
+    <div class="phase-title">Check BOS Location & Choose Entry Timeframe</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="node">
+      <div class="question">Did the BOS (break of structure) occur <strong>inside</strong> the original range values (between original Range Low and Range High)?</div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes — BOS inside the original range values</div>
+        <div class="action bullish">
+          <span class="pill pill-bull">Best case.</span> High confidence entry. Enter on this BOS.
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-no">✗ No — BOS outside the original range values</div>
+        <div class="action warn">
+          <span class="pill pill-warn">Riskier.</span> "It's always better to wait for a break of structure that's inside the range." Still valid but lower confidence. Enter with smaller size or wait for confirmation to return inside.
+        </div>
+      </div>
+    </div>
+
+    <div class="node" style="margin-top:12px">
+      <div class="question">Is the higher-TF (black) BOS inside the original range values but giving a poor R:R (e.g., near equilibrium)?</div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes — black BOS is deep inside range (poor R:R)</div>
+        <div class="action purple">
+          <strong>Multi-TF Entry Refinement:</strong><br>
+          Check if the last expansion into Tap 3 produced a mid-TF (red) market structure. If the <strong>red BOS is also inside the original range values</strong> → enter on the red BOS instead.<br><br>
+          Benefit: dramatically better R:R (example: 2.75R on red BOS vs. 1:1 on black BOS).<br>
+          Risk: monitor whether black structure also confirms. If red structure breaks bullish (wrong direction) before taking the black-level low — be cautious, but note this bounce often represents price mitigating the supply left behind by the BOS candle, then resuming the move.
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-no">✗ No — black BOS gives acceptable R:R</div>
+        <div class="action neutral">Enter on the black (higher-TF) BOS as primary.</div>
+      </div>
+    </div>
+
+    <div class="tip">
+      <strong>Supply left behind:</strong> After a bearish BOS in a Distribution schematic, a small bounce upward is typically price mitigating the structural supply created by the BOS candle — then it continues down. Not a true invalidation on mid/lower timeframes.
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 9 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#3a1a1a;color:var(--red)">9</div>
+    <div class="phase-title">Enter, Place Stop, Set Target</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <table class="rule-table">
+      <tr><th>Parameter</th><th>Accumulation (Models 1 & 2)</th><th>Distribution (Models 1 & 2)</th></tr>
+      <tr>
+        <td><strong>Entry Trigger</strong></td>
+        <td>Bullish BOS from the Tap 2–3 downward structure</td>
+        <td>Bearish BOS from the Tap 2–3 upward structure</td>
+      </tr>
+      <tr>
+        <td><strong>Direction</strong></td>
+        <td><span class="pill pill-bull">LONG</span></td>
+        <td><span class="pill pill-bear">SHORT</span></td>
+      </tr>
+      <tr>
+        <td><strong>Stop Loss</strong></td>
+        <td>Below <strong>Tap 3 low</strong> (the deepest point of the schematic)</td>
+        <td>Above <strong>Tap 3 high</strong> (the highest point of the schematic)</td>
+      </tr>
+      <tr>
+        <td><strong>Primary Target</strong></td>
+        <td><strong>Range High / Wyckoff High</strong> (highest point of the schematic)</td>
+        <td><strong>Range Low / Wyckoff Low</strong> (lowest point of the schematic)</td>
+      </tr>
+      <tr>
+        <td><strong>Beyond Target</strong></td>
+        <td>"Anything beyond is extra" — hold if broader context (HPB, main structure) supports continuation</td>
+        <td>Same logic — broader context determines whether to hold beyond Wyckoff Low</td>
+      </tr>
+    </table>
+
+    <div class="sub-label" style="margin-top:14px">Wyckoff High vs Range High (Re-accumulation)</div>
+    <div class="action warn">
+      In a <strong>re-accumulation</strong> context (uptrend continuing up), the Range High drawn on the Fibonacci may differ from the <strong>Wyckoff High</strong> (the actual highest point of the schematic structure including Tap 2 and Tap 3 highs).<br>
+      <strong>Target the Wyckoff High, not the Range High, when they differ.</strong><br>
+      Solution: draw the range locally from the lowest point of the schematic to the highest point to align them.
+    </div>
+    <div class="action warn" style="margin-top:8px">
+      Same applies to <strong>re-distribution</strong>: target the <strong>Wyckoff Low</strong>, not the Range Low.
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 10 — Pre-trade checklist -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#2a1a3a;color:var(--purple)">10</div>
+    <div class="phase-title">Pre-Trade Checklist — All Must Pass</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <ul class="checklist">
+      <li>Range confirmed (six-candle rule + EQ touch + DL2 drawn)</li>
+      <li>Schematic direction identified (Accumulation = Range Low being deviated; Distribution = Range High being deviated)</li>
+      <li>Context confirmed (Accumulation/Re-accumulation or Distribution/Re-distribution)</li>
+      <li>Tap 1 identified (original Range Low or Range High)</li>
+      <li>Tap 2 validated: deviation within DL2 + accepted back inside range. Range extreme extended to Tap 2. DL2 recalculated.</li>
+      <li><strong>Model 1:</strong> Tap 3 is a new deeper/higher deviation, also within DL2.</li>
+      <li><strong>Model 2:</strong> Tap 3 is a higher low / lower high meeting Requirement A (extreme liquidity) OR B (extreme demand/supply). Zone TF proportional to range. Demand in extreme discount / supply in extreme premium preferred.</li>
+      <li>Market structure drawn from highest/lowest point between Tap 2 and Tap 3 toward Tap 3 extreme</li>
+      <li>BOS confirmed in the correct direction from that structure</li>
+      <li>BOS location checked — inside original range values preferred; outside is riskier</li>
+      <li>Multi-TF entry considered if black BOS gives poor R:R (use red BOS if inside range values)</li>
+      <li>Stop loss placed beyond Tap 3 extreme</li>
+      <li>Target set to Wyckoff High / Wyckoff Low (not just Range High / Range Low if they differ)</li>
+    </ul>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ BONUS: Invalidation & Model 2 → Model 1 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#1c2128;color:var(--muted)">+</div>
+    <div class="phase-title">Bonus: Schematic Invalidation & Model 2 → Model 1 Transition</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="sub-label">What Invalidates a Schematic Mid-Formation</div>
+    <table class="rule-table">
+      <tr><th>Event</th><th>Effect</th><th>Next Action</th></tr>
+      <tr>
+        <td>Tap 2 or Tap 3 closes beyond DL2</td>
+        <td>Deviation invalid → schematic invalid</td>
+        <td>Reassess as potential true break / new trend direction</td>
+      </tr>
+      <tr>
+        <td>BOS breaks in wrong direction (Model 2)</td>
+        <td>Model 2 setup fails</td>
+        <td>Do not enter. Watch for price to take out Tap 2 — if so, trade as Model 1</td>
+      </tr>
+      <tr>
+        <td>Model 2 Tap 3 takes out Tap 2 extreme (while in Model 2 position)</td>
+        <td>Model 2 invalidated — stop loss hit</td>
+        <td>Take the loss. Schematic may now be forming Model 1 Tap 3 — wait for Model 1 BOS</td>
+      </tr>
+      <tr>
+        <td>Model 2 Tap 3 does not meet Req A or B</td>
+        <td>Not a valid Tap 3</td>
+        <td>Do not enter. Continue watching for Model 1</td>
+      </tr>
+      <tr>
+        <td>No BOS forms after Tap 3</td>
+        <td>Schematic unconfirmed</td>
+        <td>Do not enter. "You trade confirmations, not expectations."</td>
+      </tr>
+    </table>
+
+    <div class="sub-label" style="margin-top:14px">Model 2 → Model 1 Transition (Most Common Loss Scenario)</div>
+    <div class="action orange">
+      <strong>Sequence:</strong><br>
+      1. Tap 2 forms. Expect Model 2 (large liquidity grab at Tap 2).<br>
+      2. Tap 3 candidate forms as higher low / lower high. Requirement A or B appears met.<br>
+      3. BOS forms in the wrong direction → or price fails to break structure → or price takes out Tap 2.<br>
+      4. Model 2 is invalidated. <em>Stop loss hit.</em><br>
+      5. The new deviation beyond Tap 2 = potential Model 1 Tap 3.<br>
+      6. Apply Model 1 Tap 3 validation (DL2 check).<br>
+      7. Wait for Model 1 BOS. Re-enter on confirmation.<br><br>
+      "Often times when the Model 2 fell, it's because it wants to be a Model 1."
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ Master If/Then -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#1c2128;color:var(--muted)">≡</div>
+    <div class="phase-title">Master If / Then Rule Table</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <table class="rule-table">
+      <tr><th>Condition (IF)</th><th>Action (THEN)</th></tr>
+      <tr><td class="cond">Range Low being deviated</td><td>Accumulation schematic — expect break upward. Target: Range High / Wyckoff High</td></tr>
+      <tr><td class="cond">Range High being deviated</td><td>Distribution schematic — expect break downward. Target: Range Low / Wyckoff Low</td></tr>
+      <tr><td class="cond">Deviation closes beyond DL2 on any tap</td><td>Deviation INVALID — true range break. Invalidate the schematic. Reassess direction.</td></tr>
+      <tr><td class="cond">Tap 2 deviates and accepts back inside range within DL2</td><td>Valid Tap 2. Extend range extreme to Tap 2. Recalculate DL2. Determine M1 or M2.</td></tr>
+      <tr><td class="cond">Tap 2 grabbed massive liquidity or mitigated strong S/D</td><td>Anticipate Model 2 — but wait for confirmation; never enter on expectation</td></tr>
+      <tr><td class="cond">Price exceeds Tap 2 extreme on Tap 3 within DL2</td><td>Model 1 Tap 3 valid. Proceed to Tap 2–3 structure BOS.</td></tr>
+      <tr><td class="cond">Price stops short of Tap 2 (higher low / lower high) on Tap 3</td><td>Potential Model 2 Tap 3. Must validate Req A or Req B.</td></tr>
+      <tr><td class="cond">Model 2 Tap 3 meets Req A (extreme liquidity grab)</td><td>Valid Model 2 Tap 3. Proceed to BOS.</td></tr>
+      <tr><td class="cond">Model 2 Tap 3 meets Req B (extreme demand/supply mitigation)</td><td>Valid Model 2 Tap 3. Proceed to BOS.</td></tr>
+      <tr><td class="cond">Model 2 Tap 3 meets neither Req A nor B</td><td>Invalid Tap 3. Do not trade as Model 2. Continue watching for Model 1.</td></tr>
+      <tr><td class="cond">First MSL for Req A is extremely close to range low</td><td>Use the second MSL instead as the extreme liquidity reference</td></tr>
+      <tr><td class="cond">Very low TF (1m/2m/3m): pivot misses one candle for six-candle rule</td><td>Still valid as extreme liquidity if the pivot looks significant</td></tr>
+      <tr><td class="cond">BOS confirmed in correct direction from Tap 2–3 structure</td><td>Enter trade in direction of schematic. SL beyond Tap 3. Target: Wyckoff High/Low.</td></tr>
+      <tr><td class="cond">BOS inside original range values</td><td>Highest confidence entry. Preferred.</td></tr>
+      <tr><td class="cond">BOS outside original range values</td><td>Valid but riskier. Consider smaller size.</td></tr>
+      <tr><td class="cond">Black BOS inside range gives poor R:R (break near equilibrium)</td><td>Check for red (mid-TF) BOS inside range values → use red BOS for better entry</td></tr>
+      <tr><td class="cond">Red structure breaks bullish after entering short (Distribution)</td><td>Monitor — likely a temporary mitigation of structure supply from BOS candle; usually resumes down</td></tr>
+      <tr><td class="cond">BOS breaks in wrong direction after Model 2 Tap 3</td><td>Model 2 failing — do not enter or exit existing position. Watch for Model 1 forming.</td></tr>
+      <tr><td class="cond">In Model 2 position and Tap 2 extreme is taken out</td><td>Model 2 INVALIDATED — take the loss. Now potential Model 1 Tap 3 is forming. Wait for Model 1 BOS.</td></tr>
+      <tr><td class="cond">Re-accumulation context (Wyckoff High ≠ Range High)</td><td>Target the Wyckoff High, not the Range High. Redraw range locally to align them.</td></tr>
+      <tr><td class="cond">Re-distribution context (Wyckoff Low ≠ Range Low)</td><td>Target the Wyckoff Low, not the Range Low.</td></tr>
+      <tr><td class="cond">Demand/supply zone for Model 2 Req B on wrong timeframe (too small)</td><td>Keep zone TF proportional to range size. Do not use 1m OBs for a 1h range.</td></tr>
+      <tr><td class="cond">No BOS forms after valid Tap 3</td><td>Do not enter. Continue waiting. "You trade confirmations, not expectations."</td></tr>
+    </table>
+  </div>
+</div>
+
+
+<script>
+function toggle(header) {
+  const body = header.nextElementSibling;
+  const arrow = header.querySelector('.phase-toggle');
+  const isOpen = body.classList.contains('open');
+  body.classList.toggle('open', !isOpen);
+  arrow.classList.toggle('open', !isOpen);
+}
+</script>
+</body>
+</html>
