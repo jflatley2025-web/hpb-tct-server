@@ -1,0 +1,727 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TCT Lecture 3 — Supply & Demand Decision Tree</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --card: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d29922;
+    --blue: #58a6ff;
+    --purple: #bc8cff;
+    --orange: #ffa657;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    padding: 24px;
+  }
+  h1 { font-size: 22px; font-weight: 700; margin-bottom: 6px; color: var(--blue); }
+  .subtitle { color: var(--muted); margin-bottom: 28px; font-size: 13px; }
+
+  .legend {
+    display: flex; gap: 20px; flex-wrap: wrap;
+    margin-bottom: 28px; padding: 12px 16px;
+    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+  }
+  .legend-item { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+  .dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+
+  .phase { margin-bottom: 24px; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .phase-header {
+    display: flex; align-items: center; gap: 12px; padding: 12px 16px;
+    background: var(--card); cursor: pointer; user-select: none;
+  }
+  .phase-header:hover { background: #1c2128; }
+  .phase-number {
+    width: 28px; height: 28px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 13px; flex-shrink: 0;
+  }
+  .phase-title { font-weight: 600; font-size: 15px; flex: 1; }
+  .phase-toggle { color: var(--muted); font-size: 18px; transition: transform 0.2s; }
+  .phase-toggle.open { transform: rotate(90deg); }
+  .phase-body { border-top: 1px solid var(--border); padding: 16px; display: none; background: var(--bg); }
+  .phase-body.open { display: block; }
+
+  .node { margin-bottom: 10px; border-left: 3px solid var(--border); padding-left: 14px; }
+  .question { font-weight: 600; color: var(--blue); margin-bottom: 6px; }
+  .question::before { content: "? "; color: var(--muted); }
+  .branch { margin-top: 6px; margin-left: 12px; }
+  .branch-label {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.05em; margin-bottom: 4px;
+  }
+  .label-yes  { color: var(--green); }
+  .label-no   { color: var(--red); }
+  .label-if   { color: var(--yellow); }
+  .label-note { color: var(--orange); }
+
+  .action {
+    background: #1c2128; border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px 12px; margin-top: 4px; margin-bottom: 4px; font-size: 13px;
+  }
+  .action.bullish { border-left: 3px solid var(--green); }
+  .action.bearish { border-left: 3px solid var(--red); }
+  .action.neutral { border-left: 3px solid var(--blue); }
+  .action.warn    { border-left: 3px solid var(--yellow); }
+  .action.skip    { border-left: 3px solid var(--muted); color: var(--muted); }
+  .action.purple  { border-left: 3px solid var(--purple); }
+
+  .rule-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; }
+  .rule-table th {
+    background: #1c2128; color: var(--muted); text-align: left;
+    padding: 6px 10px; border-bottom: 1px solid var(--border);
+    font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+  }
+  .rule-table td { padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .rule-table tr:last-child td { border-bottom: none; }
+  .rule-table tr:nth-child(even) td { background: #12181f; }
+  .cond { color: var(--yellow); font-weight: 600; }
+
+  .tip {
+    background: #1c2128; border: 1px solid var(--border);
+    border-left: 3px solid var(--purple); border-radius: 6px;
+    padding: 10px 14px; margin-top: 10px; font-size: 13px; color: var(--muted);
+  }
+  .tip strong { color: var(--purple); }
+
+  .checklist { margin-top: 8px; padding-left: 0; list-style: none; }
+  .checklist li { padding: 4px 0 4px 22px; position: relative; font-size: 13px; }
+  .checklist li::before { content: "☐"; position: absolute; left: 0; color: var(--muted); }
+
+  .sub-label {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em;
+    color: var(--muted); margin-top: 12px; margin-bottom: 4px; font-weight: 700;
+  }
+  .pill {
+    display: inline-block; padding: 2px 8px; border-radius: 20px;
+    font-size: 11px; font-weight: 700; letter-spacing: 0.04em;
+  }
+  .pill-bull { background: #1a3a24; color: var(--green); border: 1px solid var(--green); }
+  .pill-bear { background: #3a1a1a; color: var(--red);   border: 1px solid var(--red); }
+  .pill-neut { background: #1a2a3a; color: var(--blue);  border: 1px solid var(--blue); }
+  .pill-warn { background: #3a2a10; color: var(--yellow); border: 1px solid var(--yellow); }
+  .pill-purp { background: #2a1a3a; color: var(--purple); border: 1px solid var(--purple); }
+
+  .candle-diagram {
+    display: flex; align-items: flex-end; gap: 6px;
+    margin: 12px 0; padding: 12px 16px;
+    background: #12181f; border: 1px solid var(--border); border-radius: 6px;
+    font-size: 11px; color: var(--muted);
+  }
+  .candle-wrap { display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 50px; }
+  .candle-label { text-align: center; }
+  .candle { display: flex; flex-direction: column; align-items: center; }
+  .wick { width: 2px; background: var(--muted); }
+  .body { width: 20px; border-radius: 2px; }
+  .body.bull { background: var(--green); }
+  .body.bear { background: var(--red); }
+  .fvg-zone {
+    flex: 1; align-self: stretch;
+    border: 1px dashed var(--yellow); border-radius: 4px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; color: var(--yellow); padding: 4px;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+
+<h1>TCT Lecture 3 — Supply &amp; Demand: Decision Tree</h1>
+<p class="subtitle">
+  Full decision framework extracted from TCT 2024 Mentorship Lecture 3 | Supply &amp; Demand.<br>
+  Work through each phase in order. A zone must pass ALL applicable phases to be tradeable.
+</p>
+
+<div class="legend">
+  <div class="legend-item"><div class="dot" style="background:var(--green)"></div> Bullish / Demand / Long</div>
+  <div class="legend-item"><div class="dot" style="background:var(--red)"></div> Bearish / Supply / Short</div>
+  <div class="legend-item"><div class="dot" style="background:var(--blue)"></div> Neutral action</div>
+  <div class="legend-item"><div class="dot" style="background:var(--yellow)"></div> Warning / edge case</div>
+  <div class="legend-item"><div class="dot" style="background:var(--purple)"></div> Refinement / confluence</div>
+  <div class="legend-item"><div class="dot" style="background:var(--muted)"></div> Skip / invalid</div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 1 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#1a2a3a;color:var(--blue)">1</div>
+    <div class="phase-title">Build Structural Context First</div>
+    <div class="phase-toggle open">›</div>
+  </div>
+  <div class="phase-body open">
+    <div class="tip" style="margin-bottom:14px">
+      <strong>Rule:</strong> Never place supply or demand zones randomly. Every zone must have a structural reason. Always determine market context before marking any zones.
+    </div>
+    <div class="node">
+      <div class="question">What is the current market context?</div>
+      <div class="branch">
+        <div class="branch-label label-if">→ Price is in a defined Range</div>
+        <div class="action neutral">
+          <strong>Range context:</strong><br>
+          • Look for <span class="pill pill-bear">Supply</span> in the <strong>upper section (premium)</strong> of the range and above the Range High<br>
+          • Look for <span class="pill pill-bull">Demand</span> in the <strong>lower section (discount)</strong> of the range and below the Range Low<br>
+          • Also look for "extreme supply" (last supply before range high) and "extreme demand" (last demand before range low) — highest priority zones
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-if">→ Price is in a Downtrend (lower highs, lower lows)</div>
+        <div class="action bearish">
+          <strong>Downtrend context:</strong><br>
+          • Look for <span class="pill pill-bear">Supply</span> at each <strong>lower high pivot</strong> (where the pullback reverses and price makes a new lower low)<br>
+          • These are the structural distribution points
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-if">→ Price is in an Uptrend (higher highs, higher lows)</div>
+        <div class="action bullish">
+          <strong>Uptrend context:</strong><br>
+          • Look for <span class="pill pill-bull">Demand</span> at each <strong>higher low pivot</strong> (where the pullback reverses and price makes a new higher high)<br>
+          • These are the structural accumulation points
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-if">→ No clear structure</div>
+        <div class="action skip">Do not place zones. Wait for structure to become clear.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 2 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#3a1a1a;color:var(--red)">2</div>
+    <div class="phase-title">Identify Zone Type: Order Block (OB) or Structure Supply/Demand?</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <p style="color:var(--muted);font-size:13px;margin-bottom:12px">
+      There are exactly two types of supply/demand zones. Both require a Fair Value Gap (FVG) to be valid.
+    </p>
+    <table class="rule-table">
+      <tr>
+        <th>Zone Type</th>
+        <th>Definition</th>
+        <th>Candle Count</th>
+        <th>FVG Required?</th>
+      </tr>
+      <tr>
+        <td><strong>Order Block (OBIF)</strong></td>
+        <td>Supply or demand represented in a <strong>single candle</strong> + FVG. Acronym: Order Block with Inefficiency.</td>
+        <td>1 candle (the OB) + 2 surrounding candles to confirm FVG</td>
+        <td><span class="pill pill-warn">YES — non-negotiable</span></td>
+      </tr>
+      <tr>
+        <td><strong>Structure Supply / Demand</strong></td>
+        <td>Supply or demand represented in <strong>multiple candles</strong> forming a structural move (e.g., the entire pullback leg before the expansion).</td>
+        <td>Multiple candles</td>
+        <td><span class="pill pill-warn">YES — non-negotiable</span></td>
+      </tr>
+    </table>
+    <div class="tip">
+      <strong>Key rule:</strong> "If there's no Fair Value Gap, it's not a valid order block." This applies equally to both zone types. The FVG is what gives the zone trading power.
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 3 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#3a2a10;color:var(--yellow)">3</div>
+    <div class="phase-title">Confirm the Fair Value Gap (FVG) — The Non-Negotiable Requirement</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="sub-label">Three-Candle Formation — Always Required</div>
+    <div class="candle-diagram">
+      <div class="candle-wrap">
+        <div class="candle-label">Candle 1</div>
+        <div class="candle">
+          <div class="wick" style="height:20px"></div>
+          <div class="body bear" style="height:30px"></div>
+          <div class="wick" style="height:10px"></div>
+        </div>
+        <div class="candle-label" style="color:var(--red)">Last bearish<br>candle (OB)</div>
+      </div>
+      <div class="fvg-zone">FVG<br>(gap between<br>C1 wick high &amp;<br>C3 wick low)</div>
+      <div class="candle-wrap">
+        <div class="candle-label">Candle 2</div>
+        <div class="candle">
+          <div class="wick" style="height:8px"></div>
+          <div class="body bull" style="height:50px"></div>
+          <div class="wick" style="height:8px"></div>
+        </div>
+        <div class="candle-label" style="color:var(--green)">Expansion<br>candle</div>
+      </div>
+      <div class="candle-wrap">
+        <div class="candle-label">Candle 3</div>
+        <div class="candle">
+          <div class="wick" style="height:15px"></div>
+          <div class="body bull" style="height:25px"></div>
+          <div class="wick" style="height:12px"></div>
+        </div>
+        <div class="candle-label" style="color:var(--green)">Confirmation<br>candle</div>
+      </div>
+    </div>
+
+    <div class="node">
+      <div class="question">Do the wick high of Candle 1 and the wick low of Candle 3 fail to connect (leave a gap)?</div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes — they do NOT touch</div>
+        <div class="action neutral">
+          <strong>FVG confirmed.</strong> A valid inefficiency exists. Proceed to drawing the zone.<br>
+          <em>Even a very small gap qualifies — "you just need an inefficiency, you just need one."</em>
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-no">✗ No — they touch or overlap</div>
+        <div class="action skip">
+          <strong>No FVG — zone is INVALID.</strong> Do not mark this as an order block or structure zone. There is no inefficiency to trade from.
+        </div>
+      </div>
+    </div>
+
+    <div class="sub-label" style="margin-top:14px">FVG Edge Cases</div>
+    <table class="rule-table">
+      <tr><th>Scenario</th><th>Ruling</th></tr>
+      <tr>
+        <td>FVG is extremely small (barely visible)</td>
+        <td><span class="pill pill-bull">Still valid</span> — size does not matter, only that the gap exists</td>
+      </tr>
+      <tr>
+        <td>Adjacent candle has a wick higher/lower than the OB candle itself</td>
+        <td><span class="pill pill-bull">Still valid</span> — extend the OB box to include that wick ("grab the wick high/low")</td>
+      </tr>
+      <tr>
+        <td>FVG was tapped from the top down (entered from above, not filled from below)</td>
+        <td><span class="pill pill-warn">Less invalidating</span> — zone retains more validity than a bottom-up fill</td>
+      </tr>
+      <tr>
+        <td>FVG fully filled / price traded through it</td>
+        <td><span class="pill pill-bear">Invalidated</span> — if zone also reacted and expanded away, retire it entirely</td>
+      </tr>
+    </table>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 4 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#1a2a3a;color:var(--blue)">4</div>
+    <div class="phase-title">Draw the Zone Boundaries</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+
+    <div class="sub-label">Bullish Demand OB — Drawing Rules</div>
+    <div class="node">
+      <ol style="margin-left:18px;font-size:13px;line-height:1.8">
+        <li>Identify the <strong>last bearish candle</strong> before the upward expansion</li>
+        <li>Confirm the three-candle FVG formation exists above it</li>
+        <li>Draw the <strong>bottom of the box</strong> at the <strong>wick low</strong> of the OB candle (or the adjacent candle if its wick is lower — always use the most extreme wick)</li>
+        <li>Draw the <strong>top of the box</strong> at the <strong>wick high</strong> of the OB candle (or adjacent candle if higher)</li>
+      </ol>
+    </div>
+
+    <div class="sub-label" style="margin-top:14px">Bearish Supply OB — Drawing Rules</div>
+    <div class="node">
+      <ol style="margin-left:18px;font-size:13px;line-height:1.8">
+        <li>Identify the <strong>last bullish candle</strong> before the downward expansion</li>
+        <li>Confirm the three-candle FVG formation exists below it</li>
+        <li>Draw the <strong>top of the box</strong> at the <strong>wick high</strong> of the OB candle (or adjacent candle if higher)</li>
+        <li>Draw the <strong>bottom of the box</strong> at the <strong>wick low</strong> of the OB candle (or adjacent candle if lower)</li>
+      </ol>
+    </div>
+
+    <div class="sub-label" style="margin-top:14px">Structure Supply / Demand — Drawing Rules</div>
+    <div class="node">
+      <div class="branch">
+        <div class="branch-label label-if">→ Structure Supply (multiple bullish candles before bearish expansion)</div>
+        <div class="action bearish">
+          <strong>Top:</strong> The high of the entire structural move (highest wick)<br>
+          <strong>Bottom:</strong> The low of the candle just before the bearish expansion began (where the FVG starts)
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-if">→ Structure Demand (multiple bearish candles before bullish expansion)</div>
+        <div class="action bullish">
+          <strong>Top:</strong> The high of the structure (highest candle in the move down, capturing the FVG above)<br>
+          <strong>Bottom:</strong> The low of the entire structural move (lowest wick)
+        </div>
+      </div>
+    </div>
+
+    <div class="tip">
+      <strong>Wick rule:</strong> Always use the most extreme wick across candles 1 and 2 to define the zone boundary — not just the OB candle. "It doesn't matter if it's candle one's wick high or candle two's wick high — we just pull towards the wick high."
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 5 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#3a1a1a;color:var(--red)">5</div>
+    <div class="phase-title">Check Zone Validity: Is It Mitigated?</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="node">
+      <div class="question">Has price previously entered this zone, caused a reaction, and expanded away from it?</div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes — fully mitigated</div>
+        <div class="action skip">
+          <strong>Zone is RETIRED.</strong> Do not use this block anymore. "The moment we get a mitigation of our order block within a move away, we do not use it anymore."
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-no">✗ No — zone has not been entered yet</div>
+        <div class="action neutral"><strong>Unmitigated zone.</strong> Proceed to Phase 6.</div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-if">→ Partial / borderline mitigation (barely tapped)</div>
+        <div class="action warn">
+          <strong>Sole-zone exception:</strong> If this is the <em>only</em> supply or demand zone in the area AND the mitigation was extremely minor:<br>
+          • Redraw the zone <strong>above</strong> the mitigation point (for supply) or <strong>below</strong> it (for demand)<br>
+          • Still treat it as unmitigated<br>
+          <em>Only applies when no other zone exists nearby.</em>
+        </div>
+      </div>
+    </div>
+
+    <div class="node" style="margin-top:12px">
+      <div class="question">Did price wick through the zone (wick only, no close through it)?</div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes — wick through, no close</div>
+        <div class="action neutral">
+          <strong>Still valid.</strong> A wick through the zone means liquidity was grabbed from that point — the zone itself is not invalidated. "Sometimes we wick the order block — that's fine. It just means we took liquidity from that point."
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 6 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#2a1a3a;color:var(--purple)">6</div>
+    <div class="phase-title">Refine the Zone Across Timeframes</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="node">
+      <div class="question">Can a more precise zone be identified on a lower timeframe within this zone?</div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes — a refined OB exists on a lower TF</div>
+        <div class="action purple">
+          <strong>Place both zones on the chart</strong> — the broad structure zone and the refined OB.<br>
+          Watch whichever price enters first. You are waiting for TCT confirmations in either zone, not trading the reaction mechanically.
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-no">✗ No — only the broad zone exists</div>
+        <div class="action neutral">Use the broad zone as your primary POI.</div>
+      </div>
+    </div>
+
+    <div class="sub-label" style="margin-top:14px">Timeframe Scanning Workflow</div>
+    <div class="action neutral">
+      Scan from higher to lower timeframes: Daily → 18H → 12H → 8H → 6H → 4H → 3H → 2H → 1H → 45m → 30m → 15m<br><br>
+      Look for the best (most refined, most recent, unmitigated) OB or structure zone at the relevant structural pivot on each timeframe.
+    </div>
+
+    <div class="sub-label" style="margin-top:14px">Timeframe Priority Rules</div>
+    <table class="rule-table">
+      <tr><th>Scenario</th><th>Result</th></tr>
+      <tr>
+        <td>Higher TF OB is also unmitigated on lower TF</td>
+        <td><span class="pill pill-bull">Best case</span> — strong confluence, preferred</td>
+      </tr>
+      <tr>
+        <td>Higher TF OB is mitigated on lower TF but not on higher TF</td>
+        <td><span class="pill pill-warn">Still usable</span> — higher TF structure takes precedence. Not ideal but valid.</td>
+      </tr>
+      <tr>
+        <td>Lower TF OB only (no higher TF confluence)</td>
+        <td><span class="pill pill-neut">Usable</span> — lower confidence, rely on TCT confirmation quality</td>
+      </tr>
+    </table>
+
+    <div class="tip" style="margin-top:12px">
+      <strong>Supply chain rule:</strong> When OB₁ creates OB₂ which creates OB₃, the <strong>second OB</strong> in the chain tends to produce the strongest reaction. Flag supply chains when price returns toward them.
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 7 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#1a3a24;color:var(--green)">7</div>
+    <div class="phase-title">Assess Zone Priority: Is This an Extreme Zone?</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="node">
+      <div class="question">Is this the <em>last remaining unmitigated supply before the Range High</em>, or the <em>last remaining unmitigated demand before the Range Low</em>?</div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes — Extreme Supply or Extreme Demand</div>
+        <div class="action bearish" style="border-left-color:var(--orange)">
+          <span class="pill" style="background:#3a2010;color:var(--orange);border:1px solid var(--orange)">EXTREME ZONE</span>&nbsp;
+          <strong>Highest priority zone.</strong> These "love to give reactions" and are where new ranges tend to form.<br>
+          Trade this zone before any other in the area. Expect stronger, faster reactions.
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-no">✗ No — regular supply or demand zone</div>
+        <div class="action neutral">Standard zone priority. Assess confluence and proceed.</div>
+      </div>
+    </div>
+
+    <div class="sub-label" style="margin-top:14px">Zone Priority Hierarchy</div>
+    <table class="rule-table">
+      <tr><th>Priority</th><th>Zone Type</th><th>Reason</th></tr>
+      <tr>
+        <td><span class="pill pill-warn">1st</span></td>
+        <td>Extreme Supply / Extreme Demand</td>
+        <td>Last remaining zone before range extreme. Causes new ranges to form here.</td>
+      </tr>
+      <tr>
+        <td><span class="pill pill-purp">2nd</span></td>
+        <td>Higher TF OB + Lower TF OB confluence (both unmitigated)</td>
+        <td>Multi-timeframe confluence. Strong structural and FVG confluence simultaneously.</td>
+      </tr>
+      <tr>
+        <td><span class="pill pill-neut">3rd</span></td>
+        <td>Structure zone containing a refined OB (broad + refined)</td>
+        <td>Dual-zone confluence. Both levels provide a reaction target.</td>
+      </tr>
+      <tr>
+        <td><span class="pill pill-neut">4th</span></td>
+        <td>Single-layer OB (unmitigated, valid FVG)</td>
+        <td>Valid but single-layer. Quality depends on TCT confirmation.</td>
+      </tr>
+      <tr>
+        <td>Supply chain 2nd OB</td>
+        <td>Second OB in an OB chain</td>
+        <td>"The reaction from that second order block always tends to be very good."</td>
+      </tr>
+    </table>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 8 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#1a2a3a;color:var(--blue)">8</div>
+    <div class="phase-title">Wait for Price to Enter the Zone — Then Confirm with TCT Schematic</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="tip" style="margin-bottom:14px">
+      <strong>Critical rule:</strong> "We are NOT trading the reaction of the order block. We are watching for confirmations inside the order block which will be TCT schematics." The zone is the <em>where</em>. The TCT schematic is the <em>when and how</em>.
+    </div>
+    <div class="node">
+      <div class="question">Has price entered the zone (supply or demand)?</div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes — price is inside the zone</div>
+        <div class="action neutral">
+          <strong>Watch for a TCT schematic to form inside the zone.</strong><br>
+          Do not enter on the touch alone. Wait for the confirmation model (TCT Model 1 or Model 2 — covered in Lectures 5–6).
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-no">✗ No — price has not reached the zone</div>
+        <div class="action neutral">Wait. The zone is your Point of Interest (POI). Do nothing until price arrives.</div>
+      </div>
+    </div>
+
+    <div class="sub-label" style="margin-top:14px">Zone-Level Targets (After Confirmation)</div>
+    <table class="rule-table">
+      <tr><th>Zone Entered</th><th>Context</th><th>Primary Target</th></tr>
+      <tr>
+        <td><span class="pill pill-bull">Demand Zone</span></td>
+        <td>Lower section of range / below Range Low</td>
+        <td>Range High (or upper range supply zone)</td>
+      </tr>
+      <tr>
+        <td><span class="pill pill-bear">Supply Zone</span></td>
+        <td>Upper section of range / above Range High</td>
+        <td>Range Low (or lower range demand zone)</td>
+      </tr>
+      <tr>
+        <td><span class="pill pill-bull">Demand Zone</span></td>
+        <td>Higher low in uptrend</td>
+        <td>Next higher high (trend continuation)</td>
+      </tr>
+      <tr>
+        <td><span class="pill pill-bear">Supply Zone</span></td>
+        <td>Lower high in downtrend</td>
+        <td>Next lower low (trend continuation)</td>
+      </tr>
+      <tr>
+        <td><span class="pill pill-warn">Extreme Supply</span></td>
+        <td>Last supply before Range High</td>
+        <td>Body of the range / lower demand zone</td>
+      </tr>
+      <tr>
+        <td><span class="pill pill-warn">Extreme Demand</span></td>
+        <td>Last demand before Range Low</td>
+        <td>Body of the range / upper supply zone</td>
+      </tr>
+    </table>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 9 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#3a1a1a;color:var(--red)">9</div>
+    <div class="phase-title">After Reaction: Retire or Keep the Zone?</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="node">
+      <div class="question">Did price enter the zone, react, AND then expand away from it?</div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes — full mitigation + expansion</div>
+        <div class="action skip">
+          <strong>Retire this zone permanently.</strong> Remove it from the chart. "After a mitigation and an expansion away from it, we do not use the block anymore."
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-no">✗ No — price entered but did NOT expand away meaningfully</div>
+        <div class="action warn">
+          Zone is potentially still valid. Reassess whether a new OB has formed at a more refined level, and whether the FVG within the zone has been filled.
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-if">→ Price entered but only wicked through (no close through)</div>
+        <div class="action neutral">
+          Zone is still valid. The wick was a liquidity grab — the zone itself was not consumed.
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 10 — Pre-trade checklist -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#2a1a3a;color:var(--purple)">10</div>
+    <div class="phase-title">Pre-Trade Checklist — All Must Pass</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <ul class="checklist">
+      <li>Structural context established (range / uptrend / downtrend)</li>
+      <li>Zone type identified (OB or structure supply/demand) with contextual reason</li>
+      <li>FVG confirmed — wick of candle 1 does NOT connect to wick of candle 3</li>
+      <li>Zone drawn correctly — using most extreme wicks across candles 1 and 2</li>
+      <li>Zone is unmitigated (has not been entered, reacted from, and expanded away)</li>
+      <li>Timeframe scan complete — best refined zone identified and placed</li>
+      <li>Zone priority assessed (extreme / multi-TF confluence / single layer)</li>
+      <li>Price has entered the zone (POI reached)</li>
+      <li>TCT schematic confirmation received inside the zone (Model 1 or Model 2)</li>
+      <li>Target identified (opposite range extreme or next structural pivot)</li>
+    </ul>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ BONUS: Zone Scanning Workflow -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#1c2128;color:var(--muted)">+</div>
+    <div class="phase-title">Zone Scanning Workflow (Full Sequence)</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <ol style="margin-left:18px;font-size:13px;line-height:2">
+      <li>Identify the current market context — range, uptrend, or downtrend</li>
+      <li>If range: mark Range High and Range Low (from Lecture 2 process)</li>
+      <li>Look for supply above Range High and demand below Range Low (for deviation setups)</li>
+      <li>Scan upper section of range for supply zones (OB + structure supply)</li>
+      <li>Scan lower section of range for demand zones (OB + structure demand)</li>
+      <li>Flag "extreme supply" (last unmitigated supply before Range High) and "extreme demand" (last before Range Low)</li>
+      <li>For trending markets: at each pivot point (lower high or higher low), check for valid OB with FVG</li>
+      <li>Cycle through timeframes (daily → 15m) to find the most refined valid zone at each POI</li>
+      <li>Place all valid, unmitigated zones on the chart</li>
+      <li>Mark zone priority (extreme &gt; multi-TF confluence &gt; structure + OB &gt; single OB)</li>
+      <li>Wait for price to reach a POI, then watch for TCT confirmation before entering</li>
+      <li>After a mitigated zone reacts and price expands away → remove it from the chart</li>
+    </ol>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ Master If/Then -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#1c2128;color:var(--muted)">≡</div>
+    <div class="phase-title">Master If / Then Rule Table</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <table class="rule-table">
+      <tr><th>Condition (IF)</th><th>Action (THEN)</th></tr>
+      <tr><td class="cond">Last bearish candle before upward expansion + FVG exists</td><td>Valid bullish OB (demand) — draw box from wick low to wick high of OB candle</td></tr>
+      <tr><td class="cond">Last bullish candle before downward expansion + FVG exists</td><td>Valid bearish OB (supply) — draw box from wick low to wick high of OB candle</td></tr>
+      <tr><td class="cond">No FVG left after expansion</td><td>NOT a valid OB or structure zone — disqualify entirely</td></tr>
+      <tr><td class="cond">Adjacent candle has a more extreme wick than the OB candle</td><td>Extend OB box to include that adjacent wick — always use the most extreme</td></tr>
+      <tr><td class="cond">FVG is very small (barely visible)</td><td>Still valid — any inefficiency qualifies</td></tr>
+      <tr><td class="cond">Zone fully mitigated + price expanded away</td><td>Retire zone permanently — never reuse</td></tr>
+      <tr><td class="cond">Only one zone nearby + extremely minor mitigation</td><td>Redraw above/below mitigation point — still treat as unmitigated (sole-zone exception)</td></tr>
+      <tr><td class="cond">Price wicked through OB (no close through)</td><td>Zone remains valid — wick = liquidity grab, not mitigation</td></tr>
+      <tr><td class="cond">FVG tapped from top down</td><td>Less invalidating — zone retains more validity</td></tr>
+      <tr><td class="cond">Refined OB found on lower TF inside broad structure zone</td><td>Place both on chart — watch whichever price enters</td></tr>
+      <tr><td class="cond">Higher TF OB also unmitigated on lower TF</td><td>Highest confluence — preferred setup</td></tr>
+      <tr><td class="cond">Higher TF OB mitigated on lower TF</td><td>Still valid — higher TF structure takes precedence</td></tr>
+      <tr><td class="cond">OB₁ creates OB₂ (supply chain)</td><td>Mark OB₂ as high priority — second OB reactions tend to be very strong</td></tr>
+      <tr><td class="cond">Last remaining supply before Range High</td><td>Extreme Supply — highest priority zone, expect strong reaction</td></tr>
+      <tr><td class="cond">Last remaining demand before Range Low</td><td>Extreme Demand — highest priority zone, expect strong reaction</td></tr>
+      <tr><td class="cond">Market in a range, upper section</td><td>Look for supply zones here (premium = distribution area)</td></tr>
+      <tr><td class="cond">Market in a range, lower section</td><td>Look for demand zones here (discount = accumulation area)</td></tr>
+      <tr><td class="cond">Market in downtrend, lower high pivot forming</td><td>Look for bearish OB or structure supply at that pivot</td></tr>
+      <tr><td class="cond">Market in uptrend, higher low pivot forming</td><td>Look for bullish OB or structure demand at that pivot</td></tr>
+      <tr><td class="cond">Price reaches the zone (POI)</td><td>Watch for TCT schematic confirmation — do NOT enter on touch alone</td></tr>
+      <tr><td class="cond">TCT schematic confirmed inside demand zone</td><td>Long entry — target Range High or next higher high</td></tr>
+      <tr><td class="cond">TCT schematic confirmed inside supply zone</td><td>Short entry — target Range Low or next lower low</td></tr>
+    </table>
+  </div>
+</div>
+
+
+<script>
+function toggle(header) {
+  const body = header.nextElementSibling;
+  const arrow = header.querySelector('.phase-toggle');
+  const isOpen = body.classList.contains('open');
+  body.classList.toggle('open', !isOpen);
+  arrow.classList.toggle('open', !isOpen);
+}
+</script>
+</body>
+</html>
