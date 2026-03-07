@@ -1,0 +1,769 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TCT Lecture 4 — Liquidity Decision Tree</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --card: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d29922;
+    --blue: #58a6ff;
+    --purple: #bc8cff;
+    --orange: #ffa657;
+    --teal: #39d353;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    font-size: 14px; line-height: 1.5; padding: 24px;
+  }
+  h1 { font-size: 22px; font-weight: 700; margin-bottom: 6px; color: var(--blue); }
+  .subtitle { color: var(--muted); margin-bottom: 28px; font-size: 13px; }
+
+  .legend {
+    display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 28px;
+    padding: 12px 16px; background: var(--card);
+    border: 1px solid var(--border); border-radius: 8px;
+  }
+  .legend-item { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+  .dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+
+  .phase { margin-bottom: 24px; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .phase-header {
+    display: flex; align-items: center; gap: 12px; padding: 12px 16px;
+    background: var(--card); cursor: pointer; user-select: none;
+  }
+  .phase-header:hover { background: #1c2128; }
+  .phase-number {
+    width: 28px; height: 28px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 13px; flex-shrink: 0;
+  }
+  .phase-title { font-weight: 600; font-size: 15px; flex: 1; }
+  .phase-toggle { color: var(--muted); font-size: 18px; transition: transform 0.2s; }
+  .phase-toggle.open { transform: rotate(90deg); }
+  .phase-body { border-top: 1px solid var(--border); padding: 16px; display: none; background: var(--bg); }
+  .phase-body.open { display: block; }
+
+  .node { margin-bottom: 10px; border-left: 3px solid var(--border); padding-left: 14px; }
+  .question { font-weight: 600; color: var(--blue); margin-bottom: 6px; }
+  .question::before { content: "? "; color: var(--muted); }
+  .branch { margin-top: 6px; margin-left: 12px; }
+  .branch-label {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.05em; margin-bottom: 4px;
+  }
+  .label-yes  { color: var(--green); }
+  .label-no   { color: var(--red); }
+  .label-if   { color: var(--yellow); }
+
+  .action {
+    background: #1c2128; border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px 12px; margin-top: 4px; margin-bottom: 4px; font-size: 13px;
+  }
+  .action.bullish { border-left: 3px solid var(--green); }
+  .action.bearish { border-left: 3px solid var(--red); }
+  .action.neutral { border-left: 3px solid var(--blue); }
+  .action.warn    { border-left: 3px solid var(--yellow); }
+  .action.skip    { border-left: 3px solid var(--muted); color: var(--muted); }
+  .action.purple  { border-left: 3px solid var(--purple); }
+  .action.orange  { border-left: 3px solid var(--orange); }
+
+  .rule-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; }
+  .rule-table th {
+    background: #1c2128; color: var(--muted); text-align: left;
+    padding: 6px 10px; border-bottom: 1px solid var(--border);
+    font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+  }
+  .rule-table td { padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .rule-table tr:last-child td { border-bottom: none; }
+  .rule-table tr:nth-child(even) td { background: #12181f; }
+  .cond { color: var(--yellow); font-weight: 600; }
+
+  .tip {
+    background: #1c2128; border: 1px solid var(--border);
+    border-left: 3px solid var(--purple); border-radius: 6px;
+    padding: 10px 14px; margin-top: 10px; font-size: 13px; color: var(--muted);
+  }
+  .tip strong { color: var(--purple); }
+
+  .quote {
+    background: #12181f; border: 1px solid var(--border);
+    border-left: 3px solid var(--orange); border-radius: 6px;
+    padding: 10px 14px; margin-top: 10px; font-size: 13px;
+    color: var(--text); font-style: italic;
+  }
+
+  .checklist { margin-top: 8px; padding-left: 0; list-style: none; }
+  .checklist li { padding: 4px 0 4px 22px; position: relative; font-size: 13px; }
+  .checklist li::before { content: "☐"; position: absolute; left: 0; color: var(--muted); }
+
+  .sub-label {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em;
+    color: var(--muted); margin-top: 12px; margin-bottom: 4px; font-weight: 700;
+  }
+  .pill {
+    display: inline-block; padding: 2px 8px; border-radius: 20px;
+    font-size: 11px; font-weight: 700; letter-spacing: 0.04em;
+  }
+  .pill-bull { background: #1a3a24; color: var(--green); border: 1px solid var(--green); }
+  .pill-bear { background: #3a1a1a; color: var(--red);   border: 1px solid var(--red); }
+  .pill-neut { background: #1a2a3a; color: var(--blue);  border: 1px solid var(--blue); }
+  .pill-warn { background: #3a2a10; color: var(--yellow); border: 1px solid var(--yellow); }
+  .pill-purp { background: #2a1a3a; color: var(--purple); border: 1px solid var(--purple); }
+  .pill-orng { background: #3a2010; color: var(--orange); border: 1px solid var(--orange); }
+
+  /* liquidity map diagram */
+  .liq-map {
+    background: #12181f; border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px; margin: 12px 0; font-size: 12px;
+  }
+  .liq-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 5px 0; border-bottom: 1px dashed var(--border);
+  }
+  .liq-row:last-child { border-bottom: none; }
+  .liq-level {
+    width: 120px; font-weight: 700; font-size: 11px; flex-shrink: 0;
+  }
+  .liq-bar {
+    height: 8px; border-radius: 4px; flex-shrink: 0;
+  }
+  .liq-desc { color: var(--muted); font-size: 11px; }
+</style>
+</head>
+<body>
+
+<h1>TCT Lecture 4 — Liquidity: Decision Tree</h1>
+<p class="subtitle">
+  Full decision framework extracted from TCT 2024 Mentorship Lecture 4 | Liquidity.<br>
+  Core mental model: market makers engineer price to stop-loss clusters, fill their position, then reverse to the opposite liquidity pool.
+</p>
+
+<div class="legend">
+  <div class="legend-item"><div class="dot" style="background:var(--green)"></div> Bullish / Long / Buy-side swept</div>
+  <div class="legend-item"><div class="dot" style="background:var(--red)"></div> Bearish / Short / Sell-side swept</div>
+  <div class="legend-item"><div class="dot" style="background:var(--blue)"></div> Neutral action / assess</div>
+  <div class="legend-item"><div class="dot" style="background:var(--yellow)"></div> Warning / disqualifier</div>
+  <div class="legend-item"><div class="dot" style="background:var(--orange)"></div> Market maker context</div>
+  <div class="legend-item"><div class="dot" style="background:var(--muted)"></div> Do not trade / wait</div>
+</div>
+
+<div class="quote">
+  "When I am talking about liquidity I am mostly referring to <strong>where the most stop losses are located</strong>." — TCT Lecture 4
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 1 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#3a2010;color:var(--orange)">1</div>
+    <div class="phase-title">Understand the Core Mechanic (Market Maker Framework)</div>
+    <div class="phase-toggle open">›</div>
+  </div>
+  <div class="phase-body open">
+    <div class="sub-label">Why Stop Losses = Liquidity</div>
+    <table class="rule-table">
+      <tr><th>Position Type</th><th>Stop Loss Location</th><th>When Triggered Creates</th><th>Market Maker Uses It To</th></tr>
+      <tr>
+        <td><span class="pill pill-bull">Long position</span></td>
+        <td>Below a low</td>
+        <td><strong>Sell order</strong> (exchange sells their position back)</td>
+        <td>Fill <strong>buy/long</strong> positions (he needs sellers)</td>
+      </tr>
+      <tr>
+        <td><span class="pill pill-bear">Short position</span></td>
+        <td>Above a high</td>
+        <td><strong>Buy order</strong> (exchange buys back their short)</td>
+        <td>Fill <strong>short/sell</strong> positions (he needs buyers)</td>
+      </tr>
+    </table>
+
+    <div class="sub-label" style="margin-top:14px">Buy-Side vs Sell-Side Liquidity</div>
+    <div class="liq-map">
+      <div class="liq-row">
+        <div class="liq-level" style="color:var(--red)">BUY-SIDE LIQ</div>
+        <div class="liq-bar" style="width:80px;background:var(--red)"></div>
+        <div class="liq-desc">Sits <strong>ABOVE highs</strong> (Range High, Market Structure Highs, trend line highs). Stop losses of shorts. When swept → buy orders spike price.</div>
+      </div>
+      <div class="liq-row" style="border-top:2px solid var(--border);padding-top:8px">
+        <div class="liq-level" style="color:var(--muted)">DL2 ABOVE ↑</div>
+        <div class="liq-bar" style="width:30px;background:var(--border)"></div>
+        <div class="liq-desc" style="color:var(--yellow)">Deviation Limit 2 — 30% extension above Range High. Close above = true break. Wick only = valid grab.</div>
+      </div>
+      <div class="liq-row">
+        <div class="liq-level" style="color:var(--orange)">RANGE HIGH</div>
+        <div class="liq-bar" style="width:100px;background:var(--orange)"></div>
+        <div class="liq-desc">Upper boundary. Buy-side liquidity clusters here.</div>
+      </div>
+      <div class="liq-row">
+        <div class="liq-level" style="color:var(--muted)">RANGE BODY</div>
+        <div class="liq-bar" style="width:60px;background:var(--muted)"></div>
+        <div class="liq-desc">Internal liquidity: higher lows (sell-side) and lower highs (buy-side) within the range.</div>
+      </div>
+      <div class="liq-row">
+        <div class="liq-level" style="color:var(--orange)">RANGE LOW</div>
+        <div class="liq-bar" style="width:100px;background:var(--orange)"></div>
+        <div class="liq-desc">Lower boundary. Sell-side liquidity clusters here.</div>
+      </div>
+      <div class="liq-row">
+        <div class="liq-level" style="color:var(--muted)">DL2 BELOW ↓</div>
+        <div class="liq-bar" style="width:30px;background:var(--border)"></div>
+        <div class="liq-desc" style="color:var(--yellow)">Deviation Limit 2 — 30% extension below Range Low. Close below = true break. Wick only = valid grab.</div>
+      </div>
+      <div class="liq-row">
+        <div class="liq-level" style="color:var(--green)">SELL-SIDE LIQ</div>
+        <div class="liq-bar" style="width:80px;background:var(--green)"></div>
+        <div class="liq-desc">Sits <strong>BELOW lows</strong> (Range Low, Market Structure Lows, trend line lows). Stop losses of longs. When swept → sell orders dump price.</div>
+      </div>
+    </div>
+
+    <div class="tip">
+      <strong>Core rule:</strong> "Markets love to move from liquidity to liquidity." Buy-side swept → expect move to sell-side. Sell-side swept → expect move to buy-side. The target is always the next obvious liquidity pool.
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 2 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#1a2a3a;color:var(--blue)">2</div>
+    <div class="phase-title">Identify All Active Liquidity Pools on Your Chart</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <table class="rule-table">
+      <tr><th>Pool Type</th><th>Location</th><th>Side</th><th>Identification Rule</th></tr>
+      <tr>
+        <td><strong>Range High</strong></td>
+        <td>Above the Range High</td>
+        <td><span class="pill pill-bear">Buy-side</span></td>
+        <td>Confirmed range (EQ touched). Shorts inside range have stops above the high. "The most liquidity will always be above your Range High."</td>
+      </tr>
+      <tr>
+        <td><strong>Range Low</strong></td>
+        <td>Below the Range Low</td>
+        <td><span class="pill pill-bull">Sell-side</span></td>
+        <td>Confirmed range. Longs inside range have stops below the low. "The most liquidity will always be below your Range Low."</td>
+      </tr>
+      <tr>
+        <td><strong>Market Structure High (downtrend)</strong></td>
+        <td>Above each prior swing high in a downtrend</td>
+        <td><span class="pill pill-bear">Buy-side</span></td>
+        <td>Shorts entering on each break of structure place stops above the prior high. Trailing stops compound this. "In a downtrend your market structure high will always have the most liquidity."</td>
+      </tr>
+      <tr>
+        <td><strong>Market Structure Low (uptrend)</strong></td>
+        <td>Below each prior swing low in an uptrend</td>
+        <td><span class="pill pill-bull">Sell-side</span></td>
+        <td>Longs entering on each break of structure place stops below the prior low. "The market structure low in the uptrend will always have the most liquidity."</td>
+      </tr>
+      <tr>
+        <td><strong>Trend Line Liquidity</strong></td>
+        <td>Above a descending series of lower highs (or below ascending lows)</td>
+        <td><span class="pill pill-bear">Buy-side</span> / <span class="pill pill-bull">Sell-side</span></td>
+        <td>Draw a line connecting highs (downtrend) or lows (uptrend). Each touch = stop cluster. Valid only if <strong>no supply</strong> backs the highs (or no demand backs the lows).</td>
+      </tr>
+      <tr>
+        <td><strong>Liquidity Curve</strong></td>
+        <td>Above a curving series of lower highs (price accelerating too fast for a straight line)</td>
+        <td><span class="pill pill-bear">Buy-side</span> / <span class="pill pill-bull">Sell-side</span></td>
+        <td>Curved version of trend line liquidity. Valid only if <strong>no demand</strong> at each higher low (or no supply at each lower high). Draw a curve connecting points.</td>
+      </tr>
+      <tr>
+        <td><strong>Internal Range Liquidity</strong></td>
+        <td>Higher lows inside a range (sell-side) and lower highs inside a range (buy-side)</td>
+        <td>Both sides</td>
+        <td>Longs who bought inside the range put stops below the most recent higher low. Shorts inside put stops above the most recent lower high.</td>
+      </tr>
+    </table>
+
+    <div class="node" style="margin-top:14px">
+      <div class="question">Is there a trend line or liquidity curve forming?</div>
+      <div class="branch">
+        <div class="branch-label label-if">→ Trend line liquidity (straight line connects highs/lows)</div>
+        <div class="action warn">
+          Check: Is there <strong>no supply</strong> backing the highs (for a descending trend line)?<br>
+          If supply exists at the highs → not a clean liquidity sweep setup.<br>
+          If no supply → valid trend line liquidity. <strong>Do NOT short the lower high.</strong> Wait for all highs to be swept.
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-if">→ Liquidity curve (cannot connect with straight line — too steep)</div>
+        <div class="action warn">
+          Check: Is there <strong>no demand</strong> at any of the higher lows?<br>
+          If demand present at any low → not a valid curve (something holds price up).<br>
+          If no demand → valid curve. Expect a cascading sweep of all highs.
+        </div>
+      </div>
+    </div>
+
+    <div class="tip">
+      <strong>Stacked liquidity rule:</strong> Market makers calculate the total stop-loss order value they need. They may need to sweep multiple pools to fill their full position. Example: "Above this high = $10M, that high = $20M, that high = $15M. He needs $45M — he'll push price to trigger all three." Cascades are self-amplifying.
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 3 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#3a2a10;color:var(--yellow)">3</div>
+    <div class="phase-title">Determine Which Side Has the Most Untouched Liquidity</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="node">
+      <div class="question">Has the Range High been swept one or more times without a DL2 close?</div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes — Range High repeatedly swept (multiple grabs)</div>
+        <div class="action bearish">
+          <span class="pill pill-bear">Buy-side being exhausted.</span> Market maker is repeatedly filling short positions. Sell-side (Range Low) is the next major target. Anticipate a move downward.
+        </div>
+      </div>
+    </div>
+    <div class="node">
+      <div class="question">Has the Range Low been swept one or more times without a DL2 close?</div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes — Range Low repeatedly swept</div>
+        <div class="action bullish">
+          <span class="pill pill-bull">Sell-side being exhausted.</span> Market maker is repeatedly filling long positions. Buy-side (Range High) is the next major target. Anticipate a move upward.
+        </div>
+      </div>
+    </div>
+    <div class="node">
+      <div class="question">Is one side untouched while the other is being repeatedly swept?</div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes — asymmetric sweep pattern</div>
+        <div class="action orange">
+          <strong>Highest conviction directional read.</strong> The untouched side is the market maker's true target. Each repeated sweep of the other side fills more of his position. When he stops sweeping and accepts back inside → the move to the untouched side begins.
+        </div>
+      </div>
+    </div>
+
+    <div class="quote" style="margin-top:14px">
+      "We deviated the low over and over and over again... liquidity grab one, liquidity grab two, liquidity grab three, liquidity grab four. Each time he was filling his buy positions."
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 4 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#3a1a1a;color:var(--red)">4</div>
+    <div class="phase-title">Classify the Move: Deviation (Grab) or True Range Break?</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="tip" style="margin-bottom:14px">
+      <strong>DL2 Rule:</strong> The Deviation Limit 2 (30% extension beyond the Range High or Low) is the hard threshold. A wick through it is acceptable. Only a <em>close</em> beyond it confirms a true structural break.
+    </div>
+
+    <div class="node">
+      <div class="question">Did price exceed the Range High or Range Low?</div>
+      <div class="branch">
+        <div class="branch-label label-if">→ Price moved above the Range High</div>
+        <div class="action neutral">Proceed to DL2 check below. Determine if it's a grab or a break.</div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-if">→ Price moved below the Range Low</div>
+        <div class="action neutral">Proceed to DL2 check below. Determine if it's a grab or a break.</div>
+      </div>
+    </div>
+
+    <div class="node">
+      <div class="question">Did any candle <em>close</em> beyond the DL2 (30% extension level)?</div>
+      <div class="branch">
+        <div class="branch-label label-no">✗ No — only a wick beyond DL2, or price stayed within DL2</div>
+        <div class="action neutral">
+          <span class="pill pill-bull">Valid deviation / liquidity grab.</span><br>
+          "A wick is completely fine. You need a close above it for it to be invalidated."<br>
+          The market maker swept the stops. The range is still intact.
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes — a candle closed beyond the DL2</div>
+        <div class="action skip">
+          <span class="pill pill-warn">True range break.</span><br>
+          "Did we close above our DL limit? Yes we did, very convincingly. So yes, that is a market structure break."<br>
+          Do NOT apply liquidity reversal logic. Reassess trend direction.
+        </div>
+      </div>
+    </div>
+
+    <div class="sub-label" style="margin-top:14px">Grab vs Break Decision Table</div>
+    <table class="rule-table">
+      <tr><th>Price Action</th><th>DL2 Close?</th><th>Classification</th><th>Next Action</th></tr>
+      <tr>
+        <td>Wick above/below range extreme</td>
+        <td>No</td>
+        <td><span class="pill pill-bull">Liquidity Grab</span></td>
+        <td>Wait for acceptance back inside → Phase 5</td>
+      </tr>
+      <tr>
+        <td>1 candle close outside, reverses next candle</td>
+        <td>No (within DL2)</td>
+        <td><span class="pill pill-bull">Bad BOS / Grab</span></td>
+        <td>Wait for acceptance → Phase 5</td>
+      </tr>
+      <tr>
+        <td>Multiple closes outside but all within DL2</td>
+        <td>No</td>
+        <td><span class="pill pill-warn">Still a grab — check HTF</span></td>
+        <td>Step up to highest valid TF and verify</td>
+      </tr>
+      <tr>
+        <td>Close convincingly beyond DL2</td>
+        <td>Yes</td>
+        <td><span class="pill pill-bear">True Break</span></td>
+        <td>Do not trade reversal. Reassess macro structure.</td>
+      </tr>
+    </table>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 5 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#1a3a24;color:var(--green)">5</div>
+    <div class="phase-title">Wait for Acceptance Back Inside the Range</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="node">
+      <div class="question">After the deviation, has price returned and closed back inside the range?</div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes — acceptance back inside</div>
+        <div class="action neutral">
+          <strong>Liquidity grab confirmed.</strong> The deviation was a sweep, not a breakout. Proceed to Phase 6 (path evaluation).
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-no">✗ No — price still holding outside the range</div>
+        <div class="action skip">
+          Wait. Acceptance back inside is required before applying reversal logic. Without it, the grab is not confirmed.
+        </div>
+      </div>
+    </div>
+
+    <div class="sub-label" style="margin-top:14px">What Acceptance Confirms</div>
+    <div class="action orange">
+      <strong>Range High deviated + accepted back inside:</strong><br>
+      → Market maker filled short positions using buy-side liquidity. He is now short.<br>
+      → The cascade down to Range Low begins. Target = Range Low (sell-side liquidity).
+    </div>
+    <div class="action neutral" style="margin-top:8px">
+      <strong>Range Low deviated + accepted back inside:</strong><br>
+      → Market maker filled long positions using sell-side liquidity. He is now long.<br>
+      → The cascade up to Range High begins. Target = Range High (buy-side liquidity).
+    </div>
+    <div class="action neutral" style="margin-top:8px">
+      <strong>SFP (Swing Failure Pattern) — Wick of a Market Structure Low/High:</strong><br>
+      → Wick of MS Low (sell-side grabbed) → market maker filled buys → target: opposite MS High.<br>
+      → Wick of MS High (buy-side grabbed) → market maker filled shorts → target: opposite MS Low.
+    </div>
+
+    <div class="quote" style="margin-top:12px">
+      "If we get acceptance back inside the range, that could mean a reversal back down to the next liquidity point."
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 6 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#2a1a3a;color:var(--purple)">6</div>
+    <div class="phase-title">Evaluate the Return-to-Zone Path (Clean or Obstructed?)</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="node">
+      <div class="question">Between the current price (post-grab acceptance) and the target (opposite liquidity pool), is the path clear of active supply/demand zones?</div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes — path contains only liquidity (no active S/D zones)</div>
+        <div class="action bullish">
+          <strong>Clean return to zone.</strong> Highest conviction. Expect a <strong>fast, cascading move</strong> (snowball effect): each stop cluster triggered cascades into the next, amplifying the move.<br><br>
+          Explicit rule: extra confirmation when path is clean → "high extra confirmation when we have a return to zone."
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-no">✗ No — active demand (for a short) or supply (for a long) sits in the path</div>
+        <div class="action warn">
+          <strong>Obstructed path.</strong> The move may stall or reverse at the intervening zone. Lower conviction. The supply/demand zone may absorb momentum before the target is reached.<br>
+          Consider: is the S/D zone already mitigated? If yes, path may still be clean.
+        </div>
+      </div>
+    </div>
+
+    <div class="sub-label" style="margin-top:14px">The Cascade / Snowball Effect</div>
+    <div class="action orange">
+      When path is clean (only liquidity between entry and target):<br><br>
+      Stop₁ triggered → sell order → price spikes into Stop₂ → Stop₂ triggered → sell order → price spikes into Stop₃ → ... → target reached in a fast, accelerating move.<br><br>
+      "That first order getting hit will spike price down to that order and that order and then you have a cascade down of sell pressure basically just by stop losses getting hit."
+    </div>
+
+    <div class="tip">
+      <strong>Key check:</strong> For a bearish move (post Range High grab) → is there any <em>unmitigated demand</em> between current price and Range Low? For a bullish move (post Range Low grab) → is there any <em>unmitigated supply</em> between current price and Range High? If yes, downgrade conviction.
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 7 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#1a2a3a;color:var(--blue)">7</div>
+    <div class="phase-title">Assess the Compounding Effect (Retail Trap = Extra Fuel)</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="node">
+      <div class="question">After the Range High deviation, are retail traders likely trying to long the perceived "break of structure"?</div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes — retail longs are entering above the Range High</div>
+        <div class="action bearish">
+          <strong>Extra fuel for the short.</strong> These longs place their stops <em>below</em> the new perceived higher low. When the market reverses back inside the range, their stops trigger → more sell orders → accelerates the cascade down.<br><br>
+          "People trying to long the higher low... their stop loss will get hit — which will just add extra fuel to the fire."
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-if">→ After Range Low deviation: retail shorts entering below the Range Low</div>
+        <div class="action bullish">
+          Extra fuel for the long. These shorts have stops above the new lower high. When market reverses inside, their stops trigger → more buy orders → accelerates the cascade up.
+        </div>
+      </div>
+    </div>
+
+    <div class="tip">
+      <strong>Trailing stops compound the effect:</strong> "Sometimes people even trail stop losses meaning it's double the amount on one low." Each market structure point may contain more liquidity than it appears.
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 8 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#1a3a24;color:var(--green)">8</div>
+    <div class="phase-title">Wait for TCT Schematic Entry Confirmation</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="tip" style="margin-bottom:14px">
+      <strong>Critical rule:</strong> Liquidity analysis tells you the <em>direction and target</em>. It does NOT give you the entry trigger. Entry is via a TCT schematic (Model 1 or Model 2) confirmed after acceptance back inside the range. Covered in Lectures 5A, 5B, and 6.
+    </div>
+
+    <div class="node">
+      <div class="question">Has a TCT schematic confirmation formed after acceptance back inside the range?</div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes — TCT schematic confirmed</div>
+        <div class="action bullish">
+          <strong>Enter the trade.</strong> All conditions met: liquidity grab → DL2 check passed → acceptance back inside → path evaluated → TCT confirmation received.
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-no">✗ No — no TCT confirmation yet</div>
+        <div class="action skip">
+          Wait. Do not enter on liquidity analysis alone. The schematic is the trigger.
+        </div>
+      </div>
+    </div>
+
+    <div class="sub-label" style="margin-top:14px">Target Assignment</div>
+    <table class="rule-table">
+      <tr><th>Liquidity Swept</th><th>Accepted Back Inside?</th><th>Trade Bias</th><th>Primary Target</th></tr>
+      <tr>
+        <td><span class="pill pill-bear">Range High (buy-side)</span></td>
+        <td>Yes</td>
+        <td>Short</td>
+        <td>Range Low (sell-side liquidity)</td>
+      </tr>
+      <tr>
+        <td><span class="pill pill-bull">Range Low (sell-side)</span></td>
+        <td>Yes</td>
+        <td>Long</td>
+        <td>Range High (buy-side liquidity)</td>
+      </tr>
+      <tr>
+        <td><span class="pill pill-bear">MS High wick (downtrend)</span></td>
+        <td>Yes</td>
+        <td>Short</td>
+        <td>Next Market Structure Low</td>
+      </tr>
+      <tr>
+        <td><span class="pill pill-bull">MS Low wick (uptrend)</span></td>
+        <td>Yes</td>
+        <td>Long</td>
+        <td>Next Market Structure High</td>
+      </tr>
+      <tr>
+        <td>Trend line high(s) swept</td>
+        <td>Yes</td>
+        <td>Short</td>
+        <td>Lowest sell-side liquidity pool below</td>
+      </tr>
+      <tr>
+        <td>Liquidity curve highs swept</td>
+        <td>Yes</td>
+        <td>Short</td>
+        <td>Next major sell-side pool below curve</td>
+      </tr>
+    </table>
+
+    <div class="quote" style="margin-top:12px">
+      "The target of the short will always be the opposite range point." — TCT Lecture 4
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 9 — Pre-trade checklist -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#2a1a3a;color:var(--purple)">9</div>
+    <div class="phase-title">Pre-Trade Checklist — All Must Pass</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <ul class="checklist">
+      <li>Range confirmed (from Lecture 2: six candle rule + EQ touch)</li>
+      <li>All liquidity pools identified and mapped (Range High/Low, MS highs/lows, trend line / curve)</li>
+      <li>Determined which side has the most untouched / repeatedly-swept liquidity</li>
+      <li>Price has moved beyond a range extreme (Range High or Low)</li>
+      <li>DL2 check: no candle has closed beyond the 30% extension — classified as a deviation, not a break</li>
+      <li>Acceptance back inside the range confirmed</li>
+      <li>Path from entry to target evaluated — is it clean (only liquidity) or obstructed (active S/D)?</li>
+      <li>Retail trap assessed — are trapped longs/shorts adding fuel to the move?</li>
+      <li>TCT schematic entry confirmation received (Model 1 or Model 2)</li>
+      <li>Target identified: opposite liquidity pool (Range Low or Range High)</li>
+    </ul>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ BONUS: Trend Line / Curve Workflow -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#1c2128;color:var(--muted)">+</div>
+    <div class="phase-title">Bonus: Trend Line & Liquidity Curve Trading Workflow</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="sub-label">Trend Line Liquidity — Do's and Don'ts</div>
+    <table class="rule-table">
+      <tr><th>Retail Approach (Wrong)</th><th>TCT Approach (Correct)</th></tr>
+      <tr>
+        <td>Short the lower high as it touches the descending trend line</td>
+        <td>Wait — the market maker <em>needs</em> to sweep those highs to fill short positions. Do not trade against him.</td>
+      </tr>
+      <tr>
+        <td>Long the higher low on the ascending trend line</td>
+        <td>Wait — the market maker needs to sweep those lows to fill long positions. Do not trade against him.</td>
+      </tr>
+      <tr>
+        <td>Set stop loss just above/below the trend line</td>
+        <td>Recognize that YOUR stop is the liquidity being targeted. Adjust accordingly.</td>
+      </tr>
+    </table>
+
+    <div class="sub-label" style="margin-top:14px">Trend Line Liquidity — Correct Sequence</div>
+    <ol style="margin-left:18px;font-size:13px;line-height:2">
+      <li>Draw the descending trend line connecting lower highs (or ascending line of higher lows)</li>
+      <li>Verify: no supply backs the descending highs / no demand backs the ascending lows</li>
+      <li>Wait for price to sweep <em>all</em> trend line highs (buy-side) or lows (sell-side)</li>
+      <li>Confirm acceptance back inside the range (DL2 not closed beyond)</li>
+      <li>Evaluate path to target — is it clear?</li>
+      <li>Wait for TCT schematic confirmation</li>
+      <li>Target: next major sell-side pool (after highs swept) or buy-side pool (after lows swept)</li>
+    </ol>
+
+    <div class="sub-label" style="margin-top:14px">Liquidity Curve Validity Check</div>
+    <div class="node">
+      <div class="question">For a downward curve (series of lower highs): is there <strong>no supply</strong> backing each high?</div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ No supply at the highs — curve is valid</div>
+        <div class="action bearish">Valid liquidity curve. Each high will be swept. Expect a sharp cascade once the sweep completes.</div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-no">✗ Supply exists at one or more highs</div>
+        <div class="action skip">Not a clean liquidity curve. Something is holding price down. Do not expect a clean multi-sweep.</div>
+      </div>
+    </div>
+    <div class="node">
+      <div class="question">For an upward curve (series of higher lows): is there <strong>no demand</strong> at each low?</div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ No demand at the lows — curve is valid</div>
+        <div class="action bullish">Valid liquidity curve. Each low will be swept. Expect a sharp cascade down once the sweep completes.</div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-no">✗ Demand exists at one or more lows</div>
+        <div class="action skip">Not a clean curve. Demand zones can hold price up at each low, stalling or absorbing the sweep.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ Master If/Then -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#1c2128;color:var(--muted)">≡</div>
+    <div class="phase-title">Master If / Then Rule Table</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <table class="rule-table">
+      <tr><th>Condition (IF)</th><th>Action (THEN)</th></tr>
+      <tr><td class="cond">Long position stop loss triggered</td><td>Exchange sends a sell order to market → sell-side liquidity activated</td></tr>
+      <tr><td class="cond">Short position stop loss triggered</td><td>Exchange sends a buy order to market → buy-side liquidity activated</td></tr>
+      <tr><td class="cond">Price goes above a high</td><td>Stop losses of shorts above that high trigger → spike in buy orders</td></tr>
+      <tr><td class="cond">Price goes below a low</td><td>Stop losses of longs below that low trigger → spike in sell orders</td></tr>
+      <tr><td class="cond">Range High deviated, no DL2 close</td><td>Liquidity grab — buy-side swept. Wait for acceptance back inside.</td></tr>
+      <tr><td class="cond">Range Low deviated, no DL2 close</td><td>Liquidity grab — sell-side swept. Wait for acceptance back inside.</td></tr>
+      <tr><td class="cond">Candle closes beyond DL2</td><td>True range break — do NOT apply reversal logic. Reassess macro structure.</td></tr>
+      <tr><td class="cond">Wick beyond DL2 (no close)</td><td>Still a valid grab — "a wick is completely fine"</td></tr>
+      <tr><td class="cond">Range High grab + acceptance back inside</td><td>Short bias. Market maker filled shorts. Target: Range Low.</td></tr>
+      <tr><td class="cond">Range Low grab + acceptance back inside</td><td>Long bias. Market maker filled longs. Target: Range High.</td></tr>
+      <tr><td class="cond">Path to target is clean (only liquidity, no active S/D)</td><td>Cascade/snowball effect expected → high conviction, fast move</td></tr>
+      <tr><td class="cond">Path to target has unmitigated S/D zones</td><td>Lower conviction — move may stall or slow at those zones</td></tr>
+      <tr><td class="cond">Retail longs enter above Range High (broken structure)</td><td>Their future stop triggers add sell orders — extra fuel for short cascade</td></tr>
+      <tr><td class="cond">Range High swept repeatedly (multiple grabs)</td><td>Buy-side exhausting → sell-side (Range Low) is next major target</td></tr>
+      <tr><td class="cond">Range Low swept repeatedly (multiple grabs)</td><td>Sell-side exhausting → buy-side (Range High) is next major target</td></tr>
+      <tr><td class="cond">Trend line highs visible (descending)</td><td>Do not short the lower high — wait for all highs to be swept</td></tr>
+      <tr><td class="cond">No supply backs trend line highs</td><td>Valid trend line liquidity — expect sweep of all highs</td></tr>
+      <tr><td class="cond">Supply present at trend line highs</td><td>Not a clean sweep setup — something holds price at those highs</td></tr>
+      <tr><td class="cond">Liquidity curve forming (can't connect with straight line)</td><td>Check: no demand at lows (upward curve) / no supply at highs (downward curve)</td></tr>
+      <tr><td class="cond">No demand at each higher low (upward curve)</td><td>Valid curve — expect cascading sweep of all lows then reversal</td></tr>
+      <tr><td class="cond">Demand present at any higher low</td><td>Not a valid liquidity curve — zone absorbs downward pressure</td></tr>
+      <tr><td class="cond">MS Low wicked in an uptrend (SFP)</td><td>Sell-side grabbed → market maker filled longs → target: opposite MS High</td></tr>
+      <tr><td class="cond">MS High wicked in a downtrend (SFP)</td><td>Buy-side grabbed → market maker filled shorts → target: opposite MS Low</td></tr>
+      <tr><td class="cond">All conditions met (grab + DL2 + acceptance + clean path)</td><td>Wait for TCT schematic confirmation, then enter</td></tr>
+    </table>
+  </div>
+</div>
+
+
+<script>
+function toggle(header) {
+  const body = header.nextElementSibling;
+  const arrow = header.querySelector('.phase-toggle');
+  const isOpen = body.classList.contains('open');
+  body.classList.toggle('open', !isOpen);
+  arrow.classList.toggle('open', !isOpen);
+}
+</script>
+</body>
+</html>
