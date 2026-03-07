@@ -1,0 +1,880 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TCT Lecture 2 — Ranges Decision Tree</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --card: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d29922;
+    --blue: #58a6ff;
+    --purple: #bc8cff;
+    --orange: #ffa657;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    padding: 24px;
+  }
+  h1 {
+    font-size: 22px;
+    font-weight: 700;
+    margin-bottom: 6px;
+    color: var(--blue);
+  }
+  .subtitle {
+    color: var(--muted);
+    margin-bottom: 28px;
+    font-size: 13px;
+  }
+  /* ─── Legend ─────────────────────────────────────── */
+  .legend {
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+    margin-bottom: 28px;
+    padding: 12px 16px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .dot {
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  /* ─── Phase blocks ───────────────────────────────── */
+  .phase {
+    margin-bottom: 24px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  .phase-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    background: var(--card);
+    cursor: pointer;
+    user-select: none;
+  }
+  .phase-header:hover { background: #1c2128; }
+  .phase-number {
+    width: 28px; height: 28px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700;
+    font-size: 13px;
+    flex-shrink: 0;
+  }
+  .phase-title { font-weight: 600; font-size: 15px; flex: 1; }
+  .phase-toggle { color: var(--muted); font-size: 18px; transition: transform 0.2s; }
+  .phase-toggle.open { transform: rotate(90deg); }
+  .phase-body {
+    border-top: 1px solid var(--border);
+    padding: 16px;
+    display: none;
+    background: var(--bg);
+  }
+  .phase-body.open { display: block; }
+
+  /* ─── Decision nodes ─────────────────────────────── */
+  .tree { padding-left: 0; }
+  .node {
+    margin-bottom: 10px;
+    border-left: 3px solid var(--border);
+    padding-left: 14px;
+  }
+  .question {
+    font-weight: 600;
+    color: var(--blue);
+    margin-bottom: 6px;
+  }
+  .question::before { content: "? "; color: var(--muted); }
+  .branch {
+    margin-top: 6px;
+    margin-left: 12px;
+  }
+  .branch-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 4px;
+  }
+  .label-yes  { color: var(--green); }
+  .label-no   { color: var(--red); }
+  .label-if   { color: var(--yellow); }
+  .label-then { color: var(--purple); }
+  .label-note { color: var(--orange); }
+
+  .action {
+    background: #1c2128;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 12px;
+    margin-top: 4px;
+    margin-bottom: 4px;
+    font-size: 13px;
+  }
+  .action.bullish { border-left: 3px solid var(--green); }
+  .action.bearish { border-left: 3px solid var(--red); }
+  .action.neutral { border-left: 3px solid var(--blue); }
+  .action.warn    { border-left: 3px solid var(--yellow); }
+  .action.skip    { border-left: 3px solid var(--muted); color: var(--muted); }
+
+  .rule-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 10px;
+    font-size: 13px;
+  }
+  .rule-table th {
+    background: #1c2128;
+    color: var(--muted);
+    text-align: left;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border);
+    font-weight: 600;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .rule-table td {
+    padding: 7px 10px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  .rule-table tr:last-child td { border-bottom: none; }
+  .rule-table tr:nth-child(even) td { background: #12181f; }
+  .cond { color: var(--yellow); font-weight: 600; }
+  .result { color: var(--text); }
+
+  .tip {
+    background: #1c2128;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--purple);
+    border-radius: 6px;
+    padding: 10px 14px;
+    margin-top: 10px;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .tip strong { color: var(--purple); }
+
+  .checklist { margin-top: 8px; padding-left: 0; list-style: none; }
+  .checklist li {
+    padding: 4px 0;
+    padding-left: 22px;
+    position: relative;
+    font-size: 13px;
+  }
+  .checklist li::before {
+    content: "☐";
+    position: absolute;
+    left: 0;
+    color: var(--muted);
+  }
+  .sub-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--muted);
+    margin-top: 12px;
+    margin-bottom: 4px;
+    font-weight: 700;
+  }
+  .pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 20px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+  }
+  .pill-bull { background: #1a3a24; color: var(--green); border: 1px solid var(--green); }
+  .pill-bear { background: #3a1a1a; color: var(--red);   border: 1px solid var(--red); }
+  .pill-neut { background: #1a2a3a; color: var(--blue);  border: 1px solid var(--blue); }
+  .pill-warn { background: #3a2a10; color: var(--yellow); border: 1px solid var(--yellow); }
+</style>
+</head>
+<body>
+
+<h1>TCT Lecture 2 — Ranges: Decision Tree</h1>
+<p class="subtitle">
+  Full decision framework extracted from TCT 2024 Mentorship Lecture 2 | Ranges.<br>
+  Work through each phase sequentially. Each phase must pass before proceeding to the next.
+</p>
+
+<div class="legend">
+  <div class="legend-item"><div class="dot" style="background:var(--green)"></div> Bullish / Long bias</div>
+  <div class="legend-item"><div class="dot" style="background:var(--red)"></div> Bearish / Short bias</div>
+  <div class="legend-item"><div class="dot" style="background:var(--blue)"></div> Neutral action</div>
+  <div class="legend-item"><div class="dot" style="background:var(--yellow)"></div> Warning / edge case</div>
+  <div class="legend-item"><div class="dot" style="background:var(--muted)"></div> Skip / do not trade</div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════ PHASE 1 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#1a2a3a;color:var(--blue)">1</div>
+    <div class="phase-title">Identify the Macro Trend Direction</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body open">
+    <div class="tree">
+      <div class="node">
+        <div class="question">Is price making higher highs and higher lows on your working timeframe?</div>
+        <div class="branch">
+          <div class="branch-label label-yes">✓ Yes</div>
+          <div class="action bullish">
+            <span class="pill pill-bull">UPTREND</span>&nbsp;
+            You will draw the range Fibonacci from <strong>Top → Bottom</strong> (high to low).
+          </div>
+        </div>
+        <div class="branch">
+          <div class="branch-label label-no">✗ No — price is making lower highs and lower lows</div>
+          <div class="action bearish">
+            <span class="pill pill-bear">DOWNTREND</span>&nbsp;
+            You will draw the range Fibonacci from <strong>Bottom → Top</strong> (low to high).
+          </div>
+        </div>
+        <div class="branch">
+          <div class="branch-label label-if">? Price structure is unclear</div>
+          <div class="action skip">
+            Step up one timeframe and re-assess. Do not force a range on ambiguous structure.
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="tip"><strong>Rule:</strong> Direction of the Fibonacci pull is non-negotiable. An uptrend = top to bottom. A downtrend = bottom to top. Flipping the direction produces the wrong EQ, premium, and discount zones.</div>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════ PHASE 2 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#1a3a24;color:var(--green)">2</div>
+    <div class="phase-title">Confirm the Range (Six Candle Rule + Equilibrium Touch)</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="sub-label">Six Candle Rule — minimum structure required to validate a range on any timeframe</div>
+    <table class="rule-table">
+      <tr>
+        <th>Candles</th>
+        <th>Uptrend context</th>
+        <th>Downtrend context</th>
+      </tr>
+      <tr>
+        <td><strong>Candles 1–2</strong></td>
+        <td class="cond">Move DOWN from the high (initial leg)</td>
+        <td class="cond">Move UP from the low (initial leg)</td>
+      </tr>
+      <tr>
+        <td><strong>Candles 3–4</strong></td>
+        <td class="cond">Move back UP toward the high</td>
+        <td class="cond">Move back DOWN toward the low</td>
+      </tr>
+      <tr>
+        <td><strong>Candles 5–6</strong></td>
+        <td class="cond">Move DOWN and touch or approach the 0.5 Fib (EQ)</td>
+        <td class="cond">Move UP and touch or approach the 0.5 Fib (EQ)</td>
+      </tr>
+    </table>
+
+    <div class="tree" style="margin-top:14px">
+      <div class="node">
+        <div class="question">Do at least 2 candles go in the initial direction, 2 return, and 2 touch the equilibrium?</div>
+        <div class="branch">
+          <div class="branch-label label-yes">✓ Yes — six candle rule passes</div>
+          <div class="action neutral">
+            Range is <strong>valid</strong> on this timeframe. Note this as your confirmed timeframe.
+          </div>
+        </div>
+        <div class="branch">
+          <div class="branch-label label-no">✗ No</div>
+          <div class="action skip">
+            Range is <strong>not valid</strong> on this timeframe. Drop one timeframe and re-check. If no timeframe passes, do not treat this as a range.
+          </div>
+        </div>
+      </div>
+      <div class="node" style="margin-top:12px">
+        <div class="question">Has price returned to the 0.5 Fib (Equilibrium) after the initial leg?</div>
+        <div class="branch">
+          <div class="branch-label label-yes">✓ Yes</div>
+          <div class="action neutral">
+            Range is <strong>confirmed</strong>. This confirmation comes before a Market Structure Low/High is established. That is expected — range confirmation is earlier.
+          </div>
+        </div>
+        <div class="branch">
+          <div class="branch-label label-no">✗ No — EQ not yet touched</div>
+          <div class="action warn">
+            Range is <strong>tentative only</strong>. Wait for the equilibrium touch. Do not draw the range until confirmed.
+          </div>
+        </div>
+      </div>
+      <div class="node" style="margin-top:12px">
+        <div class="question">What is the <em>highest timeframe</em> on which the six candle rule is satisfied?</div>
+        <div class="branch">
+          <div class="branch-label label-then">→ Record this</div>
+          <div class="action neutral">
+            This highest valid timeframe is critical. A move that looks like a break on a lower timeframe may appear as just a wick on this higher timeframe — that changes how you classify deviations later.
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════ PHASE 3 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#3a2a10;color:var(--yellow)">3</div>
+    <div class="phase-title">Validate Range Quality (Rationality Check)</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="tree">
+      <div class="node">
+        <div class="question">Does the range look genuinely <em>horizontal / sideways</em>, or does it look V-shaped and sharp?</div>
+        <div class="branch">
+          <div class="branch-label label-yes">✓ Wide and extended — clearly sideways</div>
+          <div class="action neutral">
+            <strong>Good range.</strong> Continue to Phase 4. The Fibonacci zones will be reliable.
+          </div>
+        </div>
+        <div class="branch">
+          <div class="branch-label label-no">✗ Narrow and V-shaped — looks more like a trend leg</div>
+          <div class="action warn">
+            <strong>Irrational range.</strong> Technically valid by the rules, but not rational to trade on this timeframe.<br>
+            <strong>Action:</strong> Drop to a lower timeframe and find a cleaner, more horizontal sub-range. Trade that instead.
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="tip">
+      <strong>V-Shape Test:</strong> If the structure forms a tight, narrow V, treat it as market structure (a pool), not a range. If the V is wide with nearly flat tops/bottoms, it qualifies as a range.
+    </div>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════ PHASE 4 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#1a2a3a;color:var(--blue)">4</div>
+    <div class="phase-title">Map the Range Zones (EQ, Premium, Discount, DL)</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <table class="rule-table">
+      <tr>
+        <th>Fib Level</th>
+        <th>Label</th>
+        <th>Meaning</th>
+        <th>Bias</th>
+      </tr>
+      <tr>
+        <td><strong>0.0</strong></td>
+        <td>Range High</td>
+        <td>Upper boundary of the range</td>
+        <td><span class="pill pill-bear">SELL zone</span></td>
+      </tr>
+      <tr>
+        <td><strong>0.5</strong></td>
+        <td>Equilibrium (EQ)</td>
+        <td>Midpoint. Range confirmation trigger. Fair price.</td>
+        <td><span class="pill pill-neut">Neutral</span></td>
+      </tr>
+      <tr>
+        <td><strong>1.0</strong></td>
+        <td>Range Low</td>
+        <td>Lower boundary of the range</td>
+        <td><span class="pill pill-bull">BUY zone</span></td>
+      </tr>
+      <tr>
+        <td><strong>−0.3 / 1.3</strong></td>
+        <td>Deviation Limit (DL)</td>
+        <td>30% extension beyond each extreme. The threshold between a deviation and a range break.</td>
+        <td><span class="pill pill-warn">BREAK threshold</span></td>
+      </tr>
+    </table>
+
+    <div class="tip" style="margin-top:14px">
+      <strong>How to draw the DL:</strong> On your Fibonacci tool, add custom levels at <strong>1.3</strong> (30% below Range Low) and <strong>−0.3</strong> (30% above Range High). These lines define the hard outer limits of deviation territory.
+    </div>
+
+    <div class="sub-label" style="margin-top:16px">Premium vs. Discount Framework</div>
+    <table class="rule-table">
+      <tr>
+        <th>Zone</th>
+        <th>Location</th>
+        <th>Implication</th>
+      </tr>
+      <tr>
+        <td><span class="pill pill-bear">Premium</span></td>
+        <td>EQ (0.5) up to Range High (0.0)</td>
+        <td>Price is expensive. Look for distribution / short setups.</td>
+      </tr>
+      <tr>
+        <td><span class="pill pill-bull">Discount</span></td>
+        <td>EQ (0.5) down to Range Low (1.0)</td>
+        <td>Price is cheap. Look for accumulation / long setups.</td>
+      </tr>
+    </table>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════ PHASE 5 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#3a1a1a;color:var(--red)">5</div>
+    <div class="phase-title">Wait for a Range Extreme to Be Approached / Breached</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="tree">
+      <div class="node">
+        <div class="question">Where is price relative to the range boundaries right now?</div>
+        <div class="branch">
+          <div class="branch-label label-if">→ Price is approaching or at the Range High</div>
+          <div class="action bearish">
+            <span class="pill pill-bear">Bearish Setup</span>&nbsp;
+            Watch for a deviation above the Range High → enter short targeting the Range Low (or at minimum the lower premium zone).
+          </div>
+        </div>
+        <div class="branch">
+          <div class="branch-label label-if">→ Price is approaching or at the Range Low</div>
+          <div class="action bullish">
+            <span class="pill pill-bull">Bullish Setup</span>&nbsp;
+            Watch for a deviation below the Range Low → enter long targeting the Range High (or at minimum the upper discount zone).
+          </div>
+        </div>
+        <div class="branch">
+          <div class="branch-label label-if">→ Price is near the Equilibrium (0.5)</div>
+          <div class="action neutral">
+            No deviation setup yet. Price is at fair value. Wait for it to reach a range extreme before looking for entries.
+          </div>
+        </div>
+        <div class="branch">
+          <div class="branch-label label-if">→ Price is deep inside the Premium zone, trending away from Range High</div>
+          <div class="action neutral">
+            Track the internal rotation. Identify the most recent local expansion direction and draw a sub-range from that. Do not trade counter to the local expansion until price reaches the opposite extreme.
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════ PHASE 6 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#3a1a1a;color:var(--red)">6</div>
+    <div class="phase-title">Classify the Breach: Deviation or Range Break?</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <p style="color:var(--muted);font-size:13px;margin-bottom:12px">
+      Price has exceeded the Range High or Range Low. Work through these questions in order.
+    </p>
+
+    <div class="tree">
+      <!-- Q1 -->
+      <div class="node">
+        <div class="question">Did price wick beyond the range boundary without closing outside it?</div>
+        <div class="branch">
+          <div class="branch-label label-yes">✓ Yes — pure wick</div>
+          <div class="action neutral">
+            <strong>Type 1 Wick Deviation.</strong> Highest-confidence deviation type. There was never a close outside — it is unambiguously a deviation. Proceed to Phase 7.
+          </div>
+        </div>
+        <div class="branch">
+          <div class="branch-label label-no">✗ No — price closed outside the boundary</div>
+          <div class="action neutral">Continue to next question.</div>
+        </div>
+      </div>
+
+      <!-- Q2 -->
+      <div class="node">
+        <div class="question">Did the <em>very next candle</em> close back inside the range?</div>
+        <div class="branch">
+          <div class="branch-label label-yes">✓ Yes — immediate rejection after the close</div>
+          <div class="action neutral">
+            <strong>Type 2 Candle Close Deviation</strong> (also called a "Bad Break of Structure").<br>
+            The breakout failed on the next candle — this is still a deviation. Proceed to Phase 7.
+          </div>
+        </div>
+        <div class="branch">
+          <div class="branch-label label-no">✗ No — price continued to close outside over multiple candles</div>
+          <div class="action neutral">Continue to next question.</div>
+        </div>
+      </div>
+
+      <!-- Q3 — DL check -->
+      <div class="node">
+        <div class="question">Has any candle closed <em>beyond the Deviation Limit</em> (the 1.3 / −0.3 level)?</div>
+        <div class="branch">
+          <div class="branch-label label-yes">✓ Yes — a close beyond the DL</div>
+          <div class="action warn">
+            <strong>Potential Range Break.</strong> This is no longer classified as a deviation.
+            Treat the move as a structural break and reassess the macro trend direction.
+            Do NOT look for a reversal entry against this move.
+          </div>
+        </div>
+        <div class="branch">
+          <div class="branch-label label-no">✗ No — multiple closes outside the range but all within the DL</div>
+          <div class="action neutral">
+            Still a deviation (multiple bad closes, but all within the DL). Continue to the timeframe check.
+          </div>
+        </div>
+      </div>
+
+      <!-- Q4 — TF check -->
+      <div class="node">
+        <div class="question">Step up to the <em>highest valid timeframe</em> for this range. Does the move look like a wick or a clean break from this vantage point?</div>
+        <div class="branch">
+          <div class="branch-label label-if">→ Looks like a wick or brief excursion on the higher TF</div>
+          <div class="action neutral">
+            <strong>Confirmed Deviation</strong> on the higher timeframe. The lower-timeframe closes are noise. Proceed to Phase 7.
+          </div>
+        </div>
+        <div class="branch">
+          <div class="branch-label label-if">→ Looks like a confirmed structural break on the higher TF</div>
+          <div class="action skip">
+            <strong>Range Break.</strong> Do not trade it as a deviation. Reassess macro structure.
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Deviation type summary -->
+    <div class="sub-label" style="margin-top:16px">Deviation Type Summary</div>
+    <table class="rule-table">
+      <tr>
+        <th>Type</th>
+        <th>Description</th>
+        <th>Confidence</th>
+      </tr>
+      <tr>
+        <td><strong>Type 1 — Wick</strong></td>
+        <td>Price wicks beyond the boundary, candle closes back inside.</td>
+        <td><span class="pill pill-bull">Highest</span></td>
+      </tr>
+      <tr>
+        <td><strong>Type 2 — Bad BOS</strong></td>
+        <td>Candle closes outside, next candle closes back inside immediately.</td>
+        <td><span class="pill pill-neut">High</span></td>
+      </tr>
+      <tr>
+        <td><strong>Multi-close within DL</strong></td>
+        <td>Multiple closes outside but none beyond the DL. Check highest TF.</td>
+        <td><span class="pill pill-warn">Moderate — requires TF confirmation</span></td>
+      </tr>
+      <tr>
+        <td><strong>DL exceeded</strong></td>
+        <td>Close beyond the 30% DL level.</td>
+        <td><span class="pill pill-bear">Range Break — do not trade as deviation</span></td>
+      </tr>
+    </table>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════ PHASE 7 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#1a3a24;color:var(--green)">7</div>
+    <div class="phase-title">Adjust the Range for the Deviation (Extend + Recalculate DL)</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="tree">
+      <div class="node">
+        <div class="question">Did price deviate the Range High?</div>
+        <div class="branch">
+          <div class="branch-label label-yes">✓ Yes</div>
+          <div class="action bearish">
+            <strong>Extend the Range High</strong> upward to the deviation high (the wick tip or the high close).<br>
+            Recalculate the DL: the new DL above is 30% of the new (larger) range size above the new Range High.
+          </div>
+        </div>
+      </div>
+      <div class="node">
+        <div class="question">Did price deviate the Range Low?</div>
+        <div class="branch">
+          <div class="branch-label label-yes">✓ Yes</div>
+          <div class="action bullish">
+            <strong>Extend the Range Low</strong> downward to the deviation low.<br>
+            Recalculate the DL: the new DL below is 30% of the new (larger) range size below the new Range Low.
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="tip">
+      <strong>Why extend the range?</strong> The deviation extreme becomes the new structural reference point. The DL must be reset to 30% of the updated range so that future deviation classification remains accurate relative to the actual range size.
+    </div>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════ PHASE 8 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#3a2a10;color:var(--yellow)">8</div>
+    <div class="phase-title">Check Supply / Demand Zone Confluence with the DL</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="tree">
+      <div class="node">
+        <div class="question">Does a <strong>demand zone</strong> exist near or overlapping the DL below the Range Low?</div>
+        <div class="branch">
+          <div class="branch-label label-yes">✓ Yes — demand zone overlaps the DL</div>
+          <div class="action bullish">
+            Treat the DL as sitting at the <strong>bottom</strong> of the demand zone, not the DL line itself.<br>
+            A tap into the demand zone is still a valid deviation even if price briefly closed below the raw DL line.
+          </div>
+        </div>
+        <div class="branch">
+          <div class="branch-label label-no">✗ No — no demand zone near the DL</div>
+          <div class="action neutral">Use the raw DL line as the hard threshold.</div>
+        </div>
+      </div>
+      <div class="node">
+        <div class="question">Does a <strong>supply zone</strong> exist near or overlapping the DL above the Range High?</div>
+        <div class="branch">
+          <div class="branch-label label-yes">✓ Yes — supply zone overlaps the DL</div>
+          <div class="action bearish">
+            Treat the DL as sitting at the <strong>top</strong> of the supply zone.<br>
+            A tap into the supply zone is still a valid deviation even if price briefly closed above the raw DL line.
+          </div>
+        </div>
+        <div class="branch">
+          <div class="branch-label label-no">✗ No</div>
+          <div class="action neutral">Use the raw DL line as the hard threshold.</div>
+        </div>
+      </div>
+    </div>
+    <div class="tip">
+      <strong>Key principle:</strong> Supply and demand zones are higher-quality structural references than the raw DL percentage. When they conflict, respect the zone boundary over the mechanical DL line — but only within reasonable proximity (the zone should overlap or nearly touch the DL).
+    </div>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════ PHASE 9 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#2a1a3a;color:var(--purple)">9</div>
+    <div class="phase-title">Determine Trade Bias and Target</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <table class="rule-table">
+      <tr>
+        <th>Deviation Direction</th>
+        <th>Trade Bias</th>
+        <th>Primary Target</th>
+        <th>Minimum Target</th>
+      </tr>
+      <tr>
+        <td><span class="pill pill-bear">Above Range High</span></td>
+        <td>Short / Sell (Distribution)</td>
+        <td>Range Low</td>
+        <td>Lower portion of the range (below EQ)</td>
+      </tr>
+      <tr>
+        <td><span class="pill pill-bull">Below Range Low</span></td>
+        <td>Long / Buy (Accumulation)</td>
+        <td>Range High</td>
+        <td>Upper portion of the range (above EQ)</td>
+      </tr>
+    </table>
+
+    <div class="sub-label" style="margin-top:16px">Timeframe Strictness Rules for Entry</div>
+    <table class="rule-table">
+      <tr>
+        <th>Timeframe</th>
+        <th>Deviation Speed Required</th>
+        <th>Tolerance</th>
+      </tr>
+      <tr>
+        <td>5m / 10m (Low TF)</td>
+        <td>Quick and sharp. Wick or one bad close, then immediate reversal.</td>
+        <td><span class="pill pill-warn">Low — be strict</span></td>
+      </tr>
+      <tr>
+        <td>1h / 4h (Mid TF)</td>
+        <td>Moderate. A few candles outside is acceptable.</td>
+        <td><span class="pill pill-neut">Moderate</span></td>
+      </tr>
+      <tr>
+        <td>Daily / 3D (High TF)</td>
+        <td>Can be extended — multiple candles, deeper excursion. More people get manipulated.</td>
+        <td><span class="pill pill-bull">High — be more lenient</span></td>
+      </tr>
+    </table>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════ PHASE 10 -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#2a1a3a;color:var(--purple)">10</div>
+    <div class="phase-title">Enter via TCT Schematic (Model 1 or Model 2)</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="action neutral">
+      The range provides <strong>context and direction</strong>. The actual entry trigger is a TCT schematic (accumulation or distribution model) that forms after the deviation is confirmed. This is detailed in TCT Lectures 5A, 5B, and 6.
+    </div>
+    <div class="tip" style="margin-top:12px">
+      <strong>Range role:</strong> The deviation at the range extreme tells you <em>where</em> and <em>which direction</em> to look. The TCT schematic (1-tap, 2-tap, 3-tap pattern) tells you <em>when</em> to enter.
+    </div>
+    <div class="sub-label" style="margin-top:16px">Checklist Before Entry</div>
+    <ul class="checklist">
+      <li>Range is confirmed (six candle rule + EQ touch)</li>
+      <li>Range is rational (not V-shaped)</li>
+      <li>Deviation is classified (Type 1 or Type 2, DL not exceeded)</li>
+      <li>Range extended to deviation extreme; DL recalculated</li>
+      <li>Supply/demand zone confluence checked</li>
+      <li>Trade bias determined (long or short)</li>
+      <li>TCT schematic forming or confirmed at the extreme</li>
+      <li>Target identified (opposite range extreme or inner zone)</li>
+    </ul>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════ BONUS: Internal Ranges -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#1c2128;color:var(--muted)">+</div>
+    <div class="phase-title">Bonus: Ranges Within Ranges (Internal Structure)</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="tree">
+      <div class="node">
+        <div class="question">Is price currently inside a confirmed macro range but not near either extreme?</div>
+        <div class="branch">
+          <div class="branch-label label-yes">✓ Yes</div>
+          <div class="action neutral">
+            Do <strong>not</strong> draw market structure trend lines across the entire range.<br>
+            Instead: identify the <strong>most recent expansion / rotation</strong> direction inside the range and draw a local sub-range from that move.
+          </div>
+        </div>
+      </div>
+      <div class="node">
+        <div class="question">What direction was the most recent internal expansion?</div>
+        <div class="branch">
+          <div class="branch-label label-if">→ Most recent expansion was upward (local uptrend)</div>
+          <div class="action bullish">
+            Draw the local sub-range Fib <strong>Top → Bottom</strong>. Look for deviation/accumulation at the local range low before targeting the local range high.
+          </div>
+        </div>
+        <div class="branch">
+          <div class="branch-label label-if">→ Most recent expansion was downward (local downtrend)</div>
+          <div class="action bearish">
+            Draw the local sub-range Fib <strong>Bottom → Top</strong>. Look for deviation/distribution at the local range high before targeting the local range low.
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="tip">
+      <strong>Hierarchy rule:</strong> Higher-timeframe macro range always takes priority. Internal sub-ranges are subordinate. When the macro range extreme is reached, the macro setup overrides any internal sub-range setup.
+    </div>
+    <div class="sub-label" style="margin-top:14px">Typical Timeframe Nesting Example</div>
+    <table class="rule-table">
+      <tr><th>Level</th><th>Example Timeframe</th><th>Role</th></tr>
+      <tr><td>Macro (outermost)</td><td>3-Day / 4-6H</td><td>Master range — defines the premium/discount/EQ for the entire move</td></tr>
+      <tr><td>Intermediate</td><td>1H / 4H</td><td>Sub-range within the macro — internal rotation targets</td></tr>
+      <tr><td>Local</td><td>15M / 30M</td><td>Entry refinement — where the TCT schematic forms</td></tr>
+    </table>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════ Full IF/THEN Table -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#1c2128;color:var(--muted)">≡</div>
+    <div class="phase-title">Master If / Then Rule Table</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <table class="rule-table">
+      <tr><th>Condition (IF)</th><th>Action (THEN)</th></tr>
+      <tr><td class="cond">Uptrend confirmed</td><td class="result">Draw range Fibonacci Top → Bottom</td></tr>
+      <tr><td class="cond">Downtrend confirmed</td><td class="result">Draw range Fibonacci Bottom → Top</td></tr>
+      <tr><td class="cond">Price returns to 0.5 Fib (EQ)</td><td class="result">Range is confirmed</td></tr>
+      <tr><td class="cond">Six candle rule satisfied on a TF</td><td class="result">Range is valid on that TF</td></tr>
+      <tr><td class="cond">Range looks V-shaped and narrow</td><td class="result">Drop to lower TF; find cleaner sub-range there</td></tr>
+      <tr><td class="cond">Price wicks beyond Range High/Low, closes inside</td><td class="result">Type 1 Wick Deviation — expect reversal</td></tr>
+      <tr><td class="cond">Price closes outside, next candle closes back inside</td><td class="result">Type 2 Bad BOS Deviation — expect reversal</td></tr>
+      <tr><td class="cond">Close outside but within DL (1.3 / −0.3)</td><td class="result">Still a deviation — check highest valid TF</td></tr>
+      <tr><td class="cond">Candle closes beyond the DL</td><td class="result">Reclassify as range break, not deviation</td></tr>
+      <tr><td class="cond">Deviation confirmed</td><td class="result">Extend Range High/Low to deviation extreme; recalculate DL</td></tr>
+      <tr><td class="cond">DL overlaps with demand zone (below Range Low)</td><td class="result">Move DL to bottom of demand zone; zone is valid deviation target</td></tr>
+      <tr><td class="cond">DL overlaps with supply zone (above Range High)</td><td class="result">Move DL to top of supply zone</td></tr>
+      <tr><td class="cond">Looks like break on 30M, range valid on 4H</td><td class="result">Check 4H view — may be a wick deviation on 4H; treat accordingly</td></tr>
+      <tr><td class="cond">Lower timeframe range deviation</td><td class="result">Require quick, sharp reversal — be strict</td></tr>
+      <tr><td class="cond">Higher timeframe range deviation</td><td class="result">Allow deeper, slower deviations — be more lenient</td></tr>
+      <tr><td class="cond">Deviation above Range High</td><td class="result">Look for short (distribution). Target: Range Low</td></tr>
+      <tr><td class="cond">Deviation below Range Low</td><td class="result">Look for long (accumulation). Target: Range High</td></tr>
+      <tr><td class="cond">Inside macro range, not near extremes</td><td class="result">Use most recent internal expansion to draw sub-range</td></tr>
+      <tr><td class="cond">Most recent internal expansion is upward</td><td class="result">Local sub-range Top → Bottom; look for local deviation low</td></tr>
+      <tr><td class="cond">Most recent internal expansion is downward</td><td class="result">Local sub-range Bottom → Top; look for local deviation high</td></tr>
+      <tr><td class="cond">Macro range extreme reached</td><td class="result">Macro setup overrides internal sub-range</td></tr>
+    </table>
+  </div>
+</div>
+
+
+<script>
+function toggle(header) {
+  const body = header.nextElementSibling;
+  const arrow = header.querySelector('.phase-toggle');
+  const isOpen = body.classList.contains('open');
+  body.classList.toggle('open', !isOpen);
+  arrow.classList.toggle('open', !isOpen);
+}
+// Open all toggles initially except the bonus sections
+document.querySelectorAll('.phase-toggle').forEach(t => {
+  if (!t.classList.contains('open')) t.style.display = 'inline';
+});
+</script>
+
+</body>
+</html>
