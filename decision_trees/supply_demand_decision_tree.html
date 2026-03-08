@@ -136,6 +136,20 @@
     font-size: 11px; color: var(--yellow); padding: 4px;
     text-align: center;
   }
+  /* ── Print / PDF ── */
+  .print-btn { position: fixed; top: 16px; right: 16px; z-index: 1000; padding: 8px 16px; background: var(--blue); color: #0d1117; border: none; border-radius: 6px; font-size: 13px; font-weight: 700; cursor: pointer; }
+  .print-btn:hover { opacity: 0.85; }
+  @media print {
+    .print-btn { display: none; }
+    .phase-body { display: block !important; }
+    .phase-toggle { display: none; }
+    body { background: #fff; color: #111; padding: 12px; font-size: 12px; }
+    .phase-header { background: #f0f0f0 !important; cursor: default; }
+    .action { background: #f8f8f8; border-color: #ccc; }
+    .rule-table tr:nth-child(even) td { background: #f5f5f5; }
+    .tip, .quote { background: #f8f8f8; }
+    @page { margin: 1.5cm; }
+  }
 </style>
 </head>
 <body>
@@ -721,6 +735,14 @@ function toggle(header) {
   const isOpen = body.classList.contains('open');
   body.classList.toggle('open', !isOpen);
   arrow.classList.toggle('open', !isOpen);
+}
+</script>
+<button class="print-btn" onclick="printPDF()">Save as PDF</button>
+<script>
+function printPDF() {
+  document.querySelectorAll(".phase-body").forEach(b => b.classList.add("open"));
+  document.querySelectorAll(".phase-toggle").forEach(a => a.classList.add("open"));
+  window.print();
 }
 </script>
 </body>

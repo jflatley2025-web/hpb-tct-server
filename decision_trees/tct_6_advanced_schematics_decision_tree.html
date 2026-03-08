@@ -90,6 +90,20 @@
   .step-list li:last-child{border-bottom:none;}
   .step-num{min-width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;flex-shrink:0;margin-top:1px;}
   .concept-badge{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:700;margin-bottom:12px;}
+  /* ── Print / PDF ── */
+  .print-btn { position: fixed; top: 16px; right: 16px; z-index: 1000; padding: 8px 16px; background: var(--blue); color: #0d1117; border: none; border-radius: 6px; font-size: 13px; font-weight: 700; cursor: pointer; }
+  .print-btn:hover { opacity: 0.85; }
+  @media print {
+    .print-btn { display: none; }
+    .phase-body { display: block !important; }
+    .phase-toggle { display: none; }
+    body { background: #fff; color: #111; padding: 12px; font-size: 12px; }
+    .phase-header { background: #f0f0f0 !important; cursor: default; }
+    .action { background: #f8f8f8; border-color: #ccc; }
+    .rule-table tr:nth-child(even) td { background: #f5f5f5; }
+    .tip, .quote { background: #f8f8f8; }
+    @page { margin: 1.5cm; }
+  }
 </style>
 </head>
 <body>
@@ -742,6 +756,14 @@ function showConcept(id, tab) {
   document.querySelectorAll('.concept-tab').forEach(t=>t.classList.remove('active'));
   document.getElementById(id).classList.add('active');
   tab.classList.add('active');
+}
+</script>
+<button class="print-btn" onclick="printPDF()">Save as PDF</button>
+<script>
+function printPDF() {
+  document.querySelectorAll(".phase-body").forEach(b => b.classList.add("open"));
+  document.querySelectorAll(".phase-toggle").forEach(a => a.classList.add("open"));
+  window.print();
 }
 </script>
 </body>
