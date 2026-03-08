@@ -16278,12 +16278,22 @@ function toggleDebugSection() {
   if (body.classList.contains('dopen')) refreshDebug();
 }
 
+function escapeHtml(str) {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 async function refreshDebug() {
   try {
     const d = await fetchJSON('/api/schematics-5b-trader/debug');
     renderDecisionTrees(d);
   } catch(e) {
-    document.getElementById('dtSections').innerHTML = '<div style="padding:16px;color:#ff4444;font-size:.75rem">Debug fetch error: ' + e.message + '</div>';
+    document.getElementById('dtSections').innerHTML = '<div style="padding:16px;color:#ff4444;font-size:.75rem">Debug fetch error: ' + escapeHtml(e.message) + '</div>';
   }
 }
 
@@ -16340,7 +16350,7 @@ function dtContent(category, dt, t) {
       + (dt.range_quality_score !== null ? Math.round(dt.range_quality_score * 100) + '/100' : '—') + '</span></div>';
     if (dt.range_quality_factors && dt.range_quality_factors.length) {
       h += '<div class="dt-check" style="flex-wrap:wrap"><span class="dt-check-label">Quality factors</span>'
-        + '<span class="dt-check-val" style="color:#888;white-space:normal;text-align:right">' + dt.range_quality_factors.join(', ') + '</span></div>';
+        + '<span class="dt-check-val" style="color:#888;white-space:normal;text-align:right">' + dt.range_quality_factors.map(escapeHtml).join(', ') + '</span></div>';
     }
     return h;
   }
@@ -16368,7 +16378,7 @@ function dtContent(category, dt, t) {
         const top = t.evaluations[0];
         h += '<div class="dt-check"><span class="dt-check-label">Top eval reasons</span>'
           + '<span class="dt-check-val" style="white-space:normal;text-align:right;color:#888">'
-          + (top.reasons || []).join(' | ') + '</span></div>';
+          + (top.reasons || []).map(escapeHtml).join(' | ') + '</span></div>';
       }
     }
     return h;
@@ -16490,8 +16500,8 @@ function renderDecisionTrees(d) {
     const err = d?.state_summary?.last_error;
     summary.textContent = err || 'No scan data yet';
     meta.innerHTML = '<span class="dt-meta-item"><span class="dt-meta-label">Last action:</span>'
-      + '<span class="dt-meta-val red">' + (d?.state_summary?.last_scan_action || 'None') + '</span></span>'
-      + (err ? '<span class="dt-meta-item"><span class="dt-meta-label">Error:</span><span class="dt-meta-val red">' + err + '</span></span>' : '');
+      + '<span class="dt-meta-val red">' + escapeHtml(d?.state_summary?.last_scan_action || 'None') + '</span></span>'
+      + (err ? '<span class="dt-meta-item"><span class="dt-meta-label">Error:</span><span class="dt-meta-val red">' + escapeHtml(err) + '</span></span>' : '');
     sections.innerHTML = '<div style="padding:20px;color:#444;text-align:center;font-size:.75rem">Waiting for scan data…</div>';
     return;
   }
@@ -16585,7 +16595,7 @@ function renderDecisionTrees(d) {
       if (t.status === 'insufficient_data') {
         html += '<div class="dt-no-data">Insufficient candle data for ' + tf + '</div>';
       } else if (t.status === 'error') {
-        html += '<div class="dt-no-data" style="color:#ff4444">Error: ' + (t.error || 'scan failed') + '</div>';
+        html += '<div class="dt-no-data" style="color:#ff4444">Error: ' + escapeHtml(t.error || 'scan failed') + '</div>';
       } else {
         html += dtContent(cat.id, t.dt_data, t);
       }
