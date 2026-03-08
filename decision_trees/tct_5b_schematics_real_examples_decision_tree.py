@@ -121,7 +121,7 @@ class TCT5BInputs:
 
 from typing import Optional, List
 
-`@dataclass`
+@dataclass
 class TCT5BEvaluation:
     """Result of the 5B decision tree evaluation."""
     direction: Optional[SchematicDirection] = None

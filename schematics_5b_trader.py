@@ -34,6 +34,7 @@ from trade_execution import (
     calculate_liquidation_price,
     check_liquidation_safety,
 )
+from decision_tree_bridge import DecisionTreeEvaluator
 
 # Reuse MEXC fetch helpers from tensor trader (no duplication)
 from tensor_tct_trader import fetch_candles_sync, fetch_live_price
@@ -360,129 +361,10 @@ class Schematics5BTradeState:
 # ================================================================
 class Schematics5BEvaluator:
     """
-    Scores TCT schematics for trade entry quality.
-    Fixed 50-point threshold — never adapts.
+    DEPRECATED — kept as fallback reference only.
+    Use DecisionTreeEvaluator (from decision_tree_bridge) instead.
     """
-
-    def evaluate_schematic(self, schematic: Dict, htf_bias: str, current_price: float,
-                           total_candles: int = 200, max_stale_candles: int = 5) -> Dict:
-        score = 0
-        reasons = []
-
-        direction = schematic.get("direction", "unknown")
-        model = schematic.get("model", schematic.get("schematic_type", "unknown"))
-        is_confirmed = schematic.get("is_confirmed", False)
-        tap3 = schematic.get("tap3", {})
-
-        # Live R:R calculation
-        stop_price = (schematic.get("stop_loss") or {}).get("price")
-        target_price_val = (schematic.get("target") or {}).get("price")
-        if stop_price and target_price_val and current_price > 0:
-            if direction == "bullish":
-                live_risk = current_price - stop_price
-                live_reward = target_price_val - current_price
-            else:
-                live_risk = stop_price - current_price
-                live_reward = current_price - target_price_val
-            rr = (live_reward / live_risk) if live_risk > 0 else 0
-        else:
-            rr = schematic.get("risk_reward", 0) or 0
-
-        fail = {"score": 0, "direction": direction, "model": model, "rr": rr,
-                "required_score": ENTRY_THRESHOLD, "pass": False}
-
-        # Gate: must be confirmed
-        if not is_confirmed:
-            return {**fail, "reasons": ["No BOS confirmation"]}
-
-        # Gate: stale BOS
-        bos = schematic.get("bos_confirmation") or {}
-        bos_idx = bos.get("bos_idx")
-        if bos_idx is not None and bos_idx < total_candles - max_stale_candles:
-            return {**fail, "reasons": [f"Stale BOS: {total_candles - bos_idx} candles ago (max {max_stale_candles})"]}
-
-        # Gate: model structure validation
-        if "Model_1_from_M2_failure" not in model:
-            if "Model_1" in model:
-                if tap3.get("type") != "tap3_model1":
-                    return {**fail, "reasons": ["Model 1: Tap3 must be deeper deviation"]}
-            elif "Model_2" in model:
-                if direction == "bullish" and not tap3.get("is_higher_low"):
-                    return {**fail, "reasons": ["Model 2: Tap3 must be higher low for accumulation"]}
-                if direction == "bearish" and not tap3.get("is_lower_high"):
-                    return {**fail, "reasons": ["Model 2: Tap3 must be lower high for distribution"]}
-
-        # Gate: quality floor
-        quality_score = schematic.get("quality_score", 0.0)
-        if quality_score < 0.70:
-            return {**fail, "reasons": [f"Quality too low ({quality_score:.2f} < 0.70)"]}
-
-        # ---- Scoring ----
-
-        # BOS confirmed = base
-        score += 30
-        reasons.append("BOS confirmed")
-
-        # R:R quality
-        if rr >= 3.0:
-            score += 25
-            reasons.append(f"Excellent R:R ({rr:.1f})")
-        elif rr >= 2.0:
-            score += 15
-            reasons.append(f"Good R:R ({rr:.1f})")
-        elif rr >= 1.5:
-            score += 5
-            reasons.append(f"Acceptable R:R ({rr:.1f})")
-        else:
-            return {**fail, "reasons": [f"R:R too low ({rr:.1f})"]}
-
-        # HTF alignment
-        if direction == "bullish" and htf_bias == "bullish":
-            score += 20
-            reasons.append("HTF bias aligned (bullish)")
-        elif direction == "bearish" and htf_bias == "bearish":
-            score += 20
-            reasons.append("HTF bias aligned (bearish)")
-        elif htf_bias == "neutral":
-            return {**fail, "reasons": ["HTF bias neutral — no directional clarity"]}
-        else:
-            score -= 10
-            reasons.append(f"HTF bias conflict ({htf_bias} vs {direction})")
-
-        # Quality bonus
-        quality_bonus = round(quality_score * 15)
-        score += quality_bonus
-        reasons.append(f"Quality {quality_score:.2f} (+{quality_bonus})")
-
-        # Model type (fixed defaults — no learning)
-        if "Model_1" in model:
-            score += 5
-            reasons.append("Model 1 — deeper deviation")
-        elif "Model_2" in model:
-            score += 3
-            reasons.append("Model 2 — HL/LH")
-
-        # Late entry penalty
-        entry_info = schematic.get("entry", {})
-        entry_price = entry_info.get("price")
-        if entry_price:
-            if direction == "bullish" and current_price > entry_price * 1.02:
-                score -= 15
-                reasons.append("Price 2%+ above entry — late")
-            elif direction == "bearish" and current_price < entry_price * 0.98:
-                score -= 15
-                reasons.append("Price 2%+ below entry — late")
-
-        score = max(0, min(100, score))
-        return {
-            "score": score,
-            "direction": direction,
-            "model": model,
-            "rr": rr,
-            "required_score": ENTRY_THRESHOLD,
-            "pass": score >= ENTRY_THRESHOLD,
-            "reasons": reasons,
-        }
+    pass
 
 
 # ================================================================
@@ -793,7 +675,7 @@ class Schematics5BTrader:
 
     def __init__(self):
         self.state = Schematics5BTradeState()
-        self.evaluator = Schematics5BEvaluator()
+        self.evaluator = DecisionTreeEvaluator()
         self.last_debug: Dict = {}
         # Per-symbol HTF bias cache: symbol → (bias_str, expiry_timestamp)
         self._htf_bias_cache: Dict[str, str] = {}
@@ -802,10 +684,8 @@ class Schematics5BTrader:
     def scan_and_trade(self, top_5_pairs=None) -> Dict:
         """Main cycle: fetch, detect, evaluate, trade.
 
-        top_5_pairs: optional list of {symbol, timeframe, ...} dicts from the
-        dashboard range scanner.  When provided, each symbol is scanned for TCT
-        setups; the highest-scoring qualifying setup across all symbols is traded.
-        Falls back to BTCUSDT when empty or None (e.g. before first range scan).
+        BTCUSDT only.  top_5_pairs parameter is accepted for backward
+        compatibility but ignored — all scanning is done on BTCUSDT.
         """
         cycle_result = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -814,13 +694,12 @@ class Schematics5BTrader:
         }
 
         try:
-            # Build symbol universe from top_5_pairs; fall back to module default.
-            symbols = [p["symbol"] for p in (top_5_pairs or []) if p.get("symbol")] or [SYMBOL]
+            # Keep evaluator's flip-detection in sync with current trade
+            self.evaluator.set_active_trade(self.state.current_trade)
 
-            # 1. Manage open trade first — use the trade's own symbol for price.
+            # 1. Manage open trade first
             if self.state.current_trade:
-                trade_sym = self.state.current_trade.get("symbol", SYMBOL)
-                df_price = fetch_candles_sync(trade_sym, "1m", 10)
+                df_price = fetch_candles_sync(SYMBOL, "1m", 10)
                 if df_price is None or len(df_price) == 0:
                     self.state.last_error = "Could not fetch price data"
                     self.state.save()
@@ -837,44 +716,28 @@ class Schematics5BTrader:
                 self.state.save()
                 return cycle_result
 
-            # 2. Scan each symbol for qualifying TCT setups.
-            best_setup = None
-            best_score = 0
-            best_tf = None
-            best_symbol = None
-            best_current_price = 0.0
-            best_htf_bias = "neutral"
-            all_forming: List[Dict] = []
-            per_symbol_results: Dict[str, Dict] = {}
-
-            for sym in symbols:
-                sym_result = self._scan_single_symbol(sym)
-                per_symbol_results[sym] = sym_result
-                all_forming.extend(sym_result.get("forming", []))
-                if sym_result.get("best_setup") and sym_result.get("best_score", 0) > best_score:
-                    best_score = sym_result["best_score"]
-                    best_setup = sym_result["best_setup"]
-                    best_tf = sym_result["best_tf"]
-                    best_symbol = sym
-                    best_current_price = sym_result["current_price"]
-                    best_htf_bias = sym_result["htf_bias"]
-
-            # Keep at most 5 forming schematics, newest tap3 first.
-            all_forming.sort(key=lambda x: (x.get("tap3") or {}).get("idx", 0), reverse=True)
+            # 2. Scan BTCUSDT for qualifying TCT setups.
+            sym_result = self._scan_single_symbol(SYMBOL)
+            best_setup = sym_result.get("best_setup")
+            best_score = sym_result.get("best_score", 0)
+            best_tf = sym_result.get("best_tf")
+            best_current_price = sym_result.get("current_price", 0.0)
+            best_htf_bias = sym_result.get("htf_bias", "neutral")
+            all_forming = sym_result.get("forming", [])
 
             self.last_debug = {
                 "timestamp": cycle_result["timestamp"],
-                "symbols_scanned": symbols,
+                "symbols_scanned": [SYMBOL],
                 "current_price": best_current_price,
-                "best_symbol": best_symbol,
+                "best_symbol": SYMBOL,
                 "best_tf": best_tf,
                 "best_score": best_score,
                 "htf_cascade_active": True,
                 "forming_schematics": all_forming[:5],
-                "per_symbol": per_symbol_results,
+                "per_symbol": {SYMBOL: sym_result},
             }
 
-            # 3. Enter trade on highest-scoring qualifying setup across all symbols.
+            # 3. Enter trade on highest-scoring qualifying setup.
             if best_setup:
                 schematic, evaluation = best_setup
                 entry_info = schematic.get("entry", {})
@@ -884,29 +747,24 @@ class Schematics5BTrader:
                     cycle_result["action"] = "duplicate_setup_skipped"
                     cycle_result["details"] = {
                         "price": best_current_price,
-                        "symbol": best_symbol,
+                        "symbol": SYMBOL,
                         "skipped_entry": candidate_price,
                         "reason": "Same setup as recent trade — cooldown active",
                     }
                 else:
                     trade = self._enter_trade(
                         schematic, evaluation, best_current_price, best_htf_bias,
-                        best_symbol, best_tf,
+                        SYMBOL, best_tf,
                     )
                     cycle_result["action"] = "trade_entered"
                     cycle_result["details"] = trade
             else:
                 cycle_result["action"] = "no_qualifying_setups"
                 cycle_result["details"] = {
-                    "symbols": symbols,
-                    "per_symbol": {
-                        sym: {
-                            "best_score": r.get("best_score", 0),
-                            "htf_bias": r.get("htf_bias", "neutral"),
-                            "error": r.get("error"),
-                        }
-                        for sym, r in per_symbol_results.items()
-                    },
+                    "symbols": [SYMBOL],
+                    "best_score": best_score,
+                    "htf_bias": best_htf_bias,
+                    "error": sym_result.get("error"),
                 }
 
             self.state.last_scan_time = cycle_result["timestamp"]
@@ -1112,6 +970,7 @@ class Schematics5BTrader:
                         s, htf_bias, current_price,
                         total_candles=len(eff_df),
                         max_stale_candles=_MAX_STALE.get(effective_tf, 5),
+                        candle_df=eff_df,
                     )
                     eval_result["source_tf"] = tf
                     eval_result["effective_tf"] = effective_tf
