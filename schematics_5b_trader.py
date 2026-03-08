@@ -772,17 +772,12 @@ class Schematics5BTrader:
         The background scan loop writes last_debug and mutates state concurrently.
         Reading them separately risks mixing data from different scan cycles.
         Taking both under one lock guarantees the response is internally consistent.
+        Uses Schematics5BTradeState.snapshot() so all state fields are captured in
+        one call rather than being read individually across separate attribute accesses.
         """
         with self._lock:
             debug = dict(self.last_debug)
-            debug["state_summary"] = {
-                "balance": self.state.balance,
-                "has_open_trade": self.state.current_trade is not None,
-                "total_trades": len(self.state.trade_history),
-                "last_scan_time": self.state.last_scan_time,
-                "last_scan_action": self.state.last_scan_action,
-                "last_error": self.state.last_error,
-            }
+            debug["state_summary"] = self.state.snapshot()
         return debug
 
     def scan_and_trade(self, top_5_pairs=None) -> Dict:
