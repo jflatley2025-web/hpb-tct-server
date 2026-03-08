@@ -16342,7 +16342,7 @@ function dtContent(category, dt, t) {
     h += chk('Range detected', dt.range_high !== null && dt.range_high !== undefined,
       dt.range_high ? ('$' + fmt(dt.range_high) + ' / $' + fmt(dt.range_low)) : null);
     h += chk('Range is horizontal (taps within 50% of size)', dt.range_horizontal);
-    h += chk('Range size rational (0.5%–8% of price)', rngInRange, rangeSize);
+    h += chk('Range size rational (0.5%-8% of price)', rngInRange, rangeSize);
     h += chk('Six-candle rule valid on all taps', dt.six_candle_valid);
     h += chk('Clean pivot structure on all taps', dt.range_has_clean_pivots);
     h += '<div class="dt-check"><span class="dt-check-label">Range quality score</span>'
