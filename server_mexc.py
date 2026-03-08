@@ -22,9 +22,6 @@ import re
 # Initialize logging
 logging.basicConfig(level=logging.INFO)
 
-# Initialize FastAPI app
-app = FastAPI()
-
 # Serve decision tree HTML files — one explicit literal route per file.
 # No path parameters, no dynamic matching. Files read once at startup.
 _DECISION_TREES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "decision_trees")
@@ -39,24 +36,6 @@ _DT_6      = _read_dt("tct_6_advanced_schematics_decision_tree.html")
 _DT_RANGES = _read_dt("ranges_decision_tree.html")
 _DT_LIQ    = _read_dt("liquidity_decision_tree.html")
 _DT_SD     = _read_dt("supply_demand_decision_tree.html")
-
-@app.get("/decision_trees/tct_5a_schematics_decision_tree.html",    include_in_schema=False)
-def dt_5a():     return HTMLResponse(_DT_5A)
-
-@app.get("/decision_trees/tct_5b_schematics_real_examples_decision_tree.html", include_in_schema=False)
-def dt_5b():     return HTMLResponse(_DT_5B)
-
-@app.get("/decision_trees/tct_6_advanced_schematics_decision_tree.html",       include_in_schema=False)
-def dt_6():      return HTMLResponse(_DT_6)
-
-@app.get("/decision_trees/ranges_decision_tree.html",               include_in_schema=False)
-def dt_ranges(): return HTMLResponse(_DT_RANGES)
-
-@app.get("/decision_trees/liquidity_decision_tree.html",            include_in_schema=False)
-def dt_liq():    return HTMLResponse(_DT_LIQ)
-
-@app.get("/decision_trees/supply_demand_decision_tree.html",        include_in_schema=False)
-def dt_sd():     return HTMLResponse(_DT_SD)
 
 # ChromaDB + SentenceTransformer are initialized lazily on first use so the
 # heavy model weights (all-MiniLM-L6-v2 + torch) don't load at startup and
@@ -249,6 +228,25 @@ def resolve_symbol(symbol_param: Optional[str] = None) -> str:
     return SYMBOL
 
 app = FastAPI(title="HPB–TCT v21.2 MEXC Server", version="21.2")
+
+# Decision tree routes (must be registered on this app instance)
+@app.get("/decision_trees/tct_5a_schematics_decision_tree.html",    include_in_schema=False)
+def dt_5a():     return HTMLResponse(_DT_5A)
+
+@app.get("/decision_trees/tct_5b_schematics_real_examples_decision_tree.html", include_in_schema=False)
+def dt_5b():     return HTMLResponse(_DT_5B)
+
+@app.get("/decision_trees/tct_6_advanced_schematics_decision_tree.html",       include_in_schema=False)
+def dt_6():      return HTMLResponse(_DT_6)
+
+@app.get("/decision_trees/ranges_decision_tree.html",               include_in_schema=False)
+def dt_ranges(): return HTMLResponse(_DT_RANGES)
+
+@app.get("/decision_trees/liquidity_decision_tree.html",            include_in_schema=False)
+def dt_liq():    return HTMLResponse(_DT_LIQ)
+
+@app.get("/decision_trees/supply_demand_decision_tree.html",        include_in_schema=False)
+def dt_sd():     return HTMLResponse(_DT_SD)
 
 latest_ranges = {"LTF": [], "HTF": []}
 scan_interval_sec = 120
