@@ -16280,6 +16280,7 @@ function renderDebug(d) {
     '<div class="debug-row"><span class="dlabel">Threshold</span><span class="dval dyellow">50 (fixed)</span></div>' +
     '<div class="debug-row"><span class="dlabel">Balance</span><span class="dval dcyan">$' + (d.state_summary?.balance || 0).toLocaleString(undefined,{minimumFractionDigits:2}) + '</span></div>' +
     '<div class="debug-row"><span class="dlabel">Open Trade</span><span class="dval">' + (d.state_summary?.has_open_trade ? 'Yes' : 'No') + '</span></div>' +
+    '<div class="debug-row"><span class="dlabel">Evaluator</span><span class="dval dcyan">' + (d.evaluator_type || 'legacy') + '</span></div>' +
     '<div class="debug-row"><span class="dlabel">Last Error</span><span class="dval ' + (d.state_summary?.last_error ? 'dred' : '') + '">' + (d.state_summary?.last_error || 'None') + '</span></div>' +
     '</div>';
 
@@ -16307,10 +16308,23 @@ function renderDebug(d) {
           html += '<div class="debug-eval">';
           html += '<span style="color:#00d4ff">#' + (i+1) + '</span> ';
           html += '<span class="dval ' + passC + '">' + (ev.pass ? 'PASS' : 'FAIL') + '</span> ';
-          html += 'Score: <span class="dval">' + ev.score + '/50</span> ';
+          html += 'Score: <span class="dval">' + ev.score + '/100</span> ';
           if (ev.htf_upgraded) html += '<span style="color:#00d4ff;font-size:.6rem"> ↑' + (ev.effective_tf||'') + '</span> ';
           html += (ev.direction||'?').toUpperCase() + ' ' + (ev.model||'?') + ' R:R=' + (ev.rr||0).toFixed(1);
           html += '<div class="dereason">' + (ev.reasons || []).join(' | ') + '</div>';
+          if (ev.tree_results) {
+            html += '<div style="margin-top:3px;padding-left:8px;font-size:.6rem;color:#aaa">';
+            const treeOrder = ['range','supply_demand','liquidity','tct_5a','tct_5b','advanced'];
+            const treeLabels = {range:'Range',supply_demand:'S/D',liquidity:'Liq',tct_5a:'5A',tct_5b:'5B',advanced:'Adv'};
+            treeOrder.forEach(tk => {
+              const tr = ev.tree_results[tk];
+              if (!tr) return;
+              const tpass = tr.pass || tr.passed;
+              const tcolor = tpass ? '#00e676' : (tr.soft_fail ? '#ffeb3b' : '#ff4444');
+              html += '<span style="color:' + tcolor + ';margin-right:6px">' + (treeLabels[tk]||tk) + ':' + (tpass ? 'OK' : 'FAIL') + '</span>';
+            });
+            html += '</div>';
+          }
           html += '</div>';
         });
       }
