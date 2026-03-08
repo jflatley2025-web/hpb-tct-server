@@ -759,6 +759,8 @@ class Schematics5BTrader:
                 "htf_cascade_active": True,
                 "forming_schematics": all_forming[:5],
                 "per_symbol": {SYMBOL: sym_result},
+                # Hoist timeframes to top level so the dashboard JS can render them
+                "timeframes": sym_result.get("timeframes", {}),
             }
 
             # 3. Enter trade on highest-scoring qualifying setup.
