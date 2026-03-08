@@ -119,7 +119,9 @@ class TCT5BInputs:
     ltf_bullish_break_then_new_low: bool  # Lower-TF bullish BOS immediately followed by new lower low
 
 
-@dataclass
+from typing import Optional, List
+
+`@dataclass`
 class TCT5BEvaluation:
     """Result of the 5B decision tree evaluation."""
     direction: Optional[SchematicDirection] = None
@@ -131,10 +133,9 @@ class TCT5BEvaluation:
     primary_bos_rr: float = 0.0
     stop_loss_note: str = ""
     primary_target: str = ""
-    passed_phases: list = field(default_factory=list)
+    passed_phases: List[str] = field(default_factory=list)
     failed_at_phase: Optional[str] = None
-    warnings: list = field(default_factory=list)
-
+    warnings: List[str] = field(default_factory=list)
 
 # ──────────────────────────────────────────────────────────
 # Phase functions
