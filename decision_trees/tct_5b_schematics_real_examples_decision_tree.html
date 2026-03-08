@@ -1,0 +1,668 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TCT Lecture 5B — Real Trading Examples Decision Tree</title>
+<style>
+  :root {
+    --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #e6edf3;
+    --muted: #8b949e; --green: #3fb950; --red: #f85149; --yellow: #d29922;
+    --blue: #58a6ff; --purple: #bc8cff; --orange: #ffa657; --teal: #56d364;
+    --cyan: #39d353;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 14px; line-height: 1.5; padding: 24px; }
+  h1 { font-size: 22px; font-weight: 700; margin-bottom: 6px; color: var(--blue); }
+  .subtitle { color: var(--muted); margin-bottom: 28px; font-size: 13px; }
+  .legend { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 28px; padding: 12px 16px; background: var(--card); border: 1px solid var(--border); border-radius: 8px; }
+  .legend-item { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+  .dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+  .phase { margin-bottom: 24px; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .phase-header { display: flex; align-items: center; gap: 12px; padding: 12px 16px; background: var(--card); cursor: pointer; user-select: none; }
+  .phase-header:hover { background: #1c2128; }
+  .phase-number { width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 13px; flex-shrink: 0; }
+  .phase-title { font-weight: 600; font-size: 15px; flex: 1; }
+  .phase-toggle { color: var(--muted); font-size: 18px; transition: transform 0.2s; }
+  .phase-toggle.open { transform: rotate(90deg); }
+  .phase-body { border-top: 1px solid var(--border); padding: 16px; display: none; background: var(--bg); }
+  .phase-body.open { display: block; }
+  .node { margin-bottom: 12px; border-left: 3px solid var(--border); padding-left: 14px; }
+  .question { font-weight: 600; color: var(--blue); margin-bottom: 6px; }
+  .question::before { content: "? "; color: var(--muted); }
+  .branch { margin-top: 6px; margin-left: 12px; }
+  .branch-label { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+  .label-yes { color: var(--green); } .label-no { color: var(--red); } .label-if { color: var(--yellow); }
+  .action { background: #1c2128; border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; margin-top: 4px; margin-bottom: 4px; font-size: 13px; }
+  .action.bullish { border-left: 3px solid var(--green); }
+  .action.bearish { border-left: 3px solid var(--red); }
+  .action.neutral { border-left: 3px solid var(--blue); }
+  .action.warn    { border-left: 3px solid var(--yellow); }
+  .action.skip    { border-left: 3px solid var(--muted); color: var(--muted); }
+  .action.purple  { border-left: 3px solid var(--purple); }
+  .action.orange  { border-left: 3px solid var(--orange); }
+  .action.teal    { border-left: 3px solid var(--teal); }
+  .rule-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; }
+  .rule-table th { background: #1c2128; color: var(--muted); text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .rule-table td { padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .rule-table tr:last-child td { border-bottom: none; }
+  .rule-table tr:nth-child(even) td { background: #12181f; }
+  .cond { color: var(--yellow); font-weight: 600; }
+  .tip { background: #1c2128; border: 1px solid var(--border); border-left: 3px solid var(--purple); border-radius: 6px; padding: 10px 14px; margin-top: 10px; font-size: 13px; color: var(--muted); }
+  .tip strong { color: var(--purple); }
+  .quote { background: #12181f; border: 1px solid var(--border); border-left: 3px solid var(--orange); border-radius: 6px; padding: 10px 14px; margin-top: 10px; font-size: 13px; font-style: italic; }
+  .checklist { margin-top: 8px; padding-left: 0; list-style: none; }
+  .checklist li { padding: 4px 0 4px 22px; position: relative; font-size: 13px; }
+  .checklist li::before { content: "☐"; position: absolute; left: 0; color: var(--muted); }
+  .sub-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); margin-top: 12px; margin-bottom: 4px; font-weight: 700; }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 11px; font-weight: 700; letter-spacing: 0.04em; }
+  .pill-bull { background: #1a3a24; color: var(--green); border: 1px solid var(--green); }
+  .pill-bear { background: #3a1a1a; color: var(--red);   border: 1px solid var(--red); }
+  .pill-neut { background: #1a2a3a; color: var(--blue);  border: 1px solid var(--blue); }
+  .pill-warn { background: #3a2a10; color: var(--yellow); border: 1px solid var(--yellow); }
+  .pill-purp { background: #2a1a3a; color: var(--purple); border: 1px solid var(--purple); }
+  .pill-orng { background: #3a2010; color: var(--orange); border: 1px solid var(--orange); }
+  .example-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 12px; }
+  @media (max-width: 700px) { .example-grid { grid-template-columns: 1fr; } }
+  .example-card { background: #12181f; border: 1px solid var(--border); border-radius: 8px; padding: 14px; font-size: 12px; }
+  .example-card h4 { font-size: 12px; font-weight: 700; margin-bottom: 8px; }
+  .example-card ul { list-style: none; padding: 0; }
+  .example-card li { padding: 3px 0 3px 14px; position: relative; border-bottom: 1px dashed #21262d; }
+  .example-card li:last-child { border-bottom: none; }
+  .example-card li::before { content: "→"; position: absolute; left: 0; color: var(--muted); }
+  .domino { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px 14px; background: #12181f; border: 1px solid var(--border); border-radius: 6px; margin-top: 8px; font-size: 13px; }
+  .domino-box { padding: 4px 10px; border-radius: 4px; font-weight: 700; font-size: 12px; }
+  .domino-arrow { color: var(--muted); }
+  .rr-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-weight: 700; font-size: 11px; margin-left: 6px; }
+  .rr-bad  { background: #3a1a1a; color: var(--red); }
+  .rr-ok   { background: #3a2a10; color: var(--yellow); }
+  .rr-good { background: #1a3a24; color: var(--green); }
+</style>
+</head>
+<body>
+
+<h1>TCT Lecture 5B — Real Trading Examples: Decision Tree</h1>
+<p class="subtitle">
+  Practical rules extracted from TCT 2024 Mentorship Lecture 5B | TCT Schematics (Real Examples).<br>
+  Builds on Lecture 5A theory: adds highest-TF detection, overlapping structure / domino effect, reconfirmation tool, rationality rule, tap spacing, and R:R awareness.
+</p>
+
+<div class="legend">
+  <div class="legend-item"><div class="dot" style="background:var(--green)"></div> Bullish / Long</div>
+  <div class="legend-item"><div class="dot" style="background:var(--red)"></div> Bearish / Short</div>
+  <div class="legend-item"><div class="dot" style="background:var(--blue)"></div> Neutral / assess</div>
+  <div class="legend-item"><div class="dot" style="background:var(--yellow)"></div> Warning / caution</div>
+  <div class="legend-item"><div class="dot" style="background:var(--purple)"></div> Advanced refinement</div>
+  <div class="legend-item"><div class="dot" style="background:var(--orange)"></div> Critical edge case</div>
+  <div class="legend-item"><div class="dot" style="background:var(--muted)"></div> Invalid / wait</div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 1 — Rationality check -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#3a2a10;color:var(--yellow)">1</div>
+    <div class="phase-title">Step 0: The Rationality Rule — Does This Actually Look Like a Range?</div>
+    <div class="phase-toggle open">›</div>
+  </div>
+  <div class="phase-body open">
+    <div class="quote" style="margin-bottom:12px">
+      "I don't want you guys to be doing that. I want you guys to be rational. A range is just horizontal price action." — TCT Lecture 5B
+    </div>
+    <div class="node">
+      <div class="question">Does the price structure between the range extreme and its deviations look like horizontal consolidation?</div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes — horizontal/sideways price action, deviations are wicks or "bad breaks"</div>
+        <div class="action neutral">
+          <strong>Rational range.</strong> Clean TCT schematic candidate. Proceed to Phase 2.
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-no">✗ No — massive impulsive/explosive candles, not consolidating</div>
+        <div class="action skip">
+          <strong>Irrational / not a range.</strong> Do not force tap counts onto impulsive moves. Skip — wait for genuine horizontal price action to develop.
+        </div>
+      </div>
+    </div>
+
+    <div class="sub-label">What valid deviation shapes look like (from real examples)</div>
+    <table class="rule-table">
+      <tr><th>Type</th><th>Description</th><th>Valid?</th></tr>
+      <tr><td>Wick only</td><td>Price wicked below/above range extreme but closed inside the range</td><td style="color:var(--green)">✓ Valid — most obvious deviation</td></tr>
+      <tr><td>Bad break</td><td>Candle closed slightly beyond extreme then immediately reversed back inside (within DL2)</td><td style="color:var(--green)">✓ Valid — counts as deviation not a break</td></tr>
+      <tr><td>Massive impulsive wick</td><td>Huge explosive candle far beyond range extreme</td><td style="color:var(--yellow)">⚠ Caution — apply rationality check first</td></tr>
+      <tr><td>True range break</td><td>Candle closed beyond DL2 (30% extension)</td><td style="color:var(--red)">✗ Invalid — not a deviation</td></tr>
+    </table>
+
+    <div class="tip" style="margin-top:12px">
+      <strong>Key tell:</strong> In every real example from this lecture, taps were either clean wicks or "bad breaks" (candle closed above/below, immediately came back). When you see price literally going sideways like horizontal price action — that is the ideal TCT schematic shape.
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 2 — Highest TF -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#1a2a3a;color:var(--blue)">2</div>
+    <div class="phase-title">Step 1: Identify the Highest Valid Timeframe for the TCT Schematic</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="tip" style="margin-bottom:12px">
+      <strong>Always do this at the first deviation (Tap 2).</strong> The highest valid TF label tells you which schematic you're trading and matters for the advanced lectures. It determines which demand/supply zone timeframes are proportional.
+    </div>
+    <div class="node">
+      <div class="question">Starting from your analysis timeframe, step up through TFs (30m → 45m → 1H → 2H → 3H → 4H → 6H…). On each TF, does the six-candle rule still apply across the range AND the first deviation?</div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes — six-candle rule holds on this TF</div>
+        <div class="action neutral">Continue stepping up to the next higher TF. Keep checking.</div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-no">✗ No — six-candle rule breaks on this TF</div>
+        <div class="action neutral">
+          <strong>The previous TF was your highest valid TF.</strong> Label the schematic by that timeframe (e.g., "45-minute TCT schematic", "4-hour TCT schematic"). Use this TF to calibrate demand/supply zone sizes.
+        </div>
+      </div>
+    </div>
+
+    <div class="sub-label">Six-Candle Rule Quick Check (per TF)</div>
+    <table class="rule-table">
+      <tr><th>What to verify at each TF</th><th>Pass criteria</th></tr>
+      <tr><td>Range formation: high → range low</td><td>At least 2 consecutive bearish (or bullish) closing candles trading in the range direction</td></tr>
+      <tr><td>Range confirmation: back to EQ</td><td>At least 2 consecutive candles in the opposite direction returning to equilibrium</td></tr>
+      <tr><td>First deviation from range extreme</td><td>At least 2 consecutive candles completing the deviation pattern</td></tr>
+      <tr><td>All three conditions above must hold</td><td>If any one fails → that TF is not valid → step back to previous TF</td></tr>
+    </table>
+
+    <div class="sub-label" style="margin-top:12px">Real TF Examples from Lecture 5B</div>
+    <div class="example-grid">
+      <div class="example-card" style="border-top:2px solid var(--red)">
+        <h4 style="color:var(--red)">SOLANA Distribution</h4>
+        <ul>
+          <li>30min ✓ → 45min ✓ → 1H ✗ (no 2 consecutive bearish candles in deviation)</li>
+          <li><strong>→ 45-minute TCT schematic</strong></li>
+        </ul>
+      </div>
+      <div class="example-card" style="border-top:2px solid var(--red)">
+        <h4 style="color:var(--red)">PEPE Distribution</h4>
+        <ul>
+          <li>45min ✓ → 1H ✓ → 2H ✓ → 3H ✓ → 4H ✗ (macro range not valid on 3H)</li>
+          <li><strong>→ 2-hour TCT schematic</strong> (used 2H, not 3H)</li>
+        </ul>
+      </div>
+      <div class="example-card" style="border-top:2px solid var(--red)">
+        <h4 style="color:var(--red)">4H Distribution (unnamed)</h4>
+        <ul>
+          <li>30min ✓ → 45min ✓ → 1H ✓ → ... → 4H ✓ → 6H ✗</li>
+          <li><strong>→ 4-hour TCT schematic</strong></li>
+        </ul>
+      </div>
+      <div class="example-card" style="border-top:2px solid var(--green)">
+        <h4 style="color:var(--green)">GOLD Accumulation</h4>
+        <ul>
+          <li>15min ✓ → 30min ✗ (no 2 consecutive candles going higher)</li>
+          <li><strong>→ 15-minute TCT schematic</strong></li>
+        </ul>
+      </div>
+      <div class="example-card" style="border-top:2px solid var(--green)">
+        <h4 style="color:var(--green)">EUR/USD Accumulation</h4>
+        <ul>
+          <li>45min ✓ → 1H ✗ (no 2 candles going up from range low before deviation)</li>
+          <li><strong>→ 45-minute TCT schematic</strong></li>
+        </ul>
+      </div>
+      <div class="example-card" style="border-top:2px solid var(--green)">
+        <h4 style="color:var(--green)">SOLANA Accumulation</h4>
+        <ul>
+          <li>4H ✓ → 6H ✗</li>
+          <li><strong>→ 4-hour TCT schematic</strong></li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="tip" style="margin-top:12px">
+      <strong>Why this matters:</strong> The schematic TF determines what demand/supply zone sizes are proportional for Model 2 validation. A 4H schematic uses 3H OBs. A 15min schematic uses 5min OBs. Do not use 1min OBs to validate a 4H range Model 2.
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 3 — Tap spacing -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#3a2a10;color:var(--yellow)">3</div>
+    <div class="phase-title">Step 2: Tap Spacing Check — Are the Three Taps Reasonably Spread?</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="node">
+      <div class="question">Is the distance between Tap 2 and Tap 3 extremely small compared to the distance between Tap 1 and Tap 2?</div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes — Tap 2–3 gap is extremely close / negligible</div>
+        <div class="action warn">
+          <strong>Suspect Tap 3.</strong> Prefer taps to be somewhat equally spaced. If Tap 3 doesn't even appear as a distinct swing on the schematic's own timeframe, it is NOT a valid Tap 3 on that TF.<br>
+          Check: zoom out to the schematic's highest valid TF. Can you see a distinct swing at the Tap 3 level? If not → invalid Tap 3. The schematic is still forming.
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-no">✗ No — Tap spacing is reasonable / somewhat equal</div>
+        <div class="action neutral">Tap spacing acceptable. Continue to Tap 3 validation.</div>
+      </div>
+    </div>
+    <div class="tip">
+      <strong>Rule:</strong> "Preferably you want your taps to be somewhat more or equally spread out." A Tap 3 that is barely a blip on the schematic's TF is not a real Tap 3 — you cannot draw valid six-candle structure from it. This is especially important when lower-TF schematics approach higher-TF range extremes.
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 4 — Extreme liq vs SD priority -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#2a1a3a;color:var(--purple)">4</div>
+    <div class="phase-title">Step 3 (Model 2): Extreme Liquidity vs Extreme S/D — Which to Prioritize?</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="tip" style="margin-bottom:12px">
+      <strong>Recap from 5A:</strong> Model 2 Tap 3 must meet Requirement A (extreme liquidity grab) OR Requirement B (extreme demand/supply mitigation). From 5B real examples, here is how to weigh them when they conflict or one is much clearer.
+    </div>
+    <div class="node">
+      <div class="question">Is one of the two requirements (extreme liquidity or extreme S/D) dramatically more obvious and clean than the other?</div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes — one is very obvious, the other is weak or unclear</div>
+        <div class="action purple">
+          <strong>Focus on the obvious one.</strong> "If one of the two is so obvious and looks so clean, just watch that one." Both aligning is ideal but not required — the quality of the requirement matters more than checking both boxes.
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-no">✗ No — both are of similar clarity (or both weak)</div>
+        <div class="action neutral">
+          If both are clear → extra confluence, high confidence.<br>
+          If both are weak → reconsider whether this is a valid Model 2 Tap 3.
+        </div>
+      </div>
+    </div>
+
+    <div class="sub-label" style="margin-top:12px">Trendline Liquidity — A Specific Extreme Liquidity Form</div>
+    <div class="action purple">
+      <strong>Trendline liquidity</strong> = a series of successively lower highs (distribution) or higher lows (accumulation) creating a clean diagonal liquidity trail. When price sweeps across all those highs/lows in one move, it is grabbing massive buy-side or sell-side liquidity.<br><br>
+      If a trendline liquidity trail is obvious on the left of Tap 3's area AND the first MSH/MSL aligns with that trail → this is the most obvious extreme liquidity possible. Focus on it exclusively even if no supply/demand zone is present.
+    </div>
+
+    <div class="sub-label" style="margin-top:12px">Extreme Discount / Premium Proportionality</div>
+    <table class="rule-table">
+      <tr><th>Schematic TF</th><th>Acceptable S/D zone TF for Model 2 Req B</th><th>Notes</th></tr>
+      <tr><td>15-minute range</td><td>5-minute OBs</td><td>A 5min OB in extreme discount is "very nice"</td></tr>
+      <tr><td>45-minute range</td><td>10-minute OBs</td><td>10min OB in discount = acceptable even if not extreme discount</td></tr>
+      <tr><td>2-hour range</td><td>1-minute structure pool</td><td>If that's the only valid structure on any TF, it is valid</td></tr>
+      <tr><td>4-hour range</td><td>3-hour OBs</td><td>Use the full 3H OB zone — do not dissect it to 1min</td></tr>
+    </table>
+    <div class="tip" style="margin-top:8px">
+      <strong>Flexibility on zone location:</strong> For large TF ranges, if a good demand zone falls just above the extreme discount boundary (e.g., upper edge of discount section), it may still be acceptable — especially if you can identify a more refined zone inside it at a lower TF that does sit in extreme discount.
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 5 — R:R check before entry -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#1a2a3a;color:var(--blue)">5</div>
+    <div class="phase-title">Step 4: Assess R:R Before Entry — Do You Need to Go Lower TF?</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="node">
+      <div class="question">If you were to enter on the main (higher-TF / black) BOS with SL at Tap 3 extreme and target at Wyckoff High/Low — what is the R:R?</div>
+      <div class="branch">
+        <div class="branch-label label-if">→ R:R is ≥ 1.5 and target is the Wyckoff High/Low</div>
+        <div class="action neutral">
+          Acceptable. Enter on the main BOS. No need to go lower TF.
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-if">→ R:R is &lt; 1 or entry would be near equilibrium</div>
+        <div class="action orange">
+          <strong>Do NOT take this entry.</strong> A sub-1:1 R:R on a valid setup means you entered too late in the Tap 2–3 structure. Apply overlapping structure / domino effect (Phase 6) to find a lower-TF entry.
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-if">→ R:R is borderline (1.0–1.5)</div>
+        <div class="action warn">
+          Consider going lower TF for a better entry. Weigh the schematic quality. On very high TF schematics (4H+), a 1:1 on the primary BOS may still be acceptable given the magnitude.
+        </div>
+      </div>
+    </div>
+
+    <div class="sub-label" style="margin-top:12px">R:R Reference from Lecture 5B Real Examples</div>
+    <table class="rule-table">
+      <tr><th>Example</th><th>Primary BOS R:R</th><th>Lower-TF BOS R:R</th><th>TF Used</th></tr>
+      <tr><td>PEPE 2H Dist (M2)</td><td>Poor (BOS near EQ)</td><td class="rr-good">2.19R</td><td>2-min blue BOS</td></tr>
+      <tr><td>4H Dist (M1)</td><td class="rr-bad">~1:1</td><td class="rr-good">3.0R</td><td>15-min blue BOS</td></tr>
+      <tr><td>SOLANA 30min Dist (M2)</td><td>—</td><td class="rr-ok">1.1R</td><td>3–5min BOS</td></tr>
+      <tr><td>GOLD 15min Acc (M2)</td><td class="rr-bad">0.62R</td><td class="rr-good">2.94R</td><td>1-min blue BOS</td></tr>
+      <tr><td>EUR/USD 45min Acc (M2)</td><td>—</td><td class="rr-good">2.9R</td><td>2-min BOS</td></tr>
+      <tr><td>45min Acc (M2→M1)</td><td>—</td><td class="rr-good">3.3R</td><td>Model 1 BOS</td></tr>
+      <tr><td>SOLANA 4H Acc (M2)</td><td class="rr-bad">0.4R</td><td class="rr-good">6.0R</td><td>3-min blue BOS</td></tr>
+    </table>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 6 — Overlapping structure / Domino -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#1a3a24;color:var(--green)">6</div>
+    <div class="phase-title">Step 5: Overlapping Structure / Domino Effect — Getting a Better Entry</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="tip" style="margin-bottom:12px">
+      <strong>When to use:</strong> When the main (black) BOS gives poor R:R because the market structure break is too far from the Wyckoff target, dissect the last expansion leg (from the highest/lowest point between Tap 2 and Tap 3 toward Tap 3 extreme) using lower-TF structure layers.
+    </div>
+
+    <div class="sub-label">The Domino Rule</div>
+    <div class="domino">
+      <div class="domino-box" style="background:#1c2128;color:#fff;border:1px solid #444">Break <strong>Blue</strong> (lowest TF)</div>
+      <div class="domino-arrow">→</div>
+      <div class="domino-box" style="background:#1c2128;color:var(--red);border:1px solid var(--red)">Go to Red target</div>
+      <div class="domino-arrow">→</div>
+      <div class="domino-box" style="background:#1c2128;color:var(--red);border:1px solid #666">Break <strong>Red</strong> (mid TF)</div>
+      <div class="domino-arrow">→</div>
+      <div class="domino-box" style="background:#1c2128;color:#fff;border:1px solid #fff">Go to Black target</div>
+      <div class="domino-arrow">→</div>
+      <div class="domino-box" style="background:#1c2128;color:#fff;border:1px solid #666">Break <strong>Black</strong> (high TF)</div>
+      <div class="domino-arrow">→</div>
+      <div class="domino-box" style="background:#1c2128;color:var(--green);border:1px solid var(--green)">Wyckoff Target</div>
+    </div>
+
+    <div class="node" style="margin-top:14px">
+      <div class="question">Can you identify red (mid-TF) or blue (low-TF) market structure inside the last expansion leg toward Tap 3?</div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes — valid structure layers found</div>
+        <div class="action neutral">
+          Proceed to entry rule below. Check the critical condition for each lower-TF structure break.
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-no">✗ No — no valid lower-TF structure inside the leg</div>
+        <div class="action skip">
+          No lower-TF refinement available. Wait for the main (black) BOS even with poor R:R, or skip the trade if R:R is unacceptable.
+        </div>
+      </div>
+    </div>
+
+    <div class="node">
+      <div class="question">For Model 1 schematics: Is the lower-TF (red or blue) BOS back inside the original range values?</div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes — lower-TF BOS is inside original range values</div>
+        <div class="action bullish">
+          <strong>Valid lower-TF entry.</strong> Enter on the lower-TF BOS. SL at Tap 3 extreme. Take profit targets: lower-TF target (next structure level), then mid-TF, then Wyckoff High/Low. Watch for each level to cascade.
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-no">✗ No — lower-TF BOS is outside original range values</div>
+        <div class="action warn">
+          Riskier. Step down one more TF to find a BOS that is inside the original range values. If none found → wait for the main BOS.
+        </div>
+      </div>
+    </div>
+
+    <div class="node">
+      <div class="question">For Model 2 schematics: Does the lower-TF BOS look reasonable given the demand/supply zone was already mitigated?</div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes — looks clean, demand/supply clear, no obvious obstruction</div>
+        <div class="action bullish">
+          <strong>Valid lower-TF entry.</strong> Enter on lower-TF BOS. This is especially useful when the main BOS would give &lt;0.5R.
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-no">✗ No — supply/demand zone directly above/below BOS candle (obstruction)</div>
+        <div class="action warn">
+          Apply the <strong>Reconfirmation Tool</strong> (Phase 7). Do NOT enter directly on the BOS if it occurs inside or directly below/above a supply/demand zone.
+        </div>
+      </div>
+    </div>
+
+    <div class="sub-label" style="margin-top:12px">How to Dissect a Structure Leg — Practical Steps</div>
+    <ol style="padding-left:18px; font-size:13px; line-height:1.8;">
+      <li>Identify the last expansion leg from highest/lowest point between T2–T3 → toward T3 extreme.</li>
+      <li>On the schematic's primary TF: draw structure (black). If BOS gives poor R:R → go lower.</li>
+      <li>On mid TF (red): draw structure inside that same leg. If BOS is inside original range values → entry candidate.</li>
+      <li>On lower TF (blue): draw structure inside the red structure's last leg. Apply the same BOS inside range check.</li>
+      <li>Never go below the point where structure is meaningful. Use six-candle rule at each level.</li>
+    </ol>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 7 — Reconfirmation tool -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#3a1a1a;color:var(--red)">7</div>
+    <div class="phase-title">Step 6: The Reconfirmation Tool — Never Enter on a Break Inside S/D</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="quote" style="margin-bottom:12px">
+      "You never want to enter on a break that's in a supply zone. You always want to see if we're going to surpass it and you'll enter on the retest." — TCT Lecture 5B
+    </div>
+    <div class="node">
+      <div class="question">Is the BOS candle (the candle that breaks the market structure) occurring inside or immediately adjacent to a supply zone (Distribution) or demand zone (Accumulation)?</div>
+      <div class="branch">
+        <div class="branch-label label-no">✗ No — BOS is in clear space, not in a S/D zone</div>
+        <div class="action neutral">Enter normally on the BOS. No reconfirmation needed.</div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes — BOS candle is inside a S/D zone</div>
+        <div class="action orange">
+          <strong>Do NOT enter on this BOS.</strong> The break may be a false break or the zone will resist immediately. Apply Reconfirmation Tool below.
+        </div>
+      </div>
+    </div>
+
+    <div class="sub-label" style="margin-top:12px">Reconfirmation Tool Process</div>
+    <div class="node">
+      <div class="question">After the BOS candle, did price pull back (retest the BOS level)?</div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes — price pulled back after BOS</div>
+        <div class="action neutral">Apply lower-TF structure check below.</div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-no">✗ No — price never pulled back after BOS</div>
+        <div class="action skip">
+          Wait. If price never retests, you simply missed the entry. Do not chase. The schematic is still valid — wait for the next structure opportunity.
+        </div>
+      </div>
+    </div>
+
+    <div class="node">
+      <div class="question">On the lower TF (blue): during the pullback, is price making a higher low (Accumulation) or lower high (Distribution) in the correct direction?</div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes — lower TF shows higher low / lower high and then BOS in schematic direction</div>
+        <div class="action bullish">
+          <strong>Reconfirmation confirmed.</strong> Enter on the lower-TF BOS confirmation of the higher low / lower high. SL at Tap 3 extreme.
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-no">✗ No — lower TF breaks in wrong direction (blue breaks against schematic)</div>
+        <div class="action skip">
+          <strong>Reconfirmation failed.</strong> Blue structure never confirmed the pullback as a higher low. Do NOT enter. The BOS was likely a false break. Keep watching — if price later meets Model 1 conditions (takes Tap 2 extreme), switch to Model 1 protocol.
+        </div>
+      </div>
+    </div>
+
+    <div class="tip">
+      <strong>Real example (45min M2 Acc → M1):</strong> Structure broke in the supply zone. Multiple wicks into the zone but no blue structure confirmation. Model 2 eventually failed. Became a Model 1 Accumulation. Entering on the Model 1 BOS gave 3.3R. The lesson: the reconfirmation tool saved traders from a false entry AND revealed the Model 1 was forming.
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 8 — Range formation signal -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#2a1a3a;color:var(--purple)">8</div>
+    <div class="phase-title">Bonus: Range Formation Signal — Lower-TF Break Up + Immediate New Low</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="quote" style="margin-bottom:12px">
+      "When you break back to bullish but take the low one more time — it is a typical sign of a range formation where it's a bigger range." — TCT Lecture 5B
+    </div>
+    <div class="node">
+      <div class="question">Price made a lower-TF bullish BOS (break back to bullish) but then immediately took the previous low again?</div>
+      <div class="branch">
+        <div class="branch-label label-yes">✓ Yes — bullish break followed by new lower low</div>
+        <div class="action purple">
+          <strong>Range formation signal.</strong> Zoom out to the next higher TF. On the higher TF, this entire sequence collapses into a single downward impulse — the local bullish break was internal noise, not a real reversal. Look for a bigger range to be forming on the higher TF. Apply range rules from the beginning (new Fib, EQ touch, etc.).
+        </div>
+      </div>
+      <div class="branch">
+        <div class="branch-label label-no">✗ No — BOS held (no new lower low)</div>
+        <div class="action neutral">The BOS is likely genuine. Continue monitoring for range development or directional continuation.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 9 — Full pre-trade checklist 5B -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#1a3a24;color:var(--green)">9</div>
+    <div class="phase-title">Full Pre-Trade Checklist — 5A + 5B Combined</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <div class="sub-label">Foundation (from 5A)</div>
+    <ul class="checklist">
+      <li>Range confirmed: six-candle rule + EQ touch + DL2 drawn</li>
+      <li>Schematic direction identified (Range Low deviated = Acc; Range High deviated = Dist)</li>
+      <li>Tap 1 identified (original range extreme)</li>
+      <li>Tap 2 validated: within DL2, accepted back inside range. Range extreme extended. DL2 recalculated.</li>
+      <li>Model 1 or 2 Tap 3 validated (see 5A decision tree for full checklist)</li>
+      <li>Tap 2–3 structure drawn. BOS confirmed in schematic direction.</li>
+    </ul>
+
+    <div class="sub-label" style="margin-top:14px">New Checks (from 5B)</div>
+    <ul class="checklist">
+      <li><strong>Rationality check:</strong> Does the range look like horizontal price action? Deviations are wicks or bad breaks — not massive impulsive moves.</li>
+      <li><strong>Highest TF identified:</strong> Walked up TFs, confirmed the highest TF where six-candle rule still applies. Schematic labeled by that TF.</li>
+      <li><strong>Tap spacing:</strong> Tap 2–3 gap is reasonably proportional to Tap 1–2. Not extremely compressed. Tap 3 shows as a visible swing on the schematic's TF.</li>
+      <li><strong>Model 2 S/D quality:</strong> Assessed whether extreme liq or extreme S/D is more obvious. Zone TF is proportional to schematic TF.</li>
+      <li><strong>R:R calculated:</strong> Primary BOS R:R is at least 1.5. If not, overlapping structure identified for better entry.</li>
+      <li><strong>Overlapping structure:</strong> If going lower TF for entry — lower-TF BOS is inside original range values (Model 1) or clearly looks reasonable (Model 2).</li>
+      <li><strong>Reconfirmation:</strong> If BOS candle is inside a S/D zone — waiting for retest + lower-TF higher low / lower high confirmation. Not entering directly on the BOS.</li>
+      <li><strong>Stop loss:</strong> Below Tap 3 low (Acc) or above Tap 3 high (Dist) — regardless of which TF entry is used.</li>
+      <li><strong>Target:</strong> Wyckoff High or Wyckoff Low. Confirm it matches Range High/Low or adjust if re-accumulation/re-distribution context.</li>
+    </ul>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ PHASE 10 — Worked examples summary -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#1c2128;color:var(--muted)">≡</div>
+    <div class="phase-title">Real Examples Summary — All 8 from Lecture 5B</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <table class="rule-table">
+      <tr><th>Asset / TF</th><th>Model</th><th>Direction</th><th>Key Detail</th><th>Entry</th><th>R:R</th></tr>
+      <tr>
+        <td>SOLANA 45min</td><td>M1 Distribution</td><td><span class="pill pill-bear">SHORT</span></td>
+        <td>Watched for M2 — BOS never confirmed (structure never broke from bottom up). Tap 2 taken out → became M1. Blue BOS inside original range.</td>
+        <td>Blue BOS</td><td class="rr-good">Clean</td>
+      </tr>
+      <tr>
+        <td>PEPE 2H</td><td>M2 Distribution</td><td><span class="pill pill-bear">SHORT</span></td>
+        <td>Only valid extreme liq was 1-min MSH (2H range exception). No valid OBs. Entered on 2-min BOS — main BOS near EQ poor R:R.</td>
+        <td>2-min blue BOS</td><td class="rr-good">2.19R</td>
+      </tr>
+      <tr>
+        <td>4H (unnamed)</td><td>M1 Distribution</td><td><span class="pill pill-bear">SHORT</span></td>
+        <td>Key supply zone above → anticipated M1. Watched for M2 — no BOS from bottom. Took out T2 → M1. Dissected to 15min (red) then went 3min (blue).</td>
+        <td>Blue BOS (15min)</td><td class="rr-good">3.0R</td>
+      </tr>
+      <tr>
+        <td>SOLANA 30min (2)</td><td>M2 Distribution</td><td><span class="pill pill-bear">SHORT</span></td>
+        <td>Trendline liquidity trail obvious. 10min OB at highs. Extreme liq was the dominant factor. BOS on 3–5min structure.</td>
+        <td>3–5min BOS</td><td class="rr-ok">1.1R</td>
+      </tr>
+      <tr>
+        <td>GOLD 15min</td><td>M2 Accumulation</td><td><span class="pill pill-bull">LONG</span></td>
+        <td>5min OB in extreme discount. 3min extreme liq MSL. First attempted tap — no BOS. Second tap met both. 1min BOS gave good R:R.</td>
+        <td>1-min blue BOS</td><td class="rr-good">2.94R</td>
+      </tr>
+      <tr>
+        <td>EUR/USD 45min</td><td>M2 Accumulation</td><td><span class="pill pill-bull">LONG</span></td>
+        <td>10min demand in discount (5min OB inside for refinement). 45min range → 10min OB is proportional. 2min structure BOS.</td>
+        <td>2-min BOS</td><td class="rr-good">2.9R</td>
+      </tr>
+      <tr>
+        <td>45min Acc (BTC-ish)</td><td>M2→M1 Accumulation</td><td><span class="pill pill-bull">LONG</span></td>
+        <td>M2 met req (demand + liq), BOS inside S/D zone → reconfirmation failed (blue never confirmed higher low). Model 2 failed. Price took T2 → M1. BOS on M1 clean.</td>
+        <td>M1 BOS (after loss on M2)</td><td class="rr-good">3.3R</td>
+      </tr>
+      <tr>
+        <td>SOLANA 4H</td><td>M2 Accumulation</td><td><span class="pill pill-bull">LONG</span></td>
+        <td>3H demand OB in extreme discount (proportional). Extreme liq not in extreme discount — ignored in favor of obvious demand. Main BOS 0.4R. 3-min blue BOS = 6R.</td>
+        <td>3-min blue BOS</td><td class="rr-good">6.0R</td>
+      </tr>
+    </table>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════ Master If/Then 5B -->
+<div class="phase">
+  <div class="phase-header" onclick="toggle(this)">
+    <div class="phase-number" style="background:#1c2128;color:var(--muted)">⟹</div>
+    <div class="phase-title">Master If / Then Rule Table — Lecture 5B Additions</div>
+    <div class="phase-toggle">›</div>
+  </div>
+  <div class="phase-body">
+    <table class="rule-table">
+      <tr><th>Condition (IF)</th><th>Action (THEN)</th></tr>
+      <tr><td class="cond">Range does NOT look like horizontal price action (impulsive moves)</td><td>Do not label taps — this is not a valid TCT schematic range. Wait for genuine consolidation.</td></tr>
+      <tr><td class="cond">Tap deviations are all clean wicks or bad breaks</td><td>Rational range confirmed — proceed with schematic evaluation.</td></tr>
+      <tr><td class="cond">Six-candle rule fails when stepping up to next TF</td><td>Previous TF was the highest valid TF. Label the schematic by that TF.</td></tr>
+      <tr><td class="cond">Tap 2–3 gap is negligibly small vs Tap 1–2 gap</td><td>Suspect Tap 3. Check if it registers as a swing on schematic's TF. If not → not a valid Tap 3.</td></tr>
+      <tr><td class="cond">Extreme demand/supply zone is very obvious and clean</td><td>Focus on that zone as the Model 2 validator; pay less attention to extreme liquidity even if it does not align perfectly.</td></tr>
+      <tr><td class="cond">Extreme liquidity is very obvious (especially trendline liquidity trail)</td><td>Focus on that as the primary validator; supply/demand zone less critical even if absent.</td></tr>
+      <tr><td class="cond">Primary BOS R:R is &lt; 1:1</td><td>Do not enter on primary BOS. Dissect last expansion leg for overlapping structure (blue/red BOS).</td></tr>
+      <tr><td class="cond">Lower-TF BOS is inside original range values (Model 1)</td><td>Valid lower-TF entry. Enter on that BOS. SL at Tap 3 extreme. Target: Wyckoff High/Low.</td></tr>
+      <tr><td class="cond">Lower-TF BOS is outside original range values (Model 1)</td><td>Riskier — step down one more TF to find BOS inside range, or wait for primary BOS.</td></tr>
+      <tr><td class="cond">BOS candle is occurring inside a supply or demand zone</td><td>Do NOT enter. Apply reconfirmation tool — wait for retest + lower-TF higher low / lower high confirmation.</td></tr>
+      <tr><td class="cond">Retest occurs and blue structure confirms higher low / lower high in schematic direction</td><td>Enter on the blue BOS of the confirmed retest. Reconfirmation valid.</td></tr>
+      <tr><td class="cond">Retest occurs but blue structure breaks in wrong direction (no higher low / lower high)</td><td>Reconfirmation failed. Do not enter. BOS was likely false. Watch for Model 1 to form.</td></tr>
+      <tr><td class="cond">Blue breaks → price goes to red target</td><td>Hold toward red structure break. Domino effect in progress.</td></tr>
+      <tr><td class="cond">Red breaks → price goes to black target</td><td>Hold toward black structure break. TCT schematic fully confirming.</td></tr>
+      <tr><td class="cond">Black breaks → schematic fully confirmed</td><td>Hold to Wyckoff High/Low. Take full target or scale out based on broader context.</td></tr>
+      <tr><td class="cond">Lower-TF bullish BOS → price immediately takes previous low again</td><td>Range formation signal — zoom out. On higher TF this is just one downward impulse. Look for a bigger range forming.</td></tr>
+      <tr><td class="cond">No valid structure visible on any lower TF inside the expansion leg</td><td>No refinement available. Accept primary BOS R:R or skip if unacceptable.</td></tr>
+      <tr><td class="cond">Model 2 met requirements but BOS is inside supply zone AND blue never confirmed retest</td><td>Model 2 failed. Take the loss. Watch for Model 1 Tap 3 (price takes out T2). Trade Model 1 BOS on confirmation.</td></tr>
+      <tr><td class="cond">4H range → looking for proportional demand/supply for M2 Req B</td><td>Use 3H order blocks. Do not use 1min OBs. Use the entire 3H OB zone — do not over-dissect.</td></tr>
+      <tr><td class="cond">45min range → demand slightly above extreme discount boundary</td><td>Acceptable if a more refined zone inside it falls in extreme discount, or if the broader zone is in the discount section and looks clean.</td></tr>
+      <tr><td class="cond">TCT schematic within a bigger range extreme OB</td><td>High confluence — the schematic is forming at a key macro level. Context supports the trade direction strongly.</td></tr>
+    </table>
+  </div>
+</div>
+
+
+<script>
+function toggle(header) {
+  const body = header.nextElementSibling;
+  const arrow = header.querySelector('.phase-toggle');
+  if (!body || !arrow) return;
+  const isOpen = body.classList.contains('open');
+  body.classList.toggle('open', !isOpen);
+  arrow.classList.toggle('open', !isOpen);
+}
+</script>
+</body>
+</html>

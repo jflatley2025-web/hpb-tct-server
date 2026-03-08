@@ -1,0 +1,748 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TCT Lecture 6 — Advanced TCT Schematics Decision Tree</title>
+<style>
+  :root {
+    --bg:#0d1117;--card:#161b22;--border:#30363d;--text:#e6edf3;
+    --muted:#8b949e;--green:#3fb950;--red:#f85149;--yellow:#d29922;
+    --blue:#58a6ff;--purple:#bc8cff;--orange:#ffa657;--teal:#56d364;--cyan:#79c0ff;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;font-size:14px;line-height:1.5;padding:24px;}
+  h1{font-size:22px;font-weight:700;margin-bottom:6px;color:var(--blue);}
+  .subtitle{color:var(--muted);margin-bottom:28px;font-size:13px;}
+  .legend{display:flex;gap:20px;flex-wrap:wrap;margin-bottom:28px;padding:12px 16px;background:var(--card);border:1px solid var(--border);border-radius:8px;}
+  .legend-item{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);}
+  .dot{width:12px;height:12px;border-radius:50%;flex-shrink:0;}
+  /* concept card tabs */
+  .concept-tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:20px;}
+  .concept-tab{padding:8px 16px;border-radius:6px;border:1px solid var(--border);background:var(--card);cursor:pointer;font-size:13px;font-weight:600;color:var(--muted);transition:all .15s;}
+  .concept-tab.active{color:#fff;border-color:var(--blue);background:#1a2a3a;}
+  .concept-tab:hover:not(.active){background:#1c2128;color:var(--text);}
+  .concept-panel{display:none;}.concept-panel.active{display:block;}
+  /* phase accordion */
+  .phase{margin-bottom:18px;border:1px solid var(--border);border-radius:10px;overflow:hidden;}
+  .phase-header{display:flex;align-items:center;gap:12px;padding:11px 16px;background:var(--card);cursor:pointer;user-select:none;}
+  .phase-header:hover{background:#1c2128;}
+  .phase-number{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;flex-shrink:0;}
+  .phase-title{font-weight:600;font-size:14px;flex:1;}
+  .phase-toggle{color:var(--muted);font-size:18px;transition:transform .2s;}
+  .phase-toggle.open{transform:rotate(90deg);}
+  .phase-body{border-top:1px solid var(--border);padding:16px;display:none;background:var(--bg);}
+  .phase-body.open{display:block;}
+  /* nodes */
+  .node{margin-bottom:12px;border-left:3px solid var(--border);padding-left:14px;}
+  .question{font-weight:600;color:var(--blue);margin-bottom:6px;}
+  .question::before{content:"? ";color:var(--muted);}
+  .branch{margin-top:6px;margin-left:12px;}
+  .branch-label{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;}
+  .label-yes{color:var(--green);}.label-no{color:var(--red);}.label-if{color:var(--yellow);}
+  .action{background:#1c2128;border:1px solid var(--border);border-radius:6px;padding:8px 12px;margin-top:4px;margin-bottom:4px;font-size:13px;}
+  .action.bullish{border-left:3px solid var(--green);}
+  .action.bearish{border-left:3px solid var(--red);}
+  .action.neutral{border-left:3px solid var(--blue);}
+  .action.warn{border-left:3px solid var(--yellow);}
+  .action.skip{border-left:3px solid var(--muted);color:var(--muted);}
+  .action.purple{border-left:3px solid var(--purple);}
+  .action.orange{border-left:3px solid var(--orange);}
+  .action.teal{border-left:3px solid var(--teal);}
+  .rule-table{width:100%;border-collapse:collapse;margin-top:10px;font-size:13px;}
+  .rule-table th{background:#1c2128;color:var(--muted);text-align:left;padding:6px 10px;border-bottom:1px solid var(--border);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.06em;}
+  .rule-table td{padding:7px 10px;border-bottom:1px solid var(--border);vertical-align:top;}
+  .rule-table tr:last-child td{border-bottom:none;}
+  .rule-table tr:nth-child(even) td{background:#12181f;}
+  .cond{color:var(--yellow);font-weight:600;}
+  .tip{background:#1c2128;border:1px solid var(--border);border-left:3px solid var(--purple);border-radius:6px;padding:10px 14px;margin-top:10px;font-size:13px;color:var(--muted);}
+  .tip strong{color:var(--purple);}
+  .quote{background:#12181f;border:1px solid var(--border);border-left:3px solid var(--orange);border-radius:6px;padding:10px 14px;margin-top:10px;font-size:13px;font-style:italic;}
+  .checklist{margin-top:8px;padding-left:0;list-style:none;}
+  .checklist li{padding:4px 0 4px 22px;position:relative;font-size:13px;}
+  .checklist li::before{content:"☐";position:absolute;left:0;color:var(--muted);}
+  .sub-label{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-top:12px;margin-bottom:4px;font-weight:700;}
+  .pill{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:700;letter-spacing:.04em;}
+  .pill-bull{background:#1a3a24;color:var(--green);border:1px solid var(--green);}
+  .pill-bear{background:#3a1a1a;color:var(--red);border:1px solid var(--red);}
+  .pill-neut{background:#1a2a3a;color:var(--blue);border:1px solid var(--blue);}
+  .pill-warn{background:#3a2a10;color:var(--yellow);border:1px solid var(--yellow);}
+  .pill-purp{background:#2a1a3a;color:var(--purple);border:1px solid var(--purple);}
+  .pill-orng{background:#3a2010;color:var(--orange);border:1px solid var(--orange);}
+  .rr-badge{display:inline-block;padding:2px 8px;border-radius:4px;font-weight:700;font-size:11px;margin-left:6px;}
+  .rr-bad{background:#3a1a1a;color:var(--red);}
+  .rr-ok{background:#3a2a10;color:var(--yellow);}
+  .rr-good{background:#1a3a24;color:var(--green);}
+  .rr-great{background:#1a2a10;color:#79ff57;}
+  .flow-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px 14px;background:#12181f;border:1px solid var(--border);border-radius:6px;margin-top:8px;font-size:12px;}
+  .flow-box{padding:5px 12px;border-radius:4px;font-weight:700;font-size:12px;white-space:nowrap;}
+  .flow-arrow{color:var(--muted);font-size:16px;}
+  .two-col{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:10px;}
+  @media(max-width:680px){.two-col{grid-template-columns:1fr;}}
+  .mini-card{background:#12181f;border:1px solid var(--border);border-radius:8px;padding:13px;font-size:12px;}
+  .mini-card h4{font-size:12px;font-weight:700;margin-bottom:8px;}
+  .mini-card ul{list-style:none;padding:0;}
+  .mini-card li{padding:3px 0 3px 16px;position:relative;border-bottom:1px dashed #21262d;}
+  .mini-card li:last-child{border-bottom:none;}
+  .mini-card li::before{content:"→";position:absolute;left:0;color:var(--muted);}
+  .step-list{list-style:none;padding:0;margin-top:8px;}
+  .step-list li{display:flex;gap:10px;padding:6px 0;border-bottom:1px dashed #21262d;font-size:13px;align-items:flex-start;}
+  .step-list li:last-child{border-bottom:none;}
+  .step-num{min-width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;flex-shrink:0;margin-top:1px;}
+  .concept-badge{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:700;margin-bottom:12px;}
+</style>
+</head>
+<body>
+
+<h1>TCT Lecture 6 — Advanced TCT Schematics: Decision Tree</h1>
+<p class="subtitle">
+  Four advanced concepts extracted from TCT 2024 Mentorship Lecture 6 | Advanced TCT Schematics.<br>
+  Prerequisites: Lectures 1–5B mastered. These are refinements to R:R, target extension, and schematic evolution.
+</p>
+
+<div class="legend">
+  <div class="legend-item"><div class="dot" style="background:var(--green)"></div>Bullish / Long signal</div>
+  <div class="legend-item"><div class="dot" style="background:var(--red)"></div>Bearish / Short signal</div>
+  <div class="legend-item"><div class="dot" style="background:var(--blue)"></div>Neutral / assess</div>
+  <div class="legend-item"><div class="dot" style="background:var(--yellow)"></div>Warning / caution</div>
+  <div class="legend-item"><div class="dot" style="background:var(--purple)"></div>Advanced concept</div>
+  <div class="legend-item"><div class="dot" style="background:var(--orange)"></div>Critical rule / edge case</div>
+</div>
+
+<div class="concept-tabs">
+  <div class="concept-tab active" onclick="showConcept('c1',this)">① Schematic Flip</div>
+  <div class="concept-tab" onclick="showConcept('c2',this)">② LTF → HTF Escalation</div>
+  <div class="concept-tab" onclick="showConcept('c3',this)">③ Wyckoff-in-Wyckoff</div>
+  <div class="concept-tab" onclick="showConcept('c4',this)">④ M1 → M2 Upgrade</div>
+  <div class="concept-tab" onclick="showConcept('c5',this)">⑤ Master Rules</div>
+</div>
+
+
+<!-- ══════════════════════════════════════ CONCEPT 1 — Schematic Flip -->
+<div id="c1" class="concept-panel active">
+
+  <div class="phase">
+    <div class="phase-header" onclick="toggle(this)">
+      <div class="phase-number" style="background:#1a2a3a;color:var(--blue)">①</div>
+      <div class="phase-title">Concept 1: Distributions ↔ Accumulations — Schematic Flip</div>
+      <div class="phase-toggle open">›</div>
+    </div>
+    <div class="phase-body open">
+      <div class="concept-badge" style="background:#1a2a3a;color:var(--blue);border:1px solid var(--blue)">
+        Target Rule ▸ Flip Awareness ▸ Risk Triggers
+      </div>
+      <div class="quote" style="margin-bottom:12px">
+        "A distribution can always go over into an accumulation, just like an accumulation can go over into a distribution." — TCT Lecture 6
+      </div>
+      <p style="font-size:13px;color:var(--muted);margin-bottom:12px">
+        When a schematic hits its target (opposite range extreme), price does not have to continue further. Instead it can reverse — creating an <em>opposing schematic</em> in the same range. Understanding when to expect this and how to manage your trade around it is the core skill of Concept 1.
+      </p>
+      <div class="sub-label">Step 1 — Did Both Sides of the Range Deviate BEFORE Your Schematic Confirmed?</div>
+      <div class="node">
+        <div class="question">Before your schematic's BOS was confirmed, had the opposite range extreme <strong>already been deviated</strong>?</div>
+        <div class="branch">
+          <div class="branch-label label-no">✗ No — only the confirmed schematic's side was deviated</div>
+          <div class="action neutral">
+            <strong>Standard targeting:</strong> You can freely target the full Wyckoff High/Low (opposite range extreme). If the target is hit, watch for the opposing side to start deviating — it may begin a new schematic. No special handling needed during the trade.
+          </div>
+        </div>
+        <div class="branch">
+          <div class="branch-label label-yes">✓ Yes — opposite range extreme was ALREADY deviated before confirmation</div>
+          <div class="action warn">
+            <strong>Flip-aware mode.</strong> Do NOT simply target the full opposite range extreme point. The prior deviation of the opposite side means requirements for an opposing schematic may already be partially met (Tap 1 and Tap 2 already exist for the opposing model). Apply Step 2 below.
+          </div>
+        </div>
+      </div>
+
+      <div class="sub-label" style="margin-top:14px">Step 2 — Flip-Aware Mode: Watch the Opposing Structure</div>
+      <div class="node">
+        <div class="question">As price moves toward your target (opposite range extreme), is structure on the <strong>opposing side</strong> (the side that was already deviated) breaking in the direction of an opposing schematic?</div>
+        <div class="branch">
+          <div class="branch-label label-no">✗ No — opposing structure NOT breaking (no BOS in wrong direction)</div>
+          <div class="action bullish">
+            Continue holding your trade toward the opposite range extreme. Your schematic is still valid. Opposing schematic not yet confirmed.
+          </div>
+        </div>
+        <div class="branch">
+          <div class="branch-label label-yes">✓ Yes — structure breaks in the OPPOSITE direction of your trade</div>
+          <div class="action orange">
+            <strong>This is your Risk-Off / Risk-On trigger simultaneously:</strong><br>
+            • <strong>Risk-Off</strong> for your current trade → take profit / close position<br>
+            • <strong>Risk-On</strong> for a new opposing schematic → the opposing BOS is your entry confirmation for the new direction<br><br>
+            The original schematic's Model 2 (or Model 1) has failed to hit its full target. The opposing schematic is now confirmed.
+          </div>
+        </div>
+      </div>
+
+      <div class="sub-label" style="margin-top:14px">Step 3 — Supply/Demand Zone Check at the Opposite Side</div>
+      <div class="node">
+        <div class="question">Is there visible supply (Distribution scenario) or demand (Accumulation scenario) at the range extreme that your price is approaching — the side that was previously deviated?</div>
+        <div class="branch">
+          <div class="branch-label label-yes">✓ Yes — supply/demand zone at the previously deviated extreme</div>
+          <div class="action warn">
+            Pre-identify this zone as the potential Model 2 Tap 3 validator for the opposing schematic. If price reaches it AND structure breaks against your trade → opposing schematic is confirmed. Be ready to flip.
+          </div>
+        </div>
+        <div class="branch">
+          <div class="branch-label label-no">✗ No — no significant supply/demand at the previously deviated extreme</div>
+          <div class="action neutral">
+            Lower probability of flip at that exact level. Still possible — watch structure anyway. If structure never breaks against you, hold to full target.
+          </div>
+        </div>
+      </div>
+
+      <div class="sub-label" style="margin-top:14px">Real Examples from Lecture 6</div>
+      <div class="two-col">
+        <div class="mini-card" style="border-top:2px solid var(--blue)">
+          <h4 style="color:var(--blue)">BTC — Dist → Acc (Flip)</h4>
+          <ul>
+            <li>Context: broke back bullish in uptrend, entered 8H OB</li>
+            <li>Model 2 Distribution confirmed (extreme liq grabbed)</li>
+            <li>Expected distribution to flip to accumulation (uptrend context)</li>
+            <li>Deviation at low stayed inside DL2, demand mitigated</li>
+            <li>Model 2 Accumulation confirmed → 14R trade toward HTF high</li>
+          </ul>
+        </div>
+        <div class="mini-card" style="border-top:2px solid var(--cyan)">
+          <h4 style="color:var(--cyan)">EUR/USD — Acc → Dist (Sequential)</h4>
+          <ul>
+            <li>Model 2 Accumulation hit Range High target</li>
+            <li>At Range High → Model 1 Distribution confirmed</li>
+            <li>Distribution had follow-through (macro context bearish)</li>
+            <li>Key: Distribution NOT in flip-aware mode because low was NOT deviated before acc confirmed</li>
+          </ul>
+        </div>
+        <div class="mini-card" style="border-top:2px solid var(--red)">
+          <h4 style="color:var(--red)">S&P 500 6H — Both Sides Deviated</h4>
+          <ul>
+            <li>Deviated BOTH high and low before confirmation</li>
+            <li>Macro context: in premium of 3D range, expect distribution</li>
+            <li>Identified 6H OB as extreme supply, extreme liq at deviation low</li>
+            <li>Model 2 Distribution confirmed (BOS)</li>
+            <li>Flip check: Acc would need to confirm by BOS — it DID</li>
+            <li>Risk-off on short, risk-on on long → price went to Range High</li>
+            <li>Then Model 1 Distribution confirmed → massive move down</li>
+          </ul>
+        </div>
+        <div class="mini-card" style="border-top:2px solid var(--orange)">
+          <h4 style="color:var(--orange)">ETH — M1 Dist with pre-deviation at low</h4>
+          <ul>
+            <li>Range low already deviated BEFORE M1 Dist confirmed</li>
+            <li>Extreme demand + extreme liq identified at range low area</li>
+            <li>Must watch: if price reaches those zones and BOS flips → Acc confirmed</li>
+            <li>Had unmitigated Supply above → price had reason to return</li>
+            <li>→ Was a flip-aware trade from the start</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="sub-label" style="margin-top:14px">Flip-Aware Pre-Trade Setup</div>
+      <ul class="checklist">
+        <li>Before entering: check if the opposite range extreme has already been deviated</li>
+        <li>If yes: identify extreme demand/supply and extreme liquidity at that opposite extreme</li>
+        <li>Mark those zones as potential Model 2 Tap 3 validators for the opposing schematic</li>
+        <li>During trade: watch structure at the opposite extreme as price approaches</li>
+        <li>If BOS breaks in opposing direction → exit current position, enter opposing schematic</li>
+        <li>If no opposing BOS → hold to full Wyckoff High/Low target as normal</li>
+        <li>After target hit with no prior opposing deviation: watch for new deviations starting on the now-reached extreme</li>
+      </ul>
+    </div>
+  </div>
+
+</div>
+
+
+<!-- ══════════════════════════════════════ CONCEPT 2 — LTF → HTF -->
+<div id="c2" class="concept-panel">
+
+  <div class="phase">
+    <div class="phase-header" onclick="toggle(this)">
+      <div class="phase-number" style="background:#3a2010;color:var(--orange)">②</div>
+      <div class="phase-title">Concept 2: LTF Ranges Growing into HTF Ranges</div>
+      <div class="phase-toggle open">›</div>
+    </div>
+    <div class="phase-body open">
+      <div class="concept-badge" style="background:#3a2010;color:var(--orange);border:1px solid var(--orange)">
+        Tap Spacing ▸ TF Escalation ▸ Nested Schematics
+      </div>
+      <div class="quote" style="margin-bottom:12px">
+        "Every start of a high time frame range was created on the lower time frame, just like your higher market structure pools are created by those pivot market structure breaks on the lower time frame." — TCT Lecture 6
+      </div>
+      <p style="font-size:13px;color:var(--muted);margin-bottom:14px">
+        What looks like 4–5 taps on the low TF is often just 3 taps on a higher TF. A low-TF schematic that hits its target may simply be one leg of a forming higher-TF range. Knowing when to escalate TF prevents getting stuck counting taps on the wrong timeframe.
+      </p>
+
+      <div class="sub-label">Warning Signal: Is Tap Spacing Compressed?</div>
+      <div class="node">
+        <div class="question">Is the distance between Tap 2 and Tap 3 <strong>significantly smaller</strong> than the distance between Tap 1 and Tap 2?</div>
+        <div class="branch">
+          <div class="branch-label label-no">✗ No — taps are roughly equally spaced</div>
+          <div class="action neutral">Normal schematic. No escalation check required. Proceed with standard 5A/5B evaluation.</div>
+        </div>
+        <div class="branch">
+          <div class="branch-label label-yes">✓ Yes — Tap 2–3 gap is much smaller than Tap 1–2 gap</div>
+          <div class="action orange">
+            <strong>LTF → HTF escalation check required.</strong> Step up to the next valid TF. Check if Tap 2 and Tap 3 <em>disappear</em> (merge into a single deviation). If they do → you are likely inside a higher-TF range. Perform Step 2 below.
+          </div>
+        </div>
+      </div>
+
+      <div class="sub-label" style="margin-top:14px">Also triggers when: you count more than 3 taps</div>
+      <div class="node">
+        <div class="question">Are you counting 4 or more taps in what you think is a single schematic?</div>
+        <div class="branch">
+          <div class="branch-label label-yes">✓ Yes — 4+ taps visible</div>
+          <div class="action orange">
+            <strong>Recheck on a higher TF.</strong> "If you see a four tap — one, two, three, four — recheck it. Knowing this information it will probably just be a three tap on a higher time frame." Apply Step 2.
+          </div>
+        </div>
+      </div>
+
+      <div class="sub-label" style="margin-top:14px">Step 2 — TF Escalation Check</div>
+      <div class="node">
+        <div class="question">On the next higher valid TF, do Tap 2 and Tap 3 <strong>merge into a single deviation</strong> (appear as one move)?</div>
+        <div class="branch">
+          <div class="branch-label label-yes">✓ Yes — they disappear / merge on the higher TF</div>
+          <div class="action purple">
+            <strong>You are in a LTF schematic nested inside a forming HTF range.</strong><br>
+            1. The LTF schematic (already completed or forming) is one sub-move of the HTF range.<br>
+            2. On the HTF, this merged deviation = one Tap. Find the HTF equivalent of Tap 2 and Tap 3.<br>
+            3. The HTF Tap 3 will be validated by a proportionally larger supply/demand zone (3H OB for a 4H range, etc.).<br>
+            4. Trade the HTF schematic on top of the LTF one — do not confuse them.
+          </div>
+        </div>
+        <div class="branch">
+          <div class="branch-label label-no">✗ No — each tap still shows as distinct on the higher TF</div>
+          <div class="action neutral">This is a legitimate low-TF schematic. No escalation needed. Apply 5A/5B rules normally.</div>
+        </div>
+      </div>
+
+      <div class="sub-label" style="margin-top:14px">How LTF → HTF Progression Works</div>
+      <div class="flow-row" style="flex-direction:column;align-items:flex-start;">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <div class="flow-box" style="background:#1c2128;color:#fff;border:1px solid #444">Aggressive expansion</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-box" style="background:#1c2128;color:#fff;border:1px solid #444">LTF BOS (black structure break)</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-box" style="background:#1c2128;color:var(--red);border:1px solid var(--red)">LTF range forms (black range)</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px;">
+          <div class="flow-box" style="background:#1c2128;color:var(--red);border:1px solid var(--red)">Black range break</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-box" style="background:#1c2128;color:var(--red);border:1px solid #666">Mid-TF market structure pool (red)</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-box" style="background:#1c2128;color:var(--red);border:1px solid var(--red)">Mid-TF range forms (red range)</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px;">
+          <div class="flow-box" style="background:#1c2128;color:var(--red);border:1px solid var(--red)">Red range break</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-box" style="background:#1c2128;color:var(--blue);border:1px solid var(--blue)">HTF market structure pool (blue)</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-box" style="background:#1c2128;color:var(--blue);border:1px solid var(--blue)">HTF macro range (blue range)</div>
+        </div>
+      </div>
+
+      <div class="sub-label" style="margin-top:14px">Real Example: ETH / S&P — Dual-TF Model 2 Distributions</div>
+      <table class="rule-table">
+        <tr><th>TF</th><th>What happened</th><th>R:R</th></tr>
+        <tr>
+          <td>5–10min (LTF)</td>
+          <td>Model 2 Distribution confirmed. T2 and T3 visible. Target hit (Range Low). Trade complete.</td>
+          <td class="rr-ok">Standard</td>
+        </tr>
+        <tr>
+          <td>1H (HTF)</td>
+          <td>Zoom out → LTF T2 and T3 merge into one deviation. 45min OB = new HTF Tap 3 zone. New Model 2 Distribution on 1H. BOS confirmed. Target hit.</td>
+          <td class="rr-good">Superior</td>
+        </tr>
+        <tr>
+          <td>Key rule</td>
+          <td colspan="2">Only tradeable as an HTF Model 2 if you always check the highest valid TF for your range (from Lecture 5B). The 45min OB becomes the new Tap 3 validator — proportional to the 1H range.</td>
+        </tr>
+      </table>
+
+      <div class="tip" style="margin-top:12px">
+        <strong>Zoom-out discipline:</strong> Always zoom out before zooming in. A LTF schematic that hits its target may leave behind a forming HTF range. Do not get stuck on the LTF counting extra taps. A completed LTF schematic + intact HTF range = begin watching for the HTF schematic.
+      </div>
+
+      <div class="sub-label" style="margin-top:14px">Supply Zone Still Remaining Above (HTF escalation signal)</div>
+      <div class="action warn">
+        When a LTF Model 1 Distribution forms but does NOT have strong follow-through, and there is still an unmitigated supply zone above (at the HTF range extreme) → this is often an indication that the LTF break is just a mid-TF "higher low" on the HTF, and price will come back up to complete the HTF schematic. The LTF T2 and T3 become a single deviation on the HTF.
+      </div>
+    </div>
+  </div>
+
+</div>
+
+
+<!-- ══════════════════════════════════════ CONCEPT 3 — Wyckoff in Wyckoff -->
+<div id="c3" class="concept-panel">
+
+  <div class="phase">
+    <div class="phase-header" onclick="toggle(this)">
+      <div class="phase-number" style="background:#2a1a3a;color:var(--purple)">③</div>
+      <div class="phase-title">Concept 3: Wyckoff-in-Wyckoff — TCT Schematic Inside Tap 3</div>
+      <div class="phase-toggle open">›</div>
+    </div>
+    <div class="phase-body open">
+      <div class="concept-badge" style="background:#2a1a3a;color:var(--purple);border:1px solid var(--purple)">
+        R:R Multiplier ▸ Local Schematic Confirmation ▸ Earlier Entry
+      </div>
+      <div class="quote" style="margin-bottom:12px">
+        "Our third tap of our initial TCT schematic has its own little TCT schematic. This way we can have an entry confirmation way earlier than the original break of structure level, causing our R:R to improve drastically." — TCT Lecture 6
+      </div>
+      <p style="font-size:13px;color:var(--muted);margin-bottom:14px">
+        As price moves toward Tap 3 of the main schematic, that move may form its own local TCT range. Identifying and entering on the local schematic's BOS gives you the same trade at a dramatically higher R:R — while using the same stop loss (main Tap 3 extreme).
+      </p>
+
+      <div class="sub-label">When to Look for Wyckoff-in-Wyckoff</div>
+      <div class="node">
+        <div class="question">Is price currently moving toward Tap 3 of the main schematic (the leg that creates Tap 3)?</div>
+        <div class="branch">
+          <div class="branch-label label-yes">✓ Yes — price trending toward Tap 3 extreme</div>
+          <div class="action neutral">Zoom into a lower TF on this leg. Look for a local range forming. Apply Step 2.</div>
+        </div>
+        <div class="branch">
+          <div class="branch-label label-no">✗ No — still in earlier phase of main schematic</div>
+          <div class="action skip">Not yet applicable. Come back to this concept when price is approaching the Tap 3 area.</div>
+        </div>
+      </div>
+
+      <div class="sub-label" style="margin-top:14px">Step 2 — Identify the Local (Nested) TCT Range</div>
+      <div class="node">
+        <div class="question">On a lower TF, does the move toward Tap 3 show a local range with its own three-tap structure?</div>
+        <div class="branch">
+          <div class="branch-label label-yes">✓ Yes — local range visible with its own taps</div>
+          <div class="action purple">
+            <strong>Local TCT schematic confirmed as forming.</strong> The main Tap 3 area will be one of the taps of this local schematic. Apply Steps 3–5 below to trade it.
+          </div>
+        </div>
+        <div class="branch">
+          <div class="branch-label label-no">✗ No — no local range / no structure in the Tap 3 leg</div>
+          <div class="action neutral">No Wyckoff-in-Wyckoff available. Fall back to standard entry on the main BOS (from 5A/5B rules).</div>
+        </div>
+      </div>
+
+      <div class="sub-label" style="margin-top:14px">Step 3 — Validate the Local Schematic</div>
+      <ul class="checklist">
+        <li>Local range confirmed: six-candle rule applies on the lower TF</li>
+        <li>Local Tap 2 validated: deviation within local DL2, accepted back inside local range</li>
+        <li>Local Tap 3 validated: meets Model 1 or Model 2 requirements (using local extreme liq / local S/D)</li>
+        <li>Local supply/demand zone proportional to the local range TF</li>
+        <li>The overall direction of the local schematic matches the MAIN schematic direction (both are Distribution or both Accumulation in the context of Tap 3 exhausting the move)</li>
+      </ul>
+
+      <div class="sub-label" style="margin-top:14px">Step 4 — Entry, Stop Loss, Target</div>
+      <div class="node">
+        <div class="question">Has the local schematic's BOS been confirmed?</div>
+        <div class="branch">
+          <div class="branch-label label-yes">✓ Yes — local BOS confirmed in the correct direction</div>
+          <div class="action purple">
+            <strong>Enter on the local BOS.</strong><br>
+            • <strong>Stop Loss:</strong> Beyond the <em>main</em> schematic's Tap 3 extreme (not the local one — the main one remains the invalidation)<br>
+            • <strong>Target:</strong> The <em>main</em> schematic's Wyckoff High / Wyckoff Low (same as if you had entered on the main BOS)<br>
+            • The local schematic's confirmation doubles as confirmation that the main Tap 3 has been exhausted and the main schematic is now active
+          </div>
+        </div>
+        <div class="branch">
+          <div class="branch-label label-no">✗ No — local BOS not yet confirmed</div>
+          <div class="action skip">Wait. Do not enter on anticipation. Only enter on the local BOS confirmation, just as you would wait for any BOS.</div>
+        </div>
+      </div>
+
+      <div class="sub-label" style="margin-top:14px">R:R Comparison — Real Examples</div>
+      <table class="rule-table">
+        <tr><th>Example</th><th>Main BOS R:R</th><th>Local (Wyckoff-in-Wyckoff) R:R</th><th>Improvement</th></tr>
+        <tr>
+          <td>EUR/USD Forex (M1 Dist)</td>
+          <td class="rr-ok">2.2R</td>
+          <td class="rr-great">9.0R</td>
+          <td>+6.8R / same target, same SL</td>
+        </tr>
+        <tr>
+          <td>ETH 12H (M1 Dist)</td>
+          <td class="rr-bad">~1.46R</td>
+          <td class="rr-great">13.0R</td>
+          <td>+11.5R</td>
+        </tr>
+        <tr>
+          <td>S&P 500 (M2 Dist)</td>
+          <td class="rr-bad">~2.0R</td>
+          <td class="rr-great">21.0R</td>
+          <td>+19R</td>
+        </tr>
+      </table>
+
+      <div class="tip" style="margin-top:12px">
+        <strong>Key insight:</strong> The stop loss in all cases is the <em>main</em> Tap 3 extreme — not the local schematic's Tap 3. This is what gives such a large R:R: your risk is defined by the main schematic's invalidation (a big swing), but your entry is much closer to the turn because you entered on the smaller, local BOS.
+      </div>
+
+      <div class="sub-label" style="margin-top:14px">S&P 500 Detailed Example (Wyckoff-in-Wyckoff)</div>
+      <ul class="step-list">
+        <li><div class="step-num" style="background:#2a1a3a;color:var(--purple)">1</div><span>Main schematic: macro range, price approaching Tap 3 high (extreme supply zone)</span></li>
+        <li><div class="step-num" style="background:#2a1a3a;color:var(--purple)">2</div><span>Tap 3 leg: price trending upward with higher lows + higher highs → local range visible</span></li>
+        <li><div class="step-num" style="background:#2a1a3a;color:var(--purple)">3</div><span>Local range: Range High / Range Low identified. 15min OB in local extreme supply = local Model 2 Tap 3 validator</span></li>
+        <li><div class="step-num" style="background:#2a1a3a;color:var(--purple)">4</div><span>Local extreme liquidity grabbed AND 15min OB mitigated → local Tap 3 requirements met</span></li>
+        <li><div class="step-num" style="background:#2a1a3a;color:var(--purple)">5</div><span>Lower-TF BOS confirmed on the local schematic (bearish break)</span></li>
+        <li><div class="step-num" style="background:#2a1a3a;color:var(--purple)">6</div><span>Entry: Short on local BOS. SL: above main Tap 3 high. Target: main Range Low</span></li>
+        <li><div class="step-num" style="background:#2a1a3a;color:var(--purple)">7</div><span>Result: 21R vs 2R if waited for main BOS</span></li>
+      </ul>
+    </div>
+  </div>
+
+</div>
+
+
+<!-- ══════════════════════════════════════ CONCEPT 4 — M1 → M2 Upgrade -->
+<div id="c4" class="concept-panel">
+
+  <div class="phase">
+    <div class="phase-header" onclick="toggle(this)">
+      <div class="phase-number" style="background:#1a3a24;color:var(--green)">④</div>
+      <div class="phase-title">Concept 4: Model 1 Flowing into Model 2 — Stop Trail & R:R Doubling</div>
+      <div class="phase-toggle open">›</div>
+    </div>
+    <div class="phase-body open">
+      <div class="concept-badge" style="background:#1a3a24;color:var(--green);border:1px solid var(--green)">
+        Trade Management ▸ Stop Trail ▸ Add-on Position
+      </div>
+      <div class="quote" style="margin-bottom:12px">
+        "Normally when we have a good-looking Model 1 flowing into Model 2 it tends to have follow-through beyond the range extreme point — because it just shows that the market maker is fully positioning himself." — TCT Lecture 6
+      </div>
+      <p style="font-size:13px;color:var(--muted);margin-bottom:14px">
+        After a Model 1 accumulation (or distribution) confirms, price may not go straight to the target. It may curve back toward the range extreme it just broke, creating conditions for a Model 2 third tap. When that Model 2 Tap 3 forms, a specific trade management protocol allows you to: de-risk the existing position AND add a new position — effectively doubling R:R.
+      </p>
+
+      <div class="sub-label">Step 1 — You Are Already in a Model 1 Trade</div>
+      <div class="action neutral" style="margin-bottom:10px">
+        Prerequisites: Model 1 accumulation (or distribution) BOS confirmed. You are long (or short). SL is below Tap 3 low (or above Tap 3 high). Target is Range High / Wyckoff High (or Range Low / Wyckoff Low).
+      </div>
+
+      <div class="node">
+        <div class="question">After your Model 1 entry, is price curving back toward the range extreme (toward your stop area) without hitting your target?</div>
+        <div class="branch">
+          <div class="branch-label label-yes">✓ Yes — price pulling back toward range extreme</div>
+          <div class="action neutral">Begin Model 2 watch protocol. Apply Step 2.</div>
+        </div>
+        <div class="branch">
+          <div class="branch-label label-no">✗ No — price moving cleanly toward target</div>
+          <div class="action bullish">Hold the trade. No Model 2 forming. Take profit at Wyckoff High/Low normally.</div>
+        </div>
+      </div>
+
+      <div class="sub-label" style="margin-top:14px">Step 2 — Does the Pullback Meet Model 2 Tap 3 Requirements?</div>
+      <div class="node">
+        <div class="question">Does the pullback level meet at least one of: extreme liquidity grab OR extreme demand/supply mitigation (proportional zone)?</div>
+        <div class="branch">
+          <div class="branch-label label-no">✗ No — pullback meets neither requirement</div>
+          <div class="action skip">
+            This is NOT a valid Model 2 Tap 3. Do not adjust the trade. Hold with original stop. If price takes out your Tap 3 → stop hit, trade closed.
+          </div>
+        </div>
+        <div class="branch">
+          <div class="branch-label label-yes">✓ Yes — pullback meets extreme liq or extreme demand/supply</div>
+          <div class="action purple">
+            <strong>Potential Model 2 Tap 3 forming.</strong> This pullback is now the new "Wyckoff Point" candidate — the new Tap 3. Apply Step 3.
+          </div>
+        </div>
+      </div>
+
+      <div class="sub-label" style="margin-top:14px">Step 3 — Wait for Model 2 BOS Confirmation</div>
+      <div class="node">
+        <div class="question">Has the Tap 2–3 structure (from the highest/lowest point between M1 entry area and the M2 Tap 3) broken in the schematic direction?</div>
+        <div class="branch">
+          <div class="branch-label label-no">✗ No — BOS not yet confirmed</div>
+          <div class="action skip">Wait. Do not adjust the trade yet. BOS is the only confirmation — no BOS, no action.</div>
+        </div>
+        <div class="branch">
+          <div class="branch-label label-yes">✓ Yes — Model 2 BOS confirmed</div>
+          <div class="action bullish">
+            <strong>Execute the three-step management protocol:</strong><br><br>
+            <strong>①</strong> The new Model 2 Tap 3 low (for accumulation) is your new Wyckoff Low — the invalidation point. If this new Tap 3 low is <em>above your original entry</em> → your stop loss can move to your entry (you are now de-risked).<br><br>
+            <strong>②</strong> Trail the stop loss on your existing position to entry (or to just below the new Tap 3 low, whichever makes sense). Freed-up risk = the difference between original % risk and new % risk at the tighter stop.<br><br>
+            <strong>③</strong> Add a new position on the Model 2 BOS with the freed-up risk amount (re-deploy the same 1% risk on the new position). Your average entry improves and total R:R approximately doubles.
+          </div>
+        </div>
+      </div>
+
+      <div class="sub-label" style="margin-top:14px">Step 4 — Extended Target (M1 → M2 Follow-Through)</div>
+      <div class="node">
+        <div class="question">Does the M1 → M2 upgrade setup have strong confluence (obvious demand/supply, obvious liquidity, clean schematic on both LTF and HTF)?</div>
+        <div class="branch">
+          <div class="branch-label label-yes">✓ Yes — high quality M1 → M2 setup</div>
+          <div class="action teal">
+            <strong>Expect follow-through beyond the Range High/Low.</strong> The MM has now grabbed liquidity/demand/supply on BOTH Model 1 deviations AND the Model 2 Tap 3 — leaving nothing unmitigated. This is maximum MM involvement = expect continuation beyond the target.<br><br>
+            Extended target options: liquidity curve above/below, unmitigated structure supply/demand beyond Wyckoff High/Low, or the next significant HTF supply/demand zone.
+          </div>
+        </div>
+        <div class="branch">
+          <div class="branch-label label-no">✗ No — average quality / one requirement met weakly</div>
+          <div class="action neutral">Take profit at the standard Wyckoff High/Low. Do not extend target. Secure the improved R:R from the position management.</div>
+        </div>
+      </div>
+
+      <div class="sub-label" style="margin-top:14px">Real Examples from Lecture 6</div>
+      <div class="two-col">
+        <div class="mini-card" style="border-top:2px solid var(--green)">
+          <h4 style="color:var(--green)">EUR/USD Accumulation</h4>
+          <ul>
+            <li>Model 1 Acc BOS → long at 3.6R</li>
+            <li>Price curved back → extreme demand hit → extreme liq grabbed</li>
+            <li>Model 2 BOS confirmed</li>
+            <li>New Tap 3 above original entry → SL moved to entry (de-risked)</li>
+            <li>New position added on M2 BOS at same 1% risk</li>
+            <li>Standard target: 3R (original) + 2R (new) = 5R total</li>
+            <li>Extended target (liq curve + supply): 6% + 5% = 11% total</li>
+          </ul>
+        </div>
+        <div class="mini-card" style="border-top:2px solid var(--blue)">
+          <h4 style="color:var(--blue)">HTF Perspective (same trade)</h4>
+          <ul>
+            <li>On 3H TF: the M1 Tap 2 + Tap 3 merge into a single deviation</li>
+            <li>3H view shows: Tap 1 → Tap 2 (merged LTF M1) → Tap 3 (M2 pullback)</li>
+            <li>This is a 3H Model 2 accumulation schematic</li>
+            <li>Confirms the M1 → M2 upgrade is valid: HTF perspective agrees</li>
+            <li>HTF Model 2 = expects follow-through beyond Range High</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="sub-label" style="margin-top:14px">Position Management Visual Flow</div>
+      <div class="flow-row" style="flex-direction:column;align-items:flex-start;">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <div class="flow-box" style="background:#1a3a24;color:var(--green);border:1px solid var(--green)">M1 BOS → Enter Long</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-box" style="background:#1c2128;color:#fff;border:1px solid #444">SL: below Tap 3 low (1% risk)</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-box" style="background:#1c2128;color:#fff;border:1px solid #444">Target: Range High</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px;">
+          <div class="flow-box" style="background:#3a2a10;color:var(--yellow);border:1px solid var(--yellow)">Price curves back → M2 Tap 3 forms</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-box" style="background:#3a2a10;color:var(--yellow);border:1px solid var(--yellow)">Extreme liq/demand met</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-box" style="background:#3a2a10;color:var(--yellow);border:1px solid var(--yellow)">Wait for M2 BOS</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px;">
+          <div class="flow-box" style="background:#1a3a24;color:var(--green);border:1px solid var(--green)">M2 BOS confirmed</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-box" style="background:#1c2128;color:var(--purple);border:1px solid var(--purple)">Trail SL on Pos 1 → entry (de-risk)</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-box" style="background:#1a3a24;color:var(--green);border:1px solid var(--green)">Add Pos 2 with freed risk</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px;">
+          <div class="flow-box" style="background:#1c2128;color:var(--teal);border:1px solid var(--teal)">Extended target if high-quality M1→M2</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-box" style="background:#1c2128;color:var(--teal);border:1px solid var(--teal)">Liq curve / HTF supply beyond Range High</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+
+<!-- ══════════════════════════════════════ CONCEPT 5 — Master Rules -->
+<div id="c5" class="concept-panel">
+
+  <div class="phase">
+    <div class="phase-header" onclick="toggle(this)">
+      <div class="phase-number" style="background:#1c2128;color:var(--muted)">≡</div>
+      <div class="phase-title">Master If / Then Rule Table — All Four Concepts</div>
+      <div class="phase-toggle open">›</div>
+    </div>
+    <div class="phase-body open">
+      <div class="sub-label">Concept 1 — Schematic Flip</div>
+      <table class="rule-table">
+        <tr><th>Condition (IF)</th><th>Action (THEN)</th></tr>
+        <tr><td class="cond">Opposite range extreme NOT deviated before your schematic confirmed</td><td>Target full Wyckoff High/Low freely. After target hit, watch for new deviations forming.</td></tr>
+        <tr><td class="cond">Opposite range extreme WAS deviated before your schematic confirmed</td><td>Flip-aware mode. Identify extreme S/D and extreme liq at that opposite area. Watch for opposing BOS.</td></tr>
+        <tr><td class="cond">Structure breaks in opposite direction of your trade (opposing BOS)</td><td>Risk-Off on current trade (exit / take profit). Risk-On for opposing schematic (enter new direction).</td></tr>
+        <tr><td class="cond">Opposing structure does NOT break as price reaches opposite extreme</td><td>Hold current trade. Continue to full target. No flip occurring.</td></tr>
+        <tr><td class="cond">Model 2 Distribution fails (acc BOS confirmed) while short</td><td>Exit short. Go long on the accumulation BOS confirmation.</td></tr>
+        <tr><td class="cond">Model 2 Accumulation fails (dist BOS confirmed) while long</td><td>Exit long. Go short on the distribution BOS confirmation.</td></tr>
+        <tr><td class="cond">Schematic confirmed + hitting target + no prior opposite deviation</td><td>After target hit, normal schematic ends. Watch for new range behavior from that extreme.</td></tr>
+      </table>
+
+      <div class="sub-label" style="margin-top:16px">Concept 2 — LTF → HTF Escalation</div>
+      <table class="rule-table">
+        <tr><th>Condition (IF)</th><th>Action (THEN)</th></tr>
+        <tr><td class="cond">Tap 2–3 gap is much smaller than Tap 1–2 gap</td><td>Check if Tap 2 and Tap 3 merge into one deviation on the next higher TF. If yes → LTF nested in HTF range.</td></tr>
+        <tr><td class="cond">You are counting 4 or more taps on one schematic</td><td>Recheck on the next higher valid TF. Almost certainly just 3 taps there.</td></tr>
+        <tr><td class="cond">Tap 2 and Tap 3 disappear/merge on the higher TF</td><td>You are in a LTF schematic within a forming HTF range. Find the HTF Tap 3 zone (proportional OB/zone). Trade the HTF schematic.</td></tr>
+        <tr><td class="cond">LTF schematic hits target but price reverses sharply back up (Distribution) or down (Accumulation)</td><td>Zoom out — the LTF break was likely a HTF higher low / lower high. A bigger HTF range is forming. Redraw range on HTF.</td></tr>
+        <tr><td class="cond">Unmitigated supply zone still above after LTF Distribution confirms</td><td>Signal that HTF escalation may occur — price can return to that supply to form HTF schematic. LTF was just one leg.</td></tr>
+        <tr><td class="cond">LTF range completes, HTF range starts with its own schematic</td><td>The LTF completed schematic = one deviation on the HTF. Trade HTF schematic with proportionally larger S/D zones.</td></tr>
+      </table>
+
+      <div class="sub-label" style="margin-top:16px">Concept 3 — Wyckoff-in-Wyckoff</div>
+      <table class="rule-table">
+        <tr><th>Condition (IF)</th><th>Action (THEN)</th></tr>
+        <tr><td class="cond">Price moving toward Tap 3 of main schematic with a clear local range forming</td><td>Identify the local (blue) TCT schematic. Validate it using standard 5A/5B rules (local DL2, six-candle, extreme liq/S/D).</td></tr>
+        <tr><td class="cond">Local TCT schematic's BOS confirmed (direction = opposite of Tap 3 move)</td><td>Enter on local BOS. SL at MAIN Tap 3 extreme. Target: MAIN Wyckoff High/Low. Do not use local SL.</td></tr>
+        <tr><td class="cond">Local BOS NOT confirmed</td><td>Wait. Do not enter. Same rule as always: "trade confirmations not expectations."</td></tr>
+        <tr><td class="cond">No local range visible in Tap 3 leg</td><td>No Wyckoff-in-Wyckoff available. Fall back to standard main BOS entry (5A/5B).</td></tr>
+        <tr><td class="cond">Local BOS confirmed deep inside main range values</td><td>Highest confidence Wyckoff-in-Wyckoff entry. Best R:R scenario.</td></tr>
+        <tr><td class="cond">Local schematic Tap 3 meets local extreme supply (Distribution) at the main Tap 3 area</td><td>Extra confluence: local extreme supply aligns with main Tap 3 zone = strong double-confirmation.</td></tr>
+      </table>
+
+      <div class="sub-label" style="margin-top:16px">Concept 4 — M1 → M2 Upgrade</div>
+      <table class="rule-table">
+        <tr><th>Condition (IF)</th><th>Action (THEN)</th></tr>
+        <tr><td class="cond">In a M1 trade and price curves back toward range extreme without hitting target</td><td>Begin Model 2 watch. Identify extreme liq and extreme demand/supply in the pullback area.</td></tr>
+        <tr><td class="cond">Pullback meets extreme liq OR extreme demand/supply requirements</td><td>Potential Model 2 Tap 3 forming. Wait for Model 2 BOS — do not act yet.</td></tr>
+        <tr><td class="cond">Model 2 BOS confirmed AND new Tap 3 low is above original entry (Acc) / new Tap 3 high is below original entry (Dist)</td><td>① Trail SL on existing position to entry (de-risk). ② Add new position with freed-up risk at this BOS. New invalidation = below new Tap 3.</td></tr>
+        <tr><td class="cond">New Tap 3 is NOT above original entry (stop trail would not de-risk)</td><td>Do not move stop. Still valid M2 upgrade — just add position at M2 BOS if requirements met. Manage risk on new position normally.</td></tr>
+        <tr><td class="cond">M1 → M2 upgrade is high quality (obvious demand/supply + liq + clean structure)</td><td>Expect follow-through beyond Range High/Low. Extend target to liquidity curves or HTF supply/demand zones.</td></tr>
+        <tr><td class="cond">On the HTF, M1 + M2 LTF taps merge into a single HTF Model 2</td><td>HTF Model 2 further confirms follow-through expectation. The HTF view is a clean Model 2 requiring the same trade.</td></tr>
+        <tr><td class="cond">Pullback does NOT meet any Model 2 Tap 3 requirement</td><td>Do not adjust trade. Hold original M1 position with original stop. This is not an upgrade — just a pullback.</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <div class="phase">
+    <div class="phase-header" onclick="toggle(this)">
+      <div class="phase-number" style="background:#1c2128;color:var(--muted)">☑</div>
+      <div class="phase-title">Advanced Pre-Trade Checklist — Lecture 6 Additions</div>
+      <div class="phase-toggle">›</div>
+    </div>
+    <div class="phase-body">
+      <div class="sub-label">Before Entering Any TCT Trade (add to 5A/5B checklist)</div>
+      <ul class="checklist">
+        <li><strong>Flip awareness:</strong> Has the opposite range extreme been deviated? If yes, identify extreme S/D and extreme liq there. Mark as the opposing schematic's potential Tap 3 zone.</li>
+        <li><strong>LTF/HTF check:</strong> Is Tap 2–3 gap much smaller than Tap 1–2? Zoom up one TF — do taps merge? If yes, find the HTF schematic instead.</li>
+        <li><strong>Wyckoff-in-Wyckoff scan:</strong> As price approaches Tap 3, is a local range forming in the Tap 3 leg? If yes, validate the local schematic and enter on local BOS (main SL/target unchanged).</li>
+        <li><strong>Context for extended target:</strong> Is this a M1 → M2 upgrade scenario developing? If yes, prepare stop trail and add-on plan at M2 BOS confirmation.</li>
+        <li><strong>Follow-through expectation:</strong> Is this a clean M1 → M2 with obvious demand/supply + liq + good HTF confluence? If yes, extend target beyond Wyckoff High/Low to liq curve / unmitigated HTF supply/demand.</li>
+      </ul>
+
+      <div class="sub-label" style="margin-top:14px">During Trade Management</div>
+      <ul class="checklist">
+        <li>Monitor for opposing BOS at the opposite range extreme (Concept 1) — if triggered, exit and flip</li>
+        <li>Monitor for M1 → M2 pullback meeting extreme liq/demand requirements (Concept 4)</li>
+        <li>When M2 BOS confirmed: trail SL on existing position to entry, add new position with freed-up risk</li>
+        <li>When extended target reached: scale out or fully close based on remaining liquidity/supply/demand beyond</li>
+      </ul>
+    </div>
+  </div>
+
+</div>
+
+
+<script>
+function toggle(header) {
+  const body = header.nextElementSibling;
+  const arrow = header.querySelector('.phase-toggle');
+  const isOpen = body.classList.contains('open');
+  body.classList.toggle('open', !isOpen);
+  arrow.classList.toggle('open', !isOpen);
+}
+function showConcept(id, tab) {
+  document.querySelectorAll('.concept-panel').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.concept-tab').forEach(t=>t.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  tab.classList.add('active');
+}
+</script>
+</body>
+</html>
