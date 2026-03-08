@@ -94,6 +94,8 @@ def chunk_text_by_sentences(text: str, max_chunk_size: int = 1200) -> list[str]:
         chunks.append(current_chunk.strip())
     return chunks
 
+app = FastAPI(title="HPB–TCT v21.2 MEXC Server", version="21.2")
+
 # Endpoint to index a single PDF from disk
 @app.post("/index-pdf")
 def index_pdf_from_disk(filepath: str) -> Dict[str, str | int]:
@@ -227,9 +229,7 @@ def resolve_symbol(symbol_param: Optional[str] = None) -> str:
             return s
     return SYMBOL
 
-app = FastAPI(title="HPB–TCT v21.2 MEXC Server", version="21.2")
-
-# Decision tree routes (must be registered on this app instance)
+# Decision tree routes
 @app.get("/decision_trees/tct_5a_schematics_decision_tree.html",    include_in_schema=False)
 def dt_5a():     return HTMLResponse(_DT_5A)
 
