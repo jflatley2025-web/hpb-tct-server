@@ -365,6 +365,77 @@ class Schematics5BTradeState:
 
 
 # ================================================================
+# DECISION TREE DATA EXTRACTOR
+# Pulls the key pass/fail fields from a schematic for the debug UI.
+# ================================================================
+
+def _build_dt_data(schematic: Dict, htf_bias: str) -> Dict:
+    """Extract decision-tree-relevant data from the best schematic for a TF."""
+    enh = schematic.get("lecture_5b_enhancements") or {}
+    rng = schematic.get("range") or {}
+    tap_spacing = enh.get("tap_spacing") or {}
+    range_quality = enh.get("range_quality") or {}
+    sd_check = enh.get("supply_demand_check") or {}
+    trendline = enh.get("trendline_liquidity") or {}
+    overlapping = enh.get("overlapping_structure") or {}
+
+    direction = schematic.get("direction", "unknown")
+
+    # Range size as a % of mid-price
+    rng_size = rng.get("size", 0)
+    eq = rng.get("equilibrium") or ((rng.get("high", 0) + rng.get("low", 0)) / 2) or 1
+    rng_size_pct = round((rng_size / eq) * 100, 2) if eq else None
+
+    entry_p = (schematic.get("entry") or {}).get("price")
+    sl_p = (schematic.get("stop_loss") or {}).get("price")
+    tgt_p = (schematic.get("target") or {}).get("price")
+
+    return {
+        # --- Ranges ---
+        "range_high": rng.get("high"),
+        "range_low": rng.get("low"),
+        "range_size_pct": rng_size_pct,
+        "range_horizontal": range_quality.get("is_horizontal", False),
+        "range_has_clean_pivots": range_quality.get("has_clean_pivots", False),
+        "range_quality_score": range_quality.get("quality_score", 0),
+        "range_quality_factors": range_quality.get("quality_factors", []),
+        "six_candle_valid": schematic.get("six_candle_valid", False),
+        # --- Market Structure ---
+        "direction": direction,
+        "htf_bias": htf_bias,
+        "htf_aligned": direction == htf_bias or htf_bias == "neutral",
+        "bos_confirmed": schematic.get("is_confirmed", False),
+        "model": schematic.get("model", ""),
+        # --- Supply & Demand ---
+        "sd_conflict": sd_check.get("has_conflict", False),
+        "target_clear": not sd_check.get("opposing_zone_blocks_target", False),
+        # --- Liquidity ---
+        "trendline_confluence": trendline.get("provides_confluence", False),
+        "tap_spacing_valid": tap_spacing.get("spacing_valid", False),
+        "spacing_ratio": tap_spacing.get("spacing_ratio"),
+        "tap1_to_tap2": tap_spacing.get("tap1_to_tap2_candles"),
+        "tap2_to_tap3": tap_spacing.get("tap2_to_tap3_candles"),
+        "tap_is_horizontal": tap_spacing.get("is_horizontal", False),
+        # --- 5A Schematics ---
+        "rr": schematic.get("risk_reward"),
+        "rr_meets_minimum": enh.get("meets_minimum_rr", False),
+        "quality_score": schematic.get("quality_score", 0),
+        "entry": entry_p,
+        "sl": sl_p,
+        "target": tgt_p,
+        # --- 5B Schematics ---
+        "overlapping_structure": overlapping.get("has_overlapping_structure", False) if isinstance(overlapping, dict) else False,
+        "optimized_entry_price": (enh.get("optimized_entry") or {}).get("entry") if isinstance(enh.get("optimized_entry"), dict) else None,
+        "domino_levels": (overlapping.get("domino_levels") or []) if isinstance(overlapping, dict) else [],
+        # --- Advanced TCT (Lecture 6) ---
+        "schematic_conversion": bool(schematic.get("schematic_conversion")),
+        "multi_tf_valid": bool(schematic.get("multi_tf_validity")),
+        "wov_in_wov": bool(schematic.get("wov_in_wov")),
+        "m1_to_m2_flow": bool(schematic.get("m1_to_m2_flow")),
+    }
+
+
+# ================================================================
 # DETERMINISTIC EVALUATOR (fixed threshold, no learning)
 # ================================================================
 class Schematics5BEvaluator:
@@ -1017,6 +1088,16 @@ class Schematics5BTrader:
                         best_setup = (s, eval_result)
                         best_tf_local = effective_tf
 
+                # Pick the best schematic for decision-tree display (highest quality_score
+                # among confirmed ones; fall back to highest quality_score overall).
+                dt_best: Optional[Dict] = None
+                for _s in all_sch:
+                    if not isinstance(_s, dict):
+                        continue
+                    if dt_best is None or _s.get("quality_score", 0) > dt_best.get("quality_score", 0):
+                        if _s.get("is_confirmed") or dt_best is None:
+                            dt_best = _s
+
                 total_candles = len(df) if df is not None else 0
                 all_tf_results[tf] = {
                     "status": "scanned",
@@ -1029,6 +1110,7 @@ class Schematics5BTrader:
                     "htf_bias": htf_bias,
                     "best_score": max((e["score"] for e in tf_evals), default=0),
                     "evaluations": tf_evals[:10],
+                    "dt_data": _build_dt_data(dt_best, htf_bias) if dt_best else None,
                 }
 
             # Collect forming (unconfirmed, all 3 taps present) schematics for display
