@@ -16388,7 +16388,7 @@ function dtContent(category, dt, t) {
 
   if (category === 'supply_demand') {
     let h = '';
-    h += chk('No supply/demand conflict at entry zone', !dt.sd_conflict);
+    h += chk('No supply/demand conflict at entry zone', dt.sd_conflict == null ? null : !dt.sd_conflict);
     h += chk('Target path clear (no opposing zone blocks)', dt.target_clear);
     h += chk('Trendline liquidity confluence at tap', dt.trendline_confluence);
     return h;
@@ -16422,7 +16422,7 @@ function dtContent(category, dt, t) {
       dt.rr !== null ? ('R:R=' + fmt(dt.rr, 2)) : null);
     h += chk('Six-candle rule valid on all taps', dt.six_candle_valid);
     h += chk('Range is horizontal', dt.range_horizontal);
-    h += chk('No S/D conflict at entry', !dt.sd_conflict);
+    h += chk('No S/D conflict at entry', dt.sd_conflict == null ? null : !dt.sd_conflict);
     if (dt.entry !== null && dt.entry !== undefined) {
       h += '<div class="dt-check"><span class="dt-check-label">Entry / SL / Target</span>'
         + '<span class="dt-check-val">$' + fmt(dt.entry) + ' / $' + fmt(dt.sl) + ' / $' + fmt(dt.target) + '</span></div>';
@@ -16556,7 +16556,7 @@ function renderDecisionTrees(d) {
       // rough "pass" = BOS confirmed (or range found for 'ranges')
       if (cat.id === 'ranges') { if (t.dt_data.range_high) passCount++; }
       else if (cat.id === 'market_structure') { if (t.dt_data.bos_confirmed) passCount++; }
-      else if (cat.id === 'supply_demand') { if (!t.dt_data.sd_conflict) passCount++; }
+      else if (cat.id === 'supply_demand') { if (t.dt_data.sd_conflict === false) passCount++; }
       else if (cat.id === 'liquidity') { if (t.dt_data.tap_spacing_valid) passCount++; }
       else if (cat.id === 'schematics_5a') { if (t.dt_data.bos_confirmed && t.dt_data.rr_meets_minimum) passCount++; }
       else if (cat.id === 'schematics_5b') { if (t.dt_data.tap_spacing_valid && t.dt_data.range_horizontal) passCount++; }
