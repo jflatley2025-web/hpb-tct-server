@@ -77,14 +77,15 @@
   .rr-bad  { background: #3a1a1a; color: var(--red); }
   .rr-ok   { background: #3a2a10; color: var(--yellow); }
   .rr-good { background: #1a3a24; color: var(--green); }
+  `@media` print {
     .phase-body { display: block !important; }
     .phase-toggle { display: none; }
-    body { background: #fff; color: #111; padding: 12px; font-size: 12px; }
-    .phase-header { background: #f0f0f0 !important; cursor: default; }
-    .action { background: #f8f8f8; border-color: #ccc; }
-    .rule-table tr:nth-child(even) td { background: #f5f5f5; }
-    .tip, .quote { background: #f8f8f8; }
-    @page { margin: 1.5cm; }
+    body { background: `#fff`; color: `#111`; padding: 12px; font-size: 12px; }
+    .phase-header { background: `#f0f0f0` !important; cursor: default; }
+    .action { background: `#f8f8f8`; border-color: `#ccc`; }
+    .rule-table tr:nth-child(even) td { background: `#f5f5f5`; }
+    .tip, .quote { background: `#f8f8f8`; }
+    `@page` { margin: 1.5cm; }
   }
 </style>
 </head>
