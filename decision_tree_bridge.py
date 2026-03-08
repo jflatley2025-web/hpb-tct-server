@@ -154,8 +154,7 @@ def _detect_deviation(df: pd.DataFrame, range_high: float, range_low: float,
     any_close_above = any(c > range_high for c in closes)
     any_close_below = any(c < range_low for c in closes)
     wick_above = any(h > range_high for h in highs) and not any_close_above
-    wick_below = any(l < range_low for l in lows) and not any_close_below
-
+    wick_below = any(low < range_low for low in lows) and not any_close_below
     # DL breach
     close_beyond_dl = any(c > dl_above for c in closes) or any(c < dl_below for c in closes)
 
