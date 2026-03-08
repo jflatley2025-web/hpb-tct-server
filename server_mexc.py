@@ -15599,20 +15599,22 @@ async def schematics_5b_debug():
     """Return detailed debug diagnostics from the last 5B scan cycle.
 
     Includes per-tree decision results from the 6-tree pipeline when available.
+    Uses debug_snapshot() to atomically read last_debug + state fields under
+    the trader's lock, preventing mixed data from concurrent scan cycles.
     Flattens per_symbol[primary_symbol].timeframes to a top-level 'timeframes'
     key so the frontend can render decision-tree data without knowing symbol names.
     """
     try:
         from schematics_5b_trader import get_5b_trader
         trader = get_5b_trader()
-        raw = dict(trader.last_debug) if trader.last_debug else {}
+        # Single locked snapshot — consistent across last_debug and state fields.
+        raw = trader.debug_snapshot()
 
-        # Identify primary symbol (BTCUSDT if present, else first scanned)
+        # Flatten the primary symbol's per-TF data to the top level.
         per_symbol: Dict = raw.get("per_symbol", {})
         primary = "BTCUSDT" if "BTCUSDT" in per_symbol else next(iter(per_symbol), None)
         primary_data: Dict = per_symbol.get(primary, {}) if primary else {}
 
-        # Build flattened debug response expected by the frontend
         debug: Dict = {
             "timestamp": raw.get("timestamp"),
             "current_price": primary_data.get("current_price", raw.get("current_price")),
@@ -15622,14 +15624,8 @@ async def schematics_5b_debug():
             "symbols_scanned": raw.get("symbols_scanned", []),
             "timeframes": primary_data.get("timeframes", {}),
             "forming_schematics": raw.get("forming_schematics", []),
-        }
-        debug["state_summary"] = {
-            "balance": trader.state.balance,
-            "has_open_trade": trader.state.current_trade is not None,
-            "total_trades": len(trader.state.trade_history),
-            "last_scan_time": trader.state.last_scan_time,
-            "last_scan_action": trader.state.last_scan_action,
-            "last_error": trader.state.last_error,
+            # state_summary already captured atomically inside debug_snapshot()
+            "state_summary": raw.get("state_summary", {}),
         }
 
         # Extract tree_results from the per-symbol evaluation data

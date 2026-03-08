@@ -756,6 +756,7 @@ class Schematics5BTrader:
         self.state = Schematics5BTradeState()
         self.evaluator = DecisionTreeEvaluator()
         self.last_debug: Dict = {}
+        self._lock = threading.Lock()
         # Per-symbol HTF bias cache: symbol → (bias_str, expiry_timestamp)
         self._htf_bias_cache: Dict[str, str] = {}
         self._htf_bias_expiry: Dict[str, float] = {}
@@ -764,6 +765,25 @@ class Schematics5BTrader:
         # timed-out scan keeps running while the loop dispatches a new one.
         # This lock ensures only one thread mutates state at a time.
         self._scan_lock = threading.Lock()
+
+    def debug_snapshot(self) -> Dict:
+        """Return a consistent snapshot of last_debug + state fields under the lock.
+
+        The background scan loop writes last_debug and mutates state concurrently.
+        Reading them separately risks mixing data from different scan cycles.
+        Taking both under one lock guarantees the response is internally consistent.
+        """
+        with self._lock:
+            debug = dict(self.last_debug)
+            debug["state_summary"] = {
+                "balance": self.state.balance,
+                "has_open_trade": self.state.current_trade is not None,
+                "total_trades": len(self.state.trade_history),
+                "last_scan_time": self.state.last_scan_time,
+                "last_scan_action": self.state.last_scan_action,
+                "last_error": self.state.last_error,
+            }
+        return debug
 
     def scan_and_trade(self, top_5_pairs=None) -> Dict:
         """Main cycle: fetch, detect, evaluate, trade.
@@ -828,19 +848,18 @@ class Schematics5BTrader:
             best_htf_bias = sym_result.get("htf_bias", "neutral")
             all_forming = sym_result.get("forming", [])
 
-            self.last_debug = {
-                "timestamp": cycle_result["timestamp"],
-                "symbols_scanned": [SYMBOL],
-                "current_price": best_current_price,
-                "best_symbol": SYMBOL,
-                "best_tf": best_tf,
-                "best_score": best_score,
-                "htf_cascade_active": True,
-                "forming_schematics": all_forming[:5],
-                "per_symbol": {SYMBOL: sym_result},
-                # Hoist timeframes to top level so the dashboard JS can render them
-                "timeframes": sym_result.get("timeframes", {}),
-            }
+            with self._lock:
+                self.last_debug = {
+                    "timestamp": cycle_result["timestamp"],
+                    "symbols_scanned": symbols,
+                    "current_price": best_current_price,
+                    "best_symbol": best_symbol,
+                    "best_tf": best_tf,
+                    "best_score": best_score,
+                    "htf_cascade_active": True,
+                    "forming_schematics": all_forming[:5],
+                    "per_symbol": per_symbol_results,
+                }
 
             # 3. Enter trade on highest-scoring qualifying setup.
             if best_setup:
