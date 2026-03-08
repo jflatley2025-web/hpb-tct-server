@@ -14,6 +14,7 @@ from typing import Dict, List, Optional
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
 from pypdf import PdfReader
 import uuid
 import re
@@ -23,6 +24,9 @@ logging.basicConfig(level=logging.INFO)
 
 # Initialize FastAPI app
 app = FastAPI()
+
+# Serve decision tree HTML files as static assets
+app.mount("/decision_trees", StaticFiles(directory="decision_trees"), name="decision_trees")
 
 # ChromaDB + SentenceTransformer are initialized lazily on first use so the
 # heavy model weights (all-MiniLM-L6-v2 + torch) don't load at startup and
