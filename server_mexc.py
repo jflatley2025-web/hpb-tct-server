@@ -25,8 +25,9 @@ logging.basicConfig(level=logging.INFO)
 # Initialize FastAPI app
 app = FastAPI()
 
-# Serve decision tree HTML files as static assets
-app.mount("/decision_trees", StaticFiles(directory="decision_trees"), name="decision_trees")
+# Serve decision tree HTML files as static assets (absolute path for Render compatibility)
+_DECISION_TREES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "decision_trees")
+app.mount("/decision_trees", StaticFiles(directory=_DECISION_TREES_DIR), name="decision_trees")
 
 # ChromaDB + SentenceTransformer are initialized lazily on first use so the
 # heavy model weights (all-MiniLM-L6-v2 + torch) don't load at startup and
