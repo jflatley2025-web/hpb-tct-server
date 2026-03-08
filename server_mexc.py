@@ -25,19 +25,27 @@ logging.basicConfig(level=logging.INFO)
 # Initialize FastAPI app
 app = FastAPI()
 
-# Serve decision tree HTML files as static assets (absolute path for Render compatibility)
+# Serve decision tree HTML files — read directly with open() to avoid any
+# aiofiles/StaticFiles quirks on Render's free tier.
 _DECISION_TREES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "decision_trees")
 
-# Explicit route is more reliable than StaticFiles mount on Render
+_ALLOWED_DECISION_TREES = {
+    "tct_5a_schematics_decision_tree.html",
+    "tct_5b_schematics_real_examples_decision_tree.html",
+    "tct_6_advanced_schematics_decision_tree.html",
+    "ranges_decision_tree.html",
+    "liquidity_decision_tree.html",
+    "supply_demand_decision_tree.html",
+}
+
 @app.get("/decision_trees/{filename}")
-async def serve_decision_tree(filename: str):
-    # Prevent path traversal
-    if "/" in filename or "\\" in filename or ".." in filename:
-        raise HTTPException(status_code=400, detail="Invalid filename")
-    filepath = os.path.join(_DECISION_TREES_DIR, filename)
-    if not os.path.isfile(filepath):
+def serve_decision_tree(filename: str):
+    if filename not in _ALLOWED_DECISION_TREES:
         raise HTTPException(status_code=404, detail="File not found")
-    return FileResponse(filepath, media_type="text/html")
+    filepath = os.path.join(_DECISION_TREES_DIR, filename)
+    with open(filepath, "r", encoding="utf-8") as f:
+        content = f.read()
+    return HTMLResponse(content=content)
 
 # ChromaDB + SentenceTransformer are initialized lazily on first use so the
 # heavy model weights (all-MiniLM-L6-v2 + torch) don't load at startup and
