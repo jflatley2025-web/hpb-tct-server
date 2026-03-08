@@ -12,8 +12,8 @@ import numpy as np
 from datetime import datetime
 from typing import Dict, List, Optional
 
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse, JSONResponse, Response, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pypdf import PdfReader
 import uuid
@@ -27,7 +27,17 @@ app = FastAPI()
 
 # Serve decision tree HTML files as static assets (absolute path for Render compatibility)
 _DECISION_TREES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "decision_trees")
-app.mount("/decision_trees", StaticFiles(directory=_DECISION_TREES_DIR), name="decision_trees")
+
+# Explicit route is more reliable than StaticFiles mount on Render
+@app.get("/decision_trees/{filename}")
+async def serve_decision_tree(filename: str):
+    # Prevent path traversal
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    filepath = os.path.join(_DECISION_TREES_DIR, filename)
+    if not os.path.isfile(filepath):
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(filepath, media_type="text/html")
 
 # ChromaDB + SentenceTransformer are initialized lazily on first use so the
 # heavy model weights (all-MiniLM-L6-v2 + torch) don't load at startup and
