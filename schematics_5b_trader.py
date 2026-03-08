@@ -680,13 +680,37 @@ class Schematics5BTrader:
         # Per-symbol HTF bias cache: symbol → (bias_str, expiry_timestamp)
         self._htf_bias_cache: Dict[str, str] = {}
         self._htf_bias_expiry: Dict[str, float] = {}
+        # Guard against overlapping scan_and_trade runs.  asyncio.wait_for
+        # cancels the *await* but cannot kill the executor thread, so a
+        # timed-out scan keeps running while the loop dispatches a new one.
+        # This lock ensures only one thread mutates state at a time.
+        self._scan_lock = threading.Lock()
 
     def scan_and_trade(self, top_5_pairs=None) -> Dict:
         """Main cycle: fetch, detect, evaluate, trade.
 
         BTCUSDT only.  top_5_pairs parameter is accepted for backward
         compatibility but ignored — all scanning is done on BTCUSDT.
+
+        Thread-safe: if another thread is already inside this method
+        (e.g. the previous timed-out executor thread hasn't finished),
+        this call returns immediately with action="scan_in_progress".
         """
+        if not self._scan_lock.acquire(blocking=False):
+            logger.warning("[5B] scan_and_trade skipped — previous scan still in progress")
+            return {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "action": "scan_in_progress",
+                "details": {"reason": "Previous scan cycle still running"},
+            }
+
+        try:
+            return self._scan_and_trade_locked()
+        finally:
+            self._scan_lock.release()
+
+    def _scan_and_trade_locked(self) -> Dict:
+        """Actual scan logic, called only while self._scan_lock is held."""
         cycle_result = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "action": "none",
