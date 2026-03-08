@@ -43,8 +43,11 @@ def serve_decision_tree(filename: str):
     if filename not in _ALLOWED_DECISION_TREES:
         raise HTTPException(status_code=404, detail="File not found")
     filepath = os.path.join(_DECISION_TREES_DIR, filename)
-    with open(filepath, encoding="utf-8") as f:
-        content = f.read()
+    try:
+        with open(filepath, encoding="utf-8") as f:
+            content = f.read()
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="File not found")
     return HTMLResponse(content=content)
 
 # ChromaDB + SentenceTransformer are initialized lazily on first use so the
