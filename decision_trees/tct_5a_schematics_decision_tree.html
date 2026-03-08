@@ -77,11 +77,6 @@
   .tap-label { font-weight: 700; font-size: 10px; }
   .tap-bar { width: 36px; border-radius: 3px; }
   .arrow { color: var(--muted); font-size: 18px; padding: 0 4px; }
-  /* ── Print / PDF ── */
-  .print-btn { position: fixed; top: 16px; right: 16px; z-index: 1000; padding: 8px 16px; background: var(--blue); color: #0d1117; border: none; border-radius: 6px; font-size: 13px; font-weight: 700; cursor: pointer; }
-  .print-btn:hover { opacity: 0.85; }
-  @media print {
-    .print-btn { display: none; }
     .phase-body { display: block !important; }
     .phase-toggle { display: none; }
     body { background: #fff; color: #111; padding: 12px; font-size: 12px; }
@@ -680,14 +675,6 @@ function toggle(header) {
   const isOpen = body.classList.contains('open');
   body.classList.toggle('open', !isOpen);
   arrow.classList.toggle('open', !isOpen);
-}
-</script>
-<button class="print-btn" onclick="printPDF()">Save as PDF</button>
-<script>
-function printPDF() {
-  document.querySelectorAll(".phase-body").forEach(b => b.classList.add("open"));
-  document.querySelectorAll(".phase-toggle").forEach(a => a.classList.add("open"));
-  window.print();
 }
 </script>
 </body>

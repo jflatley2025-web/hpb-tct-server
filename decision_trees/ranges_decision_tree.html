@@ -219,11 +219,6 @@
   .pill-bear { background: #3a1a1a; color: var(--red);   border: 1px solid var(--red); }
   .pill-neut { background: #1a2a3a; color: var(--blue);  border: 1px solid var(--blue); }
   .pill-warn { background: #3a2a10; color: var(--yellow); border: 1px solid var(--yellow); }
-  /* ── Print / PDF ── */
-  .print-btn { position: fixed; top: 16px; right: 16px; z-index: 1000; padding: 8px 16px; background: var(--blue); color: #0d1117; border: none; border-radius: 6px; font-size: 13px; font-weight: 700; cursor: pointer; }
-  .print-btn:hover { opacity: 0.85; }
-  @media print {
-    .print-btn { display: none; }
     .phase-body { display: block !important; }
     .phase-toggle { display: none; }
     body { background: #fff; color: #111; padding: 12px; font-size: 12px; }
@@ -888,15 +883,6 @@ function toggle(header) {
 document.querySelectorAll('.phase-toggle').forEach(t => {
   if (!t.classList.contains('open')) t.style.display = 'inline';
 });
-</script>
-
-<button class="print-btn" onclick="printPDF()">Save as PDF</button>
-<script>
-function printPDF() {
-  document.querySelectorAll(".phase-body").forEach(b => b.classList.add("open"));
-  document.querySelectorAll(".phase-toggle").forEach(a => a.classList.add("open"));
-  window.print();
-}
 </script>
 </body>
 </html>
