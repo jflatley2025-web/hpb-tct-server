@@ -15596,7 +15596,10 @@ async def schematics_5b_state():
 
 @app.get("/api/schematics-5b-trader/debug")
 async def schematics_5b_debug():
-    """Return detailed debug diagnostics from the last 5B scan cycle."""
+    """Return detailed debug diagnostics from the last 5B scan cycle.
+
+    Includes per-tree decision results from the 6-tree pipeline when available.
+    """
     try:
         from schematics_5b_trader import get_5b_trader
         trader = get_5b_trader()
@@ -15604,6 +15607,7 @@ async def schematics_5b_debug():
         # Attach current MSCE context
         msce_ctx: Dict = {}
         debug["msce"] = validate_MSCE(msce_ctx)
+        debug["evaluator_type"] = "decision_tree_pipeline"
         debug["state_summary"] = {
             "balance": trader.state.balance,
             "has_open_trade": trader.state.current_trade is not None,
@@ -15612,6 +15616,29 @@ async def schematics_5b_debug():
             "last_scan_action": trader.state.last_scan_action,
             "last_error": trader.state.last_error,
         }
+
+        # Extract tree_results from the per-symbol evaluation data
+        per_sym = debug.get("per_symbol", {})
+        for sym, sym_data in per_sym.items():
+            if not isinstance(sym_data, dict):
+                continue
+            for tf_key, tf_data in sym_data.get("timeframes", {}).items():
+                if not isinstance(tf_data, dict):
+                    continue
+                for ev in tf_data.get("evaluations", []):
+                    if isinstance(ev, dict) and "tree_results" in ev:
+                        # Surface tree results at top level for easy dashboard access
+                        if "tree_evaluations" not in debug:
+                            debug["tree_evaluations"] = []
+                        debug["tree_evaluations"].append({
+                            "symbol": sym,
+                            "timeframe": tf_key,
+                            "score": ev.get("score", 0),
+                            "pass": ev.get("pass", False),
+                            "direction": ev.get("direction"),
+                            "tree_results": ev["tree_results"],
+                        })
+
         return convert_numpy_types(debug)
     except Exception as e:
         logger.error(f"[5B-DEBUG] Failed to build debug response: {e}", exc_info=True)
@@ -17426,13 +17453,11 @@ async def schematics_5b_auto_scan_loop():
             async with _get_scan_lock():
                 trader = get_5b_trader()
                 loop = asyncio.get_event_loop()
-                # Snapshot top_5_setups to avoid concurrent-mutation issues;
-                # passes an empty list before the first range scan fires (falls back to BTCUSDT).
-                pairs_snapshot = list(top_5_setups)
+                # BTCUSDT only — no multi-symbol scanning.
                 # Cap each scan cycle at 5 minutes; a hung thread would otherwise
                 # hold the lock and stall both auto-scan loops indefinitely.
                 result = await asyncio.wait_for(
-                    loop.run_in_executor(None, trader.scan_and_trade, pairs_snapshot),
+                    loop.run_in_executor(None, trader.scan_and_trade),
                     timeout=300,
                 )
 
