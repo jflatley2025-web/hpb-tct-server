@@ -658,6 +658,7 @@
 function toggle(header) {
   const body = header.nextElementSibling;
   const arrow = header.querySelector('.phase-toggle');
+  if (!body || !arrow) return;
   const isOpen = body.classList.contains('open');
   body.classList.toggle('open', !isOpen);
   arrow.classList.toggle('open', !isOpen);
