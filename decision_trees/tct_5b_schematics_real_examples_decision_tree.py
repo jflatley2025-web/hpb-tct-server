@@ -89,7 +89,7 @@ class TCT5BInputs:
     highest_valid_tf: str                # e.g. "15min", "45min", "2H", "4H"
 
     # ── 5B Step 2: Tap spacing ──
-    tap23_gap_reasonable: bool           # T2–T3 gap is proportional to T1–T2; Tap 3 visible on schematic TF
+    tap23_gap_reasonable: bool           # T2-T3 gap is proportional to T1-T2; Tap 3 visible on schematic TF
 
     # ── 5B Step 3: Model 2 extreme liq vs S/D priority ──
     # (only evaluated if model_type == MODEL_2)
