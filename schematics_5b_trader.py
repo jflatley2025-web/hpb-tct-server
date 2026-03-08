@@ -846,14 +846,14 @@ class Schematics5BTrader:
             with self._lock:
                 self.last_debug = {
                     "timestamp": cycle_result["timestamp"],
-                    "symbols_scanned": symbols,
+                    "symbols_scanned": [SYMBOL],
                     "current_price": best_current_price,
-                    "best_symbol": best_symbol,
+                    "best_symbol": SYMBOL,
                     "best_tf": best_tf,
                     "best_score": best_score,
                     "htf_cascade_active": True,
                     "forming_schematics": all_forming[:5],
-                    "per_symbol": per_symbol_results,
+                    "per_symbol": {SYMBOL: sym_result},
                 }
 
             # 3. Enter trade on highest-scoring qualifying setup.
