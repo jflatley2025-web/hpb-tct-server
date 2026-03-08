@@ -15840,7 +15840,9 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
 
 /* TF tabs inside each section */
 .dt-tabs{display:flex;border-bottom:1px solid #1e1e2d;overflow-x:auto}
-.dt-tab{padding:5px 14px;font-size:.68rem;font-weight:700;cursor:pointer;border-right:1px solid #1e1e2d;color:#555;white-space:nowrap;transition:all .15s;flex-shrink:0}
+.dt-header-btn{all:unset;display:flex;align-items:center;gap:10px;flex:1;cursor:pointer}
+.dt-header-btn:focus-visible{outline:2px solid #00d4ff;outline-offset:-2px}
+.dt-tab{all:unset;padding:5px 14px;font-size:.68rem;font-weight:700;cursor:pointer;border-right:1px solid #1e1e2d;color:#555;white-space:nowrap;transition:all .15s;flex-shrink:0}
 .dt-tab:hover{background:#181828;color:#e0e0e0}
 .dt-tab.active{background:rgba(0,212,255,.08);color:#00d4ff;border-bottom:2px solid #00d4ff}
 .dt-tab-content{display:none;padding:10px 14px}
@@ -16476,19 +16478,27 @@ const _activeTabs = {};
 function switchTab(sectionId, tf) {
   _activeTabs[sectionId] = tf;
   document.querySelectorAll('#' + sectionId + ' .dt-tab').forEach(tab => {
-    tab.classList.toggle('active', tab.dataset.tf === tf);
+    const selected = tab.dataset.tf === tf;
+    tab.classList.toggle('active', selected);
+    tab.setAttribute('aria-selected', String(selected));
+    tab.setAttribute('tabindex', selected ? '0' : '-1');
   });
   document.querySelectorAll('#' + sectionId + ' .dt-tab-content').forEach(pane => {
-    pane.classList.toggle('active', pane.dataset.tf === tf);
+    const active = pane.dataset.tf === tf;
+    pane.classList.toggle('active', active);
+    if (active) pane.removeAttribute('hidden');
+    else pane.setAttribute('hidden', '');
   });
 }
 
 function toggleDtSection(sectionId) {
-  const body = document.getElementById(sectionId + '-body');
+  const body  = document.getElementById(sectionId + '-body');
   const arrow = document.getElementById(sectionId + '-arrow');
+  const btn   = document.getElementById(sectionId + '-hdr-btn');
   const isOpen = body.classList.contains('open');
   body.classList.toggle('open', !isOpen);
   arrow.classList.toggle('open', !isOpen);
+  if (btn) btn.setAttribute('aria-expanded', String(!isOpen));
 }
 
 function renderDecisionTrees(d) {
@@ -16555,18 +16565,22 @@ function renderDecisionTrees(d) {
     const pillColor = passCount === totalCount ? '#00e676' : passCount > 0 ? '#ffc107' : '#ff4444';
 
     html += '<div class="dt-section" id="' + sid + '">';
-    html += '<div class="dt-header" onclick="toggleDtSection(\'' + sid + '\')">';
+    html += '<div class="dt-header">';
+    html += '<button class="dt-header-btn" id="' + sid + '-hdr-btn"'
+      + ' aria-expanded="false" aria-controls="' + sid + '-body"'
+      + ' onclick="toggleDtSection(\'' + sid + '\')">';
     html += '<span class="dt-icon" style="color:#00d4ff">' + cat.icon + '</span>';
     html += '<span class="dt-title">' + cat.title + '</span>';
-    if (cat.link) {
-      html += '<a href="' + cat.link + '" target="_blank" onclick="event.stopPropagation()" '
-        + 'style="font-size:.62rem;color:#555;text-decoration:none;border:1px solid #222;border-radius:3px;padding:1px 6px;white-space:nowrap">Decision Tree ↗</a>';
-    }
     if (totalCount > 0) {
       html += '<span style="font-size:.65rem;font-weight:700;color:' + pillColor + ';margin-left:6px;white-space:nowrap">'
         + passCount + '/' + totalCount + ' TF</span>';
     }
     html += '<span class="dt-toggle" id="' + sid + '-arrow">▶</span>';
+    html += '</button>';
+    if (cat.link) {
+      html += '<a href="' + cat.link + '" target="_blank" rel="noopener noreferrer"'
+        + ' style="font-size:.62rem;color:#555;text-decoration:none;border:1px solid #222;border-radius:3px;padding:1px 6px;white-space:nowrap">Decision Tree ↗</a>';
+    }
     html += '</div>';
     html += '<div class="dt-body" id="' + sid + '-body">';
 
@@ -16574,25 +16588,37 @@ function renderDecisionTrees(d) {
     const availableTFs = TF_ORDER.filter(tf => tfs[tf]);
     const savedTF = _activeTabs[sid];
     const defaultTF = (savedTF && availableTFs.includes(savedTF)) ? savedTF : (availableTFs[0] || '1d');
-    html += '<div class="dt-tabs">';
+    html += '<div class="dt-tabs" role="tablist" aria-label="' + cat.title + ' timeframes">';
     availableTFs.forEach(tf => {
       const t = tfs[tf];
       const isBest = tf === d.best_tf;
+      const isActive = tf === defaultTF;
       const statusDot = t.status === 'scanned' ? '●' : t.status === 'insufficient_data' ? '○' : '✕';
       const statusColor = t.status === 'scanned' ? '#00e676' : t.status === 'insufficient_data' ? '#ffc107' : '#ff4444';
-      html += '<div class="dt-tab' + (tf === defaultTF ? ' active' : '') + '" '
-        + 'data-tf="' + tf + '" onclick="switchTab(\'' + sid + '\',\'' + tf + '\')">'
+      html += '<button class="dt-tab' + (isActive ? ' active' : '') + '"'
+        + ' role="tab"'
+        + ' id="' + sid + '-tab-' + tf + '"'
+        + ' aria-selected="' + isActive + '"'
+        + ' aria-controls="' + sid + '-panel-' + tf + '"'
+        + ' tabindex="' + (isActive ? '0' : '-1') + '"'
+        + ' data-tf="' + tf + '"'
+        + ' onclick="switchTab(\'' + sid + '\',\'' + tf + '\')">'
         + '<span style="color:' + statusColor + ';margin-right:3px;font-size:.6rem">' + statusDot + '</span>'
         + (TF_LABELS[tf] || tf.toUpperCase())
         + (isBest ? ' <span style="color:#ffc107;font-size:.55rem">★</span>' : '')
-        + '</div>';
+        + '</button>';
     });
     html += '</div>';
 
     // TF tab content panes
     availableTFs.forEach(tf => {
       const t = tfs[tf];
-      html += '<div class="dt-tab-content' + (tf === defaultTF ? ' active' : '') + '" data-tf="' + tf + '">';
+      html += '<div class="dt-tab-content' + (tf === defaultTF ? ' active' : '') + '"'
+        + ' role="tabpanel"'
+        + ' id="' + sid + '-panel-' + tf + '"'
+        + ' aria-labelledby="' + sid + '-tab-' + tf + '"'
+        + (tf !== defaultTF ? ' hidden' : '')
+        + ' data-tf="' + tf + '">';
       if (t.status === 'insufficient_data') {
         html += '<div class="dt-no-data">Insufficient candle data for ' + tf + '</div>';
       } else if (t.status === 'error') {
