@@ -309,6 +309,14 @@ class Schematics5BTradeState:
                 self.total_losses = data.get("total_losses", 0)
                 self.last_scan_time = data.get("last_scan_time")
                 self.last_scan_action = data.get("last_scan_action")
+                # Validate current_trade — discard if essential fields are missing/zero
+                if self.current_trade:
+                    ep = self.current_trade.get("entry_price", 0)
+                    sp = self.current_trade.get("stop_price", 0)
+                    tp = self.current_trade.get("target_price", 0)
+                    if not ep or not sp or not tp:
+                        logger.error(f"[5B-STATE] Discarding corrupt current_trade on load: entry={ep}, stop={sp}, target={tp}")
+                        self.current_trade = None
                 logger.info(f"[5B-STATE] Loaded — balance=${self.balance:.2f}, trades={len(self.trade_history)}")
         except Exception as e:
             logger.warning(f"[5B-STATE] Could not load trade state: {e}")
@@ -1172,8 +1180,15 @@ class Schematics5BTrader:
         if not trade:
             return {"action": "no_trade"}
 
+        # Guard: discard corrupt trades with missing/zero entry_price
+        entry_price = trade.get("entry_price", 0)
+        if not entry_price:
+            logger.error(f"[5B] Discarding corrupt trade with entry_price={entry_price!r}: {trade}")
+            self.state.current_trade = None
+            self.state.save()
+            return {"action": "corrupt_trade_discarded", "details": "entry_price was 0 or missing"}
+
         direction = trade["direction"]
-        entry_price = trade["entry_price"]
         stop_price = trade["stop_price"]
         target_price = trade["target_price"]
         tp1_price = trade.get("tp1_price")
