@@ -1,207 +1,206 @@
-# Schematics-5B Implementation Plan
+# Plan: Replace Schematics-5B Trading Bot with 6-Tree Decision Pipeline
 
-## Overview
+## Summary
 
-Build a new **schematics-5B** automated trading simulator page:
-1. **Enhanced TCT logic** from Lecture 5B (structure dissection, domino effect, reconfirmation tool)
-2. **Automated simulated trading** on **BTCUSDT only** using live MEXC prices
-3. **Purely deterministic evaluation** — fixed score threshold (50/100), no learning, no reward system, no adaptive adjustments
-4. **GitHub persistence** via `GITHUB_TOKEN_2` env var
-5. **Telegram notifications** to `TELEGRAM_CHAT_ID_3` with entry/exit details
+Replace the hardcoded 50-point scoring system in `schematics_5b_trader.py` with a full 6-tree decision pipeline that chains all decision tree files from `decision_trees/`. BTCUSDT only. Preserve all execution infrastructure.
 
 ---
 
-## Finalized Architecture Decisions
+## Architecture: What Changes vs What Stays
 
-### Decision 1: Separate Trading Engine ✅ (Option A)
+### STAYS (untouched)
+- `Schematics5BTradeState` — state persistence, save/load, GitHub sync
+- `_enter_trade()` — position sizing, margin, leverage, TP1 calc
+- `_manage_open_trade()` — TP1 partial close, SL-to-BE, target/stop monitoring
+- `_close_trade()` / `_take_partial_profit()` — PnL calc, balance update
+- `_is_duplicate_setup()` — cooldown + price tolerance
+- Telegram notifications — `_notify_5b_entry/tp1/exit`
+- HTF bias detection — `_get_htf_bias()` (used as one input to the pipeline)
+- LTF BOS refinement — `refine_schematic_bos_with_ltf()`
+- HTF upgrade cascade — `_find_htf_upgrade()`
+- Background scan loop in `server_mexc.py`
+- Dashboard HTML layout (update debug section only)
 
-Dedicated `schematics_5b_trader.py` module — clean separation from tensor trader.
+### REPLACED
+- `Schematics5BEvaluator` class → new `DecisionTreeEvaluator` class
+- The 6 hardcoded gates (BOS, staleness, quality, R:R, HTF, model) → 6-tree pipeline
+- `_scan_single_symbol()` scanning logic → new method that builds tree inputs from candles
 
-### Decision 2: Single Pair Only ✅ (Option B)
-
-**BTCUSDT only.** No multi-pair scanning, no pair selector UI.
-
-### Decision 3: No Learning / No Reward System ✅
-
-Explicitly excluded from the 5B trader:
-- ❌ No `HPBContextualReward` / no reward_history tracking
-- ❌ No `compute_model_weights()` — no learned per-model score bonuses
-- ❌ No `adapt_after_loss()` / `adapt_after_win()` — no consecutive-loss adaptation
-- ❌ No tightening/loosening of entry thresholds based on trade history
-- ✅ Fixed 50-point pass threshold — same rules on trade #1 as trade #100
-- ✅ Pure W/L trade log (no reward_value, no analysis, no solution fields)
-
-### Decision 4: Fixed Score Threshold ✅
-
-Entry evaluation uses a fixed 50/100 minimum score based on structural factors:
-- BOS confirmation (30 pts)
-- R:R quality (5-25 pts based on ratio)
-- HTF bias alignment (20 pts)
-- Schematic quality score bonus (10-15 pts)
-- Model type bonus (3-5 pts)
-
-No dynamic adjustments — threshold stays at 50 forever.
+### NEW
+- `decision_tree_bridge.py` — module that maps raw candle data + schematic dicts → decision tree input dataclasses
+- Import all 6 evaluate functions from `decision_trees/`
 
 ---
 
-## Components to Build
+## Pipeline Design
 
-### 1. `schematics_5b_trader.py` — Trading Engine (~350 lines)
+Each scan cycle runs this pipeline for BTCUSDT across MTF timeframes:
 
-Modeled after `tensor_tct_trader.py` but **stripped of all learning/reward logic**.
+```
+Step 1: Fetch candles (1d, 4h, 1h, 30m) + LTF (5m, 1m)  [EXISTING]
+Step 2: detect_tct_schematics() on each TF               [EXISTING]
+Step 3: For each detected schematic, run the 6-tree pipeline:
 
-**`Schematics5BTradeState`** — Trade state manager
-- Separate log file: `schematics_5b_trade_log.json`
-- Balance tracking ($5,000 starting), trade history, W/L stats
-- No reward_history, no solutions_applied, no model_weights
-- GitHub restore on load (uses `GITHUB_TOKEN_2`)
+  Tree 1 — Ranges (evaluate_range_setup)
+    Input: Derive trend, 6-candle rule, EQ touch, horizontal check from candles
+    Gate: range_valid must be True, trade_bias != WAIT
 
-**`Schematics5BEvaluator`** — Deterministic schematic evaluator
-- Fixed 50-point threshold (never changes)
-- Same scoring factors as tensor trader: BOS + R:R + HTF alignment + quality + model type
-- No consecutive_losses tracking, no adapt_after_loss/win
-- 5B-specific structural checks:
-  - **Tap spacing validation** — reject if tap spacing is severely uneven
-  - **Horizontal range quality** — reject steep trends disguised as ranges
-  - **Structure dissection scoring** — bonus points for overlapping structure (domino effect)
+  Tree 2 — Supply/Demand (evaluate_sd_zone)
+    Input: Derive zone type, FVG, mitigation from candle structure
+    Gate: fvg_valid must be True, failed_at_phase must be None
 
-**`Schematics5BTrader`** — Main trading engine
-- `scan_and_trade()` — BTCUSDT only, scans MTF timeframes (1h, 15m)
-- HTF gate (4h bias) with caching — same pattern as tensor trader
-- Position management: entry at market, SL/TP monitoring
-- Uses existing `trade_execution.py` for position sizing (1% risk, 10x leverage)
-- Deduplication: cooldown to prevent re-entering same setup
+  Tree 3 — Liquidity (evaluate_liquidity_setup)
+    Input: Derive pool type, sweep side, DL2 breach, acceptance from candles
+    Gate: sweep_classification must be LIQUIDITY_GRAB, accepted_back_inside True
 
-**Reused from tensor trader (not reimplemented):**
-- `fetch_candles_sync()` — imported from `tensor_tct_trader.py`
-- `fetch_live_price()` — imported from `tensor_tct_trader.py`
-- `calculate_position_size/margin/liquidation` — imported from `trade_execution.py`
+  Tree 4 — TCT 5A (evaluate_tct_schematic)
+    Input: Map schematic dict fields → TCTSchematicInputs
+    Gate: status must be VALID_ENTRY, trade_bias != WAIT
 
-**Telegram notifications** — to `TELEGRAM_CHAT_ID_3`
-- Entry: direction, entry price, stop, target, R:R, score
-- Exit: WIN/LOSS, entry price, exit price, P&L dollars
-- Uses existing `TELEGRAM_BOT_TOKEN` for the bot, different chat ID
+  Tree 5 — TCT 5B (evaluate_5b_schematic)
+    Input: Map schematic + 5A result → TCT5BInputs
+    Gate: status must be VALID_ENTRY, trade_bias != WAIT
 
-**GitHub persistence** — `Schematics5BGitHubStorage`
-- Uses `GITHUB_TOKEN_2` env var
-- Separate file on data branch: `schematics_5b_trade_log.json`
-- Push on trade close + hourly sync
+  Tree 6 — Advanced (evaluate_schematic_flip + evaluate_wyckoff_in_wyckoff)
+    Input: If active trade exists → check flip; if tap3 zone → check W-in-W
+    Effect: Can upgrade conviction or trigger flip exit
 
-### 2. Server Routes in `server_mexc.py` (~150 lines)
+Step 4: Score surviving setups (all 5 gates passed)
+  - Composite score from tree outputs (conviction, path quality, zone priority, R:R)
+  - Best setup wins
 
-- `GET /schematics-5B` — HTML page (the UI)
-- `GET /api/schematics-5b-data` — Schematic detection data + chart candles (reuses 5A detection logic)
-- `GET /api/schematics-5b-trader/state` — Live trade state JSON
-- `GET /api/schematics-5b-trader/scan` — Manual scan trigger
-- Background loop: `schematics_5b_auto_scan_loop()` launched at startup
-
-No toggle-pair endpoint (single pair only).
-
-### 3. UI Page: `/schematics-5B` (~800 lines inline HTML/JS/CSS)
-
-Based on the tensor-trade dashboard layout (simpler than 5A — no chart needed):
-
-**Header:**
-- Title: "Schematics 5B — Simulated Trading — BTCUSDT"
-- Navigation links: Schematics 5A, Tensor Trade, Dashboard
-- Live price display
-
-**Controls:**
-- Manual Scan button
-- Refresh button
-- Auto-scan status indicator (ON, every 60s)
-
-**Stats Row:**
-- Balance / Starting Balance
-- P&L ($ and %)
-- Win Rate
-- Total Trades / Wins / Losses
-
-**Current Trade Panel:**
-- Direction, entry price, stop, target, R:R
-- Live P&L % and current price
-- Entry score and reasons
-
-**Trade History Table:**
-- Last 50 trades: direction, entry/exit prices, P&L, W/L, timestamp
-- Color-coded green/red for wins/losses
-
-**Debug Panel (collapsible):**
-- Last scan results per timeframe
-- HTF bias status
-- Evaluator scores and rejection reasons
-
-No schematic chart, no pair selector, no learning indicators.
-
-### 4. Tests (~150 lines)
-
-`tests/unit/test_schematics_5b_trader.py`:
-- Test fixed threshold is always 50 (no adaptation)
-- Test trade entry/exit mechanics (long and short)
-- Test R:R validation at market price
-- Test stale BOS rejection
-- Test HTF bias gate (aligned, conflicting, neutral)
-- Test quality score gate
-- Test deduplication cooldown
-- Test state save/load round-trip
+Step 5: Enter trade via existing _enter_trade()           [EXISTING]
+```
 
 ---
 
-## Key Differences from Tensor Trader
+## New File: `decision_tree_bridge.py`
 
-| Feature | Tensor Trader | 5B Trader |
-|---------|--------------|-----------|
-| Learning | ✅ HPBContextualReward | ❌ None |
-| Score threshold | Dynamic (50→60→70) | Fixed 50 |
-| Consecutive loss tracking | ✅ Tightens threshold | ❌ No tracking |
-| Model weights | ✅ Learned from history | ❌ Fixed defaults |
-| reward_history | ✅ Tracked | ❌ Not tracked |
-| adapt_after_loss/win | ✅ Generates solutions | ❌ Not present |
-| Pair | BTCUSDT | BTCUSDT |
-| Evaluation | Same structural checks | Same structural checks |
+This is the core new code. It contains functions that translate raw market data into each tree's input dataclass:
+
+### Functions:
+
+1. `build_range_inputs(df, schematic) → RangeInputs`
+   - Analyze candle highs/lows for HH/HL or LH/LL pattern
+   - Check 6-candle rule (at least 6 candles touching both range boundaries)
+   - Check EQ touch (price crossed midpoint of range)
+   - Determine if range looks horizontal (range height < threshold relative to price)
+   - Check deviation characteristics (wick only, close outside, etc.)
+
+2. `build_sd_inputs(df, schematic, range_eval) → SDZoneInputs`
+   - Identify order blocks near schematic tap zones
+   - Check FVG (3-candle pattern where C1 wick doesn't overlap C3 wick)
+   - Determine mitigation status from subsequent price action
+   - Check multi-TF confluence from HTF data
+
+3. `build_liquidity_inputs(df, schematic, range_eval) → LiquidityInputs`
+   - Identify pool type from schematic range structure
+   - Determine sweep side from tap2/tap3 deviation direction
+   - Check DL2 breach (30% extension beyond range extreme)
+   - Check acceptance back inside range
+   - Assess path quality (clean move vs choppy)
+
+4. `build_5a_inputs(schematic, range_eval) → TCTSchematicInputs`
+   - Direct mapping from schematic dict fields
+   - Range confirmed from tree 1 result
+   - Model type, tap validation, BOS status from schematic
+
+5. `build_5b_inputs(schematic, eval_5a, range_eval) → TCT5BInputs`
+   - Rationality from range_eval
+   - Tap spacing from schematic tap distances
+   - R:R from schematic entry/stop/target
+   - LTF BOS availability from refinement results
+
+6. `build_flip_inputs(active_trade, schematic) → FlipInputs` (only when trade is open)
+
+7. `build_wiw_inputs(schematic, local_schematic) → WyckoffInWyckoffInputs` (when nested pattern detected)
+
+8. `compute_composite_score(range_eval, sd_eval, liq_eval, eval_5a, eval_5b) → dict`
+   - Weighted composite from all tree outputs
+   - Returns score (0–100), pass/fail, and reasons list
+   - Compatible with existing _enter_trade() expectations
+
+### DecisionTreeEvaluator class:
+- `evaluate(df, schematic, htf_bias, current_price, ltf_dfs=None) → dict`
+  - Orchestrates the full pipeline: build inputs → run trees → compute score
+  - Returns `{"score": int, "pass": bool, "reasons": list, "rr": float, "tree_results": dict}`
+  - `tree_results` contains per-tree outputs for debug endpoint
 
 ---
 
-## Lecture 5B Key Rules to Encode
+## Changes to `schematics_5b_trader.py`
 
-1. **Always check highest TF range validity** — use six candle rule across timeframes
-2. **Structure dissection for better entries** — when main BOS gives bad R:R (<1.5), dissect last leg on lower TF
-3. **Domino effect entry** — enter on blue (micro) structure break, ride through red to black to target
-4. **Reconfirmation on breaks in supply/demand** — if BOS occurs inside a supply zone, wait for retest
-5. **Model 2 requirements** — price must mitigate extreme supply/demand OR grab extreme liquidity before tap 3
-6. **Tap spacing** — taps should be roughly equally spaced; reject if severely uneven
-7. **Horizontal range quality** — reject ranges that look like steep trends with wicks
-8. **Take-the-L-to-get-the-W** — when M2 fails, scan for M1 on the same range
+### Replace `Schematics5BEvaluator`
+- Delete the class entirely
+- Replace with: `from decision_tree_bridge import DecisionTreeEvaluator`
+
+### Modify `_scan_single_symbol()`
+- Remove multi-symbol support (BTCUSDT only, no top_5_pairs)
+- After detecting schematics on each TF, call `DecisionTreeEvaluator.evaluate(df, schematic, htf_bias)` which runs the full 6-tree pipeline
+- Keep HTF cascade and LTF BOS refinement (run BEFORE tree evaluation so trees get refined data)
+
+### Modify `scan_and_trade()`
+- Remove `top_5_pairs` parameter
+- Hardcode symbol = "BTCUSDT"
+- Rest of flow stays the same
+
+### Modify `_manage_open_trade()`
+- Add Tree 6 flip detection: after fetching current price, also run flip check
+- If flip detected → close current trade + enter new one
+
+---
+
+## Changes to `server_mexc.py`
+
+### Background loop
+- Remove top_5_pairs passing (just call `scan_and_trade()` with no args)
+
+### Debug endpoint
+- Update `/api/schematics-5b-trader/debug` to include tree evaluation phases:
+  ```json
+  {
+    "tree_pipeline": {
+      "ranges": {"passed": true, "trade_bias": "LONG", ...},
+      "supply_demand": {"passed": true, "zone_priority": "EXTREME", ...},
+      "liquidity": {"passed": true, "sweep": "LIQUIDITY_GRAB", ...},
+      "tct_5a": {"passed": true, "status": "VALID_ENTRY", ...},
+      "tct_5b": {"passed": true, "entry_tf": "RED_MID", ...},
+      "advanced": {"flip": null, "wiw": null, "escalation": null}
+    }
+  }
+  ```
+
+### Dashboard HTML
+- Update debug section to render tree pipeline results
+- Add phase-by-phase pass/fail indicators
 
 ---
 
 ## File Changes Summary
 
-| File | Action | Description |
-|------|--------|-------------|
-| `schematics_5b_trader.py` | **CREATE** | Deterministic trading engine (no learning) |
-| `server_mexc.py` | **EDIT** | Add /schematics-5B routes, API endpoints, background loop |
-| `tests/unit/test_schematics_5b_trader.py` | **CREATE** | Unit tests for 5B trader |
+| File | Action |
+|---|---|
+| `decision_tree_bridge.py` | **NEW** — bridge layer mapping candles → tree inputs |
+| `schematics_5b_trader.py` | **MODIFY** — replace evaluator, simplify to BTCUSDT only |
+| `server_mexc.py` | **MODIFY** — update debug endpoint + remove top_5_pairs from loop |
+| `decision_trees/*.py` | **NO CHANGE** — used as-is via imports |
 
 ---
 
-## Env Vars Required
+## Risk Mitigation
 
-| Variable | Purpose |
-|----------|---------|
-| `MEXC_KEY` | MEXC API key (existing) |
-| `MEXC_SECRET` | MEXC API secret (existing) |
-| `GITHUB_TOKEN_2` | GitHub PAT for 5B trade log persistence |
-| `GITHUB_REPO` | GitHub repo (existing, shared) |
-| `TELEGRAM_BOT_TOKEN` | Telegram bot token (existing, shared) |
-| `TELEGRAM_CHAT_ID_3` | Telegram chat ID for 5B notifications |
+1. **Backward compatibility**: The bridge produces evaluation dicts with the same shape as current evaluator (`score`, `pass`, `reasons`, `rr`) so `_enter_trade()` works unchanged
+2. **Fallback**: If any tree raises an exception, the pipeline catches it and fails the setup (no trade entered on error)
+3. **Testing**: Add unit tests for the bridge functions with mock candle data
+4. **No live trading risk**: This is paper trading ($5000 simulated balance)
 
 ---
 
 ## Execution Order
 
-1. Create `schematics_5b_trader.py` with deterministic trading engine
-2. Add API routes and background loop to `server_mexc.py`
-3. Build the schematics-5B UI page in `server_mexc.py`
-4. Create unit tests
-5. Run tests and verify
+1. Create `decision_tree_bridge.py` with all builder functions + DecisionTreeEvaluator
+2. Modify `schematics_5b_trader.py` — swap evaluator, remove multi-symbol, add flip detection
+3. Modify `server_mexc.py` — update debug endpoint, simplify background loop
+4. Update dashboard debug section HTML
+5. Add/update unit tests
+6. Run tests and verify
