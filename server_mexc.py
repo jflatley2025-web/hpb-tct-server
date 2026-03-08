@@ -16572,7 +16572,8 @@ function renderDecisionTrees(d) {
 
     // TF tabs
     const availableTFs = TF_ORDER.filter(tf => tfs[tf]);
-    const defaultTF = availableTFs[0] || '1d';
+    const savedTF = _activeTabs[sid];
+    const defaultTF = (savedTF && availableTFs.includes(savedTF)) ? savedTF : (availableTFs[0] || '1d');
     html += '<div class="dt-tabs">';
     availableTFs.forEach(tf => {
       const t = tfs[tf];
