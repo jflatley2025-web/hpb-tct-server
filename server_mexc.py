@@ -25,30 +25,38 @@ logging.basicConfig(level=logging.INFO)
 # Initialize FastAPI app
 app = FastAPI()
 
-# Serve decision tree HTML files — read directly with open() to avoid any
-# aiofiles/StaticFiles quirks on Render's free tier.
+# Serve decision tree HTML files — one explicit literal route per file.
+# No path parameters, no dynamic matching. Files read once at startup.
 _DECISION_TREES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "decision_trees")
 
-_ALLOWED_DECISION_TREES = {
-    "tct_5a_schematics_decision_tree.html",
-    "tct_5b_schematics_real_examples_decision_tree.html",
-    "tct_6_advanced_schematics_decision_tree.html",
-    "ranges_decision_tree.html",
-    "liquidity_decision_tree.html",
-    "supply_demand_decision_tree.html",
-}
+def _read_dt(name: str) -> str:
+    with open(os.path.join(_DECISION_TREES_DIR, name), encoding="utf-8") as f:
+        return f.read()
 
-@app.get("/decision_trees/{filename}")
-def serve_decision_tree(filename: str):
-    if filename not in _ALLOWED_DECISION_TREES:
-        raise HTTPException(status_code=404, detail="File not found")
-    filepath = os.path.join(_DECISION_TREES_DIR, filename)
-    try:
-        with open(filepath, encoding="utf-8") as f:
-            content = f.read()
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="File not found")
-    return HTMLResponse(content=content)
+_DT_5A     = _read_dt("tct_5a_schematics_decision_tree.html")
+_DT_5B     = _read_dt("tct_5b_schematics_real_examples_decision_tree.html")
+_DT_6      = _read_dt("tct_6_advanced_schematics_decision_tree.html")
+_DT_RANGES = _read_dt("ranges_decision_tree.html")
+_DT_LIQ    = _read_dt("liquidity_decision_tree.html")
+_DT_SD     = _read_dt("supply_demand_decision_tree.html")
+
+@app.get("/decision_trees/tct_5a_schematics_decision_tree.html",    include_in_schema=False)
+def dt_5a():     return HTMLResponse(_DT_5A)
+
+@app.get("/decision_trees/tct_5b_schematics_real_examples_decision_tree.html", include_in_schema=False)
+def dt_5b():     return HTMLResponse(_DT_5B)
+
+@app.get("/decision_trees/tct_6_advanced_schematics_decision_tree.html",       include_in_schema=False)
+def dt_6():      return HTMLResponse(_DT_6)
+
+@app.get("/decision_trees/ranges_decision_tree.html",               include_in_schema=False)
+def dt_ranges(): return HTMLResponse(_DT_RANGES)
+
+@app.get("/decision_trees/liquidity_decision_tree.html",            include_in_schema=False)
+def dt_liq():    return HTMLResponse(_DT_LIQ)
+
+@app.get("/decision_trees/supply_demand_decision_tree.html",        include_in_schema=False)
+def dt_sd():     return HTMLResponse(_DT_SD)
 
 # ChromaDB + SentenceTransformer are initialized lazily on first use so the
 # heavy model weights (all-MiniLM-L6-v2 + torch) don't load at startup and
