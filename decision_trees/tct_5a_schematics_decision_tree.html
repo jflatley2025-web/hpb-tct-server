@@ -77,6 +77,16 @@
   .tap-label { font-weight: 700; font-size: 10px; }
   .tap-bar { width: 36px; border-radius: 3px; }
   .arrow { color: var(--muted); font-size: 18px; padding: 0 4px; }
+    `@media` print {
+    .phase-body { display: block !important; }
+    .phase-toggle { display: none; }
+    body { background: `#fff`; color: `#111`; padding: 12px; font-size: 12px; }
+    .phase-header { background: `#f0f0f0` !important; cursor: default; }
+    .action { background: `#f8f8f8`; border-color: `#ccc`; }
+    .rule-table tr:nth-child(even) td { background: `#f5f5f5`; }
+    .tip, .quote { background: `#f8f8f8`; }
+    `@page` { margin: 1.5cm; }
+  }
 </style>
 </head>
 <body>

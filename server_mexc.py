@@ -15599,22 +15599,33 @@ async def schematics_5b_debug():
     """Return detailed debug diagnostics from the last 5B scan cycle.
 
     Includes per-tree decision results from the 6-tree pipeline when available.
+    Uses debug_snapshot() to atomically read last_debug + state fields under
+    the trader's lock, preventing mixed data from concurrent scan cycles.
+    Flattens per_symbol[primary_symbol].timeframes to a top-level 'timeframes'
+    key so the frontend can render decision-tree data without knowing symbol names.
     """
     try:
         from schematics_5b_trader import get_5b_trader
         trader = get_5b_trader()
-        debug = dict(trader.last_debug) if trader.last_debug else {}
-        # Attach current MSCE context
-        msce_ctx: Dict = {}
-        debug["msce"] = validate_MSCE(msce_ctx)
-        debug["evaluator_type"] = "decision_tree_pipeline"
-        debug["state_summary"] = {
-            "balance": trader.state.balance,
-            "has_open_trade": trader.state.current_trade is not None,
-            "total_trades": len(trader.state.trade_history),
-            "last_scan_time": trader.state.last_scan_time,
-            "last_scan_action": trader.state.last_scan_action,
-            "last_error": trader.state.last_error,
+        # Single locked snapshot — consistent across last_debug and state fields.
+        raw = trader.debug_snapshot()
+
+        # Flatten the primary symbol's per-TF data to the top level.
+        per_symbol: Dict = raw.get("per_symbol", {})
+        primary = "BTCUSDT" if "BTCUSDT" in per_symbol else next(iter(per_symbol), None)
+        primary_data: Dict = per_symbol.get(primary, {}) if primary else {}
+
+        debug: Dict = {
+            "timestamp": raw.get("timestamp"),
+            "current_price": primary_data.get("current_price", raw.get("current_price")),
+            "htf_bias": primary_data.get("htf_bias", "neutral"),
+            "best_tf": primary_data.get("best_tf", raw.get("best_tf")),
+            "best_score": primary_data.get("best_score", raw.get("best_score", 0)),
+            "symbols_scanned": raw.get("symbols_scanned", []),
+            "timeframes": primary_data.get("timeframes", {}),
+            "forming_schematics": raw.get("forming_schematics", []),
+            # state_summary already captured atomically inside debug_snapshot()
+            "state_summary": raw.get("state_summary", {}),
         }
 
         # Extract tree_results from the per-symbol evaluation data
@@ -15809,18 +15820,47 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
 .debug-toggle-btn .darrow.dopen{transform:rotate(90deg)}
 .debug-body-wrap{display:none;margin-top:8px}
 .debug-body-wrap.dopen{display:block}
-.debug-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}
-.debug-card{background:#12121e;border:1px solid #1e1e2d;border-radius:8px;padding:12px 14px;font-size:.72rem}
-.debug-card-title{color:#00d4ff;font-weight:700;font-size:.78rem;margin-bottom:8px}
-.debug-row{display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid rgba(255,255,255,.03)}
-.debug-row .dlabel{color:#666}
-.debug-row .dval{color:#e0e0e0;font-weight:600}
-.debug-row .dval.dgreen{color:#00e676}
-.debug-row .dval.dred{color:#ff4444}
-.debug-row .dval.dyellow{color:#ffc107}
-.debug-row .dval.dcyan{color:#00d4ff}
-.debug-eval{background:#181828;border:1px solid #222;border-radius:4px;padding:6px 8px;margin-top:4px;font-size:.68rem}
-.debug-eval .dereason{color:#888;font-size:.65rem;margin-top:2px}
+
+/* Scan overview bar */
+.dt-meta{padding:8px 14px;font-size:.7rem;color:#888;border-bottom:1px solid #1e1e2d;display:flex;gap:16px;flex-wrap:wrap;background:#0d0d18;border-radius:6px 6px 0 0}
+.dt-meta-item{display:flex;gap:4px}.dt-meta-label{color:#555}.dt-meta-val{color:#e0e0e0;font-weight:600}
+.dt-meta-val.green{color:#00e676}.dt-meta-val.red{color:#ff4444}.dt-meta-val.yellow{color:#ffc107}.dt-meta-val.cyan{color:#00d4ff}
+
+/* Decision-tree category sections */
+.dt-section{margin-bottom:8px;border:1px solid #1e1e2d;border-radius:8px;overflow:hidden}
+.dt-header{display:flex;align-items:center;gap:10px;padding:8px 14px;background:#12121e;cursor:pointer;user-select:none}
+.dt-header:hover{background:#181828}
+.dt-icon{font-size:14px;width:18px;text-align:center;flex-shrink:0}
+.dt-title{font-size:.78rem;font-weight:700;color:#e0e0e0;flex:1}
+.dt-score-pills{display:flex;gap:4px;flex-wrap:wrap}
+.dt-toggle{color:#555;font-size:12px;transition:transform .15s;flex-shrink:0}
+.dt-toggle.open{transform:rotate(90deg)}
+.dt-body{display:none;background:#0a0a14;border-top:1px solid #1e1e2d}
+.dt-body.open{display:block}
+
+/* TF tabs inside each section */
+.dt-tabs{display:flex;border-bottom:1px solid #1e1e2d;overflow-x:auto}
+.dt-header-btn{all:unset;display:flex;align-items:center;gap:10px;flex:1;cursor:pointer}
+.dt-header-btn:focus-visible{outline:2px solid #00d4ff;outline-offset:-2px}
+.dt-tab{all:unset;padding:5px 14px;font-size:.68rem;font-weight:700;cursor:pointer;border-right:1px solid #1e1e2d;color:#555;white-space:nowrap;transition:all .15s;flex-shrink:0}
+.dt-tab:hover{background:#181828;color:#e0e0e0}
+.dt-tab.active{background:rgba(0,212,255,.08);color:#00d4ff;border-bottom:2px solid #00d4ff}
+.dt-tab-content{display:none;padding:10px 14px}
+.dt-tab-content.active{display:block}
+
+/* Checklist rows inside each tab */
+.dt-check{display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,.03);font-size:.72rem}
+.dt-check:last-child{border-bottom:none}
+.dt-check-label{color:#aaa;flex:1;min-width:0}
+.dt-check-val{color:#666;font-size:.68rem;white-space:nowrap}
+.dt-check-val.green{color:#00e676}.dt-check-val.yellow{color:#ffc107}
+.dt-no-data{padding:16px;color:#444;font-size:.72rem;text-align:center}
+
+/* Pass/fail/NA badges */
+.b-pass{display:inline-block;background:rgba(0,230,118,.12);color:#00e676;border:1px solid rgba(0,230,118,.25);border-radius:3px;padding:1px 7px;font-size:.64rem;font-weight:700;white-space:nowrap;flex-shrink:0}
+.b-fail{display:inline-block;background:rgba(255,68,68,.12);color:#ff4444;border:1px solid rgba(255,68,68,.25);border-radius:3px;padding:1px 7px;font-size:.64rem;font-weight:700;white-space:nowrap;flex-shrink:0}
+.b-warn{display:inline-block;background:rgba(255,193,7,.12);color:#ffc107;border:1px solid rgba(255,193,7,.25);border-radius:3px;padding:1px 7px;font-size:.64rem;font-weight:700;white-space:nowrap;flex-shrink:0}
+.b-na{display:inline-block;background:rgba(255,255,255,.04);color:#555;border:1px solid #1e1e2d;border-radius:3px;padding:1px 7px;font-size:.64rem;font-weight:700;white-space:nowrap;flex-shrink:0}
 
 ::-webkit-scrollbar{width:6px}
 ::-webkit-scrollbar-track{background:#0a0a0f}
@@ -16029,13 +16069,12 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
 <div class="debug-section">
   <button class="debug-toggle-btn" onclick="toggleDebugSection()">
     <span class="darrow" id="debugArrow">&#9654;</span>
-    Debug Diagnostics — Scan Details
+    Decision Tree Analysis — Live Scan Data
     <span id="debugSummary" style="margin-left:auto;color:#666;font-size:.65rem"></span>
   </button>
   <div class="debug-body-wrap" id="debugBodyWrap">
-    <div class="debug-grid" id="debugGrid">
-      <div class="debug-card"><div style="color:#555;text-align:center;padding:20px">Click "Manual Scan" or wait for auto-scan to see debug data</div></div>
-    </div>
+    <div id="dtMeta" class="dt-meta"><span class="dt-meta-item"><span class="dt-meta-label">Status:</span><span class="dt-meta-val">Click "Manual Scan" or wait for auto-scan</span></span></div>
+    <div id="dtSections"></div>
   </div>
 </div>
 
@@ -16241,99 +16280,359 @@ function toggleDebugSection() {
   if (body.classList.contains('dopen')) refreshDebug();
 }
 
+function escapeHtml(str) {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 async function refreshDebug() {
   try {
     const d = await fetchJSON('/api/schematics-5b-trader/debug');
-    renderDebug(d);
+    renderDecisionTrees(d);
   } catch(e) {
-    document.getElementById('debugGrid').innerHTML = '<div class="debug-card"><div style="color:#ff4444">Debug fetch error: ' + e.message + '</div></div>';
+    document.getElementById('dtSections').innerHTML = '<div style="padding:16px;color:#ff4444;font-size:.75rem">Debug fetch error: ' + escapeHtml(e.message) + '</div>';
   }
 }
 
-function renderDebug(d) {
-  const grid = document.getElementById('debugGrid');
+// ── Decision Tree render helpers ──────────────────────────────────
+
+function badge(pass, passLabel, failLabel) {
+  if (pass === null || pass === undefined) return '<span class="b-na">N/A</span>';
+  return pass ? '<span class="b-pass">' + (passLabel||'PASS') + '</span>'
+               : '<span class="b-fail">' + (failLabel||'FAIL') + '</span>';
+}
+
+function warnBadge(val) {
+  // val can be true/false/null — true = warning present
+  if (val === null || val === undefined) return '<span class="b-na">N/A</span>';
+  return val ? '<span class="b-warn">YES</span>' : '<span class="b-pass">NO</span>';
+}
+
+function chk(label, passVal, extraVal) {
+  const b = badge(passVal);
+  const ev = extraVal !== undefined && extraVal !== null ? '<span class="dt-check-val">' + extraVal + '</span>' : '';
+  return '<div class="dt-check"><span class="dt-check-label">' + label + '</span>' + ev + b + '</div>';
+}
+
+function chkWarn(label, warnVal, extraVal) {
+  const b = warnBadge(warnVal);
+  const ev = extraVal !== undefined && extraVal !== null ? '<span class="dt-check-val">' + extraVal + '</span>' : '';
+  return '<div class="dt-check"><span class="dt-check-label">' + label + '</span>' + ev + b + '</div>';
+}
+
+function fmt(v, decimals) {
+  if (v === null || v === undefined) return '—';
+  if (typeof v === 'number') return decimals !== undefined ? v.toFixed(decimals) : v.toLocaleString();
+  return String(v);
+}
+
+// Build checklist HTML for one decision-tree category given the tf's dt_data
+function dtContent(category, dt, t) {
+  if (!dt) return '<div class="dt-no-data">No schematic data for this timeframe' + (t && t.status ? ' (' + t.status + ')' : '') + '</div>';
+
+  const rangeSize = dt.range_size_pct !== null && dt.range_size_pct !== undefined
+    ? (dt.range_size_pct + '%') : '—';
+  const rngInRange = dt.range_size_pct !== null ? (dt.range_size_pct >= 0.5 && dt.range_size_pct <= 8) : null;
+
+  if (category === 'ranges') {
+    let h = '';
+    h += chk('Range detected', dt.range_high !== null && dt.range_high !== undefined,
+      dt.range_high ? ('$' + fmt(dt.range_high) + ' / $' + fmt(dt.range_low)) : null);
+    h += chk('Range is horizontal (taps within 50% of size)', dt.range_horizontal);
+    h += chk('Range size rational (0.5%-8% of price)', rngInRange, rangeSize);
+    h += chk('Six-candle rule valid on all taps', dt.six_candle_valid);
+    h += chk('Clean pivot structure on all taps', dt.range_has_clean_pivots);
+    h += '<div class="dt-check"><span class="dt-check-label">Range quality score</span>'
+      + '<span class="dt-check-val ' + (dt.range_quality_score >= 0.6 ? 'green' : dt.range_quality_score >= 0.4 ? 'yellow' : '') + '">'
+      + (dt.range_quality_score !== null ? Math.round(dt.range_quality_score * 100) + '/100' : '—') + '</span></div>';
+    if (dt.range_quality_factors && dt.range_quality_factors.length) {
+      h += '<div class="dt-check" style="flex-wrap:wrap"><span class="dt-check-label">Quality factors</span>'
+        + '<span class="dt-check-val" style="color:#888;white-space:normal;text-align:right">' + dt.range_quality_factors.map(escapeHtml).join(', ') + '</span></div>';
+    }
+    return h;
+  }
+
+  if (category === 'market_structure') {
+    const dir = (dt.direction || '?').toUpperCase();
+    const htf = (dt.htf_bias || '?').toUpperCase();
+    const biasColor = dt.htf_bias === 'bullish' ? 'green' : dt.htf_bias === 'bearish' ? 'red' : 'yellow';
+    let h = '';
+    h += '<div class="dt-check"><span class="dt-check-label">HTF bias (Daily gate)</span>'
+      + '<span class="dt-check-val ' + biasColor + '">' + htf + '</span></div>';
+    h += '<div class="dt-check"><span class="dt-check-label">Schematic direction</span>'
+      + '<span class="dt-check-val ' + (dt.direction === 'bullish' ? 'green' : 'red') + '">' + dir + '</span></div>';
+    h += chk('Direction aligned with HTF bias', dt.htf_aligned);
+    h += chk('BOS confirmed (schematic complete)', dt.bos_confirmed);
+    h += '<div class="dt-check"><span class="dt-check-label">Model type</span>'
+      + '<span class="dt-check-val">' + (dt.model || '—').replace(/_/g,' ') + '</span></div>';
+    if (t) {
+      h += '<div class="dt-check"><span class="dt-check-label">Schematics found / confirmed</span>'
+        + '<span class="dt-check-val">' + (t.schematics_found ?? '—') + ' / ' + (t.confirmed ?? '—') + '</span></div>';
+      h += '<div class="dt-check"><span class="dt-check-label">Best eval score this TF</span>'
+        + '<span class="dt-check-val ' + (t.best_score >= 50 ? 'green' : t.best_score > 0 ? 'yellow' : '') + '">'
+        + (t.best_score ?? '—') + '/100</span></div>';
+      if (t.evaluations && t.evaluations.length) {
+        const top = t.evaluations[0];
+        h += '<div class="dt-check"><span class="dt-check-label">Top eval reasons</span>'
+          + '<span class="dt-check-val" style="white-space:normal;text-align:right;color:#888">'
+          + (top.reasons || []).map(escapeHtml).join(' | ') + '</span></div>';
+      }
+    }
+    return h;
+  }
+
+  if (category === 'supply_demand') {
+    let h = '';
+    h += chk('No supply/demand conflict at entry zone', dt.sd_conflict == null ? null : !dt.sd_conflict);
+    h += chk('Target path clear (no opposing zone blocks)', dt.target_clear);
+    h += chk('Trendline liquidity confluence at tap', dt.trendline_confluence);
+    return h;
+  }
+
+  if (category === 'liquidity') {
+    let h = '';
+    h += chk('Tap spacing valid (roughly equal distribution)', dt.tap_spacing_valid,
+      dt.spacing_ratio !== null ? ('ratio=' + fmt(dt.spacing_ratio, 2)) : null);
+    h += chk('Taps are horizontally aligned (not steep trend)', dt.tap_is_horizontal);
+    h += '<div class="dt-check"><span class="dt-check-label">T1→T2 candle distance</span>'
+      + '<span class="dt-check-val">' + fmt(dt.tap1_to_tap2) + ' candles</span></div>';
+    h += '<div class="dt-check"><span class="dt-check-label">T2→T3 candle distance</span>'
+      + '<span class="dt-check-val">' + fmt(dt.tap2_to_tap3) + ' candles</span></div>';
+    if (dt.tap1_to_tap2 && dt.tap2_to_tap3) {
+      const ratio = Math.min(dt.tap1_to_tap2, dt.tap2_to_tap3) / Math.max(dt.tap1_to_tap2, dt.tap2_to_tap3);
+      h += '<div class="dt-check"><span class="dt-check-label">Spacing ratio (1.0 = perfect)</span>'
+        + '<span class="dt-check-val ' + (ratio >= 0.6 ? 'green' : ratio >= 0.4 ? 'yellow' : '') + '">'
+        + ratio.toFixed(2) + '</span></div>';
+    }
+    h += chk('Trendline confluence (liquidity grab at tap)', dt.trendline_confluence);
+    return h;
+  }
+
+  if (category === 'schematics_5a') {
+    let h = '';
+    h += chk('BOS confirmed (entry signal)', dt.bos_confirmed);
+    h += '<div class="dt-check"><span class="dt-check-label">Model type</span>'
+      + '<span class="dt-check-val">' + (dt.model || '—').replace(/_/g,' ') + '</span></div>';
+    h += chk('R:R meets minimum (≥1.5)', dt.rr_meets_minimum,
+      dt.rr !== null ? ('R:R=' + fmt(dt.rr, 2)) : null);
+    h += chk('Six-candle rule valid on all taps', dt.six_candle_valid);
+    h += chk('Range is horizontal', dt.range_horizontal);
+    h += chk('No S/D conflict at entry', dt.sd_conflict == null ? null : !dt.sd_conflict);
+    if (dt.entry !== null && dt.entry !== undefined) {
+      h += '<div class="dt-check"><span class="dt-check-label">Entry / SL / Target</span>'
+        + '<span class="dt-check-val">$' + fmt(dt.entry) + ' / $' + fmt(dt.sl) + ' / $' + fmt(dt.target) + '</span></div>';
+    }
+    h += '<div class="dt-check"><span class="dt-check-label">Quality score</span>'
+      + '<span class="dt-check-val ' + (dt.quality_score >= 0.6 ? 'green' : dt.quality_score >= 0.4 ? 'yellow' : '') + '">'
+      + (dt.quality_score !== null ? Math.round(dt.quality_score * 100) + '/100' : '—') + '</span></div>';
+    return h;
+  }
+
+  if (category === 'schematics_5b') {
+    let h = '';
+    h += chk('Tap spacing valid (5B: equal distribution rule)', dt.tap_spacing_valid,
+      dt.spacing_ratio !== null ? ('ratio=' + fmt(dt.spacing_ratio, 2)) : null);
+    h += chk('Range horizontal (not a steep trend disguised)', dt.range_horizontal);
+    h += '<div class="dt-check"><span class="dt-check-label">Range quality score</span>'
+      + '<span class="dt-check-val ' + (dt.range_quality_score >= 0.6 ? 'green' : dt.range_quality_score >= 0.4 ? 'yellow' : '') + '">'
+      + (dt.range_quality_score !== null ? Math.round(dt.range_quality_score * 100) + '/100' : '—') + '</span></div>';
+    h += chkWarn('Overlapping structure / domino effect detected', dt.overlapping_structure);
+    if (dt.optimized_entry_price) {
+      h += '<div class="dt-check"><span class="dt-check-label">Domino optimized entry</span>'
+        + '<span class="dt-check-val green">$' + fmt(dt.optimized_entry_price) + '</span></div>';
+    }
+    if (dt.domino_levels && dt.domino_levels.length) {
+      h += '<div class="dt-check"><span class="dt-check-label">Domino BOS levels</span>'
+        + '<span class="dt-check-val">' + dt.domino_levels.length + ' levels</span></div>';
+    }
+    h += chk('R:R meets minimum (≥1.5)', dt.rr_meets_minimum,
+      dt.rr !== null ? ('R:R=' + fmt(dt.rr, 2)) : null);
+    h += chk('BOS confirmed (structure break entry)', dt.bos_confirmed);
+    return h;
+  }
+
+  if (category === 'advanced_tct') {
+    let h = '';
+    h += chkWarn('Schematic conversion detected (Dist→Acc or reverse)', dt.schematic_conversion);
+    h += chk('Multi-timeframe schematic validity', dt.multi_tf_valid);
+    h += chkWarn('WoV-in-WoV (schematic within schematic)', dt.wov_in_wov);
+    h += chkWarn('M1→M2 flow detected', dt.m1_to_m2_flow);
+    if (t && t.htf_upgraded > 0) {
+      h += '<div class="dt-check"><span class="dt-check-label">HTF cascade upgrades this TF</span>'
+        + '<span class="dt-check-val green">↑ ' + t.htf_upgraded + ' promoted</span></div>';
+    }
+    return h;
+  }
+
+  return '<div class="dt-no-data">Unknown category</div>';
+}
+
+// Active tab state per section
+const _activeTabs = {};
+
+function switchTab(sectionId, tf) {
+  _activeTabs[sectionId] = tf;
+  document.querySelectorAll('#' + sectionId + ' .dt-tab').forEach(tab => {
+    const selected = tab.dataset.tf === tf;
+    tab.classList.toggle('active', selected);
+    tab.setAttribute('aria-selected', String(selected));
+    tab.setAttribute('tabindex', selected ? '0' : '-1');
+  });
+  document.querySelectorAll('#' + sectionId + ' .dt-tab-content').forEach(pane => {
+    const active = pane.dataset.tf === tf;
+    pane.classList.toggle('active', active);
+    if (active) pane.removeAttribute('hidden');
+    else pane.setAttribute('hidden', '');
+  });
+}
+
+function toggleDtSection(sectionId) {
+  const body  = document.getElementById(sectionId + '-body');
+  const arrow = document.getElementById(sectionId + '-arrow');
+  const btn   = document.getElementById(sectionId + '-hdr-btn');
+  const isOpen = body.classList.contains('open');
+  body.classList.toggle('open', !isOpen);
+  arrow.classList.toggle('open', !isOpen);
+  if (btn) btn.setAttribute('aria-expanded', String(!isOpen));
+}
+
+function renderDecisionTrees(d) {
+  const meta = document.getElementById('dtMeta');
+  const sections = document.getElementById('dtSections');
   const summary = document.getElementById('debugSummary');
-  if (!d || !d.timeframes) {
-    summary.textContent = d.state_summary?.last_error || 'No scan data yet';
-    grid.innerHTML = '<div class="debug-card">' +
-      '<div class="debug-card-title">State</div>' +
-      '<div class="debug-row"><span class="dlabel">Last Scan</span><span class="dval">' + (d.state_summary?.last_scan_time || 'Never') + '</span></div>' +
-      '<div class="debug-row"><span class="dlabel">Last Action</span><span class="dval">' + (d.state_summary?.last_scan_action || 'None') + '</span></div>' +
-      '<div class="debug-row"><span class="dlabel">Last Error</span><span class="dval dred">' + (d.state_summary?.last_error || 'None') + '</span></div>' +
-      '</div>';
+
+  if (!d || !d.timeframes || !Object.keys(d.timeframes).length) {
+    const err = d?.state_summary?.last_error;
+    summary.textContent = err || 'No scan data yet';
+    meta.innerHTML = '<span class="dt-meta-item"><span class="dt-meta-label">Last action:</span>'
+      + '<span class="dt-meta-val red">' + escapeHtml(d?.state_summary?.last_scan_action || 'None') + '</span></span>'
+      + (err ? '<span class="dt-meta-item"><span class="dt-meta-label">Error:</span><span class="dt-meta-val red">' + escapeHtml(err) + '</span></span>' : '');
+    sections.innerHTML = '<div style="padding:20px;color:#444;text-align:center;font-size:.75rem">Waiting for scan data…</div>';
     return;
   }
 
   const ts = d.timestamp ? new Date(d.timestamp).toLocaleTimeString() : '?';
-  const totalSchems = Object.values(d.timeframes).reduce((s,v) => s + (v.schematics_found || 0), 0);
-  const totalConf = Object.values(d.timeframes).reduce((s,v) => s + (v.confirmed || 0), 0);
+  const tfs = d.timeframes;
+  const totalSchems = Object.values(tfs).reduce((s,v) => s + (v.schematics_found || 0), 0);
+  const totalConf = Object.values(tfs).reduce((s,v) => s + (v.confirmed || 0), 0);
   summary.textContent = ts + ' | ' + totalSchems + ' schematics, ' + totalConf + ' confirmed, best=' + (d.best_score || 0);
 
+  // Scan meta bar
+  const biasC = d.htf_bias === 'bullish' ? 'green' : d.htf_bias === 'bearish' ? 'red' : 'yellow';
+  meta.innerHTML =
+    '<span class="dt-meta-item"><span class="dt-meta-label">Time:</span><span class="dt-meta-val">' + ts + '</span></span>' +
+    '<span class="dt-meta-item"><span class="dt-meta-label">Price:</span><span class="dt-meta-val cyan">$' + fmt(d.current_price) + '</span></span>' +
+    '<span class="dt-meta-item"><span class="dt-meta-label">HTF Bias (Daily):</span><span class="dt-meta-val ' + biasC + '">' + (d.htf_bias || '?').toUpperCase() + '</span></span>' +
+    '<span class="dt-meta-item"><span class="dt-meta-label">Best TF:</span><span class="dt-meta-val yellow">' + (d.best_tf || 'None') + '</span></span>' +
+    '<span class="dt-meta-item"><span class="dt-meta-label">Best Score:</span><span class="dt-meta-val ' + (d.best_score >= 50 ? 'green' : 'red') + '">' + (d.best_score || 0) + '/100</span></span>' +
+    '<span class="dt-meta-item"><span class="dt-meta-label">Threshold:</span><span class="dt-meta-val">50 (fixed)</span></span>';
+
+  const DT_CATEGORIES = [
+    { id: 'ranges',           icon: '↔',  title: 'Ranges',                  link: '/decision_trees/ranges_decision_tree.html' },
+    { id: 'market_structure', icon: '⬆',  title: 'Market Structure',         link: null },
+    { id: 'supply_demand',    icon: '⚖',  title: 'Supply & Demand',          link: '/decision_trees/supply_demand_decision_tree.html' },
+    { id: 'liquidity',        icon: '💧', title: 'Liquidity',                link: '/decision_trees/liquidity_decision_tree.html' },
+    { id: 'schematics_5a',    icon: '5A', title: '5A Schematics (TCT Model)',link: '/decision_trees/tct_5a_schematics_decision_tree.html' },
+    { id: 'schematics_5b',    icon: '5B', title: '5B Schematics (Real Examples)', link: '/decision_trees/tct_5b_schematics_real_examples_decision_tree.html' },
+    { id: 'advanced_tct',     icon: '6',  title: 'Advanced TCT (Lecture 6)', link: '/decision_trees/tct_6_advanced_schematics_decision_tree.html' },
+  ];
+
+  const TF_ORDER = ['1d','4h','1h','30m','15m'];
+  const TF_LABELS = {'1d':'Daily','4h':'4H','1h':'1H','30m':'30M','15m':'15M'};
+
   let html = '';
+  DT_CATEGORIES.forEach(cat => {
+    const sid = 'dt-' + cat.id;
+    // Compute per-TF pass counts for the header pills
+    let passCount = 0, totalCount = 0;
+    TF_ORDER.forEach(tf => {
+      const t = tfs[tf];
+      if (!t || !t.dt_data) return;
+      // rough "pass" = BOS confirmed (or range found for 'ranges')
+      if (cat.id === 'ranges') { if (t.dt_data.range_high) passCount++; }
+      else if (cat.id === 'market_structure') { if (t.dt_data.bos_confirmed) passCount++; }
+      else if (cat.id === 'supply_demand') { if (t.dt_data.sd_conflict === false) passCount++; }
+      else if (cat.id === 'liquidity') { if (t.dt_data.tap_spacing_valid) passCount++; }
+      else if (cat.id === 'schematics_5a') { if (t.dt_data.bos_confirmed && t.dt_data.rr_meets_minimum) passCount++; }
+      else if (cat.id === 'schematics_5b') { if (t.dt_data.tap_spacing_valid && t.dt_data.range_horizontal) passCount++; }
+      totalCount++;
+    });
+    const pillColor = passCount === totalCount ? '#00e676' : passCount > 0 ? '#ffc107' : '#ff4444';
 
-  html += '<div class="debug-card">' +
-    '<div class="debug-card-title">Scan Overview</div>' +
-    '<div class="debug-row"><span class="dlabel">Time</span><span class="dval">' + ts + '</span></div>' +
-    '<div class="debug-row"><span class="dlabel">Price</span><span class="dval dcyan">$' + (d.current_price || 0).toLocaleString() + '</span></div>' +
-    '<div class="debug-row"><span class="dlabel">Best TF</span><span class="dval dyellow">' + (d.best_tf || 'None') + '</span></div>' +
-    '<div class="debug-row"><span class="dlabel">Best Score</span><span class="dval ' + (d.best_score >= 50 ? 'dgreen' : 'dred') + '">' + (d.best_score || 0) + '/100</span></div>' +
-    '<div class="debug-row"><span class="dlabel">Threshold</span><span class="dval dyellow">50 (fixed)</span></div>' +
-    '<div class="debug-row"><span class="dlabel">Balance</span><span class="dval dcyan">$' + (d.state_summary?.balance || 0).toLocaleString(undefined,{minimumFractionDigits:2}) + '</span></div>' +
-    '<div class="debug-row"><span class="dlabel">Open Trade</span><span class="dval">' + (d.state_summary?.has_open_trade ? 'Yes' : 'No') + '</span></div>' +
-    '<div class="debug-row"><span class="dlabel">Evaluator</span><span class="dval dcyan">' + (d.evaluator_type || 'legacy') + '</span></div>' +
-    '<div class="debug-row"><span class="dlabel">Last Error</span><span class="dval ' + (d.state_summary?.last_error ? 'dred' : '') + '">' + (d.state_summary?.last_error || 'None') + '</span></div>' +
-    '</div>';
-
-  // Include 5m and 1m — added to MTF_TIMEFRAMES so they now appear in scan results
-  const tfOrder = ['1d','4h','1h','30m','15m','5m','1m'];
-  for (const tf of tfOrder) {
-    const t = d.timeframes[tf];
-    if (!t) continue;
-    html += '<div class="debug-card">';
-    html += '<div class="debug-card-title">' + tf.toUpperCase() + ' Timeframe';
-    if (tf === d.best_tf) html += ' <span style="color:#00e676;font-size:.6rem;background:#00e67622;padding:1px 6px;border-radius:3px">BEST</span>';
-    html += '</div>';
-    html += '<div class="debug-row"><span class="dlabel">Status</span><span class="dval ' + (t.status === 'scanned' ? 'dgreen' : t.status === 'cached' ? 'dyellow' : 'dred') + '">' + t.status + '</span></div>';
-    html += '<div class="debug-row"><span class="dlabel">Candles</span><span class="dval">' + (t.candles ?? '-') + '</span></div>';
-    if (t.htf_bias) html += '<div class="debug-row"><span class="dlabel">HTF Bias</span><span class="dval ' + (t.htf_bias === 'bullish' ? 'dgreen' : t.htf_bias === 'bearish' ? 'dred' : 'dyellow') + '">' + t.htf_bias + '</span></div>';
-    if (t.status === 'scanned') {
-      html += '<div class="debug-row"><span class="dlabel">Schematics</span><span class="dval">' + t.schematics_found + '</span></div>';
-      html += '<div class="debug-row"><span class="dlabel">Confirmed</span><span class="dval ' + (t.confirmed > 0 ? 'dgreen' : 'dred') + '">' + t.confirmed + '</span></div>';
-      if (t.htf_upgraded > 0) html += '<div class="debug-row"><span class="dlabel">HTF Upgraded</span><span class="dval dcyan">↑ ' + t.htf_upgraded + ' promoted to higher TF</span></div>';
-      html += '<div class="debug-row"><span class="dlabel">Best Score</span><span class="dval ' + (t.best_score >= 50 ? 'dgreen' : t.best_score > 0 ? 'dyellow' : 'dred') + '">' + t.best_score + '</span></div>';
-      if (t.evaluations && t.evaluations.length > 0) {
-        html += '<div style="margin-top:6px;border-top:1px solid #222;padding-top:4px;font-size:.65rem;color:#888">Evaluations:</div>';
-        t.evaluations.forEach((ev, i) => {
-          const passC = ev.pass ? 'dgreen' : 'dred';
-          html += '<div class="debug-eval">';
-          html += '<span style="color:#00d4ff">#' + (i+1) + '</span> ';
-          html += '<span class="dval ' + passC + '">' + (ev.pass ? 'PASS' : 'FAIL') + '</span> ';
-          html += 'Score: <span class="dval">' + ev.score + '/100</span> ';
-          if (ev.htf_upgraded) html += '<span style="color:#00d4ff;font-size:.6rem"> ↑' + (ev.effective_tf||'') + '</span> ';
-          html += (ev.direction||'?').toUpperCase() + ' ' + (ev.model||'?') + ' R:R=' + (ev.rr||0).toFixed(1);
-          html += '<div class="dereason">' + (ev.reasons || []).join(' | ') + '</div>';
-          if (ev.tree_results) {
-            html += '<div style="margin-top:3px;padding-left:8px;font-size:.6rem;color:#aaa">';
-            const treeOrder = ['range','supply_demand','liquidity','tct_5a','tct_5b','advanced'];
-            const treeLabels = {range:'Range',supply_demand:'S/D',liquidity:'Liq',tct_5a:'5A',tct_5b:'5B',advanced:'Adv'};
-            treeOrder.forEach(tk => {
-              const tr = ev.tree_results[tk];
-              if (!tr) return;
-              const tpass = tr.pass || tr.passed;
-              const tcolor = tpass ? '#00e676' : (tr.soft_fail ? '#ffeb3b' : '#ff4444');
-              html += '<span style="color:' + tcolor + ';margin-right:6px">' + (treeLabels[tk]||tk) + ':' + (tpass ? 'OK' : 'FAIL') + '</span>';
-            });
-            html += '</div>';
-          }
-          html += '</div>';
-        });
-      }
+    html += '<div class="dt-section" id="' + sid + '">';
+    html += '<div class="dt-header">';
+    html += '<button class="dt-header-btn" id="' + sid + '-hdr-btn"'
+      + ' aria-expanded="false" aria-controls="' + sid + '-body"'
+      + ' onclick="toggleDtSection(\'' + sid + '\')">';
+    html += '<span class="dt-icon" style="color:#00d4ff">' + cat.icon + '</span>';
+    html += '<span class="dt-title">' + cat.title + '</span>';
+    if (totalCount > 0) {
+      html += '<span style="font-size:.65rem;font-weight:700;color:' + pillColor + ';margin-left:6px;white-space:nowrap">'
+        + passCount + '/' + totalCount + ' TF</span>';
     }
-    if (t.error) html += '<div class="debug-row"><span class="dlabel">Error</span><span class="dval dred">' + t.error + '</span></div>';
+    html += '<span class="dt-toggle" id="' + sid + '-arrow">▶</span>';
+    html += '</button>';
+    if (cat.link) {
+      html += '<a href="' + cat.link + '" target="_blank" rel="noopener noreferrer"'
+        + ' style="font-size:.62rem;color:#555;text-decoration:none;border:1px solid #222;border-radius:3px;padding:1px 6px;white-space:nowrap">Decision Tree ↗</a>';
+    }
     html += '</div>';
-  }
+    html += '<div class="dt-body" id="' + sid + '-body">';
 
-  grid.innerHTML = html;
+    // TF tabs
+    const availableTFs = TF_ORDER.filter(tf => tfs[tf]);
+    const savedTF = _activeTabs[sid];
+    const defaultTF = (savedTF && availableTFs.includes(savedTF)) ? savedTF : (availableTFs[0] || '1d');
+    html += '<div class="dt-tabs" role="tablist" aria-label="' + cat.title + ' timeframes">';
+    availableTFs.forEach(tf => {
+      const t = tfs[tf];
+      const isBest = tf === d.best_tf;
+      const isActive = tf === defaultTF;
+      const statusDot = t.status === 'scanned' ? '●' : t.status === 'insufficient_data' ? '○' : '✕';
+      const statusColor = t.status === 'scanned' ? '#00e676' : t.status === 'insufficient_data' ? '#ffc107' : '#ff4444';
+      html += '<button class="dt-tab' + (isActive ? ' active' : '') + '"'
+        + ' role="tab"'
+        + ' id="' + sid + '-tab-' + tf + '"'
+        + ' aria-selected="' + isActive + '"'
+        + ' aria-controls="' + sid + '-panel-' + tf + '"'
+        + ' tabindex="' + (isActive ? '0' : '-1') + '"'
+        + ' data-tf="' + tf + '"'
+        + ' onclick="switchTab(\'' + sid + '\',\'' + tf + '\')">'
+        + '<span style="color:' + statusColor + ';margin-right:3px;font-size:.6rem">' + statusDot + '</span>'
+        + (TF_LABELS[tf] || tf.toUpperCase())
+        + (isBest ? ' <span style="color:#ffc107;font-size:.55rem">★</span>' : '')
+        + '</button>';
+    });
+    html += '</div>';
+
+    // TF tab content panes
+    availableTFs.forEach(tf => {
+      const t = tfs[tf];
+      html += '<div class="dt-tab-content' + (tf === defaultTF ? ' active' : '') + '"'
+        + ' role="tabpanel"'
+        + ' id="' + sid + '-panel-' + tf + '"'
+        + ' aria-labelledby="' + sid + '-tab-' + tf + '"'
+        + (tf !== defaultTF ? ' hidden' : '')
+        + ' data-tf="' + tf + '">';
+      if (t.status === 'insufficient_data') {
+        html += '<div class="dt-no-data">Insufficient candle data for ' + tf + '</div>';
+      } else if (t.status === 'error') {
+        html += '<div class="dt-no-data" style="color:#ff4444">Error: ' + escapeHtml(t.error || 'scan failed') + '</div>';
+      } else {
+        html += dtContent(cat.id, t.dt_data, t);
+      }
+      html += '</div>';
+    });
+
+    html += '</div></div>'; // dt-body + dt-section
+  });
+
+  sections.innerHTML = html;
 }
 
 setInterval(() => {

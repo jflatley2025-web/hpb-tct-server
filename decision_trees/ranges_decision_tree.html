@@ -219,6 +219,16 @@
   .pill-bear { background: #3a1a1a; color: var(--red);   border: 1px solid var(--red); }
   .pill-neut { background: #1a2a3a; color: var(--blue);  border: 1px solid var(--blue); }
   .pill-warn { background: #3a2a10; color: var(--yellow); border: 1px solid var(--yellow); }
+  `@media` print {
+    .phase-body { display: block !important; }
+    .phase-toggle { display: none; }
+    body { background: `#fff`; color: `#111`; padding: 12px; font-size: 12px; }
+    .phase-header { background: `#f0f0f0` !important; cursor: default; }
+    .action { background: `#f8f8f8`; border-color: `#ccc`; }
+    .rule-table tr:nth-child(even) td { background: `#f5f5f5`; }
+    .tip, .quote { background: `#f8f8f8`; }
+    `@page` { margin: 1.5cm; }
+  }
 </style>
 </head>
 <body>
@@ -875,6 +885,5 @@ document.querySelectorAll('.phase-toggle').forEach(t => {
   if (!t.classList.contains('open')) t.style.display = 'inline';
 });
 </script>
-
 </body>
 </html>
