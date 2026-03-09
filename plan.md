@@ -1,206 +1,204 @@
-# Plan: Replace Schematics-5B Trading Bot with 6-Tree Decision Pipeline
+# Plan: Jack's TCT Mode + Auto-scan Fix
 
-## Summary
+## Scope
 
-Replace the hardcoded 50-point scoring system in `schematics_5b_trader.py` with a full 6-tree decision pipeline that chains all decision tree files from `decision_trees/`. BTCUSDT only. Preserve all execution infrastructure.
-
----
-
-## Architecture: What Changes vs What Stays
-
-### STAYS (untouched)
-- `Schematics5BTradeState` — state persistence, save/load, GitHub sync
-- `_enter_trade()` — position sizing, margin, leverage, TP1 calc
-- `_manage_open_trade()` — TP1 partial close, SL-to-BE, target/stop monitoring
-- `_close_trade()` / `_take_partial_profit()` — PnL calc, balance update
-- `_is_duplicate_setup()` — cooldown + price tolerance
-- Telegram notifications — `_notify_5b_entry/tp1/exit`
-- HTF bias detection — `_get_htf_bias()` (used as one input to the pipeline)
-- LTF BOS refinement — `refine_schematic_bos_with_ltf()`
-- HTF upgrade cascade — `_find_htf_upgrade()`
-- Background scan loop in `server_mexc.py`
-- Dashboard HTML layout (update debug section only)
-
-### REPLACED
-- `Schematics5BEvaluator` class → new `DecisionTreeEvaluator` class
-- The 6 hardcoded gates (BOS, staleness, quality, R:R, HTF, model) → 6-tree pipeline
-- `_scan_single_symbol()` scanning logic → new method that builds tree inputs from candles
-
-### NEW
-- `decision_tree_bridge.py` — module that maps raw candle data + schematic dicts → decision tree input dataclasses
-- Import all 6 evaluate functions from `decision_trees/`
+1. **Fix auto-scan hang** (already partially addressed — reduced LTF limits + stagger; this plan confirms no further structural change is needed there)
+2. **Rename existing evaluator** → "Claude's TCT Mode"
+3. **Create "Jack's TCT Mode"** with a separate evaluator (`jack_tct_evaluator.py`)
+4. **Mode-switching dropdown** on the `/schematics-5B` page
+5. **Mode-aware debug panel** showing Jack's 5-tree data when that mode is active
 
 ---
 
-## Pipeline Design
+## Architecture Review
 
-Each scan cycle runs this pipeline for BTCUSDT across MTF timeframes:
+### Issue 1 — Where does the mode live?
 
-```
-Step 1: Fetch candles (1d, 4h, 1h, 30m) + LTF (5m, 1m)  [EXISTING]
-Step 2: detect_tct_schematics() on each TF               [EXISTING]
-Step 3: For each detected schematic, run the 6-tree pipeline:
+**Problem**: The page needs to persist which mode is selected (Claude vs Jack) across page reloads and 60s scan cycles, but not necessarily across server restarts.
 
-  Tree 1 — Ranges (evaluate_range_setup)
-    Input: Derive trend, 6-candle rule, EQ touch, horizontal check from candles
-    Gate: range_valid must be True, trade_bias != WAIT
+**Options:**
 
-  Tree 2 — Supply/Demand (evaluate_sd_zone)
-    Input: Derive zone type, FVG, mitigation from candle structure
-    Gate: fvg_valid must be True, failed_at_phase must be None
+**A (Recommended) — In-memory on the trader singleton, persisted to the existing `schematics_5b_trade_log.json`**
+- Add `"trading_mode": "claude"` field to the trade log JSON
+- `Schematics5BTrader` reads it on startup and exposes a `set_mode()/get_mode()` method
+- A new `POST /api/schematics-5b-trader/mode` endpoint writes through to trader and disk
+- Implementation effort: Low
+- Risk: Minimal — appending one field to an existing JSON
+- Impact: No change to existing trade history or state fields
+- Maintenance: Low — naturally co-located with state
 
-  Tree 3 — Liquidity (evaluate_liquidity_setup)
-    Input: Derive pool type, sweep side, DL2 breach, acceptance from candles
-    Gate: sweep_classification must be LIQUIDITY_GRAB, accepted_back_inside True
+**B — Separate `mode.json` config file**
+- Clean separation of config vs state
+- Implementation effort: Low
+- Risk: One more file to manage / back up
+- Maintenance: Low but slightly more surface area
 
-  Tree 4 — TCT 5A (evaluate_tct_schematic)
-    Input: Map schematic dict fields → TCTSchematicInputs
-    Gate: status must be VALID_ENTRY, trade_bias != WAIT
+**C — In-memory only (reset to default on restart)**
+- Simplest; no disk I/O for mode changes
+- Risk: Mode resets to "claude" on every deploy/restart
+- Maintenance: Lowest
 
-  Tree 5 — TCT 5B (evaluate_5b_schematic)
-    Input: Map schematic + 5A result → TCT5BInputs
-    Gate: status must be VALID_ENTRY, trade_bias != WAIT
-
-  Tree 6 — Advanced (evaluate_schematic_flip + evaluate_wyckoff_in_wyckoff)
-    Input: If active trade exists → check flip; if tap3 zone → check W-in-W
-    Effect: Can upgrade conviction or trigger flip exit
-
-Step 4: Score surviving setups (all 5 gates passed)
-  - Composite score from tree outputs (conviction, path quality, zone priority, R:R)
-  - Best setup wins
-
-Step 5: Enter trade via existing _enter_trade()           [EXISTING]
-```
+**Recommendation: Option A.** Persisting inside the existing JSON is the DRY choice — no new files, no new I/O paths, and survives deploy restarts.
 
 ---
 
-## New File: `decision_tree_bridge.py`
+### Issue 2 — How do the two evaluators co-exist?
 
-This is the core new code. It contains functions that translate raw market data into each tree's input dataclass:
+**Problem**: `Schematics5BTrader` currently holds a single `DecisionTreeEvaluator`. We need it to call Jack's logic when in Jack mode.
 
-### Functions:
+**Options:**
 
-1. `build_range_inputs(df, schematic) → RangeInputs`
-   - Analyze candle highs/lows for HH/HL or LH/LL pattern
-   - Check 6-candle rule (at least 6 candles touching both range boundaries)
-   - Check EQ touch (price crossed midpoint of range)
-   - Determine if range looks horizontal (range height < threshold relative to price)
-   - Check deviation characteristics (wick only, close outside, etc.)
+**A (Recommended) — Two separate evaluator classes, trader switches at call time**
+- `jack_tct_evaluator.py` exports `JackTCTEvaluator` with the same `evaluate_schematic(...)` interface
+- `Schematics5BTrader._get_evaluator()` returns the correct one based on `self._mode`
+- No change to the `evaluate_schematic(...)` call site in `_scan_and_trade_locked()`
+- Implementation effort: Medium (new evaluator file)
+- Risk: Low — clean interface, no touching of Claude's evaluator
+- Impact: Additive only; Claude mode unchanged
 
-2. `build_sd_inputs(df, schematic, range_eval) → SDZoneInputs`
-   - Identify order blocks near schematic tap zones
-   - Check FVG (3-candle pattern where C1 wick doesn't overlap C3 wick)
-   - Determine mitigation status from subsequent price action
-   - Check multi-TF confluence from HTF data
+**B — Single evaluator with a mode flag**
+- Pass `mode` into `DecisionTreeEvaluator` constructor; one class, two paths
+- Implementation effort: Medium
+- Risk: Medium — Claude's 6-tree logic entangled with Jack's 5-tree logic
+- Maintenance: Higher; changes to one path could break the other
 
-3. `build_liquidity_inputs(df, schematic, range_eval) → LiquidityInputs`
-   - Identify pool type from schematic range structure
-   - Determine sweep side from tap2/tap3 deviation direction
-   - Check DL2 breach (30% extension beyond range extreme)
-   - Check acceptance back inside range
-   - Assess path quality (clean move vs choppy)
+**C — Subclass: `JackTCTEvaluator(DecisionTreeEvaluator)`**
+- Override `evaluate_schematic`; reuse helpers
+- Implementation effort: Low
+- Risk: Moderate — inheritance creates tight coupling to Claude's internals
 
-4. `build_5a_inputs(schematic, range_eval) → TCTSchematicInputs`
-   - Direct mapping from schematic dict fields
-   - Range confirmed from tree 1 result
-   - Model type, tap validation, BOS status from schematic
-
-5. `build_5b_inputs(schematic, eval_5a, range_eval) → TCT5BInputs`
-   - Rationality from range_eval
-   - Tap spacing from schematic tap distances
-   - R:R from schematic entry/stop/target
-   - LTF BOS availability from refinement results
-
-6. `build_flip_inputs(active_trade, schematic) → FlipInputs` (only when trade is open)
-
-7. `build_wiw_inputs(schematic, local_schematic) → WyckoffInWyckoffInputs` (when nested pattern detected)
-
-8. `compute_composite_score(range_eval, sd_eval, liq_eval, eval_5a, eval_5b) → dict`
-   - Weighted composite from all tree outputs
-   - Returns score (0–100), pass/fail, and reasons list
-   - Compatible with existing _enter_trade() expectations
-
-### DecisionTreeEvaluator class:
-- `evaluate(df, schematic, htf_bias, current_price, ltf_dfs=None) → dict`
-  - Orchestrates the full pipeline: build inputs → run trees → compute score
-  - Returns `{"score": int, "pass": bool, "reasons": list, "rr": float, "tree_results": dict}`
-  - `tree_results` contains per-tree outputs for debug endpoint
+**Recommendation: Option A.** Separate files are the cleanest isolation. Both evaluators satisfy the same interface (`evaluate_schematic` → same return dict format) so `Schematics5BTrader` doesn't need to know the difference.
 
 ---
 
-## Changes to `schematics_5b_trader.py`
+### Issue 3 — What does `jack_tct_evaluator.py` implement?
 
-### Replace `Schematics5BEvaluator`
-- Delete the class entirely
-- Replace with: `from decision_tree_bridge import DecisionTreeEvaluator`
+Jack's 5 trees map directly to data already available from `detect_tct_schematics()` + `market_structure.py` + the existing `_detect_*` helpers in `decision_tree_bridge.py`. **No new data sources needed.**
 
-### Modify `_scan_single_symbol()`
-- Remove multi-symbol support (BTCUSDT only, no top_5_pairs)
-- After detecting schematics on each TF, call `DecisionTreeEvaluator.evaluate(df, schematic, htf_bias)` which runs the full 6-tree pipeline
-- Keep HTF cascade and LTF BOS refinement (run BEFORE tree evaluation so trees get refined data)
+| Tree | Input data | Logic |
+|------|-----------|-------|
+| 1 — Market Structure | 4H candle df | Run `market_structure.py` to get confirmed MSH + MSL; check direction; gate on valid structure |
+| 2 — Ranges | Schematic `range` field + candle df | Compute DL2, Range High, EQ, Range Low; check price position (premium/discount); validate horizontal range |
+| 3 — Supply & Demand | Schematic taps + candle df | Detect OB + FVG near each tap; classify premium (supply) vs discount (demand) vs extreme zones |
+| 4 — Liquidity | 4H candle df + schematic | Connect swing highs (bearish) or swing lows (bullish) with a trendline; check if price is touching/near it |
+| 5 — TCT 5A | Schematic dict directly | Model 1/2, tap1/2/3 prices, BOS confirmed or not, BOS price, highest valid TF |
 
-### Modify `scan_and_trade()`
-- Remove `top_5_pairs` parameter
-- Hardcode symbol = "BTCUSDT"
-- Rest of flow stays the same
-
-### Modify `_manage_open_trade()`
-- Add Tree 6 flip detection: after fetching current price, also run flip check
-- If flip detected → close current trade + enter new one
-
----
-
-## Changes to `server_mexc.py`
-
-### Background loop
-- Remove top_5_pairs passing (just call `scan_and_trade()` with no args)
-
-### Debug endpoint
-- Update `/api/schematics-5b-trader/debug` to include tree evaluation phases:
-  ```json
-  {
-    "tree_pipeline": {
-      "ranges": {"passed": true, "trade_bias": "LONG", ...},
-      "supply_demand": {"passed": true, "zone_priority": "EXTREME", ...},
-      "liquidity": {"passed": true, "sweep": "LIQUIDITY_GRAB", ...},
-      "tct_5a": {"passed": true, "status": "VALID_ENTRY", ...},
-      "tct_5b": {"passed": true, "entry_tf": "RED_MID", ...},
-      "advanced": {"flip": null, "wiw": null, "escalation": null}
+**Return format (same as Claude's evaluator):**
+```python
+{
+    "score": int,          # 0-100
+    "pass": bool,          # score >= 50
+    "direction": str,
+    "model": str,
+    "rr": float,
+    "required_score": 50,
+    "reasons": List[str],
+    "tree_results": {      # one key per tree, for debug panel
+        "market_structure": {...},
+        "ranges": {...},
+        "supply_demand": {...},
+        "liquidity": {...},
+        "tct_5a": {...},
     }
-  }
-  ```
+}
+```
 
-### Dashboard HTML
-- Update debug section to render tree pipeline results
-- Add phase-by-phase pass/fail indicators
-
----
-
-## File Changes Summary
-
-| File | Action |
-|---|---|
-| `decision_tree_bridge.py` | **NEW** — bridge layer mapping candles → tree inputs |
-| `schematics_5b_trader.py` | **MODIFY** — replace evaluator, simplify to BTCUSDT only |
-| `server_mexc.py` | **MODIFY** — update debug endpoint + remove top_5_pairs from loop |
-| `decision_trees/*.py` | **NO CHANGE** — used as-is via imports |
+**Scoring (Jack's mode):**
+- Tree 1 Market Structure pass → 20 pts (hard gate if no valid structure)
+- Tree 2 Ranges pass (price in correct zone) → 20 pts
+- Tree 3 S/D + FVG → 20 pts (hard gate if no FVG)
+- Tree 4 Liquidity curve present → 15 pts
+- Tree 5 TCT 5A schematic confirmed → 25 pts (hard gate if not confirmed)
+- Threshold: 50 pts (same as Claude's mode)
 
 ---
 
-## Risk Mitigation
+### Issue 4 — Trendline / liquidity curve detection (Tree 4)
 
-1. **Backward compatibility**: The bridge produces evaluation dicts with the same shape as current evaluator (`score`, `pass`, `reasons`, `rr`) so `_enter_trade()` works unchanged
-2. **Fallback**: If any tree raises an exception, the pipeline catches it and fails the setup (no trade entered on error)
-3. **Testing**: Add unit tests for the bridge functions with mock candle data
-4. **No live trading risk**: This is paper trading ($5000 simulated balance)
+Jack's Tree 4 asks: "Is there a trend line or liquidity curve forming?"
+
+**Options:**
+
+**A (Recommended) — Simple swing-point trendline check**
+- For bullish setups: connect last 2 confirmed swing lows (`_is_swing_low()` from `tct_schematics.py`)
+- For bearish setups: connect last 2 confirmed swing highs (`_is_swing_high()`)
+- If the slope is consistent and price is within ~1% of that line near tap1/tap2 → YES
+- Implementation effort: Low (reuses existing swing-point helpers)
+- Risk: Low — conservative, matches TCT trendline definition
+
+**B — Linear regression over recent swing points**
+- More robust but requires scipy or numpy computation
+- Implementation effort: Medium
+- Risk: Medium — adds computation, harder to explain to traders
+
+**C — Always return YES / skip this tree**
+- Zero implementation effort
+- Risk: High — meaningless tree, misleading pass/fail
+
+**Recommendation: Option A.** Simple, deterministic, matches TCT methodology.
 
 ---
 
-## Execution Order
+### Issue 5 — Debug panel rendering for Jack's mode
 
-1. Create `decision_tree_bridge.py` with all builder functions + DecisionTreeEvaluator
-2. Modify `schematics_5b_trader.py` — swap evaluator, remove multi-symbol, add flip detection
-3. Modify `server_mexc.py` — update debug endpoint, simplify background loop
-4. Update dashboard debug section HTML
-5. Add/update unit tests
-6. Run tests and verify
+The current debug panel renders Claude's 7-category tree accordion. Jack's mode has 5 different categories.
+
+**Options:**
+
+**A (Recommended) — Mode-aware rendering in existing `renderDecisionTrees()` JS function**
+- `d.trading_mode` returned in debug endpoint
+- `renderDecisionTrees()` branches on `d.trading_mode === 'jack'` to render Jack's 5 trees with the correct live-scan fields
+- Implementation effort: Medium (new JS rendering block)
+- Risk: Low — additive, existing rendering untouched for Claude mode
+
+**B — Separate API endpoint `/api/schematics-5b-trader/jack-debug`**
+- Cleaner separation but requires two separate polling calls
+- Implementation effort: Medium
+- Risk: Low but unnecessary complexity
+
+**Recommendation: Option A.** Same endpoint, mode-aware rendering — DRY, single polling call.
+
+---
+
+## Files to Create / Modify
+
+| File | Action | What changes |
+|------|--------|-------------|
+| `jack_tct_evaluator.py` | **CREATE** | `JackTCTEvaluator` class with 5-tree pipeline |
+| `schematics_5b_trader.py` | **MODIFY** | Add `_mode` field, `get_mode()`/`set_mode()`, load/save mode in JSON, `_get_evaluator()` helper |
+| `server_mexc.py` | **MODIFY** | Add `GET/POST /api/schematics-5b-trader/mode` endpoints; include `trading_mode` in debug response |
+| `server_mexc.py` (schematics-5B page HTML/JS) | **MODIFY** | Add mode dropdown in header; mode-aware `renderDecisionTrees()` for Jack's 5 trees; live scan data display per tree |
+
+---
+
+## Auto-scan Fix Status
+
+The hang was caused by `fetch_candles_sync` fetching `5m×1000` + `1m×1000` candles (83h of 5m data) over synchronous `requests` in a background thread. Already committed:
+- LTF limits reduced: 1000 → 200 (5m) / 100 (1m)
+- Startup stagger reduced: 55s → 5s
+- Diagnostic timing logs added to pinpoint any remaining slowness
+
+No additional structural fix needed here — the next deploy's logs will confirm timing per phase.
+
+---
+
+## Questions Before Proceeding
+
+**Q1 (Issue 1 — Mode persistence):** Does **Option A** (persisted inside `schematics_5b_trade_log.json`) work for you, or do you prefer **Option C** (in-memory only, resets on restart)?
+
+**Q2 (Issue 3 — Scoring):** The proposed scoring for Jack's mode is:
+- Tree 1 Market Structure: 20 pts (hard gate)
+- Tree 2 Ranges: 20 pts
+- Tree 3 S/D + FVG: 20 pts (hard gate)
+- Tree 4 Liquidity curve: 15 pts
+- Tree 5 TCT 5A confirmed: 25 pts (hard gate)
+
+Do these weights and hard gates look right to you, or do you want different emphasis?
+
+**Q3 (Issue 4 — Tree 4 Liquidity):** Are you OK with the **swing-point trendline approach** (Option A), or do you have a specific definition of "trendline or liquidity curve forming" you'd like to use?
+
+**Q4 — Scan behavior in Jack's mode:** When Jack's mode is active, should it:
+- **(a)** Still scan all MTF timeframes (1d, 4h, 1h, 30m) and pick the best TF
+- **(b)** Only scan the 4H timeframe (since all of Jack's trees reference 4H)
+
+Please answer each question — I'll implement after your approval.
