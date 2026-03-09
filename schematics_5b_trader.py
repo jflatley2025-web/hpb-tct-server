@@ -989,6 +989,8 @@ class Schematics5BTrader:
         }
 
         try:
+            _t0 = time.time()
+            logger.info(f"[5B] _scan_single_symbol started for {symbol}")
             # Current price
             df_price = fetch_candles_sync(symbol, "1m", 10)
             if df_price is None or len(df_price) == 0:
@@ -996,6 +998,7 @@ class Schematics5BTrader:
                 return out
             current_price = float(df_price.iloc[-1]["close"])
             out["current_price"] = current_price
+            logger.info(f"[5B] price fetch ok ({time.time()-_t0:.1f}s) — ${current_price:,.2f}")
 
             # HTF bias (per-symbol cache)
             htf_bias, htf_debug = self._get_htf_bias(symbol)
@@ -1029,6 +1032,7 @@ class Schematics5BTrader:
                         if tf in LTF_BOS_TIMEFRAMES:
                             ltf_dfs[tf] = None
 
+            logger.info(f"[5B] parallel candle fetch done ({time.time()-_t0:.1f}s)")
             # Phase A: collect all schematics per TF (needed for HTF cascade)
             all_schematics_by_tf: Dict[str, List[Dict]] = {}
             for tf in MTF_TIMEFRAMES:
@@ -1053,6 +1057,7 @@ class Schematics5BTrader:
                     all_tf_results[tf] = {"status": "error", "error": str(e)}
 
             # Phase B: evaluate with HTF cascade (lowest → highest TF walk)
+            logger.info(f"[5B] Phase A (detection) done ({time.time()-_t0:.1f}s)")
             best_setup: Optional[Tuple] = None
             best_score = 0
             best_tf_local: Optional[str] = None
@@ -1168,6 +1173,11 @@ class Schematics5BTrader:
                 "forming": forming[:5],
                 "timeframes": all_tf_results,
             })
+            logger.info(
+                f"[5B] _scan_single_symbol done ({time.time()-_t0:.1f}s) — "
+                f"best_tf={best_tf_local}, best_score={best_score}, "
+                f"timeframes={list(all_tf_results.keys())}"
+            )
 
         except Exception as e:
             logger.error(f"[5B] _scan_single_symbol error for {symbol}: {e}", exc_info=True)

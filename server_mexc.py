@@ -17770,12 +17770,16 @@ async def schematics_5b_auto_scan_loop():
                 trader = get_5b_trader()
                 loop = asyncio.get_event_loop()
                 # BTCUSDT only — no multi-symbol scanning.
-                # Cap each scan cycle at 5 minutes; a hung thread would otherwise
+                # Cap each scan cycle at 90s; a hung thread would otherwise
                 # hold the lock and stall both auto-scan loops indefinitely.
+                _scan_start = time.time()
+                logger.info("[5B-TRADE] Dispatching scan_and_trade to thread executor")
                 result = await asyncio.wait_for(
                     loop.run_in_executor(None, trader.scan_and_trade),
-                    timeout=300,
+                    timeout=90,
                 )
+                _scan_dur = time.time() - _scan_start
+                logger.info(f"[5B-TRADE] scan_and_trade returned in {_scan_dur:.1f}s")
 
             action = result.get("action", "unknown")
             ts = result.get("timestamp", "")
