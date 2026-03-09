@@ -784,9 +784,9 @@ class Schematics5BTrader:
             self.state.save()
         logger.info(f"[5B] Trading mode changed to '{mode}'")
 
-    def _get_evaluator(self):
-        """Return the correct evaluator for the current mode."""
-        if self.state.trading_mode == "jack":
+    def _get_evaluator(self, mode: str):
+        """Return the evaluator for the given snapshotted mode string."""
+        if mode == "jack":
             return self._jack_evaluator
         return self.evaluator
 
@@ -860,9 +860,11 @@ class Schematics5BTrader:
                 return cycle_result
 
             # 2. Scan BTCUSDT for qualifying TCT setups.
-            # Jack's mode restricts scanning to 4H only (all trees use 4H data).
-            scan_tfs = ["4h"] if self.state.trading_mode == "jack" else None
-            sym_result = self._scan_single_symbol(SYMBOL, timeframes=scan_tfs)
+            # Snapshot mode here (under _scan_lock) so the entire scan cycle uses
+            # one consistent evaluator even if set_mode() is called concurrently.
+            scan_mode = self.state.trading_mode
+            scan_tfs = ["4h"] if scan_mode == "jack" else None
+            sym_result = self._scan_single_symbol(SYMBOL, mode=scan_mode, timeframes=scan_tfs)
             best_setup = sym_result.get("best_setup")
             best_score = sym_result.get("best_score", 0)
             best_tf = sym_result.get("best_tf")
@@ -873,7 +875,7 @@ class Schematics5BTrader:
             with self._lock:
                 self.last_debug = {
                     "timestamp": cycle_result["timestamp"],
-                    "trading_mode": self.state.trading_mode,
+                    "trading_mode": scan_mode,
                     "symbols_scanned": [SYMBOL],
                     "current_price": best_current_price,
                     "best_symbol": SYMBOL,
@@ -998,13 +1000,17 @@ class Schematics5BTrader:
     # SINGLE-SYMBOL SCAN — extracted so scan_and_trade can loop over pairs
     # ----------------------------------------------------------------
 
-    def _scan_single_symbol(self, symbol: str, timeframes: Optional[List[str]] = None) -> Dict:
+    def _scan_single_symbol(self, symbol: str, mode: str = "claude",
+                            timeframes: Optional[List[str]] = None) -> Dict:
         """
         Fetch candles, detect TCT schematics, and evaluate all candidates for
         one symbol.  Returns a result dict keyed by: current_price, htf_bias,
         best_setup, best_score, best_tf, forming, timeframes, error.
 
         Args:
+            mode:       Snapshotted trading mode ('claude' or 'jack').  Must be
+                        passed by the caller so evaluator choice is deterministic
+                        for the full scan cycle even if set_mode() runs concurrently.
             timeframes: MTF timeframes to scan.  None → use MTF_TIMEFRAMES (all).
                         Pass ["4h"] for Jack's mode (4H-only scan).
         """
@@ -1126,7 +1132,7 @@ class Schematics5BTrader:
                             htf_upgraded_count += 1
 
                     eff_df = mtf_dfs.get(effective_tf) if mtf_dfs.get(effective_tf) is not None else df
-                    eval_result = self._get_evaluator().evaluate_schematic(
+                    eval_result = self._get_evaluator(mode).evaluate_schematic(
                         s, htf_bias, current_price,
                         total_candles=len(eff_df),
                         max_stale_candles=_MAX_STALE.get(effective_tf, 5),
