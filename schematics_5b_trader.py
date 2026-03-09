@@ -85,7 +85,7 @@ _MAX_STALE: Dict[str, int] = {
 # Per TCT model, cascade from highest TF down to the lowest that confirms BOS;
 # the earliest (lowest-TF) BOS gives the best entry and best R:R.
 LTF_BOS_TIMEFRAMES = ["5m", "1m"]  # highest → lowest; we keep overwriting so lowest TF wins
-_LTF_CANDLE_LIMITS = {"5m": 1000, "1m": 1000}  # 1000×5m ≈ 83 h; 1000×1m ≈ 17 h (MEXC max per call)
+_LTF_CANDLE_LIMITS = {"5m": 200, "1m": 100}  # 200×5m ≈ 17h; 100×1m ≈ 1.7h — sufficient for recent BOS
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
 TRADE_LOG_PATH = os.path.join(_DIR, "schematics_5b_trade_log.json")
@@ -1004,6 +1004,7 @@ class Schematics5BTrader:
             htf_bias, htf_debug = self._get_htf_bias(symbol)
             out["htf_bias"] = htf_bias
             all_tf_results: Dict = {HTF_TIMEFRAME: htf_debug}
+            logger.info(f"[5B] HTF bias done ({time.time()-_t0:.1f}s) — {htf_bias}")
 
             # Parallel MTF + LTF candle fetch
             mtf_dfs: Dict[str, Optional[pd.DataFrame]] = {}

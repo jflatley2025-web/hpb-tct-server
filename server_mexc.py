@@ -17749,8 +17749,8 @@ async def schematics_5b_auto_scan_loop():
     from schematics_5b_trader import get_5b_trader, AUTO_SCAN_INTERVAL, TRADE_LOG_PATH as LOG_5B
     from schematics_5b_trader import github_push_5b_log
 
-    # Stagger 5B start to 55s so it doesn't overlap with Tensor (15s) or any short-interval bots.
-    await asyncio.sleep(55)
+    # Small stagger so startup health-check passes before first scan hits the API.
+    await asyncio.sleep(5)
     logger.info(f"[5B-TRADE] Auto-scan loop started — interval: {AUTO_SCAN_INTERVAL}s")
 
     consecutive_errors = 0
