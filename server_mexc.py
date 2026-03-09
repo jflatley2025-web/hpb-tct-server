@@ -15620,6 +15620,7 @@ async def schematics_5b_debug():
 
         debug: Dict = {
             "timestamp": raw.get("timestamp"),
+            "trading_mode": raw.get("trading_mode", "claude"),
             "current_price": primary_data.get("current_price", raw.get("current_price")),
             "htf_bias": primary_data.get("htf_bias", "neutral"),
             "best_tf": primary_data.get("best_tf", raw.get("best_tf")),
@@ -15657,6 +15658,31 @@ async def schematics_5b_debug():
     except Exception as e:
         logger.error(f"[5B-DEBUG] Failed to build debug response: {e}", exc_info=True)
         return {"error": str(e), "state_summary": {}}
+
+
+@app.get("/api/schematics-5b-trader/mode")
+async def schematics_5b_get_mode():
+    """Return the current trading mode ('claude' or 'jack')."""
+    from schematics_5b_trader import get_5b_trader
+    trader = get_5b_trader()
+    return {"trading_mode": trader.get_mode()}
+
+
+@app.post("/api/schematics-5b-trader/mode")
+async def schematics_5b_set_mode(request: Request):
+    """Set trading mode. Body: {"mode": "claude"} or {"mode": "jack"}."""
+    from schematics_5b_trader import get_5b_trader
+    try:
+        body = await request.json()
+        mode = body.get("mode", "")
+        trader = get_5b_trader()
+        trader.set_mode(mode)
+        return {"trading_mode": trader.get_mode(), "ok": True}
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    except Exception as e:
+        logger.error(f"[5B-MODE] Failed to set mode: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @app.get("/api/schematics-5b-trader/candles")
@@ -15956,6 +15982,12 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
   <span class="auto-label" style="color:#00e676">Server auto-scan: ON (every 60s)</span>
   <div class="loading" id="loadingIndicator"><div class="spinner"></div>Scanning...</div>
   <span class="status-text" id="statusText">Auto-scanning...</span>
+  <label style="margin-left:16px;font-size:.75rem;color:#888">Mode:</label>
+  <select id="tradingModeSelect" onchange="setTradingMode(this.value)"
+    style="background:#1a1a2e;color:#e0e0e0;border:1px solid #333;border-radius:4px;padding:4px 8px;font-size:.75rem;cursor:pointer">
+    <option value="claude">Claude's TCT Mode</option>
+    <option value="jack">Jack's TCT Mode</option>
+  </select>
 </div>
 
 <div class="stats" id="statsRow">
@@ -16504,10 +16536,44 @@ function toggleDtSection(sectionId) {
   if (btn) btn.setAttribute('aria-expanded', String(!isOpen));
 }
 
+// ================================================================
+// TRADING MODE — load on startup, persist via API
+// ================================================================
+async function loadTradingMode() {
+  try {
+    const r = await fetchJSON('/api/schematics-5b-trader/mode');
+    const sel = document.getElementById('tradingModeSelect');
+    if (sel && r.trading_mode) sel.value = r.trading_mode;
+  } catch(e) { /* non-fatal */ }
+}
+
+async function setTradingMode(mode) {
+  try {
+    const r = await fetch('/api/schematics-5b-trader/mode', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({mode}),
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    const sel = document.getElementById('tradingModeSelect');
+    if (sel) sel.value = d.trading_mode;
+    // Immediately refresh debug panel to reflect new mode label
+    refreshDebug();
+  } catch(e) {
+    alert('Failed to set mode: ' + e.message);
+  }
+}
+
 function renderDecisionTrees(d) {
   const meta = document.getElementById('dtMeta');
   const sections = document.getElementById('dtSections');
   const summary = document.getElementById('debugSummary');
+
+  // Sync dropdown to the mode reported by the server (source of truth)
+  const mode = d?.trading_mode || 'claude';
+  const sel = document.getElementById('tradingModeSelect');
+  if (sel && sel.value !== mode) sel.value = mode;
 
   if (!d || !d.timeframes || !Object.keys(d.timeframes).length) {
     const err = d?.state_summary?.last_error;
@@ -16523,18 +16589,29 @@ function renderDecisionTrees(d) {
   const tfs = d.timeframes;
   const totalSchems = Object.values(tfs).reduce((s,v) => s + (v.schematics_found || 0), 0);
   const totalConf = Object.values(tfs).reduce((s,v) => s + (v.confirmed || 0), 0);
-  summary.textContent = ts + ' | ' + totalSchems + ' schematics, ' + totalConf + ' confirmed, best=' + (d.best_score || 0);
+  const modeLabel = mode === 'jack' ? "Jack's TCT Mode" : "Claude's TCT Mode";
+  summary.textContent = ts + ' | ' + modeLabel + ' | ' + totalSchems + ' schematics, ' + totalConf + ' confirmed, best=' + (d.best_score || 0);
 
   // Scan meta bar
   const biasC = d.htf_bias === 'bullish' ? 'green' : d.htf_bias === 'bearish' ? 'red' : 'yellow';
+  const tfScope = mode === 'jack' ? '4H only' : '1D/4H/1H/30M';
   meta.innerHTML =
     '<span class="dt-meta-item"><span class="dt-meta-label">Time:</span><span class="dt-meta-val">' + ts + '</span></span>' +
+    '<span class="dt-meta-item"><span class="dt-meta-label">Mode:</span><span class="dt-meta-val" style="color:#a78bfa">' + escapeHtml(modeLabel) + '</span></span>' +
     '<span class="dt-meta-item"><span class="dt-meta-label">Price:</span><span class="dt-meta-val cyan">$' + fmt(d.current_price) + '</span></span>' +
     '<span class="dt-meta-item"><span class="dt-meta-label">HTF Bias (Daily):</span><span class="dt-meta-val ' + biasC + '">' + (d.htf_bias || '?').toUpperCase() + '</span></span>' +
+    '<span class="dt-meta-item"><span class="dt-meta-label">Scan TFs:</span><span class="dt-meta-val yellow">' + tfScope + '</span></span>' +
     '<span class="dt-meta-item"><span class="dt-meta-label">Best TF:</span><span class="dt-meta-val yellow">' + (d.best_tf || 'None') + '</span></span>' +
     '<span class="dt-meta-item"><span class="dt-meta-label">Best Score:</span><span class="dt-meta-val ' + (d.best_score >= 50 ? 'green' : 'red') + '">' + (d.best_score || 0) + '/100</span></span>' +
     '<span class="dt-meta-item"><span class="dt-meta-label">Threshold:</span><span class="dt-meta-val">50 (fixed)</span></span>';
 
+  // Jack's mode: 5-tree panel
+  if (mode === 'jack') {
+    renderJackDecisionTrees(d, tfs);
+    return;
+  }
+
+  // Claude's mode: 7-category accordion (original)
   const DT_CATEGORIES = [
     { id: 'ranges',           icon: '↔',  title: 'Ranges',                  link: '/decision_trees/ranges_decision_tree.html' },
     { id: 'market_structure', icon: '⬆',  title: 'Market Structure',         link: null },
@@ -16638,12 +16715,138 @@ function renderDecisionTrees(d) {
   sections.innerHTML = html;
 }
 
+// ================================================================
+// JACK'S TCT MODE — 5-tree debug panel renderer
+// ================================================================
+function renderJackDecisionTrees(d, tfs) {
+  const sections = document.getElementById('dtSections');
+
+  // Jack's 5 trees — 4H only scan
+  const JACK_TREES = [
+    { id: 'market_structure', icon: '⬆', title: 'Tree 1 — Market Structure', pts: 20, gate: true },
+    { id: 'ranges',           icon: '↔', title: 'Tree 2 — Ranges',           pts: 20, gate: false },
+    { id: 'supply_demand',    icon: '⚖', title: 'Tree 3 — Supply & Demand',  pts: 20, gate: true },
+    { id: 'liquidity',        icon: '〜', title: 'Tree 4 — Liquidity Curve', pts: 15, gate: false },
+    { id: 'tct_5a',           icon: '5A', title: 'Tree 5 — TCT 5A',          pts: 25, gate: true },
+  ];
+
+  // Pull evaluation data from the 4H timeframe (Jack's mode scans 4H only)
+  const tf4h = tfs['4h'] || {};
+  const evals = tf4h.evaluations || [];
+  // Use the best-scoring evaluation (highest score)
+  const bestEval = evals.reduce((best, ev) => (!best || (ev.score || 0) > (best.score || 0)) ? ev : best, null);
+  const treeResults = bestEval?.tree_results || {};
+
+  let html = '';
+
+  JACK_TREES.forEach(tree => {
+    const tr = treeResults[tree.id] || {};
+    const passed = tr.passed === true;
+    const sid = 'jack-dt-' + tree.id;
+    const passColor = passed ? '#00e676' : (tr.passed === false ? '#ff4444' : '#666');
+    const gateTag = tree.gate ? ' <span style="font-size:.58rem;color:#ffc107;border:1px solid #ffc107;border-radius:2px;padding:0 3px">GATE</span>' : '';
+
+    html += '<div class="dt-section" id="' + sid + '">';
+    html += '<div class="dt-header">';
+    html += '<button class="dt-header-btn" id="' + sid + '-hdr-btn"'
+      + ' aria-expanded="false" aria-controls="' + sid + '-body"'
+      + ' onclick="toggleDtSection(\'' + sid + '\')">';
+    html += '<span class="dt-icon" style="color:#a78bfa">' + tree.icon + '</span>';
+    html += '<span class="dt-title">' + tree.title + '</span>';
+    html += gateTag;
+    html += '<span style="font-size:.65rem;font-weight:700;color:' + passColor + ';margin-left:8px">'
+      + (tr.passed === true ? '✓ PASS' : tr.passed === false ? '✗ FAIL' : '—') + '</span>';
+    html += '<span style="font-size:.6rem;color:#555;margin-left:6px">' + tree.pts + ' pts</span>';
+    html += '<span class="dt-toggle" id="' + sid + '-arrow">▶</span>';
+    html += '</button>';
+    html += '</div>';
+    html += '<div class="dt-body" id="' + sid + '-body">';
+
+    if (!bestEval) {
+      html += '<div class="dt-no-data">No evaluation data yet — waiting for 4H scan</div>';
+    } else if (!tr || !tr.passed === undefined) {
+      html += '<div class="dt-no-data">Tree not evaluated</div>';
+    } else {
+      html += '<div style="padding:10px 12px;font-size:.73rem;color:#ccc;line-height:1.8">';
+
+      // Common: reason field
+      if (tr.reason) {
+        html += '<div class="trade-row"><span class="label">Status</span>'
+          + '<span class="value" style="color:' + passColor + '">' + escapeHtml(tr.reason) + '</span></div>';
+      }
+
+      if (tree.id === 'market_structure') {
+        if (tr.trend) html += '<div class="trade-row"><span class="label">Trend</span><span class="value">' + escapeHtml(tr.trend) + '</span></div>';
+        if (tr.ms_highs !== undefined) html += '<div class="trade-row"><span class="label">MS Highs</span><span class="value">' + tr.ms_highs + '</span></div>';
+        if (tr.ms_lows !== undefined) html += '<div class="trade-row"><span class="label">MS Lows</span><span class="value">' + tr.ms_lows + '</span></div>';
+      }
+
+      if (tree.id === 'ranges') {
+        if (tr.range_high) html += '<div class="trade-row"><span class="label">Range High</span><span class="value">$' + fmt(tr.range_high) + '</span></div>';
+        if (tr.range_low) html += '<div class="trade-row"><span class="label">Range Low</span><span class="value">$' + fmt(tr.range_low) + '</span></div>';
+        if (tr.equilibrium) html += '<div class="trade-row"><span class="label">EQ (0.5 Fib)</span><span class="value">$' + fmt(tr.equilibrium) + '</span></div>';
+        if (tr.dl2_above) html += '<div class="trade-row"><span class="label">DL2 Above</span><span class="value">$' + fmt(tr.dl2_above) + '</span></div>';
+        if (tr.dl2_below) html += '<div class="trade-row"><span class="label">DL2 Below</span><span class="value">$' + fmt(tr.dl2_below) + '</span></div>';
+        if (tr.price_zone) html += '<div class="trade-row"><span class="label">Price Zone</span><span class="value">' + escapeHtml(tr.price_zone) + '</span></div>';
+        html += '<div class="trade-row"><span class="label">Horizontal</span><span class="value">' + (tr.is_horizontal ? '✓ Yes' : '✗ No') + '</span></div>';
+      }
+
+      if (tree.id === 'supply_demand') {
+        html += '<div class="trade-row"><span class="label">Zone Type</span><span class="value">' + escapeHtml(tr.zone_type || '—') + '</span></div>';
+        html += '<div class="trade-row"><span class="label">Taps Checked</span><span class="value">' + (tr.taps_checked || 0) + '</span></div>';
+        html += '<div class="trade-row"><span class="label">OB Found</span><span class="value">' + (tr.ob_found ? '✓ Yes' : 'No') + '</span></div>';
+        html += '<div class="trade-row"><span class="label">FVG Found</span><span class="value" style="color:' + (tr.fvg_found ? '#00e676' : '#ff4444') + '">' + (tr.fvg_found ? '✓ Yes' : '✗ No (GATE)') + '</span></div>';
+      }
+
+      if (tree.id === 'liquidity') {
+        if (tr.swing_type) html += '<div class="trade-row"><span class="label">Swing Points</span><span class="value">' + escapeHtml(tr.swing_type) + '</span></div>';
+        if (tr.swing_points_used !== undefined) html += '<div class="trade-row"><span class="label">Swings Used</span><span class="value">' + tr.swing_points_used + '</span></div>';
+        if (tr.trendline_slope !== null && tr.trendline_slope !== undefined) html += '<div class="trade-row"><span class="label">Slope</span><span class="value">' + tr.trendline_slope + '</span></div>';
+        if (tr.price_within_pct !== null && tr.price_within_pct !== undefined) html += '<div class="trade-row"><span class="label">Distance to Line</span><span class="value">' + tr.price_within_pct + '%</span></div>';
+        if (tr.swing_point_1) html += '<div class="trade-row"><span class="label">Swing 1</span><span class="value">$' + fmt(tr.swing_point_1.price) + ' (idx ' + tr.swing_point_1.idx + ')</span></div>';
+        if (tr.swing_point_2) html += '<div class="trade-row"><span class="label">Swing 2</span><span class="value">$' + fmt(tr.swing_point_2.price) + ' (idx ' + tr.swing_point_2.idx + ')</span></div>';
+      }
+
+      if (tree.id === 'tct_5a') {
+        if (tr.model) html += '<div class="trade-row"><span class="label">Model</span><span class="value">' + escapeHtml(tr.model) + '</span></div>';
+        if (tr.direction) html += '<div class="trade-row"><span class="label">Direction</span><span class="value">' + escapeHtml(tr.direction) + '</span></div>';
+        html += '<div class="trade-row"><span class="label">BOS Confirmed</span><span class="value" style="color:' + (tr.bos_confirmed ? '#00e676' : '#ff4444') + '">' + (tr.bos_confirmed ? '✓ Yes' : '✗ No (GATE)') + '</span></div>';
+        if (tr.bos_price) html += '<div class="trade-row"><span class="label">BOS Price</span><span class="value">$' + fmt(tr.bos_price) + '</span></div>';
+        if (tr.tap1_price) html += '<div class="trade-row"><span class="label">Tap 1</span><span class="value">$' + fmt(tr.tap1_price) + '</span></div>';
+        if (tr.tap2_price) html += '<div class="trade-row"><span class="label">Tap 2</span><span class="value">$' + fmt(tr.tap2_price) + '</span></div>';
+        if (tr.tap3_price) html += '<div class="trade-row"><span class="label">Tap 3</span><span class="value">$' + fmt(tr.tap3_price) + '</span></div>';
+        if (tr.timeframe) html += '<div class="trade-row"><span class="label">TF</span><span class="value">' + escapeHtml(tr.timeframe) + '</span></div>';
+      }
+
+      html += '</div>'; // padding div
+    }
+
+    html += '</div></div>'; // dt-body + dt-section
+  });
+
+  // Score summary
+  if (bestEval) {
+    const score = bestEval.score || 0;
+    const scoreColor = score >= 50 ? '#00e676' : '#ff4444';
+    html = '<div style="padding:10px 14px;border-bottom:1px solid #222;display:flex;align-items:center;gap:16px;flex-wrap:wrap">'
+      + '<span style="font-size:.72rem;color:#888">4H Evaluation:</span>'
+      + '<span style="font-size:.8rem;font-weight:700;color:' + scoreColor + '">' + score + '/100</span>'
+      + '<span style="font-size:.72rem;color:' + scoreColor + '">' + (bestEval.pass ? '✓ ENTRY QUALIFIED' : '✗ BELOW THRESHOLD') + '</span>'
+      + (bestEval.direction ? '<span style="font-size:.72rem;color:#888">Direction: <b style="color:#e0e0e0">' + escapeHtml(bestEval.direction) + '</b></span>' : '')
+      + (bestEval.rr ? '<span style="font-size:.72rem;color:#888">R:R: <b style="color:#e0e0e0">' + (bestEval.rr || 0).toFixed(1) + '</b></span>' : '')
+      + '</div>' + html;
+  }
+
+  sections.innerHTML = html;
+}
+
 setInterval(() => {
   if (document.getElementById('debugBodyWrap').classList.contains('dopen')) refreshDebug();
 }, 15000);
 
 setInterval(refreshState, 15000);
 
+loadTradingMode();
 refreshState();
 
 // ================================================================

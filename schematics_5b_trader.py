@@ -35,6 +35,7 @@ from trade_execution import (
     check_liquidation_safety,
 )
 from decision_tree_bridge import DecisionTreeEvaluator
+from jack_tct_evaluator import JackTCTEvaluator
 
 # Reuse MEXC fetch helpers from tensor trader (no duplication)
 from tensor_tct_trader import fetch_candles_sync, fetch_live_price
@@ -289,6 +290,7 @@ class Schematics5BTradeState:
         self.last_scan_time: Optional[str] = None
         self.last_scan_action: Optional[str] = None
         self.last_error: Optional[str] = None
+        self.trading_mode: str = "claude"  # "claude" | "jack"
         self._load()
 
     def _load(self):
@@ -309,6 +311,7 @@ class Schematics5BTradeState:
                 self.total_losses = data.get("total_losses", 0)
                 self.last_scan_time = data.get("last_scan_time")
                 self.last_scan_action = data.get("last_scan_action")
+                self.trading_mode = data.get("trading_mode", "claude")
                 # Validate current_trade — discard if essential fields are missing/zero
                 if self.current_trade:
                     ep = self.current_trade.get("entry_price", 0)
@@ -337,6 +340,7 @@ class Schematics5BTradeState:
                 "last_scan_time": self.last_scan_time,
                 "last_scan_action": self.last_scan_action,
                 "last_error": self.last_error,
+                "trading_mode": self.trading_mode,
             }
             with open(TRADE_LOG_PATH, "w") as f:
                 json.dump(data, f, indent=2, default=str)
@@ -755,6 +759,7 @@ class Schematics5BTrader:
     def __init__(self):
         self.state = Schematics5BTradeState()
         self.evaluator = DecisionTreeEvaluator()
+        self._jack_evaluator = JackTCTEvaluator()
         self.last_debug: Dict = {}
         self._lock = threading.Lock()
         # Per-symbol HTF bias cache: symbol → (bias_str, expiry_timestamp)
@@ -765,6 +770,25 @@ class Schematics5BTrader:
         # timed-out scan keeps running while the loop dispatches a new one.
         # This lock ensures only one thread mutates state at a time.
         self._scan_lock = threading.Lock()
+
+    def get_mode(self) -> str:
+        """Return the current trading mode: 'claude' or 'jack'."""
+        return self.state.trading_mode
+
+    def set_mode(self, mode: str) -> None:
+        """Set trading mode ('claude' or 'jack') and persist to disk."""
+        if mode not in ("claude", "jack"):
+            raise ValueError(f"Invalid mode '{mode}' — must be 'claude' or 'jack'")
+        with self._lock:
+            self.state.trading_mode = mode
+            self.state.save()
+        logger.info(f"[5B] Trading mode changed to '{mode}'")
+
+    def _get_evaluator(self):
+        """Return the correct evaluator for the current mode."""
+        if self.state.trading_mode == "jack":
+            return self._jack_evaluator
+        return self.evaluator
 
     def debug_snapshot(self) -> Dict:
         """Return a consistent snapshot of last_debug + state fields under the lock.
@@ -812,7 +836,8 @@ class Schematics5BTrader:
         }
 
         try:
-            # Keep evaluator's flip-detection in sync with current trade
+            # Keep Claude evaluator's flip-detection in sync with current trade
+            # (JackTCTEvaluator has no flip detection, so only update Claude's)
             self.evaluator.set_active_trade(self.state.current_trade)
 
             # 1. Manage open trade first
@@ -835,7 +860,9 @@ class Schematics5BTrader:
                 return cycle_result
 
             # 2. Scan BTCUSDT for qualifying TCT setups.
-            sym_result = self._scan_single_symbol(SYMBOL)
+            # Jack's mode restricts scanning to 4H only (all trees use 4H data).
+            scan_tfs = ["4h"] if self.state.trading_mode == "jack" else None
+            sym_result = self._scan_single_symbol(SYMBOL, timeframes=scan_tfs)
             best_setup = sym_result.get("best_setup")
             best_score = sym_result.get("best_score", 0)
             best_tf = sym_result.get("best_tf")
@@ -846,6 +873,7 @@ class Schematics5BTrader:
             with self._lock:
                 self.last_debug = {
                     "timestamp": cycle_result["timestamp"],
+                    "trading_mode": self.state.trading_mode,
                     "symbols_scanned": [SYMBOL],
                     "current_price": best_current_price,
                     "best_symbol": SYMBOL,
@@ -970,11 +998,15 @@ class Schematics5BTrader:
     # SINGLE-SYMBOL SCAN — extracted so scan_and_trade can loop over pairs
     # ----------------------------------------------------------------
 
-    def _scan_single_symbol(self, symbol: str) -> Dict:
+    def _scan_single_symbol(self, symbol: str, timeframes: Optional[List[str]] = None) -> Dict:
         """
         Fetch candles, detect TCT schematics, and evaluate all candidates for
         one symbol.  Returns a result dict keyed by: current_price, htf_bias,
         best_setup, best_score, best_tf, forming, timeframes, error.
+
+        Args:
+            timeframes: MTF timeframes to scan.  None → use MTF_TIMEFRAMES (all).
+                        Pass ["4h"] for Jack's mode (4H-only scan).
         """
         out: Dict = {
             "symbol": symbol,
@@ -1006,11 +1038,14 @@ class Schematics5BTrader:
             all_tf_results: Dict = {HTF_TIMEFRAME: htf_debug}
             logger.info(f"[5B] HTF bias done ({time.time()-_t0:.1f}s) — {htf_bias}")
 
+            # Resolve which MTF timeframes to scan
+            active_mtf_tfs = timeframes if timeframes is not None else MTF_TIMEFRAMES
+
             # Parallel MTF + LTF candle fetch
             mtf_dfs: Dict[str, Optional[pd.DataFrame]] = {}
             ltf_dfs: Dict[str, Optional[pd.DataFrame]] = {}
             all_tfs = {
-                **{tf: _MTF_CANDLE_LIMITS.get(tf, 300) for tf in MTF_TIMEFRAMES},
+                **{tf: _MTF_CANDLE_LIMITS.get(tf, 300) for tf in active_mtf_tfs},
                 **{ltf: _LTF_CANDLE_LIMITS[ltf] for ltf in LTF_BOS_TIMEFRAMES},
             }
             with ThreadPoolExecutor(max_workers=len(all_tfs)) as ex:
@@ -1022,13 +1057,13 @@ class Schematics5BTrader:
                     tf = futures[future]
                     try:
                         df_result = future.result()
-                        if tf in MTF_TIMEFRAMES:
+                        if tf in active_mtf_tfs:
                             mtf_dfs[tf] = df_result
                         if tf in LTF_BOS_TIMEFRAMES:
                             ltf_dfs[tf] = df_result
                     except Exception as e:
                         logger.warning(f"[5B] Fetch failed for {symbol}/{tf}: {e}")
-                        if tf in MTF_TIMEFRAMES:
+                        if tf in active_mtf_tfs:
                             mtf_dfs[tf] = None
                         if tf in LTF_BOS_TIMEFRAMES:
                             ltf_dfs[tf] = None
@@ -1036,7 +1071,7 @@ class Schematics5BTrader:
             logger.info(f"[5B] parallel candle fetch done ({time.time()-_t0:.1f}s)")
             # Phase A: collect all schematics per TF (needed for HTF cascade)
             all_schematics_by_tf: Dict[str, List[Dict]] = {}
-            for tf in MTF_TIMEFRAMES:
+            for tf in active_mtf_tfs:
                 df = mtf_dfs.get(tf)
                 if df is None or len(df) < 50:
                     all_schematics_by_tf[tf] = []
@@ -1063,7 +1098,7 @@ class Schematics5BTrader:
             best_score = 0
             best_tf_local: Optional[str] = None
 
-            for tf in reversed(MTF_TIMEFRAMES):
+            for tf in reversed(active_mtf_tfs):
                 df = mtf_dfs.get(tf)
                 if tf not in all_schematics_by_tf or all_tf_results.get(tf, {}).get("status") in {"error", "insufficient_data"}:
                     continue
@@ -1091,7 +1126,7 @@ class Schematics5BTrader:
                             htf_upgraded_count += 1
 
                     eff_df = mtf_dfs.get(effective_tf) if mtf_dfs.get(effective_tf) is not None else df
-                    eval_result = self.evaluator.evaluate_schematic(
+                    eval_result = self._get_evaluator().evaluate_schematic(
                         s, htf_bias, current_price,
                         total_candles=len(eff_df),
                         max_stale_candles=_MAX_STALE.get(effective_tf, 5),
