@@ -310,7 +310,7 @@
   ],
   "total_wins": 0,
   "total_losses": 8,
-  "last_scan_time": "2026-03-08T22:50:15.014793+00:00",
-  "last_scan_action": "error",
-  "last_error": "name 'symbols' is not defined"
+  "last_scan_time": "2026-03-09T00:23:32.494799+00:00",
+  "last_scan_action": "no_qualifying_setups",
+  "last_error": null
 }
