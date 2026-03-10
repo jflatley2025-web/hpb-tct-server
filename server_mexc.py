@@ -15777,7 +15777,7 @@ async def schematics_5b_page():
     Schematics 5B Simulated Trading Dashboard.
     Deterministic TCT trading — BTCUSDT only, fixed threshold, no learning.
     """
-    html = """<!DOCTYPE html>
+    html = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
