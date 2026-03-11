@@ -17998,11 +17998,18 @@ async def schematics_5b_auto_scan_loop():
             if consecutive_errors >= 5:
                 logger.critical(f"[5B-TRADE] {consecutive_errors} consecutive failures — possible systemic issue")
 
+        # GitHub push is outside the main scan try/except so a push failure
+        # doesn't increment consecutive_errors, but it must be guarded with its
+        # own handler — an unhandled exception here would propagate to the
+        # supervisor and restart the whole loop unnecessarily.
         now = time.time()
         if now - _last_github_push >= GITHUB_PUSH_INTERVAL:
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, github_push_5b_log, LOG_5B)
-            _last_github_push = now
+            try:
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, github_push_5b_log, LOG_5B)
+                _last_github_push = now
+            except Exception as push_err:
+                logger.error(f"[5B-TRADE] GitHub push failed (non-fatal): {push_err}", exc_info=True)
 
         await asyncio.sleep(AUTO_SCAN_INTERVAL)
 
@@ -18023,7 +18030,15 @@ async def phemex_tct_auto_scan_loop():
     # Import deferred until after the startup stagger so that the heavy
     # phemex_tct_algo → tct_pdf_rules → chromadb import chain doesn't run
     # on the first event-loop tick and spike memory before health checks pass.
-    await asyncio.sleep(95)  # stagger: 95s after startup
+    # Stagger increased from 95s → 240s to avoid an OOM collision with the
+    # first 5B scan cycle.  The 5B scan starts at T+5s and takes ~80s (Phase A
+    # detection is CPU-heavy), so its DataFrames are live in memory until ~T+87s.
+    # The original 95s stagger caused chromadb+onnxruntime (~200-300 MB) to load
+    # at T+95s while the 5B scan data hadn't been GC'd yet, pushing the 512 MB
+    # Render instance over its limit and triggering a silent OOM kill.
+    # 240s puts the first Phemex TCT scan safely after the second 5B scan cycle
+    # ends (~T+229s), giving the GC ample time to reclaim DataFrames first.
+    await asyncio.sleep(240)  # stagger: 240s after startup
     from phemex_tct_trader import get_trader, SCAN_INTERVAL
     logger.info(f"[PHEMEX-TCT] Auto-scan loop started — interval: {SCAN_INTERVAL}s")
 
