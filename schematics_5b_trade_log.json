@@ -310,8 +310,8 @@
   ],
   "total_wins": 0,
   "total_losses": 8,
-  "last_scan_time": "2026-03-11T00:41:46.482174+00:00",
+  "last_scan_time": "2026-03-11T01:43:21.183991+00:00",
   "last_scan_action": "no_qualifying_setups",
   "last_error": null,
-  "trading_mode": "claude"
+  "trading_mode": "jack"
 }
