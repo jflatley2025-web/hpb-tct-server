@@ -789,6 +789,7 @@ class TCTSchematicDetector:
 
             # Watch LTF structure from highest point to Tap3 low
             # TCT: Look for break back to bullish on internal structure
+            # EQ filter preserved: BOS must confirm below EQ (in the discount zone)
             bos = self._find_bullish_bos(tap3_idx, highest_point_price, tap3_price,
                                           equilibrium=equilibrium)
 
