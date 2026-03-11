@@ -787,20 +787,11 @@ class TCTSchematicDetector:
             highest_point_idx = range_candles["high"].idxmax()
             highest_point_price = float(self.candles.iloc[highest_point_idx]["high"])
 
-            # For Model 2, Tap3 is a higher low so price has already partially
-            # recovered — the first internal swing high after Tap3 can naturally
-            # sit at or above EQ.  Using EQ as the ceiling eliminates valid BOS
-            # signals for Model 2, so relax the ceiling to range_high (BOS is
-            # valid anywhere inside the range for Model 2).
-            is_model2 = "Model_2" in schematic_type
-            bos_ceiling = (
-                range_data.get("range_high") if (is_model2 and range_data) else equilibrium
-            )
-
             # Watch LTF structure from highest point to Tap3 low
             # TCT: Look for break back to bullish on internal structure
+            # EQ filter preserved: BOS must confirm below EQ (in the discount zone)
             bos = self._find_bullish_bos(tap3_idx, highest_point_price, tap3_price,
-                                          equilibrium=bos_ceiling)
+                                          equilibrium=equilibrium)
 
             if bos:
                 return {
