@@ -16451,8 +16451,11 @@ function dtContent(category, dt, t) {
   if (category === 'schematics_5a') {
     let h = '';
     h += chk('BOS confirmed (entry signal)', dt.bos_confirmed);
+    const _5aAccDist = dt.direction === 'bullish' ? 'Accumulation' : dt.direction === 'bearish' ? 'Distribution' : '';
+    const _5aModelLabel = [(dt.model || '—').replace(/_/g, ' '), _5aAccDist].filter(Boolean).join(' — ');
+    const _5aModelColor = dt.direction === 'bullish' ? 'green' : dt.direction === 'bearish' ? 'red' : '';
     h += '<div class="dt-check"><span class="dt-check-label">Model type</span>'
-      + '<span class="dt-check-val">' + (dt.model || '—').replace(/_/g,' ') + '</span></div>';
+      + '<span class="dt-check-val ' + _5aModelColor + '">' + _5aModelLabel + '</span></div>';
     h += chk('R:R meets minimum (≥1.5)', dt.rr_meets_minimum,
       dt.rr !== null ? ('R:R=' + fmt(dt.rr, 2)) : null);
     h += chk('Six-candle rule valid on all taps', dt.six_candle_valid);
