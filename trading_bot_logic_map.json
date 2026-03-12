@@ -1,0 +1,664 @@
+{
+  "meta": {
+    "title": "HPB-TCT Trading Bot — Complete Operational Workflow Logic Map",
+    "version": "1.0",
+    "generated": "2026-03-12",
+    "description": "Machine-readable hierarchical map of all decision logic in the Schematics-5B trading engine. Covers market bias determination, range validation, liquidity checks, session scaling, counter-bias protection, execution confidence, and trade management.",
+    "entry_point": "schematics_5b_trader.py → Schematics5BTrader._scan_and_trade_locked()",
+    "scoring_model": "6-tree v1 (threshold 50) or 9-phase v2 (threshold 60)"
+  },
+
+  "constants": {
+    "ENTRY_THRESHOLD_V1": 50,
+    "ENTRY_THRESHOLD_V2": 60,
+    "MIN_RR_RATIO": 1.5,
+    "DEVIATION_LIMIT_PERCENT": 0.30,
+    "BOS_GOOD_DISTANCE_PCT": 0.002,
+    "WICK_PROXIMITY_PCT": 0.001,
+    "AUTO_SCAN_INTERVAL_SECONDS": 60,
+    "DUPLICATE_COOLDOWN_SECONDS": 300,
+    "DUPLICATE_PRICE_TOLERANCE_PCT": 0.002,
+    "HTF_BIAS_CACHE_TTL_DIRECTIONAL": 86400,
+    "HTF_BIAS_CACHE_TTL_NEUTRAL": 3600,
+    "LIQUIDITY_TOLERANCE_V2_PCT": 0.003,
+    "DEFAULT_RISK_PER_TRADE_PCT": 0.01,
+    "DEFAULT_LEVERAGE": 10,
+    "MARGIN_MODE": "ISOLATED",
+    "MTF_TIMEFRAMES": ["1d", "4h", "1h", "30m"],
+    "LTF_BOS_TIMEFRAMES": ["5m", "1m"],
+    "MAX_STALE_CANDLES": {
+      "1d": 2, "4h": 3, "1h": 3, "30m": 4, "15m": 6, "5m": 10, "1m": 30
+    }
+  },
+
+  "workflow": [
+    {
+      "step_id": "1.0",
+      "name": "AUTO_SCAN_LOOP",
+      "module_or_function": "schematics_5b_trader.py → Schematics5BTrader._scan_and_trade_locked()",
+      "inputs": ["AUTO_SCAN_INTERVAL (60s)", "current symbol list", "exchange API connection"],
+      "decision_logic": "Polling loop that fires every 60 seconds. Acquires async lock to prevent concurrent scans. Checks if a position is already open — if yes, routes to trade management (step 8.0). If no position, proceeds to scan for new setups.",
+      "outputs": ["triggers full pipeline per symbol per MTF timeframe"],
+      "conditions": {
+        "gate_position_open": "If current_trade is not None → skip to step 8.0 (manage existing position)",
+        "gate_duplicate_cooldown": "If same symbol+price (±0.2%) was evaluated within 300s → skip",
+        "loop_interval": "Repeats every 60 seconds indefinitely"
+      },
+      "children": [
+        {
+          "step_id": "2.0",
+          "name": "HTF_BIAS_DETERMINATION",
+          "module_or_function": "decision_tree_bridge.py → detect_htf_market_structure(df)",
+          "inputs": ["1D OHLCV candles (last 100)", "cached bias (if TTL not expired)"],
+          "decision_logic": "Determines the Higher Time Frame directional bias using 6-candle-rule pivot detection on daily candles. Identifies swing highs and swing lows, then classifies the last two of each to determine market structure direction. Structure break confirmation requires a candle CLOSE beyond the prior swing level.",
+          "outputs": ["htf_bias: 'bullish' | 'bearish' | 'neutral'", "htf_structure_details"],
+          "conditions": {
+            "cache_hit": "If cached bias exists and TTL not expired (24h for directional, 1h for neutral) → return cached value without recomputation",
+            "bullish_classification": "Last 2 swing highs form Higher High AND last 2 swing lows form Higher Low → 'bullish'",
+            "bearish_classification": "Last 2 swing highs form Lower High AND last 2 swing lows form Lower Low → 'bearish'",
+            "neutral_classification": "Mixed pattern (e.g., HH+LL or LH+HL) → 'neutral'",
+            "structure_break_confirmation": "Close beyond prior swing pivot confirms direction; wick-only does not confirm"
+          },
+          "children": [
+            {
+              "step_id": "2.1",
+              "name": "SIX_CANDLE_RULE_PIVOT_DETECTION",
+              "module_or_function": "market_structure.py → find_6cr_pivots(df)",
+              "inputs": ["OHLCV candle array"],
+              "decision_logic": "Scans candles for pivot highs and lows using the 6-candle rule: a pivot HIGH requires 2+ consecutive bullish candles followed by 2+ consecutive bearish candles. A pivot LOW requires the inverse. Inside bars (close == open or body < threshold) do NOT count toward the sequence but do NOT break it either.",
+              "outputs": ["swing_highs[]", "swing_lows[]", "pivot_indices"],
+              "conditions": {
+                "min_shoulder_candles": "At least 2 consecutive candles in each direction (3-candle shoulder each side)",
+                "inside_bar_handling": "Inside bars are skipped — they neither count nor reset the consecutive sequence"
+              }
+            },
+            {
+              "step_id": "2.2",
+              "name": "STRUCTURE_CLASSIFICATION",
+              "module_or_function": "market_structure.py → confirm_structure_points()",
+              "inputs": ["swing_highs[]", "swing_lows[]"],
+              "decision_logic": "Compares the last two swing highs and last two swing lows to classify as HH (Higher High), HL (Higher Low), LH (Lower High), or LL (Lower Low). These four labels determine the bias.",
+              "outputs": ["structure_label: 'HH+HL' | 'LH+LL' | mixed"],
+              "conditions": {
+                "HH": "swing_highs[-1] > swing_highs[-2]",
+                "HL": "swing_lows[-1] > swing_lows[-2]",
+                "LH": "swing_highs[-1] < swing_highs[-2]",
+                "LL": "swing_lows[-1] < swing_lows[-2]"
+              }
+            }
+          ]
+        },
+
+        {
+          "step_id": "3.0",
+          "name": "RANGE_FORMATION_AND_VALIDATION",
+          "module_or_function": "tct_schematics.py → TCTSchematicDetector._find_accumulation_ranges() / _find_distribution_ranges()",
+          "inputs": ["MTF OHLCV candles (4h, 1h, 30m)", "detected swing highs/lows from step 2.1"],
+          "decision_logic": "Identifies horizontal consolidation ranges by finding swing high/low boundaries. Calculates Equilibrium (EQ) and Deviation Limits (DL2). Validates that the range is genuinely horizontal (not a V-shaped impulse) and that EQ has been touched.",
+          "outputs": ["range_high", "range_low", "equilibrium (EQ)", "DL2_above", "DL2_below", "range_valid: bool", "tap1_price"],
+          "conditions": {
+            "EQ_calculation": "EQ = (range_high + range_low) / 2.0",
+            "DL2_calculation": "DL2_above = range_high + (range_size × 0.30); DL2_below = range_low - (range_size × 0.30)",
+            "EQ_touch_required": "At least one candle must close within 5% of EQ — confirms range is being respected",
+            "horizontal_validation": "At least 60% of closes must stay within range boundaries AND direction changes ≥ 15% of candle count AND EQ crossings ≥ 10% of candle count",
+            "tap1_identification": "Tap1 = first definitive touch of range low (accumulation) or range high (distribution)"
+          },
+          "children": [
+            {
+              "step_id": "3.1",
+              "name": "RANGE_QUALITY_SCORING",
+              "module_or_function": "tct_schematics.py (inline logic)",
+              "inputs": ["range boundaries", "candle data within range"],
+              "decision_logic": "Scores the quality of the identified range by checking horizontal character, liquidity stacking at boundaries, and EQ interaction frequency.",
+              "outputs": ["range_quality_score", "is_horizontal: bool", "has_liquidity_stacking: bool"],
+              "conditions": {
+                "liquidity_stacking": "2+ equal highs (within 0.1%) at range_high OR 2+ equal lows at range_low → indicates stop-loss clustering",
+                "V_shape_rejection": "If most price action is directional with < 15% direction changes → NOT a valid range"
+              }
+            }
+          ]
+        },
+
+        {
+          "step_id": "4.0",
+          "name": "DEVIATION_AND_SCHEMATIC_DETECTION",
+          "module_or_function": "tct_schematics.py → _build_accumulation_schematic() / _build_distribution_schematic()",
+          "inputs": ["validated range from step 3.0", "candle data", "range_high", "range_low", "EQ", "DL2"],
+          "decision_logic": "After identifying Tap1 (first touch of range boundary), searches for Tap2 (first deviation beyond range) and Tap3 (deeper deviation or higher-low retest). Classifies as Model 1 or Model 2 based on the relationship between Tap2 and Tap3. Validates that deviations stay within DL2.",
+          "outputs": ["schematic_type: 'Model_1' | 'Model_2'", "tap2_price", "tap3_price", "direction: 'bullish' | 'bearish'", "schematic_valid: bool"],
+          "conditions": {
+            "tap2_requirement": "Tap2 = first deviation beyond range boundary that comes BACK inside the range. Must NOT close beyond DL2.",
+            "model_1_classification": "Tap3 goes LOWER than Tap2 (accumulation) or HIGHER than Tap2 (distribution) — creates a lower low / higher high outside range",
+            "model_2_classification": "Tap3 is a HIGHER LOW relative to Tap2 (accumulation) that grabs extreme liquidity (first MS low after Tap2) OR mitigates extreme demand/supply zone",
+            "DL2_gate": "If any candle CLOSES beyond DL2 AND does not get accepted back within 3 candles → TRUE BREAK → schematic INVALID",
+            "tap_spacing_requirement": "Time gap between Tap2 and Tap3 must be ≥ 30% of the gap between Tap1 and Tap2",
+            "v2_tolerance": "In v2 scoring, allow close slightly beyond DL2 if within 0.3% tolerance (softer gate)"
+          },
+          "children": [
+            {
+              "step_id": "4.1",
+              "name": "MODEL_1_DETECTION",
+              "module_or_function": "tct_schematics.py (accumulation/distribution logic)",
+              "inputs": ["tap2_low/high", "subsequent candle data"],
+              "decision_logic": "Searches for a Tap3 that creates a LOWER LOW below Tap2 (for accumulation) or HIGHER HIGH above Tap2 (for distribution). This is the classic spring/upthrust pattern.",
+              "outputs": ["model_1_valid: bool", "tap3_price", "deviation_depth"],
+              "conditions": {
+                "accumulation_model_1": "tap3_low < tap2_low AND tap3_close > range_low (accepted back)",
+                "distribution_model_1": "tap3_high > tap2_high AND tap3_close < range_high (accepted back)"
+              }
+            },
+            {
+              "step_id": "4.2",
+              "name": "MODEL_2_DETECTION",
+              "module_or_function": "tct_schematics.py (accumulation/distribution logic)",
+              "inputs": ["tap2_low/high", "subsequent candle data", "extreme liquidity zones"],
+              "decision_logic": "Searches for a Tap3 that forms a HIGHER LOW relative to Tap2 (accumulation) — does NOT make new low. Must grab either extreme liquidity (first MS low after Tap2) or mitigate extreme demand zone (S/D).",
+              "outputs": ["model_2_valid: bool", "tap3_price", "grabbed_liquidity: bool", "mitigated_sd: bool"],
+              "conditions": {
+                "higher_low_requirement": "tap3_low > tap2_low (accumulation) or tap3_high < tap2_high (distribution)",
+                "liquidity_grab_or_sd": "Must satisfy at least one: (a) price reaches extreme liquidity level, OR (b) price enters extreme S/D zone"
+              }
+            }
+          ]
+        },
+
+        {
+          "step_id": "5.0",
+          "name": "BOS_CONFIRMATION_AND_LTF_CASCADE",
+          "module_or_function": "schematics_5b_trader.py → _try_confirm_with_ltf_bos() / refine_schematic_bos_with_ltf()",
+          "inputs": ["schematic from step 4.0", "MTF candle data", "LTF candle data (5m, 1m)"],
+          "decision_logic": "After Tap3, searches for a Break of Structure (BOS) — a candle that CLOSES above the highest point between Tap2 and Tap3 (bullish) or below the lowest point (bearish). Cascades through lower timeframes (5m → 1m) to find the earliest confirmation for best risk-reward. Lowest TF BOS overwrites higher TF BOS.",
+          "outputs": ["bos_confirmed: bool", "bos_price", "bos_timeframe", "bos_candle_index", "refined_entry_price", "refined_stop_price"],
+          "conditions": {
+            "mtf_bos_search": "On the schematic timeframe, find first candle CLOSE beyond the swing high/low between Tap2-Tap3",
+            "ltf_cascade": "After MTF BOS found, search 5m then 1m for earlier BOS — LOWEST TF wins (best R:R)",
+            "bos_staleness_check": "BOS must occur within MAX_STALE candles of Tap3 (varies by TF: 1d=2, 4h=3, 1h=3, 30m=4, 5m=10, 1m=30). If exceeded → STALE → REJECT",
+            "ltf_internal_structure": "Primary: search for BOS using internal structure swings between Tap2-Tap3 timestamps",
+            "ltf_fallback": "If no internal structure, use post-Tap3 swings as fallback BOS points",
+            "eq_filter_v1": "In v1 mode: BOS must be below EQ for accumulation, above EQ for distribution",
+            "hard_gate": "If no BOS found on any timeframe → HARD FAIL → cannot enter trade"
+          },
+          "children": [
+            {
+              "step_id": "5.1",
+              "name": "LTF_BOS_REFINEMENT",
+              "module_or_function": "schematics_5b_trader.py → refine_schematic_bos_with_ltf()",
+              "inputs": ["MTF BOS price/time", "5m and 1m candle data"],
+              "decision_logic": "Fetches LTF candles around the MTF BOS zone. Identifies LTF swing structure and finds first LTF BOS (close beyond LTF swing). If found, uses LTF BOS price as entry and LTF swing extreme as stop — tighter risk, better R:R.",
+              "outputs": ["ltf_bos_price", "ltf_stop_price", "ltf_timeframe", "improved_rr"],
+              "conditions": {
+                "5m_first": "Search 5m candles first",
+                "1m_override": "If 1m BOS found, it overwrites 5m BOS (tighter = better)",
+                "no_ltf_found": "If no LTF BOS → fall back to MTF BOS levels"
+              }
+            }
+          ]
+        },
+
+        {
+          "step_id": "6.0",
+          "name": "GATING_CHECKS",
+          "module_or_function": "decision_tree_bridge.py → compute_composite_score_v2() (inline gates)",
+          "inputs": ["htf_bias from step 2.0", "schematic from step 4.0", "bos_confirmed from step 5.0", "calculated R:R", "FVG/OB zones"],
+          "decision_logic": "Series of hard gates that must ALL pass before scoring proceeds. Any single hard gate failure results in immediate rejection — the trade is NOT taken regardless of other factors.",
+          "outputs": ["all_gates_passed: bool", "rejection_reason: string | null"],
+          "conditions": {
+            "HARD_GATES": "ALL must pass or trade is rejected"
+          },
+          "children": [
+            {
+              "step_id": "6.1",
+              "name": "HTF_ALIGNMENT_GATE",
+              "module_or_function": "decision_tree_bridge.py (inline)",
+              "inputs": ["htf_bias", "schematic.direction"],
+              "decision_logic": "Checks that the trade direction aligns with HTF bias. Counter-bias trades (e.g., bearish setup during bullish HTF) are typically rejected.",
+              "outputs": ["htf_aligned: bool"],
+              "conditions": {
+                "pass": "htf_bias == schematic.direction OR htf_bias == 'neutral'",
+                "fail_hard": "htf_bias is OPPOSITE to schematic.direction → REJECT",
+                "exception_neutral": "htf_bias == 'neutral' → HARD FAIL in v2 (neutral = uncertain = no entry)",
+                "exception_trend_shift": "If CHoCH (Change of Character) detected in HTF → counter-bias entry MAY be allowed"
+              }
+            },
+            {
+              "step_id": "6.2",
+              "name": "BOS_CONFIRMATION_GATE",
+              "module_or_function": "decision_tree_bridge.py (inline)",
+              "inputs": ["bos_confirmed from step 5.0"],
+              "decision_logic": "Requires confirmed BOS. Without structural confirmation, no trade.",
+              "outputs": ["bos_gate_passed: bool"],
+              "conditions": {
+                "pass": "bos_confirmed == True",
+                "fail_hard": "bos_confirmed == False → REJECT — non-negotiable"
+              }
+            },
+            {
+              "step_id": "6.3",
+              "name": "RISK_REWARD_GATE",
+              "module_or_function": "decision_tree_bridge.py (inline)",
+              "inputs": ["entry_price", "stop_price", "target_price"],
+              "decision_logic": "Calculates live risk-to-reward ratio. Hard floor of 1.5. Trades below this threshold are never taken.",
+              "outputs": ["rr_ratio: float", "rr_gate_passed: bool"],
+              "conditions": {
+                "calculation": "live_risk = abs(entry_price - stop_price); live_reward = abs(target_price - entry_price); rr = live_reward / live_risk",
+                "pass": "rr >= 1.5",
+                "fail_hard": "rr < 1.5 → REJECT — absolute floor",
+                "bonus_trigger": "rr >= 3.0 → bonus points in scoring (step 7.0)"
+              }
+            },
+            {
+              "step_id": "6.4",
+              "name": "SUPPLY_DEMAND_VALIDATION_GATE",
+              "module_or_function": "decision_tree_bridge.py → _score_supply_demand_tree()",
+              "inputs": ["FVG zones (Fair Value Gaps)", "OB zones (Order Blocks)", "tap3_price", "schematic.direction"],
+              "decision_logic": "Verifies that a valid supply or demand zone exists near Tap3. FVG is a 3-candle pattern leaving an unmitigated gap. OB is a swing-structure point (last opposing candle before impulse). At least one must be present in the correct zone.",
+              "outputs": ["sd_valid: bool", "fvg_present: bool", "ob_present: bool"],
+              "conditions": {
+                "for_bullish": "Demand zone (FVG or OB) must exist BELOW or AT Tap3 level",
+                "for_bearish": "Supply zone (FVG or OB) must exist ABOVE or AT Tap3 level",
+                "hard_gate": "If NO FVG and NO OB near Tap3 → HARD FAIL (unless schematic already confirmed via other path)",
+                "fvg_definition": "3 consecutive candles where candle[1].low > candle[0].high (bullish) or candle[1].high < candle[0].low (bearish)"
+              }
+            },
+            {
+              "step_id": "6.5",
+              "name": "LIQUIDITY_SWEEP_VALIDATION_GATE",
+              "module_or_function": "decision_tree_bridge.py → _score_liquidity_tree()",
+              "inputs": ["range_low", "range_high", "DL2_above", "DL2_below", "candle data around deviations"],
+              "decision_logic": "Classifies the liquidity event as SWEEP (acceptable) or TRUE BREAK (rejection). A sweep means price went beyond range but came back. A true break means price closed beyond DL2 and stayed there.",
+              "outputs": ["sweep_type: 'swept' | 'deep_break' | 'true_break'", "liquidity_gate_passed: bool"],
+              "conditions": {
+                "swept": "Any candle low/high beyond range boundary but closes back inside → VALID sweep",
+                "deep_break": "Candle CLOSES beyond DL2 but penetration ≥ 1% of range AND accepted back within ≥ 3 candles → VALID (soft pass)",
+                "true_break": "Candle CLOSES beyond DL2 AND NOT accepted back within 3 candles → HARD FAIL",
+                "v2_tolerance": "In v2, allow close slightly beyond DL2 if within 0.3% tolerance before classifying as true break"
+              }
+            },
+            {
+              "step_id": "6.6",
+              "name": "TCT_5A_SCHEMATIC_VALIDITY_GATE",
+              "module_or_function": "decision_tree_bridge.py → _score_tct_5a_tree()",
+              "inputs": ["schematic from step 4.0"],
+              "decision_logic": "Validates that the overall TCT 5A schematic structure is intact — range found, taps identified, model type classified, deviation within limits.",
+              "outputs": ["tct_5a_valid: bool"],
+              "conditions": {
+                "pass": "schematic has valid range + valid taps + valid model type + deviation within DL2",
+                "fail_hard": "Any core schematic element missing or invalid → HARD FAIL"
+              }
+            },
+            {
+              "step_id": "6.7",
+              "name": "COUNTER_BIAS_RANGE_INTEGRITY_GATE",
+              "module_or_function": "High_Probability_Model_v17_RIG.config → Range Integrity Gate (RIG)",
+              "inputs": ["htf_range_duration", "local_displacement", "htf_bias", "session_bias"],
+              "decision_logic": "Prevents counter-bias entries when the HTF range is still intact. If the higher timeframe range has held for 24+ hours and local displacement is weak, counter-bias entries are blocked.",
+              "outputs": ["rig_passed: bool"],
+              "conditions": {
+                "hard_fail_if": "HTF range intact (duration ≥ 24h) AND local displacement < 25% AND htf_bias ≠ session_bias → REJECT",
+                "exception_choch": "If Change of Character (CHoCH) detected via domino effect (L3→L2→L1 confirmation) → bypass RIG",
+                "exception_model_flow": "Model 1 → Model 2 conversion or schematic conversion → bypass allowed"
+              }
+            }
+          ]
+        },
+
+        {
+          "step_id": "7.0",
+          "name": "COMPOSITE_SCORING",
+          "module_or_function": "decision_tree_bridge.py → compute_composite_score_v2()",
+          "inputs": ["all gate results from step 6.0", "range quality from step 3.0", "schematic details from step 4.0", "BOS details from step 5.0", "session timing", "R:R ratio"],
+          "decision_logic": "If all hard gates pass, computes a composite score from 0-100 across 6 scoring trees plus R:R bonus. Each tree contributes a weighted score. The total must meet or exceed the entry threshold (60 for v2, 50 for v1) to trigger trade entry.",
+          "outputs": ["composite_score: int (0-100)", "tree_results: object", "entry_decision: bool"],
+          "conditions": {
+            "entry_threshold_v1": "score >= 50 → ENTER",
+            "entry_threshold_v2": "score >= 60 → ENTER",
+            "below_threshold": "score < threshold → NO ENTRY"
+          },
+          "children": [
+            {
+              "step_id": "7.1",
+              "name": "TREE_1_RANGE_STRUCTURE",
+              "module_or_function": "decision_tree_bridge.py → _score_ranges_tree()",
+              "inputs": ["range quality", "horizontal validation", "EQ touches", "liquidity stacking"],
+              "decision_logic": "Scores the quality and validity of the identified consolidation range.",
+              "outputs": ["range_score: 0-20"],
+              "conditions": {
+                "full_pass": "Valid horizontal range with EQ touched and liquidity stacking → 20 pts",
+                "partial_pass": "Range found but quality concerns → 10-15 pts",
+                "soft_fail": "Range validation issues → 5 pts (does not reject, just low score)"
+              }
+            },
+            {
+              "step_id": "7.2",
+              "name": "TREE_2_SUPPLY_DEMAND",
+              "module_or_function": "decision_tree_bridge.py → _score_supply_demand_tree()",
+              "inputs": ["FVG zones", "OB zones", "proximity to Tap3"],
+              "decision_logic": "Scores the presence and quality of supply/demand zones near the entry area.",
+              "outputs": ["sd_score: 0-20"],
+              "conditions": {
+                "full_pass": "FVG present and unmitigated in correct zone → 20 pts",
+                "partial_pass": "OB only (no FVG) → 10-15 pts",
+                "hard_gate_fail": "No FVG at all → HARD FAIL (overrides score, entire trade rejected)"
+              }
+            },
+            {
+              "step_id": "7.3",
+              "name": "TREE_3_LIQUIDITY",
+              "module_or_function": "decision_tree_bridge.py → _score_liquidity_tree()",
+              "inputs": ["sweep classification from step 6.5"],
+              "decision_logic": "Scores the quality of the liquidity sweep event.",
+              "outputs": ["liquidity_score: 0-15"],
+              "conditions": {
+                "full_pass": "Clean sweep classified and accepted back → 15 pts",
+                "partial_pass": "Deep break but accepted back → 8-10 pts",
+                "soft_fail": "Unclear sweep → 5 pts"
+              }
+            },
+            {
+              "step_id": "7.4",
+              "name": "TREE_4_TCT_5A",
+              "module_or_function": "decision_tree_bridge.py → _score_tct_5a_tree()",
+              "inputs": ["schematic validity from step 6.6", "model type", "tap quality"],
+              "decision_logic": "Scores the TCT 5A schematic pattern recognition quality.",
+              "outputs": ["tct_5a_score: 0-20"],
+              "conditions": {
+                "full_pass": "All schematic elements confirmed → 20 pts",
+                "partial_pass": "Schematic with minor issues → 10-15 pts",
+                "hard_gate_fail": "Schematic INVALID → HARD FAIL"
+              }
+            },
+            {
+              "step_id": "7.5",
+              "name": "TREE_5_TCT_5B_REAL_WORLD",
+              "module_or_function": "decision_tree_bridge.py → _score_tct_5b_tree()",
+              "inputs": ["tap spacing", "BOS distance", "entry precision", "real-world chart conformance"],
+              "decision_logic": "Scores real-world execution factors — how clean the setup looks on actual charts vs theoretical patterns.",
+              "outputs": ["tct_5b_score: 0-15"],
+              "conditions": {
+                "full_pass": "Clean taps, good BOS distance (≥ 0.2%), proper spacing → 15 pts",
+                "partial_pass": "Some execution concerns → 8-10 pts",
+                "low_score": "Messy execution → 3-5 pts"
+              }
+            },
+            {
+              "step_id": "7.6",
+              "name": "TREE_6_ADVANCED_FLIP_ESCALATION",
+              "module_or_function": "decision_tree_bridge.py → _score_advanced_tree()",
+              "inputs": ["flip detection (acc→dist or dist→acc)", "escalation patterns", "multi-TF confluence"],
+              "decision_logic": "Bonus scoring for advanced pattern recognition — schematic flips, escalation setups, and multi-timeframe confluence signals.",
+              "outputs": ["advanced_score: 0-5"],
+              "conditions": {
+                "flip_detected": "Accumulation-to-distribution flip (or vice versa) → +3-5 pts",
+                "escalation": "Higher-TF schematic nesting → +2-3 pts",
+                "none": "No advanced patterns → 0 pts"
+              }
+            },
+            {
+              "step_id": "7.7",
+              "name": "RR_BONUS",
+              "module_or_function": "decision_tree_bridge.py (inline)",
+              "inputs": ["rr_ratio from step 6.3"],
+              "decision_logic": "Awards bonus points for excellent risk-to-reward ratios.",
+              "outputs": ["rr_bonus: 0-5"],
+              "conditions": {
+                "excellent_rr": "R:R >= 3.0 → +5 pts",
+                "good_rr": "R:R >= 2.5 → +3 pts",
+                "standard_rr": "R:R >= 1.5 (minimum) → +0 pts"
+              }
+            },
+            {
+              "step_id": "7.8",
+              "name": "SESSION_TIMING_ADJUSTMENT",
+              "module_or_function": "decision_tree_bridge.py → _score_session_timing()",
+              "inputs": ["current UTC hour"],
+              "decision_logic": "Adjusts score based on which trading session is active. Higher scores during high-volume sessions (London/NY overlap), lower during Asia/off-hours. NOT a hard gate — just moves the needle on total score.",
+              "outputs": ["session_score: 2-10"],
+              "conditions": {
+                "london_ny_overlap": "13:00-16:00 UTC → 10 pts (peak liquidity)",
+                "ny_session": "13:00-21:00 UTC → 7 pts",
+                "london_session": "07:00-16:00 UTC → 7 pts",
+                "asia_session": "00:00-07:00 UTC → 3 pts (low volume)",
+                "off_hours": "Other times → 2 pts",
+                "multi_session_weights": {
+                  "asia_multiplier": 0.95,
+                  "london_multiplier": 1.05,
+                  "ny_multiplier": 1.15
+                }
+              }
+            }
+          ]
+        },
+
+        {
+          "step_id": "8.0",
+          "name": "TRADE_EXECUTION",
+          "module_or_function": "trade_execution.py → generate_execution_plan() / calculate_position_size()",
+          "inputs": ["composite_score from step 7.0", "entry_price", "stop_price", "target_price", "account_balance", "leverage"],
+          "decision_logic": "If composite score >= threshold, generates a full execution plan including position sizing, margin requirements, and liquidation safety checks. Verifies that the liquidation price is safely beyond the stop loss before placing any order.",
+          "outputs": ["position_size (USDT)", "margin_required", "liquidation_price", "order_type", "execution_plan"],
+          "conditions": {
+            "score_gate": "composite_score >= threshold (50 v1 / 60 v2) → proceed to execution",
+            "below_threshold": "composite_score < threshold → NO TRADE, log reason, continue scanning"
+          },
+          "children": [
+            {
+              "step_id": "8.1",
+              "name": "POSITION_SIZING",
+              "module_or_function": "trade_execution.py → calculate_position_size()",
+              "inputs": ["account_balance", "risk_per_trade (1%)", "entry_price", "stop_price", "leverage"],
+              "decision_logic": "Calculates position size based on fixed 1% risk per trade. Position = (balance × risk%) / |entry - stop| × leverage. Ensures margin does not exceed available balance.",
+              "outputs": ["position_size_usd", "position_size_contracts", "margin_required"],
+              "conditions": {
+                "risk_formula": "position_size = (balance × 0.01) / abs(entry - stop) × entry",
+                "margin_check": "margin = position_size / leverage; must be ≤ available_balance",
+                "no_dynamic_scaling": "Risk is FIXED at 1% — does not adjust based on confidence or score"
+              }
+            },
+            {
+              "step_id": "8.2",
+              "name": "LIQUIDATION_SAFETY_CHECK",
+              "module_or_function": "trade_execution.py → check_liquidation_safety()",
+              "inputs": ["entry_price", "stop_price", "leverage", "direction", "margin_mode (ISOLATED)"],
+              "decision_logic": "Calculates the estimated liquidation price and verifies it is safely OUTSIDE the stop loss. This is non-negotiable per TCT Lecture 9 — liquidation must never be hit before stop loss.",
+              "outputs": ["liquidation_price", "is_safe: bool", "safety_margin_pct"],
+              "conditions": {
+                "long_safety": "liquidation_price < stop_price → SAFE",
+                "long_danger": "liquidation_price >= stop_price → DANGER: reduce leverage or reject",
+                "short_safety": "liquidation_price > stop_price → SAFE",
+                "short_danger": "liquidation_price <= stop_price → DANGER: reduce leverage or reject",
+                "margin_mode_requirement": "ISOLATED only — never cross margin"
+              }
+            },
+            {
+              "step_id": "8.3",
+              "name": "ORDER_PLACEMENT",
+              "module_or_function": "trade_execution.py → generate_execution_plan()",
+              "inputs": ["position_size", "entry_price", "stop_price", "target_price", "direction"],
+              "decision_logic": "Generates the final order specification. Primary entry is MARKET order (95% of entries — at BOS confirmation). Limit orders used for partial take-profits.",
+              "outputs": ["order_spec: {type, side, size, price, sl, tp}", "order_submitted: bool"],
+              "conditions": {
+                "entry_order_type": "MARKET (at BOS confirmation) — 95% of trades",
+                "limit_alternative": "LIMIT at refined LTF price — 5% of trades (better entry but may miss)",
+                "stop_loss_order": "Placed simultaneously as SL order",
+                "take_profit_order": "Placed simultaneously as TP order"
+              }
+            }
+          ]
+        },
+
+        {
+          "step_id": "9.0",
+          "name": "TRADE_MANAGEMENT",
+          "module_or_function": "schematics_5b_trader.py → _manage_open_position()",
+          "inputs": ["current_trade state", "live price", "entry_price", "stop_price", "target_price", "tp2_price"],
+          "decision_logic": "Once a trade is open, manages it through its lifecycle: partial take-profit at midpoint, trailing stop to breakeven, and final exit at TP or SL.",
+          "outputs": ["trade_outcome: 'tp_hit' | 'sl_hit' | 'partial_tp' | 'breakeven_exit'", "realized_pnl"],
+          "conditions": {
+            "runs_every": "Checked on each 60s scan cycle while position is open"
+          },
+          "children": [
+            {
+              "step_id": "9.1",
+              "name": "PARTIAL_TAKE_PROFIT",
+              "module_or_function": "schematics_5b_trader.py (inline management)",
+              "inputs": ["live_price", "entry_price", "target_price"],
+              "decision_logic": "When price reaches the midpoint between entry and target, close 50% of the position to lock in profit.",
+              "outputs": ["partial_closed: bool", "partial_pnl"],
+              "conditions": {
+                "bullish_trigger": "live_price >= (entry_price + target_price) / 2 → close 50%",
+                "bearish_trigger": "live_price <= (entry_price + target_price) / 2 → close 50%",
+                "one_time": "Only triggers once per trade"
+              }
+            },
+            {
+              "step_id": "9.2",
+              "name": "TRAILING_STOP_TO_BREAKEVEN",
+              "module_or_function": "schematics_5b_trader.py (inline management)",
+              "inputs": ["live_price", "entry_price", "stop_price", "partial_closed status"],
+              "decision_logic": "After partial TP is taken, move the stop loss to breakeven (entry price) to eliminate risk on remaining position.",
+              "outputs": ["stop_updated: bool", "new_stop_price"],
+              "conditions": {
+                "trigger": "After partial TP is closed → move SL to entry_price",
+                "direction_long": "new_stop = entry_price (from below)",
+                "direction_short": "new_stop = entry_price (from above)"
+              }
+            },
+            {
+              "step_id": "9.3",
+              "name": "FINAL_EXIT",
+              "module_or_function": "schematics_5b_trader.py (inline management)",
+              "inputs": ["live_price", "stop_price", "target_price", "tp2_price"],
+              "decision_logic": "Remaining position exits at full target (TP), secondary target (TP2), or stop loss (SL). Trade is then logged and state is cleared for next scan.",
+              "outputs": ["trade_closed: bool", "final_pnl", "exit_reason"],
+              "conditions": {
+                "tp_hit_long": "live_price >= target_price → close remaining at profit",
+                "tp_hit_short": "live_price <= target_price → close remaining at profit",
+                "sl_hit_long": "live_price <= stop_price → close at loss (or breakeven if trailed)",
+                "sl_hit_short": "live_price >= stop_price → close at loss (or breakeven if trailed)",
+                "tp2_optional": "If tp2_price set → close last portion at tp2 instead of tp1"
+              }
+            }
+          ]
+        },
+
+        {
+          "step_id": "10.0",
+          "name": "STATE_PERSISTENCE_AND_RECOVERY",
+          "module_or_function": "schematics_5b_trader.py → _save_trade_log() / _load_trade_log()",
+          "inputs": ["current_trade", "trade_history", "balance", "mode"],
+          "decision_logic": "Persists all trade state to disk (JSON) and optionally syncs to GitHub data branch. On restart, loads persisted state, validates it, and resumes operation.",
+          "outputs": ["schematics_5b_trade_log.json", "GitHub data branch sync"],
+          "conditions": {
+            "save_triggers": "After every trade entry, partial TP, exit, and balance change",
+            "corruption_detection": "On load: if entry_price=0 OR stop_price=0 OR target_price=0 → discard trade (treat as no open position)",
+            "github_sync": "If GITHUB_TOKEN_2 env var present → push to data branch automatically"
+          }
+        }
+      ]
+    },
+
+    {
+      "step_id": "11.0",
+      "name": "HTF_UPGRADE_MECHANISM",
+      "module_or_function": "schematics_5b_trader.py → _find_htf_upgrade()",
+      "inputs": ["current schematic timeframe", "timeframe hierarchy"],
+      "decision_logic": "After finding a schematic on one timeframe, checks if a higher timeframe also shows a valid schematic at the same level. If so, upgrades the analysis to the HTF for more significant structure. Walks up the TF hierarchy: 30m → 1h → 4h → 1d.",
+      "outputs": ["upgraded_timeframe", "htf_schematic"],
+      "conditions": {
+        "upgrade_criteria": "HTF schematic found at overlapping price levels AND same direction",
+        "hierarchy": "30m < 1h < 4h < 1d — walks upward until no match"
+      }
+    },
+
+    {
+      "step_id": "12.0",
+      "name": "ALTERNATIVE_EVALUATION_MODE_JACK",
+      "module_or_function": "jack_tct_evaluator.py → JackTCTEvaluator",
+      "inputs": ["4H candle data exclusively", "schematic", "market structure"],
+      "decision_logic": "Alternative 5-tree evaluation pipeline that uses only the 4H timeframe. Scoring weights: market_structure=20, ranges=20, s/d=20, liquidity=15, tct_5a=25. Threshold = 50. Has its own set of hard gates (MS valid, FVG present, 5A confirmed).",
+      "outputs": ["jack_score: int (0-100)", "jack_tree_results"],
+      "conditions": {
+        "activation": "Selected via evaluator mode config (not default)",
+        "4h_exclusive": "Only analyzes 4H timeframe — no LTF cascade",
+        "scoring": {
+          "market_structure_tree": "0-20 pts",
+          "ranges_tree": "0-20 pts",
+          "supply_demand_tree": "0-20 pts",
+          "liquidity_tree": "0-15 pts",
+          "tct_5a_tree": "0-25 pts",
+          "threshold": 50
+        }
+      }
+    },
+
+    {
+      "step_id": "13.0",
+      "name": "PO3_SCHEMATIC_MODE",
+      "module_or_function": "po3_schematics.py → PO3SchematicDetector",
+      "inputs": ["OHLCV candles", "range detection output"],
+      "decision_logic": "Power of Three (PO3) detection from TCT Lecture 8. Identifies three-phase pattern: Range (accumulation/distribution) → Manipulation (liquidity sweep) → Expansion (breakout in intended direction). Uses RTZ quality scoring and stricter R:R minimum of 2.0.",
+      "outputs": ["po3_schematic", "rtx_quality_score", "po3_direction"],
+      "conditions": {
+        "phase_1_range": "Horizontal consolidation identified (reuses range logic from step 3.0)",
+        "phase_2_manipulation": "Aggressive breakout that stays within DL2 (false breakout / liquidity grab)",
+        "phase_3_expansion": "Directional move in intended direction after manipulation",
+        "min_rr": "R:R >= 2.0 (stricter than standard TCT minimum of 1.5)"
+      }
+    },
+
+    {
+      "step_id": "14.0",
+      "name": "NOTIFICATIONS_AND_DIAGNOSTICS",
+      "module_or_function": "schematics_5b_trader.py / server_mexc.py",
+      "inputs": ["trade events", "evaluation results"],
+      "decision_logic": "Sends notifications on key events (trade entry, partial TP, exit) via Telegram. Exposes diagnostic data via FastAPI endpoints and WebSocket for the live dashboard. Maintains last_debug state for UI rendering.",
+      "outputs": ["Telegram messages", "WebSocket updates", "REST API responses", "/schematics-5B dashboard page"],
+      "conditions": {
+        "telegram_notify_on": ["trade_entry", "partial_tp", "trade_exit", "error"],
+        "dashboard_updates": "Pushed via WebSocket or polling every scan cycle",
+        "debug_data_exposed": "tree_results, phase_results, schematic visualization, P&L"
+      }
+    }
+  ],
+
+  "data_flow_summary": {
+    "1_market_data": "Exchange API → OHLCV candles (multi-TF)",
+    "2_structure_analysis": "Candles → 6CR Pivots → Swing H/L → HTF Bias",
+    "3_range_detection": "Candles → Range boundaries → EQ + DL2",
+    "4_schematic_build": "Range + Candles → Tap1/2/3 → Model classification",
+    "5_bos_confirmation": "Post-Tap3 candles → MTF BOS → LTF cascade refinement",
+    "6_gating": "All upstream → 7 hard gates (any fail = reject)",
+    "7_scoring": "Gate results → 6 trees + bonus → composite score (0-100)",
+    "8_execution": "Score ≥ threshold → position sizing → liquidation check → order placement",
+    "9_management": "Open position → partial TP → trailing SL → final exit",
+    "10_persistence": "All state → JSON on disk + GitHub sync"
+  },
+
+  "critical_failure_modes": [
+    {
+      "id": "F1",
+      "description": "HTF bias is neutral — v2 treats this as hard fail, preventing any entries during unclear market structure",
+      "impact": "May miss valid setups during transitional periods"
+    },
+    {
+      "id": "F2",
+      "description": "No FVG found near Tap3 — hard gate rejection even if all other criteria pass",
+      "impact": "FVG detection sensitivity directly controls entry frequency"
+    },
+    {
+      "id": "F3",
+      "description": "BOS staleness exceeds MAX_STALE candles — valid schematic rejected because confirmation came too late",
+      "impact": "Time-sensitive: delayed BOS = missed opportunity"
+    },
+    {
+      "id": "F4",
+      "description": "Liquidation price inside stop loss — trade rejected at execution stage despite passing all scoring",
+      "impact": "Leverage too high for the risk distance — requires manual leverage adjustment"
+    },
+    {
+      "id": "F5",
+      "description": "Counter-bias entry blocked by RIG when trend shift IS occurring but CHoCH not yet confirmed",
+      "impact": "Early trend shifts may be systematically missed"
+    }
+  ]
+}
