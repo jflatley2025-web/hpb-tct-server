@@ -58,7 +58,7 @@ HTF_TIMEFRAME = "1d"
 # after a setup is confirmed on one of these TFs (see LTF_BOS_TIMEFRAMES).
 MTF_TIMEFRAMES = ["1d", "4h", "1h", "30m"]
 AUTO_SCAN_INTERVAL = int(os.getenv("SCHEMATICS_5B_SCAN_INTERVAL", "60"))
-ENTRY_THRESHOLD = 50  # Fixed — never changes
+ENTRY_THRESHOLD = 60  # v2 pipeline: raised from 50 to 60
 
 # TF hierarchy for the upward cascade (ordered highest → lowest).
 # When a schematic is confirmed at a lower TF, we try to upgrade it to the
@@ -374,7 +374,11 @@ class Schematics5BTradeState:
 # ================================================================
 
 def _build_dt_data(schematic: Dict, htf_bias: str) -> Dict:
-    """Extract decision-tree-relevant data from the best schematic for a TF."""
+    """Extract decision-tree-relevant data from the best schematic for a TF.
+
+    Returns a flat dict consumed by the schematics-5B UI debug panel.
+    Includes both legacy keys (backward compat) and v2 phase fields.
+    """
     enh = schematic.get("lecture_5b_enhancements") or {}
     rng = schematic.get("range") or {}
     tap_spacing = enh.get("tap_spacing") or {}
@@ -394,8 +398,27 @@ def _build_dt_data(schematic: Dict, htf_bias: str) -> Dict:
     sl_p = (schematic.get("stop_loss") or {}).get("price")
     tgt_p = (schematic.get("target") or {}).get("price")
 
+    # Tap time displacement (v2 Phase 2)
+    tap1 = schematic.get("tap1") or {}
+    tap2 = schematic.get("tap2") or {}
+    tap3 = schematic.get("tap3") or {}
+    t1_idx = tap1.get("idx", 0)
+    t2_idx = tap2.get("idx", 0)
+    t3_idx = tap3.get("idx", 0)
+    t12_gap = abs(t2_idx - t1_idx) if t1_idx and t2_idx else None
+    t23_gap = abs(t3_idx - t2_idx) if t2_idx and t3_idx else None
+
+    # Model type for v2 Phase 3
+    model_str = schematic.get("model", "")
+    if "Model_1" in model_str:
+        model_type = "Model_1"
+    elif "Model_2" in model_str:
+        model_type = "Model_2"
+    else:
+        model_type = model_str or "unknown"
+
     return {
-        # --- Ranges ---
+        # --- Ranges (v2 Phase 2) ---
         "range_high": rng.get("high"),
         "range_low": rng.get("low"),
         "range_size_pct": rng_size_pct,
@@ -404,25 +427,32 @@ def _build_dt_data(schematic: Dict, htf_bias: str) -> Dict:
         "range_quality_score": range_quality.get("quality_score", 0),
         "range_quality_factors": range_quality.get("quality_factors", []),
         "six_candle_valid": schematic.get("six_candle_valid", False),
-        # --- Market Structure ---
+        "time_displacement_t12": t12_gap,
+        "time_displacement_t23": t23_gap,
+        # --- Market Structure (v2 Phase 1/7) ---
         "direction": direction,
         "htf_bias": htf_bias,
         "htf_aligned": direction == htf_bias or htf_bias == "neutral",
         "bos_confirmed": schematic.get("is_confirmed", False),
         "model": schematic.get("model", ""),
-        # --- Supply & Demand ---
+        "model_type": model_type,
+        # --- POI / Supply & Demand (v2 Phase 6) ---
         "sd_conflict": sd_check.get("has_conflict", False),
         "target_clear": not sd_check.get("opposing_zone_blocks_target", False),
-        # --- Liquidity ---
+        # --- Liquidity (v2 Phase 4) ---
         "trendline_confluence": trendline.get("provides_confluence", False),
         "tap_spacing_valid": tap_spacing.get("spacing_valid", False),
         "spacing_ratio": tap_spacing.get("spacing_ratio"),
-        "tap1_to_tap2": tap_spacing.get("tap1_to_tap2_candles"),
-        "tap2_to_tap3": tap_spacing.get("tap2_to_tap3_candles"),
+        "tap1_to_tap2": tap_spacing.get("tap1_to_tap2_candles") or t12_gap,
+        "tap2_to_tap3": tap_spacing.get("tap2_to_tap3_candles") or t23_gap,
         "tap_is_horizontal": tap_spacing.get("is_horizontal", False),
-        # --- 5A Schematics ---
+        # --- Tap Structure (v2 Phase 3) ---
+        "tap1_price": tap1.get("price"),
+        "tap2_price": tap2.get("price"),
+        "tap3_price": tap3.get("price"),
+        # --- Trade Setup (v2 Phase 8) ---
         "rr": schematic.get("risk_reward"),
-        "rr_meets_minimum": enh.get("meets_minimum_rr", False),
+        "rr_meets_minimum": enh.get("meets_minimum_rr", False) or (schematic.get("risk_reward", 0) or 0) >= 1.5,
         "quality_score": schematic.get("quality_score", 0),
         "entry": entry_p,
         "sl": sl_p,
@@ -1107,7 +1137,11 @@ class Schematics5BTrader:
     # ----------------------------------------------------------------
 
     def _get_htf_bias(self, symbol: str) -> Tuple[str, Dict]:
-        """Return (bias_str, debug_dict) for symbol, using a per-symbol TTL cache."""
+        """Return (bias_str, debug_dict) for symbol, using a per-symbol TTL cache.
+
+        Uses pivot-based market structure detection (not schematic detection)
+        to determine directional bias from the Daily timeframe.
+        """
         now_ts = time.time()
         expiry = self._htf_bias_expiry.get(symbol, 0.0)
         if now_ts < expiry:
@@ -1120,39 +1154,20 @@ class Schematics5BTrader:
         htf_bias = "neutral"
         htf_debug: Dict = {"status": "not_fetched"}
         try:
+            from decision_tree_bridge import detect_htf_market_structure
             df_htf = fetch_candles_sync(symbol, HTF_TIMEFRAME, 200)
-            if df_htf is not None and len(df_htf) >= 50:
-                htf_schematics = detect_tct_schematics(df_htf, [])
-                htf_acc = [s for s in htf_schematics.get("accumulation_schematics", [])
-                           if isinstance(s, dict) and s.get("is_confirmed")]
-                htf_dist = [s for s in htf_schematics.get("distribution_schematics", [])
-                            if isinstance(s, dict) and s.get("is_confirmed")]
-                if htf_acc and not htf_dist:
-                    htf_bias = "bullish"
-                elif htf_dist and not htf_acc:
-                    htf_bias = "bearish"
-                elif htf_acc and htf_dist:
-                    # Both present (common at market turning points: old distribution
-                    # co-exists with newly-formed accumulation).  Resolve by the most
-                    # recently-confirmed BOS — whichever structure formed last defines
-                    # the current market bias.
-                    def _latest_bos(schematics: list) -> int:
-                        return max(
-                            (s.get("bos_confirmation", {}).get("bos_idx") or 0
-                             for s in schematics),
-                            default=0,
-                        )
-                    latest_acc_idx = _latest_bos(htf_acc)
-                    latest_dist_idx = _latest_bos(htf_dist)
-                    if latest_acc_idx > latest_dist_idx:
-                        htf_bias = "bullish"
-                    elif latest_dist_idx > latest_acc_idx:
-                        htf_bias = "bearish"
-                    # equal → stays neutral (genuine ambiguity)
+            if df_htf is not None and len(df_htf) >= 20:
+                ms_result = detect_htf_market_structure(df_htf, lookback=min(100, len(df_htf)))
+                htf_bias = ms_result["bias"]
                 htf_debug = {
-                    "status": "scanned", "candles": len(df_htf),
-                    "confirmed_acc": len(htf_acc), "confirmed_dist": len(htf_dist),
+                    "status": "scanned",
+                    "method": "market_structure",
+                    "candles": len(df_htf),
                     "htf_bias": htf_bias,
+                    "swing_highs": len(ms_result.get("swing_highs", [])),
+                    "swing_lows": len(ms_result.get("swing_lows", [])),
+                    "structure_break": ms_result.get("structure_break"),
+                    "reason": ms_result.get("reason", ""),
                 }
             else:
                 htf_debug = {

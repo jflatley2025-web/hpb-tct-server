@@ -1,19 +1,30 @@
 """
-decision_tree_bridge.py — Bridge between raw candle/schematic data and the 6 Decision Trees
+decision_tree_bridge.py — Bridge between raw candle/schematic data and the Decision Trees
 ============================================================================================
 
-Translates candle DataFrames and schematic dicts (from detect_tct_schematics) into the
-typed dataclass inputs each decision tree expects, then runs the full 6-tree pipeline:
+Provides two scoring pipelines:
 
-    Tree 1: Ranges              → Is the range valid? What's the trend/bias?
-    Tree 2: Supply & Demand     → Is there a valid S/D zone with FVG confirmation?
-    Tree 3: Liquidity           → Was liquidity swept? Grab vs true break?
-    Tree 4: TCT 5A              → Is the 3-tap schematic structurally sound?
-    Tree 5: TCT 5B              → Does it pass real-world refinement rules?
-    Tree 6: Advanced (optional) → Flip, escalation, Wyckoff-in-Wyckoff?
+**v2 (active)** — 9-phase sequential pipeline following correct TCT logic:
 
-Trees 1–5 are hard gates — fail any and the setup is rejected.
-Tree 6 is an enhancement layer (upgrades conviction, triggers flip exits).
+    Phase 1: HTF Context         → Market-structure-based bias (not schematic detection)
+    Phase 2: Range Detection     → Time displacement, liquidity stacking, V-shape rejection
+    Phase 3: Tap Structure       → Model 1 / Model 2 validation (before BOS)
+    Phase 4: Liquidity           → Sweep or interaction (slight close beyond OK)
+    Phase 5: Break of Structure  → Internal MS break after Tap3
+    Phase 6: POI Validation      → FVG / OB / MM block (FVG optional, not hard gate)
+    Phase 7: Directional Filter  → HTF alignment (with reversal exception)
+    Phase 8: Risk Filter         → Minimum R:R 1.5
+    Phase 9: Confidence Scoring  → 6-component score, threshold 60
+
+**v1 (legacy, kept for reference)** — Original 6-tree pipeline.
+
+Key differences vs v1:
+  - HTF bias uses market structure, NOT schematic detection
+  - Tap detection occurs BEFORE BOS validation
+  - Range validation uses time displacement + liquidity stacking
+  - Liquidity sweeps allow slight close beyond range boundary
+  - FVG is optional (confidence contributor, not hard gate)
+  - Threshold raised from 50 → 60
 """
 
 import logging
@@ -132,6 +143,332 @@ def _range_looks_horizontal(df: pd.DataFrame, range_high: float, range_low: floa
     inside_count = sum(1 for c in closes if range_low <= c <= range_high)
     return (inside_count / len(closes)) >= 0.6
 
+
+# ================================================================
+# PHASE 1 — HTF MARKET STRUCTURE BIAS (v2 pipeline)
+# Uses pivot-based structure, NOT schematic detection.
+# ================================================================
+
+def detect_htf_market_structure(df: pd.DataFrame, lookback: int = 100) -> Dict:
+    """Determine HTF bias from pure market structure (pivots → structure breaks).
+
+    Steps:
+      1. Identify valid pivots using the 6-candle rule (3 candles each side).
+      2. Build swing sequence: alternating highs and lows.
+      3. Classify: HH+HL = bullish, LH+LL = bearish.
+      4. Confirm via most recent structure break (close beyond prior swing).
+      5. Return bias + diagnostic detail.
+
+    Returns:
+        {
+            "bias": "bullish" | "bearish" | "neutral",
+            "swing_highs": [(idx, price), ...],
+            "swing_lows": [(idx, price), ...],
+            "structure_break": {"type": "bullish"|"bearish", "level": float, "idx": int} | None,
+            "reason": str,
+        }
+    """
+    neutral = {
+        "bias": "neutral", "swing_highs": [], "swing_lows": [],
+        "structure_break": None, "reason": "insufficient data",
+    }
+    if df is None or len(df) < 20:
+        return neutral
+
+    highs = df["high"].values[-min(lookback, len(df)):]
+    lows = df["low"].values[-min(lookback, len(df)):]
+    closes = df["close"].values[-min(lookback, len(df)):]
+    n = len(highs)
+    offset = len(df) - n  # to convert local idx → df idx
+
+    # Step 1: Pivot detection using 6-candle rule (3 candles each side)
+    pivot_window = 3
+    swing_highs: List[Tuple[int, float]] = []
+    swing_lows: List[Tuple[int, float]] = []
+
+    for i in range(pivot_window, n - pivot_window):
+        left_h = highs[i - pivot_window:i]
+        right_h = highs[i + 1:i + pivot_window + 1]
+        if highs[i] >= max(left_h) and highs[i] >= max(right_h):
+            swing_highs.append((i + offset, float(highs[i])))
+
+        left_l = lows[i - pivot_window:i]
+        right_l = lows[i + 1:i + pivot_window + 1]
+        if lows[i] <= min(left_l) and lows[i] <= min(right_l):
+            swing_lows.append((i + offset, float(lows[i])))
+
+    if len(swing_highs) < 2 or len(swing_lows) < 2:
+        return {**neutral, "swing_highs": swing_highs, "swing_lows": swing_lows,
+                "reason": "not enough swing points"}
+
+    # Step 2: Classify the last two swing highs and lows
+    sh1_price = swing_highs[-2][1]
+    sh2_price = swing_highs[-1][1]
+    sl1_price = swing_lows[-2][1]
+    sl2_price = swing_lows[-1][1]
+
+    hh = sh2_price > sh1_price
+    hl = sl2_price > sl1_price
+    lh = sh2_price < sh1_price
+    ll = sl2_price < sl1_price
+
+    # Step 3: Determine structure direction
+    if hh and hl:
+        structure_dir = "bullish"
+    elif lh and ll:
+        structure_dir = "bearish"
+    else:
+        return {
+            "bias": "neutral", "swing_highs": swing_highs, "swing_lows": swing_lows,
+            "structure_break": None,
+            "reason": f"mixed structure (HH={hh}, HL={hl}, LH={lh}, LL={ll})",
+        }
+
+    # Step 4: Confirm via structure break — a candle must CLOSE beyond
+    # the prior swing level to confirm the break.
+    structure_break = None
+    if structure_dir == "bullish":
+        # Need a close above the prior swing high (sh1) to confirm bullish break
+        break_level = sh1_price
+        for i in range(swing_highs[-2][0] - offset, n):
+            if closes[i] > break_level:
+                structure_break = {
+                    "type": "bullish", "level": break_level, "idx": i + offset,
+                }
+                break
+    else:
+        # Need a close below the prior swing low (sl1) to confirm bearish break
+        break_level = sl1_price
+        for i in range(swing_lows[-2][0] - offset, n):
+            if closes[i] < break_level:
+                structure_break = {
+                    "type": "bearish", "level": break_level, "idx": i + offset,
+                }
+                break
+
+    if structure_break is None:
+        return {
+            "bias": "neutral", "swing_highs": swing_highs, "swing_lows": swing_lows,
+            "structure_break": None,
+            "reason": f"{structure_dir} structure detected but no confirmed break",
+        }
+
+    return {
+        "bias": structure_dir,
+        "swing_highs": swing_highs,
+        "swing_lows": swing_lows,
+        "structure_break": structure_break,
+        "reason": f"confirmed {structure_dir} structure break at {break_level:.2f}",
+    }
+
+
+# ================================================================
+# PHASE 2 — RANGE VALIDATION HELPERS (v2 pipeline)
+# ================================================================
+
+def _check_time_displacement(schematic: Dict, min_candles: int = 8) -> Tuple[bool, int]:
+    """Check that time displacement between Tap1 and Tap2 is significant.
+
+    Returns (passes, candle_gap).
+    """
+    tap1 = schematic.get("tap1") or {}
+    tap2 = schematic.get("tap2") or {}
+    t1_idx = tap1.get("idx", 0)
+    t2_idx = tap2.get("idx", 0)
+    gap = abs(t2_idx - t1_idx)
+    return gap >= min_candles, gap
+
+
+def _detect_liquidity_stacking(df: pd.DataFrame, range_high: float,
+                                range_low: float, tolerance_pct: float = 0.002) -> Dict:
+    """Detect equal highs or equal lows near the range boundary (liquidity stacking).
+
+    Returns {"equal_highs": int, "equal_lows": int, "has_stacking": bool}.
+    """
+    if df is None or len(df) < 6:
+        return {"equal_highs": 0, "equal_lows": 0, "has_stacking": False}
+
+    highs = df["high"].values[-min(60, len(df)):]
+    lows = df["low"].values[-min(60, len(df)):]
+
+    tol_h = range_high * tolerance_pct
+    tol_l = range_low * tolerance_pct
+
+    # Count highs clustering near range_high
+    equal_highs = sum(1 for h in highs if abs(h - range_high) <= tol_h)
+    # Count lows clustering near range_low
+    equal_lows = sum(1 for l in lows if abs(l - range_low) <= tol_l)
+
+    # Liquidity stacking requires at least 2 touches on either boundary
+    return {
+        "equal_highs": int(equal_highs),
+        "equal_lows": int(equal_lows),
+        "has_stacking": equal_highs >= 2 or equal_lows >= 2,
+    }
+
+
+def _reject_v_shape(df: pd.DataFrame, range_high: float, range_low: float) -> bool:
+    """Return True if the range is a V-shape / impulsive move that should be rejected.
+
+    A V-shape is detected when price moves impulsively through the range without
+    oscillation — i.e., it trends in one direction rather than consolidating.
+    """
+    if df is None or len(df) < 6:
+        return True  # Not enough data → reject
+
+    rng = range_high - range_low
+    if rng <= 0:
+        return True
+
+    closes = df["close"].values[-min(40, len(df)):]
+
+    # Count direction changes (oscillations) — sideways ranges have many,
+    # impulsive moves have few.
+    direction_changes = 0
+    for i in range(2, len(closes)):
+        prev_dir = closes[i - 1] - closes[i - 2]
+        curr_dir = closes[i] - closes[i - 1]
+        if prev_dir * curr_dir < 0:  # sign change = direction reversal
+            direction_changes += 1
+
+    # Count half-crossings (price crosses EQ from one half to the other)
+    eq = (range_high + range_low) / 2
+    half_crossings = 0
+    for i in range(1, len(closes)):
+        above_prev = closes[i - 1] > eq
+        above_curr = closes[i] > eq
+        if above_prev != above_curr:
+            half_crossings += 1
+
+    # V-shape: few oscillations AND few (or zero) EQ crossings.
+    # A real range has price crossing EQ many times; an impulse crosses it
+    # at most once (on the way through).
+    min_crossings = max(2, len(closes) * 0.10)
+    min_dir_changes = max(3, len(closes) * 0.15)
+
+    if direction_changes < min_dir_changes and half_crossings < min_crossings:
+        return True
+
+    return False
+
+
+# ================================================================
+# PHASE 4 — LIQUIDITY TOLERANCE (v2 pipeline)
+# ================================================================
+
+def _detect_liquidity_sweep_v2(df: pd.DataFrame, range_high: float, range_low: float,
+                                direction: str) -> Dict:
+    """Detect liquidity sweep with tolerance for slight closes beyond boundary.
+
+    Unlike v1, does NOT require strict wick-only behavior. A close slightly
+    beyond the range boundary (within tolerance) still qualifies as a sweep.
+    """
+    if df is None or len(df) < 5:
+        return {"swept": False, "classification": "no_data"}
+
+    rng = range_high - range_low
+    if rng <= 0:
+        return {"swept": False, "classification": "no_range"}
+
+    # Tolerance: 0.3% of range size — close within this is still a sweep
+    tolerance = rng * 0.003
+    dl2 = rng * 0.30
+    dl2_above = range_high + dl2
+    dl2_below = range_low - dl2
+
+    recent = df.tail(20) if len(df) >= 20 else df
+    highs = recent["high"].values
+    lows = recent["low"].values
+    closes = recent["close"].values
+
+    if direction == "bullish":
+        # Sell-side sweep (below range low)
+        exceeded = any(l < range_low for l in lows)
+        # Decisive break: full body close below DL2 AND no immediate acceptance back
+        close_beyond_dl2 = any(c < dl2_below for c in closes)
+        # Slight close beyond range low but within tolerance
+        slight_close = any(c < range_low and c >= range_low - tolerance for c in closes)
+        # Accepted back inside range
+        accepted = len(closes) >= 2 and closes[-1] >= range_low
+        sweep_count = sum(1 for l in lows if l < range_low)
+
+        if close_beyond_dl2 and not accepted:
+            classification = "true_break"
+        elif exceeded:
+            classification = "sweep"
+        else:
+            classification = "no_sweep"
+
+        return {
+            "swept": exceeded,
+            "sweep_side": "sell_side",
+            "pool_type": "range_low",
+            "close_beyond_dl2": close_beyond_dl2,
+            "slight_close_beyond": slight_close,
+            "accepted_back": accepted,
+            "sweep_count": sweep_count,
+            "classification": classification,
+        }
+    else:
+        # Buy-side sweep (above range high)
+        exceeded = any(h > range_high for h in highs)
+        close_beyond_dl2 = any(c > dl2_above for c in closes)
+        slight_close = any(c > range_high and c <= range_high + tolerance for c in closes)
+        accepted = len(closes) >= 2 and closes[-1] <= range_high
+        sweep_count = sum(1 for h in highs if h > range_high)
+
+        if close_beyond_dl2 and not accepted:
+            classification = "true_break"
+        elif exceeded:
+            classification = "sweep"
+        else:
+            classification = "no_sweep"
+
+        return {
+            "swept": exceeded,
+            "sweep_side": "buy_side",
+            "pool_type": "range_high",
+            "close_beyond_dl2": close_beyond_dl2,
+            "slight_close_beyond": slight_close,
+            "accepted_back": accepted,
+            "sweep_count": sweep_count,
+            "classification": classification,
+        }
+
+
+# ================================================================
+# PHASE 9 — SESSION TIMING HELPER
+# ================================================================
+
+def _score_session_timing() -> Tuple[int, str]:
+    """Score based on whether we're in a high-volume trading session.
+
+    London (07:00-16:00 UTC) and NY (13:00-21:00 UTC) overlap is best.
+    Returns (points, description).
+    """
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    hour = now.hour
+
+    # London+NY overlap (13:00-16:00 UTC) — highest volume
+    if 13 <= hour < 16:
+        return 10, "London/NY overlap (peak)"
+    # NY session (13:00-21:00 UTC)
+    if 13 <= hour < 21:
+        return 7, "NY session"
+    # London session (07:00-16:00 UTC)
+    if 7 <= hour < 16:
+        return 7, "London session"
+    # Asian session (00:00-07:00 UTC)
+    if 0 <= hour < 7:
+        return 3, "Asian session (low volume)"
+    # Off-hours
+    return 2, "off-session"
+
+
+# ================================================================
+# V1 CANDLE ANALYSIS HELPERS (kept for legacy pipeline)
+# ================================================================
 
 def _detect_deviation(df: pd.DataFrame, range_high: float, range_low: float,
                       current_price: float) -> Dict:
@@ -877,12 +1214,386 @@ def compute_composite_score(
 
 
 # ================================================================
+# V2 COMPOSITE SCORING — 9-phase pipeline (active)
+# ================================================================
+
+V2_THRESHOLD = 60
+
+def compute_composite_score_v2(
+    df: pd.DataFrame,
+    schematic: Dict,
+    htf_bias: str,
+    current_price: float,
+    active_trade: Optional[Dict] = None,
+) -> Dict:
+    """Run the 9-phase decision pipeline on a schematic.
+
+    Phase order:
+        1. HTF Context        — already resolved by caller (htf_bias param)
+        2. Range Detection    — time displacement, liquidity stacking, horizontal, V-shape
+        3. Tap Structure      — Model 1/2 validation (BEFORE BOS)
+        4. Liquidity          — sweep with tolerance for slight closes beyond
+        5. Break of Structure — internal MS break after Tap3
+        6. POI Validation     — FVG / OB / MM block (optional, not hard gate)
+        7. Directional Filter — HTF alignment (with reversal exception)
+        8. Risk Filter        — minimum R:R 1.5
+        9. Confidence Scoring — 6-component score, threshold 60
+
+    Returns same shape as v1 for backward compatibility:
+        {"score", "pass", "direction", "model", "rr", "required_score",
+         "reasons", "tree_results", "phase_results"}
+    """
+    direction = schematic.get("direction", "unknown")
+    model = schematic.get("model", schematic.get("schematic_type", "unknown"))
+    is_confirmed = schematic.get("is_confirmed", False)
+
+    # Live R:R calculation
+    stop_price = (schematic.get("stop_loss") or {}).get("price")
+    target_price_val = (schematic.get("target") or {}).get("price")
+    if stop_price and target_price_val and current_price > 0:
+        if direction == "bullish":
+            live_risk = current_price - stop_price
+            live_reward = target_price_val - current_price
+        else:
+            live_risk = stop_price - current_price
+            live_reward = current_price - target_price_val
+        rr = (live_reward / live_risk) if live_risk > 0 else 0
+    else:
+        rr = schematic.get("risk_reward", 0) or 0
+
+    fail = {
+        "score": 0, "direction": direction, "model": model, "rr": rr,
+        "required_score": V2_THRESHOLD, "pass": False, "tree_results": {},
+        "phase_results": {},
+    }
+
+    reasons: List[str] = []
+    phase_results: Dict = {}
+    score = 0
+
+    # ── Phase 1: HTF Context ──
+    # Already resolved by caller via detect_htf_market_structure.
+    # We record it for diagnostics only.
+    phase_results["htf_context"] = {"bias": htf_bias}
+
+    # ── Phase 2: Range Detection ──
+    range_info = schematic.get("range") or {}
+    range_high = range_info.get("high", 0)
+    range_low = range_info.get("low", 0)
+
+    time_ok, time_gap = _check_time_displacement(schematic)
+    liq_stack = _detect_liquidity_stacking(df, range_high, range_low)
+    is_v_shape = _reject_v_shape(df, range_high, range_low)
+    horizontal = _range_looks_horizontal(df, range_high, range_low)
+    six_candle = _six_candle_rule(df, range_high, range_low)
+
+    range_score = 0
+    range_checks = {
+        "time_displacement_ok": time_ok,
+        "time_gap_candles": time_gap,
+        "liquidity_stacking": liq_stack,
+        "v_shape_rejected": is_v_shape,
+        "horizontal": horizontal,
+        "six_candle_rule": six_candle,
+    }
+    if is_v_shape:
+        phase_results["range"] = {**range_checks, "passed": False, "reason": "V-shape / impulsive move"}
+        return {**fail, "reasons": ["Phase 2: Range rejected — V-shape / impulsive move"],
+                "phase_results": phase_results}
+
+    if not time_ok:
+        phase_results["range"] = {**range_checks, "passed": False, "reason": "insufficient time displacement"}
+        return {**fail, "reasons": [f"Phase 2: Insufficient time displacement ({time_gap} candles)"],
+                "phase_results": phase_results}
+
+    # Score range quality (max 20 points)
+    if horizontal and six_candle:
+        range_score = 20
+    elif horizontal or six_candle:
+        range_score = 14
+    else:
+        range_score = 8  # Minimal range detected but not ideal
+
+    if liq_stack["has_stacking"]:
+        range_score = min(20, range_score + 3)
+
+    phase_results["range"] = {**range_checks, "passed": True, "score": range_score}
+    score += range_score
+    reasons.append(f"Range: {range_score}/20 (horizontal={horizontal}, 6CR={six_candle}, stacking={liq_stack['has_stacking']})")
+
+    # ── Phase 3: Tap Structure Validation ──
+    # Validate taps BEFORE BOS (spec requirement)
+    tap1 = schematic.get("tap1") or {}
+    tap2 = schematic.get("tap2") or {}
+    tap3 = schematic.get("tap3") or {}
+
+    if not tap1.get("price") or not tap2.get("price") or not tap3.get("price"):
+        phase_results["tap_structure"] = {"passed": False, "reason": "missing tap(s)"}
+        return {**fail, "score": score, "reasons": reasons + ["Phase 3: Missing tap structure"],
+                "phase_results": phase_results}
+
+    # Model classification
+    model_str = schematic.get("model", "")
+    if "Model_1" in model_str:
+        model_type = "Model_1"
+    elif "Model_2" in model_str:
+        model_type = "Model_2"
+    else:
+        model_type = "unknown"
+
+    tap_valid = True
+    tap_reason = ""
+
+    if model_type == "Model_1":
+        # M1: Tap3 must extend beyond Tap2 (deeper deviation)
+        if direction == "bullish":
+            tap3_deeper = tap3.get("price", 0) < tap2.get("price", float("inf"))
+        else:
+            tap3_deeper = tap3.get("price", 0) > tap2.get("price", 0)
+        if not tap3_deeper:
+            tap_valid = False
+            tap_reason = "Model 1: Tap3 does not extend beyond Tap2"
+        # M1: Must not close beyond DL2
+        rng_size = range_high - range_low
+        dl2_limit = rng_size * 0.30
+        if direction == "bullish":
+            if tap3.get("price", 0) < range_low - dl2_limit:
+                tap_valid = False
+                tap_reason = "Model 1: Tap3 closed beyond DL2"
+        else:
+            if tap3.get("price", 0) > range_high + dl2_limit:
+                tap_valid = False
+                tap_reason = "Model 1: Tap3 closed beyond DL2"
+
+    elif model_type == "Model_2":
+        # M2: Tap3 forms HL (accumulation) or LH (distribution)
+        if direction == "bullish":
+            is_hl = tap3.get("price", 0) > tap2.get("price", 0)
+            if not is_hl and not tap3.get("is_higher_low", False):
+                tap_valid = False
+                tap_reason = "Model 2: Tap3 is not a higher low"
+        else:
+            is_lh = tap3.get("price", 0) < tap2.get("price", 0)
+            if not is_lh and not tap3.get("is_lower_high", False):
+                tap_valid = False
+                tap_reason = "Model 2: Tap3 is not a lower high"
+    else:
+        # Unknown model — check if taps exist and are reasonable
+        tap_valid = True
+        tap_reason = "model type unclear, taps present"
+
+    tap_score = 0
+    if tap_valid:
+        tap_score = 20
+        # Bonus for spacing quality
+        t1_idx = tap1.get("idx", 0)
+        t2_idx = tap2.get("idx", 0)
+        t3_idx = tap3.get("idx", 0)
+        t12_gap = max(1, abs(t2_idx - t1_idx))
+        t23_gap = max(1, abs(t3_idx - t2_idx))
+        spacing_ratio = min(t12_gap, t23_gap) / max(t12_gap, t23_gap) if max(t12_gap, t23_gap) > 0 else 0
+        if spacing_ratio < 0.3:
+            tap_score = 14  # Uneven spacing penalizes
+    else:
+        phase_results["tap_structure"] = {"passed": False, "reason": tap_reason, "model": model_type}
+        return {**fail, "score": score, "reasons": reasons + [f"Phase 3: {tap_reason}"],
+                "phase_results": phase_results}
+
+    phase_results["tap_structure"] = {"passed": True, "score": tap_score, "model": model_type}
+    score += tap_score
+    reasons.append(f"Taps: {tap_score}/20 ({model_type})")
+
+    # ── Phase 4: Liquidity Validation ──
+    sweep_v2 = _detect_liquidity_sweep_v2(df, range_high, range_low, direction)
+
+    liq_score = 0
+    if sweep_v2["classification"] == "true_break":
+        phase_results["liquidity"] = {**sweep_v2, "passed": False, "reason": "true break detected"}
+        return {**fail, "score": score,
+                "reasons": reasons + ["Phase 4: True break — not a sweep"],
+                "phase_results": phase_results}
+    elif sweep_v2["swept"]:
+        liq_score = 20
+        if sweep_v2.get("slight_close_beyond"):
+            liq_score = 16  # Slight close beyond is acceptable but less ideal
+    else:
+        # No sweep at all — liquidity interaction may still be present via stacking
+        if liq_stack["has_stacking"]:
+            liq_score = 10  # Stacking detected, just no sweep yet
+        else:
+            liq_score = 5  # Weak liquidity picture
+
+    phase_results["liquidity"] = {**sweep_v2, "passed": True, "score": liq_score}
+    score += liq_score
+    reasons.append(f"Liquidity: {liq_score}/20 ({sweep_v2['classification']})")
+
+    # ── Phase 5: Break of Structure ──
+    bos = schematic.get("bos_confirmation") or {}
+    bos_idx = bos.get("bos_idx")
+    tap3_idx = tap3.get("idx", 0)
+
+    bos_score = 0
+    if not is_confirmed:
+        phase_results["bos"] = {"passed": False, "reason": "BOS not confirmed"}
+        return {**fail, "score": score,
+                "reasons": reasons + ["Phase 5: No BOS confirmation"],
+                "phase_results": phase_results}
+
+    # BOS must occur AFTER Tap3
+    if bos_idx is not None and tap3_idx > 0 and bos_idx < tap3_idx:
+        phase_results["bos"] = {"passed": False, "reason": "BOS before Tap3",
+                                "bos_idx": bos_idx, "tap3_idx": tap3_idx}
+        return {**fail, "score": score,
+                "reasons": reasons + ["Phase 5: BOS occurred before Tap3 — invalid sequence"],
+                "phase_results": phase_results}
+
+    # BOS must break internal structure in trade direction
+    bos_price = bos.get("bos_price") or bos.get("price", 0)
+    bos_score = 20
+    bos_detail = "confirmed"
+
+    # Quality: is BOS inside the range? (higher confidence)
+    if bos_price and range_low and range_high:
+        if range_low <= bos_price <= range_high:
+            bos_detail = "inside range (high confidence)"
+        else:
+            bos_score = 15  # Outside range is acceptable but lower confidence
+            bos_detail = "outside range"
+
+    phase_results["bos"] = {"passed": True, "score": bos_score, "detail": bos_detail,
+                            "bos_idx": bos_idx, "bos_price": bos_price}
+    score += bos_score
+    reasons.append(f"BOS: {bos_score}/20 ({bos_detail})")
+
+    # ── Phase 6: POI Validation ──
+    # FVG is optional — increases confidence but is not mandatory
+    tap3_price = tap3.get("price", 0)
+    tap3_df_idx = tap3.get("idx", len(df) - 5 if df is not None else 0)
+    ob_info = _find_order_block_near_tap(df, tap3_price, direction, lookback=15)
+    fvg_found = _detect_fvg(df, tap3_df_idx)
+
+    poi_score = 0
+    poi_type = "none"
+    if fvg_found and ob_info.get("found"):
+        poi_score = 10
+        poi_type = "FVG + OB"
+    elif fvg_found:
+        poi_score = 10
+        poi_type = "FVG"
+    elif ob_info.get("found"):
+        poi_score = 7
+        poi_type = "OB only"
+    else:
+        poi_score = 0
+        poi_type = "none"
+        # NOT a hard gate — just means less confluence
+
+    phase_results["poi"] = {"passed": True, "score": poi_score, "type": poi_type,
+                            "fvg_found": fvg_found, "ob_found": ob_info.get("found", False)}
+    score += poi_score
+    reasons.append(f"POI: {poi_score}/10 ({poi_type})")
+
+    # ── Phase 7: Directional Filter ──
+    # Trade direction must align with HTF bias UNLESS the setup is a confirmed
+    # HTF reversal schematic (e.g., a confirmed accumulation in a bearish trend
+    # that signals a structural reversal).
+    aligned = True
+    is_reversal = False
+    if direction == "bullish" and htf_bias == "bearish":
+        # Check for reversal exception: if this is a confirmed accumulation
+        # schematic with strong BOS, it may be a valid reversal
+        if is_confirmed and bos_score >= 20 and tap_score >= 20:
+            is_reversal = True
+            reasons.append("Directional: HTF reversal exception (confirmed accumulation vs bearish HTF)")
+        else:
+            aligned = False
+    elif direction == "bearish" and htf_bias == "bullish":
+        if is_confirmed and bos_score >= 20 and tap_score >= 20:
+            is_reversal = True
+            reasons.append("Directional: HTF reversal exception (confirmed distribution vs bullish HTF)")
+        else:
+            aligned = False
+    elif htf_bias == "neutral":
+        aligned = False
+
+    if not aligned:
+        phase_results["directional"] = {"passed": False, "aligned": False,
+                                         "direction": direction, "htf_bias": htf_bias}
+        return {**fail, "score": score,
+                "reasons": reasons + [f"Phase 7: HTF bias conflict ({htf_bias} vs {direction})"],
+                "phase_results": phase_results}
+
+    phase_results["directional"] = {"passed": True, "aligned": not is_reversal,
+                                     "reversal": is_reversal,
+                                     "direction": direction, "htf_bias": htf_bias}
+
+    # ── Phase 8: Risk Filter ──
+    if rr < 1.5:
+        phase_results["risk"] = {"passed": False, "rr": rr}
+        return {**fail, "score": score,
+                "reasons": reasons + [f"Phase 8: R:R too low ({rr:.1f} < 1.5)"],
+                "phase_results": phase_results}
+
+    phase_results["risk"] = {"passed": True, "rr": round(rr, 2)}
+
+    # ── Phase 9: Confidence Scoring ──
+    # Session timing component (max 10 points)
+    session_pts, session_desc = _score_session_timing()
+    score += session_pts
+    reasons.append(f"Session: {session_pts}/10 ({session_desc})")
+    phase_results["session"] = {"score": session_pts, "session": session_desc}
+
+    # R:R bonus (folded into BOS quality — already scored above)
+    if rr >= 3.0:
+        score += 3
+        reasons.append(f"R:R bonus: +3 ({rr:.1f})")
+    elif rr >= 2.0:
+        score += 1
+        reasons.append(f"R:R bonus: +1 ({rr:.1f})")
+
+    # Reversal penalty — aligned trades score higher than reversals
+    if is_reversal:
+        penalty = 5
+        score -= penalty
+        reasons.append(f"Reversal penalty: -{penalty}")
+
+    score = max(0, min(100, score))
+
+    return {
+        "score": score,
+        "direction": direction,
+        "model": model,
+        "rr": rr,
+        "required_score": V2_THRESHOLD,
+        "pass": score >= V2_THRESHOLD,
+        "reasons": reasons,
+        "tree_results": {
+            # Backward-compatible tree_results shape for UI
+            "ranges": {"passed": not is_v_shape and time_ok and (horizontal or six_candle),
+                       "score": range_score},
+            "market_structure": {"passed": htf_bias in ("bullish", "bearish"),
+                                 "bias": htf_bias},
+            "supply_demand": {"passed": poi_score > 0, "fvg_valid": fvg_found,
+                              "ob_found": ob_info.get("found", False)},
+            "liquidity": {"passed": sweep_v2["classification"] != "true_break",
+                          "sweep_class": sweep_v2["classification"]},
+            "schematics_5a": {"passed": tap_valid and is_confirmed,
+                              "model_type": model_type, "status": "VALID_ENTRY" if tap_valid else "INVALID"},
+            "schematics_5b": {"passed": bos_score > 0,
+                              "entry_tf": "primary", "primary_rr": rr},
+            "advanced_flip": {"status": "not_applicable"},
+        },
+        "phase_results": phase_results,
+    }
+
+
+# ================================================================
 # PUBLIC EVALUATOR CLASS — drop-in replacement for Schematics5BEvaluator
 # ================================================================
 
 class DecisionTreeEvaluator:
     """
-    Evaluates TCT schematics using the 6-tree decision pipeline.
+    Evaluates TCT schematics using the 9-phase decision pipeline (v2).
     Drop-in replacement for Schematics5BEvaluator — same evaluate_schematic interface.
     """
 
@@ -890,19 +1601,19 @@ class DecisionTreeEvaluator:
         self._active_trade: Optional[Dict] = None
 
     def set_active_trade(self, trade: Optional[Dict]):
-        """Update the active trade reference for flip detection (Tree 6)."""
+        """Update the active trade reference for flip detection."""
         self._active_trade = trade
 
     def evaluate_schematic(self, schematic: Dict, htf_bias: str, current_price: float,
                            total_candles: int = 200, max_stale_candles: int = 5,
                            candle_df: Optional[pd.DataFrame] = None) -> Dict:
         """
-        Evaluate a schematic using the 6-tree pipeline.
+        Evaluate a schematic using the 9-phase v2 pipeline.
 
-        Same return format as Schematics5BEvaluator.evaluate_schematic:
+        Same return format as before:
             {"score", "pass", "direction", "model", "rr", "required_score", "reasons"}
 
-        Plus additional "tree_results" key with per-tree diagnostics.
+        Plus "tree_results" (backward-compatible) and "phase_results" (v2 detail).
         """
         direction = schematic.get("direction", "unknown")
         model = schematic.get("model", schematic.get("schematic_type", "unknown"))
@@ -924,26 +1635,27 @@ class DecisionTreeEvaluator:
 
         fail = {
             "score": 0, "direction": direction, "model": model, "rr": rr,
-            "required_score": 50, "pass": False, "tree_results": {},
+            "required_score": V2_THRESHOLD, "pass": False, "tree_results": {},
+            "phase_results": {},
         }
 
-        # Pre-gates (same as old evaluator for backward compat)
+        # Pre-gate: BOS must be confirmed
         if not is_confirmed:
             return {**fail, "reasons": ["No BOS confirmation"]}
 
-        # Stale BOS check
+        # Pre-gate: stale BOS check
         bos = schematic.get("bos_confirmation") or {}
         bos_idx = bos.get("bos_idx")
         if bos_idx is not None and bos_idx < total_candles - max_stale_candles:
             return {**fail, "reasons": [f"Stale BOS: {total_candles - bos_idx} candles ago (max {max_stale_candles})"]}
 
-        # If we have candle data, run the full tree pipeline
+        # Run the v2 9-phase pipeline if candle data is available
         if candle_df is not None and len(candle_df) > 0:
-            return compute_composite_score(
+            return compute_composite_score_v2(
                 candle_df, schematic, htf_bias, current_price, self._active_trade,
             )
 
-        # Fallback: no candle data — run simplified scoring (mirrors old evaluator logic)
+        # Fallback: no candle data — simplified scoring
         return self._fallback_score(schematic, htf_bias, current_price, rr)
 
     def _fallback_score(self, schematic: Dict, htf_bias: str,
@@ -956,7 +1668,8 @@ class DecisionTreeEvaluator:
 
         fail = {
             "score": 0, "direction": direction, "model": model, "rr": rr,
-            "required_score": 50, "pass": False, "tree_results": {},
+            "required_score": V2_THRESHOLD, "pass": False, "tree_results": {},
+            "phase_results": {},
         }
 
         # R:R gate
@@ -1003,6 +1716,7 @@ class DecisionTreeEvaluator:
         score = max(0, min(100, score))
         return {
             "score": score, "direction": direction, "model": model, "rr": rr,
-            "required_score": 50, "pass": score >= 50, "reasons": reasons,
+            "required_score": V2_THRESHOLD, "pass": score >= V2_THRESHOLD, "reasons": reasons,
             "tree_results": {"mode": "fallback_no_candle_data"},
+            "phase_results": {"mode": "fallback"},
         }
