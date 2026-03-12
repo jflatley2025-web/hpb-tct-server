@@ -16397,19 +16397,22 @@ function dtContent(category, dt, t) {
     const htf = (dt.htf_bias || '?').toUpperCase();
     const biasColor = dt.htf_bias === 'bullish' ? 'green' : dt.htf_bias === 'bearish' ? 'red' : 'yellow';
     let h = '';
-    h += '<div class="dt-check"><span class="dt-check-label">HTF bias (Daily gate)</span>'
+    h += '<div class="dt-check"><span class="dt-check-label">HTF bias (Daily — pivot-based)</span>'
       + '<span class="dt-check-val ' + biasColor + '">' + htf + '</span></div>';
     h += '<div class="dt-check"><span class="dt-check-label">Schematic direction</span>'
       + '<span class="dt-check-val ' + (dt.direction === 'bullish' ? 'green' : 'red') + '">' + dir + '</span></div>';
     h += chk('Direction aligned with HTF bias', dt.htf_aligned);
     h += chk('BOS confirmed (schematic complete)', dt.bos_confirmed);
+    const _msAccDist = dt.direction === 'bullish' ? 'Accumulation' : dt.direction === 'bearish' ? 'Distribution' : '';
+    const _msModelLabel = [(dt.model || '—').replace(/_/g, ' '), _msAccDist].filter(Boolean).join(' — ');
+    const _msModelColor = dt.direction === 'bullish' ? 'green' : dt.direction === 'bearish' ? 'red' : '';
     h += '<div class="dt-check"><span class="dt-check-label">Model type</span>'
-      + '<span class="dt-check-val">' + (dt.model || '—').replace(/_/g,' ') + '</span></div>';
+      + '<span class="dt-check-val ' + _msModelColor + '">' + _msModelLabel + '</span></div>';
     if (t) {
       h += '<div class="dt-check"><span class="dt-check-label">Schematics found / confirmed</span>'
         + '<span class="dt-check-val">' + (t.schematics_found ?? '—') + ' / ' + (t.confirmed ?? '—') + '</span></div>';
       h += '<div class="dt-check"><span class="dt-check-label">Best eval score this TF</span>'
-        + '<span class="dt-check-val ' + (t.best_score >= 50 ? 'green' : t.best_score > 0 ? 'yellow' : '') + '">'
+        + '<span class="dt-check-val ' + (t.best_score >= 60 ? 'green' : t.best_score > 0 ? 'yellow' : '') + '">'
         + (t.best_score ?? '—') + '/100</span></div>';
       if (t.evaluations && t.evaluations.length) {
         const top = t.evaluations[0];
@@ -16456,6 +16459,16 @@ function dtContent(category, dt, t) {
     const _5aModelColor = dt.direction === 'bullish' ? 'green' : dt.direction === 'bearish' ? 'red' : '';
     h += '<div class="dt-check"><span class="dt-check-label">Model type</span>'
       + '<span class="dt-check-val ' + _5aModelColor + '">' + _5aModelLabel + '</span></div>';
+    // Tap prices (v2 Phase 3)
+    if (dt.tap1_price != null) {
+      h += '<div class="dt-check"><span class="dt-check-label">Tap 1 / Tap 2 / Tap 3</span>'
+        + '<span class="dt-check-val">$' + fmt(dt.tap1_price) + ' / $' + fmt(dt.tap2_price) + ' / $' + fmt(dt.tap3_price) + '</span></div>';
+    }
+    // Time displacement (v2 Phase 2)
+    if (dt.time_displacement_t12 != null) {
+      const tdOk = dt.time_displacement_t12 >= 8;
+      h += chk('Time displacement T1→T2 (≥8 candles)', tdOk, dt.time_displacement_t12 + ' candles');
+    }
     h += chk('R:R meets minimum (≥1.5)', dt.rr_meets_minimum,
       dt.rr !== null ? ('R:R=' + fmt(dt.rr, 2)) : null);
     h += chk('Six-candle rule valid on all taps', dt.six_candle_valid);
@@ -16605,8 +16618,8 @@ function renderDecisionTrees(d) {
     '<span class="dt-meta-item"><span class="dt-meta-label">HTF Bias (Daily):</span><span class="dt-meta-val ' + biasC + '">' + (d.htf_bias || '?').toUpperCase() + '</span></span>' +
     '<span class="dt-meta-item"><span class="dt-meta-label">Scan TFs:</span><span class="dt-meta-val yellow">' + tfScope + '</span></span>' +
     '<span class="dt-meta-item"><span class="dt-meta-label">Best TF:</span><span class="dt-meta-val yellow">' + (d.best_tf || 'None') + '</span></span>' +
-    '<span class="dt-meta-item"><span class="dt-meta-label">Best Score:</span><span class="dt-meta-val ' + (d.best_score >= 50 ? 'green' : 'red') + '">' + (d.best_score || 0) + '/100</span></span>' +
-    '<span class="dt-meta-item"><span class="dt-meta-label">Threshold:</span><span class="dt-meta-val">50 (fixed)</span></span>';
+    '<span class="dt-meta-item"><span class="dt-meta-label">Best Score:</span><span class="dt-meta-val ' + (d.best_score >= 60 ? 'green' : 'red') + '">' + (d.best_score || 0) + '/100</span></span>' +
+    '<span class="dt-meta-item"><span class="dt-meta-label">Threshold:</span><span class="dt-meta-val">60 (v2)</span></span>';
 
   // Jack's mode: 5-tree panel
   if (mode === 'jack') {
