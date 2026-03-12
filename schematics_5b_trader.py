@@ -1037,10 +1037,6 @@ class Schematics5BTrader:
         }
 
         try:
-            # Keep Claude evaluator's flip-detection in sync with current trade
-            # (JackTCTEvaluator has no flip detection, so only update Claude's)
-            self.evaluator.set_active_trade(self.state.current_trade)
-
             # 1. Manage open trade first
             if self.state.current_trade:
                 df_price = fetch_candles_sync(SYMBOL, "1m", 10)
@@ -1177,6 +1173,8 @@ class Schematics5BTrader:
         except Exception as e:
             logger.warning(f"[5B] HTF gate error for {symbol}: {e}", exc_info=True)
             htf_debug = {"status": "error", "error": str(e), "fetch_error": True}
+            # Don't cache error results — next cycle should retry immediately
+            return htf_bias, htf_debug
 
         self._htf_bias_cache[symbol] = htf_bias
         self._htf_bias_expiry[symbol] = now_ts + self._HTF_CACHE_TTL.get(htf_bias, 900)
@@ -1322,11 +1320,10 @@ class Schematics5BTrader:
                 for s in all_sch:
                     if not isinstance(s, dict):
                         continue
-                    s_dir = s.get("direction", "unknown")
-                    if htf_bias == "bullish" and s_dir == "bearish":
-                        continue
-                    if htf_bias == "bearish" and s_dir == "bullish":
-                        continue
+
+                    # NOTE: No caller-side HTF directional filter here.
+                    # Phase 7 in the v2 pipeline handles HTF alignment,
+                    # including the reversal exception for strong counter-HTF setups.
 
                     if s.get("is_confirmed"):
                         s = self._refine_schematic_bos_with_ltf(s, ltf_dfs)

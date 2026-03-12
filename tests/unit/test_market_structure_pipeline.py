@@ -496,3 +496,162 @@ class TestDecisionTreeEvaluatorV2:
                                                total_candles=200, max_stale_candles=5)
         assert result["pass"] is False
         assert any("Stale" in r for r in result["reasons"])
+
+
+# ================================================================
+# AUDIT FIX TESTS — Issues 1-6
+# ================================================================
+
+class TestIssue1_ReversalExceptionReachable:
+    """Issue 1: Caller pre-filter was killing the reversal exception.
+    Now that the pre-filter is removed, counter-HTF schematics should
+    reach Phase 7 where the reversal exception can fire."""
+
+    def test_strong_counter_htf_reaches_reversal(self):
+        """A confirmed bullish schematic with strong BOS+taps against
+        bearish HTF should trigger the reversal exception, not be pre-filtered."""
+        df = _make_range_df(110, 100, n=40)
+        sch = _make_valid_schematic("bullish", confirmed=True, model="Model_1")
+        result = compute_composite_score_v2(df, sch, "bearish", 102.0)
+        phase = result.get("phase_results", {}).get("directional", {})
+        # Should reach Phase 7 and get the reversal exception
+        assert phase.get("reversal") is True
+        assert any("reversal" in r.lower() for r in result["reasons"])
+
+    def test_weak_counter_htf_still_fails(self):
+        """A weak counter-HTF schematic should fail at Phase 7."""
+        df = _make_range_df(110, 100, n=40)
+        sch = _make_valid_schematic("bullish", confirmed=True, model="Model_1")
+        # Degrade taps so reversal exception doesn't fire
+        sch["tap3"]["price"] = sch["tap2"]["price"]  # tap3 doesn't extend beyond tap2
+        result = compute_composite_score_v2(df, sch, "bearish", 102.0)
+        # Should fail at Phase 3 (tap validation) since Model_1 tap3 must extend beyond tap2
+        assert result["pass"] is False
+
+
+class TestIssue2_UnknownModelFails:
+    """Issue 2: Unknown model type must hard-fail Phase 3."""
+
+    def test_unknown_model_rejected(self):
+        df = _make_range_df(110, 100, n=40)
+        sch = _make_valid_schematic("bullish", confirmed=True, model="Model_1")
+        sch["model"] = "SomeUnknownModel"
+        result = compute_composite_score_v2(df, sch, "bullish", 102.0)
+        assert result["pass"] is False
+        assert any("unknown model" in r.lower() for r in result["reasons"])
+
+    def test_empty_model_rejected(self):
+        df = _make_range_df(110, 100, n=40)
+        sch = _make_valid_schematic("bullish", confirmed=True, model="Model_1")
+        sch["model"] = ""
+        result = compute_composite_score_v2(df, sch, "bullish", 102.0)
+        assert result["pass"] is False
+        assert any("unknown model" in r.lower() for r in result["reasons"])
+
+    def test_model_1_still_passes(self):
+        """Model_1 should still work after the fix."""
+        df = _make_range_df(110, 100, n=40)
+        sch = _make_valid_schematic("bullish", confirmed=True, model="Model_1")
+        result = compute_composite_score_v2(df, sch, "bullish", 102.0)
+        assert result["phase_results"]["tap_structure"]["passed"] is True
+
+    def test_model_2_still_passes(self):
+        """Model_2 should still work after the fix."""
+        df = _make_range_df(110, 100, n=40)
+        sch = _make_valid_schematic("bullish", confirmed=True, model="Model_2")
+        result = compute_composite_score_v2(df, sch, "bullish", 102.0)
+        assert result["phase_results"]["tap_structure"]["passed"] is True
+
+
+class TestIssue3_BosIdxRequired:
+    """Issue 3: Missing bos_idx must fail Phase 5 when is_confirmed."""
+
+    def test_missing_bos_idx_fails(self):
+        df = _make_range_df(110, 100, n=40)
+        sch = _make_valid_schematic("bullish", confirmed=True)
+        del sch["bos_confirmation"]["bos_idx"]
+        result = compute_composite_score_v2(df, sch, "bullish", 102.0)
+        assert result["pass"] is False
+        assert any("bos_idx missing" in r.lower() or "bos index missing" in r.lower()
+                    for r in result["reasons"])
+
+    def test_none_bos_idx_fails(self):
+        df = _make_range_df(110, 100, n=40)
+        sch = _make_valid_schematic("bullish", confirmed=True)
+        sch["bos_confirmation"]["bos_idx"] = None
+        result = compute_composite_score_v2(df, sch, "bullish", 102.0)
+        assert result["pass"] is False
+
+    def test_valid_bos_idx_still_passes(self):
+        """Normal case with bos_idx present should still work."""
+        df = _make_range_df(110, 100, n=40)
+        sch = _make_valid_schematic("bullish", confirmed=True)
+        assert sch["bos_confirmation"]["bos_idx"] == 30
+        result = compute_composite_score_v2(df, sch, "bullish", 102.0)
+        assert result["phase_results"]["bos"]["passed"] is True
+
+
+class TestIssue5_NoActiveTradeState:
+    """Issue 5: DecisionTreeEvaluator should not have set_active_trade."""
+
+    def test_no_set_active_trade_method(self):
+        evaluator = DecisionTreeEvaluator()
+        assert not hasattr(evaluator, "set_active_trade")
+
+    def test_no_active_trade_attribute(self):
+        evaluator = DecisionTreeEvaluator()
+        assert not hasattr(evaluator, "_active_trade")
+
+
+class TestIssue6_DeepDL2BreakRequiresSustainedAcceptance:
+    """Issue 6: A single recovery candle should not forgive a deep DL2 break."""
+
+    def test_deep_dl2_break_single_recovery_is_true_break(self):
+        """Deep close beyond DL2 followed by only 1 candle back inside
+        should remain classified as true_break, not sweep."""
+        rng = 10  # 110-100
+        dl2_below = 100 - rng * 0.30  # 97
+        # 18 candles closing at 96 (below DL2), then 2 candles back at 102
+        # Only 2 candles accepted back — fewer than sustained_candles (3)
+        highs = [105] * 20
+        lows = [95] * 20
+        closes = [96] * 18 + [102, 102]
+        df = _make_df(highs, lows, closes)
+        result = _detect_liquidity_sweep_v2(df, 110, 100, "bullish")
+        assert result["classification"] == "true_break"
+
+    def test_deep_dl2_break_sustained_recovery_is_sweep(self):
+        """Deep close beyond DL2 followed by multiple candles back inside
+        should be classified as sweep (sustained acceptance)."""
+        rng = 10  # 110-100
+        # 17 candles at 96 (below DL2), then 3 candles back at 102
+        highs = [105] * 20
+        lows = [95] * 20
+        closes = [96] * 17 + [102, 102, 102]  # 3 candles sustained acceptance
+        df = _make_df(highs, lows, closes)
+        result = _detect_liquidity_sweep_v2(df, 110, 100, "bullish")
+        assert result["classification"] == "sweep"
+
+    def test_shallow_dl2_break_single_recovery_still_sweep(self):
+        """Shallow close beyond DL2 (within 1% of range) doesn't need
+        sustained acceptance — a single recovery candle is fine."""
+        # Close at 96.95 — just barely below DL2 (97), only 0.05 beyond
+        # which is 0.5% of range (10) — below the 1% threshold
+        highs = [105] * 20
+        lows = [96.5] * 20
+        closes = [96.95] * 18 + [102, 102]
+        df = _make_df(highs, lows, closes)
+        result = _detect_liquidity_sweep_v2(df, 110, 100, "bullish")
+        assert result["classification"] == "sweep"
+
+    def test_bearish_deep_dl2_break_single_recovery(self):
+        """Same logic for bearish direction — deep break above DL2."""
+        rng = 10  # 110-100
+        dl2_above = 110 + rng * 0.30  # 113
+        highs = [115] * 20
+        lows = [112] * 20
+        # 18 candles at 114 (above DL2), then 2 candles back inside
+        closes = [114] * 18 + [108, 108]
+        df = _make_df(highs, lows, closes)
+        result = _detect_liquidity_sweep_v2(df, 110, 100, "bearish")
+        assert result["classification"] == "true_break"

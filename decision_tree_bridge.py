@@ -381,6 +381,11 @@ def _detect_liquidity_sweep_v2(df: pd.DataFrame, range_high: float, range_low: f
     lows = recent["low"].values
     closes = recent["close"].values
 
+    # Sustained acceptance threshold: if the deepest close beyond DL2 was
+    # significant (> 1% of range), require multiple candles back inside the
+    # range to confirm acceptance, not just one.
+    sustained_candles = 3
+
     if direction == "bullish":
         # Sell-side sweep (below range low)
         exceeded = any(l < range_low for l in lows)
@@ -388,8 +393,15 @@ def _detect_liquidity_sweep_v2(df: pd.DataFrame, range_high: float, range_low: f
         close_beyond_dl2 = any(c < dl2_below for c in closes)
         # Slight close beyond range low but within tolerance
         slight_close = any(c < range_low and c >= range_low - tolerance for c in closes)
-        # Accepted back inside range
-        accepted = len(closes) >= 2 and closes[-1] >= range_low
+        # Accepted back inside range — require sustained acceptance for deep DL2 breaks
+        deepest_close = min(closes)
+        deep_break = deepest_close < dl2_below and (dl2_below - deepest_close) > rng * 0.01
+        if deep_break:
+            # Sustained acceptance: last N candles must all be back inside
+            accepted = (len(closes) >= sustained_candles
+                        and all(c >= range_low for c in closes[-sustained_candles:]))
+        else:
+            accepted = len(closes) >= 2 and closes[-1] >= range_low
         sweep_count = sum(1 for l in lows if l < range_low)
 
         if close_beyond_dl2 and not accepted:
@@ -414,7 +426,14 @@ def _detect_liquidity_sweep_v2(df: pd.DataFrame, range_high: float, range_low: f
         exceeded = any(h > range_high for h in highs)
         close_beyond_dl2 = any(c > dl2_above for c in closes)
         slight_close = any(c > range_high and c <= range_high + tolerance for c in closes)
-        accepted = len(closes) >= 2 and closes[-1] <= range_high
+        # Sustained acceptance for deep DL2 breaks
+        deepest_close = max(closes)
+        deep_break = deepest_close > dl2_above and (deepest_close - dl2_above) > rng * 0.01
+        if deep_break:
+            accepted = (len(closes) >= sustained_candles
+                        and all(c <= range_high for c in closes[-sustained_candles:]))
+        else:
+            accepted = len(closes) >= 2 and closes[-1] <= range_high
         sweep_count = sum(1 for h in highs if h > range_high)
 
         if close_beyond_dl2 and not accepted:
@@ -1378,9 +1397,9 @@ def compute_composite_score_v2(
                 tap_valid = False
                 tap_reason = "Model 2: Tap3 is not a lower high"
     else:
-        # Unknown model — check if taps exist and are reasonable
-        tap_valid = True
-        tap_reason = "model type unclear, taps present"
+        # Unknown model — cannot validate tap structure without model classification
+        tap_valid = False
+        tap_reason = "unknown model type — cannot validate tap structure"
 
     tap_score = 0
     if tap_valid:
@@ -1439,8 +1458,15 @@ def compute_composite_score_v2(
                 "reasons": reasons + ["Phase 5: No BOS confirmation"],
                 "phase_results": phase_results}
 
+    # BOS index is required to verify temporal ordering
+    if bos_idx is None:
+        phase_results["bos"] = {"passed": False, "reason": "BOS confirmed but bos_idx missing — cannot verify ordering"}
+        return {**fail, "score": score,
+                "reasons": reasons + ["Phase 5: BOS index missing — cannot verify BOS-after-Tap3 ordering"],
+                "phase_results": phase_results}
+
     # BOS must occur AFTER Tap3
-    if bos_idx is not None and tap3_idx > 0 and bos_idx < tap3_idx:
+    if tap3_idx > 0 and bos_idx < tap3_idx:
         phase_results["bos"] = {"passed": False, "reason": "BOS before Tap3",
                                 "bos_idx": bos_idx, "tap3_idx": tap3_idx}
         return {**fail, "score": score,
@@ -1598,11 +1624,8 @@ class DecisionTreeEvaluator:
     """
 
     def __init__(self):
-        self._active_trade: Optional[Dict] = None
-
-    def set_active_trade(self, trade: Optional[Dict]):
-        """Update the active trade reference for flip detection."""
-        self._active_trade = trade
+        pass  # Stateless — v2 pipeline does not use flip detection
+        # TODO: re-implement flip detection for v2 if needed
 
     def evaluate_schematic(self, schematic: Dict, htf_bias: str, current_price: float,
                            total_candles: int = 200, max_stale_candles: int = 5,
@@ -1652,7 +1675,7 @@ class DecisionTreeEvaluator:
         # Run the v2 9-phase pipeline if candle data is available
         if candle_df is not None and len(candle_df) > 0:
             return compute_composite_score_v2(
-                candle_df, schematic, htf_bias, current_price, self._active_trade,
+                candle_df, schematic, htf_bias, current_price,
             )
 
         # Fallback: no candle data — simplified scoring
