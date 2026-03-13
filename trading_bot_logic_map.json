@@ -1,10 +1,10 @@
 {
   "meta": {
     "title": "HPB-TCT Trading Bot — Complete Operational Workflow Logic Map",
-    "version": "1.2",
+    "version": "1.3",
     "generated": "2026-03-12",
     "updated": "2026-03-13",
-    "description": "Machine-readable hierarchical map of all decision logic in the Schematics-5B trading engine. Covers HTF→LTF market bias initialization (established at workflow start, referenced by all downstream steps), range validation with impulsive/V-shape hard invalidation and S/R alignment checks, BOS structural validity (body-close required), POI confluence gating (FVG/RTZ/OB/S&R), liquidity checks, session scaling, counter-bias protection, execution confidence, and trade management.",
+    "description": "Machine-readable hierarchical map of all decision logic in the Schematics-5B trading engine. Covers HTF→LTF market bias initialization, range validation with impulsive/V-shape hard invalidation and S/R alignment, BOS structural validity (body-close required), POI confluence gating, liquidity checks, MSCE (Market Session Confidence Engine) session multipliers (Asia/London/NY/Overlap) applied to composite score and position sizing, counter-bias protection, execution confidence, and trade management.",
     "entry_point": "schematics_5b_trader.py → Schematics5BTrader._scan_and_trade_locked()",
     "scoring_model": "6-tree v1 (threshold 50) or 9-phase v2 (threshold 60)",
     "bias_init_rule": "HTF→LTF market bias MUST be established at step 2.0 before any downstream step proceeds. All steps from 3.0 onward receive htf_bias and ltf_bias as required inputs."
@@ -38,7 +38,35 @@
     "POI_TIER2_TYPES": ["OB", "SR_LEVEL"],
     "POI_PROXIMITY_TO_TAP3_PCT": 0.01,
     "IMPULSE_MAX_DIRECTION_CHANGE_PCT": 0.15,
-    "SR_LOOKBACK_CANDLES": 200
+    "SR_LOOKBACK_CANDLES": 200,
+    "MSCE_SESSION_WINDOWS_UTC": {
+      "asia":    { "start": 0,  "end": 7  },
+      "london":  { "start": 7,  "end": 16 },
+      "ny":      { "start": 13, "end": 21 },
+      "overlap": { "start": 13, "end": 16 }
+    },
+    "MSCE_SCORE_MULTIPLIERS": {
+      "asia":     0.95,
+      "london":   1.05,
+      "ny":       1.15,
+      "overlap":  1.20,
+      "off_hours": 0.90
+    },
+    "MSCE_POSITION_SCALE_FACTORS": {
+      "asia":     0.75,
+      "london":   1.00,
+      "ny":       1.00,
+      "overlap":  1.10,
+      "off_hours": 0.50
+    },
+    "MSCE_MIN_EXECUTION_CONFIDENCE": 0.60,
+    "MSCE_SCORE_BASE_POINTS": {
+      "asia":     3,
+      "london":   7,
+      "ny":       7,
+      "overlap":  10,
+      "off_hours": 2
+    }
   },
 
   "workflow": [
@@ -515,23 +543,63 @@
             },
             {
               "step_id": "7.8",
-              "name": "SESSION_TIMING_ADJUSTMENT",
-              "module_or_function": "decision_tree_bridge.py → _score_session_timing()",
-              "inputs": ["current UTC hour"],
-              "decision_logic": "Adjusts score based on which trading session is active. Higher scores during high-volume sessions (London/NY overlap), lower during Asia/off-hours. NOT a hard gate — just moves the needle on total score.",
-              "outputs": ["session_score: 2-10"],
+              "name": "MSCE_SESSION_MULTIPLIER_ENGINE",
+              "_annotation": "MODIFIED (MSCE session scaling): Renamed from SESSION_TIMING_ADJUSTMENT to MSCE_SESSION_MULTIPLIER_ENGINE. Inline multiplier values extracted to MSCE_* constants. Step now outputs a structured msce_profile consumed by steps 8.1 (position scaling) and 8.4 (execution confidence gate). Score base points unchanged; msce_score_multiplier, msce_position_scale_factor, and execution_confidence_modifier added as explicit outputs.",
+              "module_or_function": "decision_tree_bridge.py → _score_session_timing() + compute_msce_profile()",
+              "inputs": ["current UTC timestamp", "composite_score (pre-session) from prior tree steps"],
+              "decision_logic": "Determines the active trading session from current UTC time using MSCE_SESSION_WINDOWS_UTC. Overlap (London/NY 13:00–16:00) takes priority over London or NY alone. Assigns session_score base points, msce_score_multiplier, and msce_position_scale_factor from MSCE_* constant tables. Applies msce_score_multiplier to the running composite score to produce msce_adjusted_score. Emits the full msce_profile for downstream consumption.",
+              "outputs": [
+                "session_score: 2-10",
+                "active_session: 'asia' | 'london' | 'ny' | 'overlap' | 'off_hours'",
+                "msce_score_multiplier: float",
+                "msce_position_scale_factor: float",
+                "msce_adjusted_score: float",
+                "execution_confidence_modifier: float"
+              ],
               "conditions": {
-                "london_ny_overlap": "13:00-16:00 UTC → 10 pts (peak liquidity)",
-                "ny_session": "13:00-21:00 UTC → 7 pts",
-                "london_session": "07:00-16:00 UTC → 7 pts",
-                "asia_session": "00:00-07:00 UTC → 3 pts (low volume)",
-                "off_hours": "Other times → 2 pts",
-                "multi_session_weights": {
-                  "asia_multiplier": 0.95,
-                  "london_multiplier": 1.05,
-                  "ny_multiplier": 1.15
+                "overlap_priority": "13:00–16:00 UTC → active_session = 'overlap' (takes precedence over 'london' and 'ny')",
+                "ny_session": "13:00–21:00 UTC (non-overlap) → active_session = 'ny'; score × 1.15, position × 1.00",
+                "london_session": "07:00–16:00 UTC (non-overlap) → active_session = 'london'; score × 1.05, position × 1.00",
+                "asia_session": "00:00–07:00 UTC → active_session = 'asia'; score × 0.95, position × 0.75",
+                "off_hours": "All other hours → active_session = 'off_hours'; score × 0.90, position × 0.50",
+                "score_multiplier_application": "msce_adjusted_score = composite_score × MSCE_SCORE_MULTIPLIERS[active_session]",
+                "confidence_derivation": "execution_confidence_modifier = msce_score_multiplier — values < 1.0 mean reduced confidence; values > 1.0 mean elevated confidence",
+                "position_scale_forwarding": "msce_position_scale_factor forwarded to step 8.1 for session-adjusted sizing"
+              },
+              "children": [
+                {
+                  "step_id": "7.8.1",
+                  "name": "MSCE_SESSION_DETECTION",
+                  "_annotation": "NEW (MSCE): Determines the active market session from UTC time. Overlap window takes strict priority. Outputs active_session label used by all downstream MSCE logic.",
+                  "module_or_function": "decision_tree_bridge.py → detect_active_session(utc_hour)",
+                  "inputs": ["current UTC hour"],
+                  "decision_logic": "Evaluates UTC hour against MSCE_SESSION_WINDOWS_UTC in priority order: overlap first (13–16), then NY (13–21), then London (7–16), then Asia (0–7). Falls back to off_hours if none match.",
+                  "outputs": ["active_session: 'asia' | 'london' | 'ny' | 'overlap' | 'off_hours'"],
+                  "conditions": {
+                    "overlap_check_first": "13 ≤ utc_hour < 16 → 'overlap'",
+                    "ny_check": "13 ≤ utc_hour < 21 (non-overlap) → 'ny'",
+                    "london_check": "7 ≤ utc_hour < 16 (non-overlap) → 'london'",
+                    "asia_check": "0 ≤ utc_hour < 7 → 'asia'",
+                    "off_hours": "else → 'off_hours'"
+                  }
+                },
+                {
+                  "step_id": "7.8.2",
+                  "name": "MSCE_MULTIPLIER_AND_SCALE_ASSIGNMENT",
+                  "_annotation": "NEW (MSCE): Looks up MSCE multiplier tables by active_session and computes msce_adjusted_score and msce_position_scale_factor. These values propagate to steps 8.1 and 8.4.",
+                  "module_or_function": "decision_tree_bridge.py → assign_msce_multipliers(active_session, composite_score)",
+                  "inputs": ["active_session from step 7.8.1", "composite_score (pre-session)"],
+                  "decision_logic": "Two table lookups from MSCE constants: (1) MSCE_SCORE_MULTIPLIERS[active_session] → msce_score_multiplier; (2) MSCE_POSITION_SCALE_FACTORS[active_session] → msce_position_scale_factor. Computes msce_adjusted_score = composite_score × msce_score_multiplier. The adjusted score is used by step 8.4 for threshold comparison instead of the raw composite score.",
+                  "outputs": ["msce_score_multiplier: float", "msce_position_scale_factor: float", "msce_adjusted_score: float"],
+                  "conditions": {
+                    "overlap": "score × 1.20, position × 1.10 — peak confidence; highest liquidity window produces the most reliable directional moves",
+                    "ny": "score × 1.15, position × 1.00 — high confidence; NY open is the strongest session for momentum continuation",
+                    "london": "score × 1.05, position × 1.00 — moderate confidence boost; good liquidity at London open",
+                    "asia": "score × 0.95, position × 0.75 — reduced confidence and size; thin liquidity, wider spreads, less reliable follow-through",
+                    "off_hours": "score × 0.90, position × 0.50 — significant penalty; trades during off-hours have high noise and low reliability"
+                  }
                 }
-              }
+              ]
             }
           ]
         },
@@ -540,26 +608,29 @@
           "step_id": "8.0",
           "name": "TRADE_EXECUTION",
           "module_or_function": "trade_execution.py → generate_execution_plan() / calculate_position_size()",
-          "_annotation": "MODIFIED (bias-init enforcement): Added htf_bias and ltf_bias to inputs. Both bias values are embedded in the execution plan metadata and persisted with the trade log (step 10.0) so that post-trade analysis can attribute outcomes to specific bias states.",
-          "inputs": ["composite_score from step 7.0", "entry_price", "stop_price", "target_price", "account_balance", "leverage", "htf_bias from step 2.0", "ltf_bias from step 2.3"],
-          "decision_logic": "If composite score >= threshold, generates a full execution plan including position sizing, margin requirements, and liquidation safety checks. Verifies that the liquidation price is safely beyond the stop loss before placing any order.",
-          "outputs": ["position_size (USDT)", "margin_required", "liquidation_price", "order_type", "execution_plan"],
+          "_annotation": "MODIFIED (MSCE session scaling): Added msce_adjusted_score, active_session, msce_position_scale_factor, and execution_confidence_modifier from step 7.8 to inputs. Threshold comparison now uses msce_adjusted_score (not raw composite_score) so session context affects entry decisions. Execution plan output now includes active_session and execution_confidence_pct for trade log attribution.",
+          "inputs": ["composite_score from step 7.0", "msce_adjusted_score from step 7.8", "active_session from step 7.8", "msce_position_scale_factor from step 7.8", "execution_confidence_modifier from step 7.8", "entry_price", "stop_price", "target_price", "account_balance", "leverage", "htf_bias from step 2.0", "ltf_bias from step 2.3"],
+          "decision_logic": "If msce_adjusted_score >= threshold (after session multiplier is applied), generates a full execution plan. Position sizing (step 8.1) is scaled by msce_position_scale_factor. Execution confidence (step 8.4) must meet MSCE_MIN_EXECUTION_CONFIDENCE (0.60) before order placement proceeds. Verifies liquidation price is safely beyond stop loss.",
+          "outputs": ["position_size (USDT)", "margin_required", "liquidation_price", "order_type", "execution_plan", "active_session", "execution_confidence_pct"],
           "conditions": {
-            "score_gate": "composite_score >= threshold (50 v1 / 60 v2) → proceed to execution",
-            "below_threshold": "composite_score < threshold → NO TRADE, log reason, continue scanning"
+            "score_gate": "msce_adjusted_score >= threshold (50 v1 / 60 v2) → proceed to execution (uses MSCE-adjusted score, not raw score)",
+            "below_threshold": "msce_adjusted_score < threshold → NO TRADE, log reason including active_session and multiplier, continue scanning",
+            "confidence_gate": "execution_confidence_pct from step 8.4 must be >= MSCE_MIN_EXECUTION_CONFIDENCE (0.60) or trade is skipped"
           },
           "children": [
             {
               "step_id": "8.1",
               "name": "POSITION_SIZING",
+              "_annotation": "MODIFIED (MSCE session scaling): Added msce_position_scale_factor from step 7.8 to inputs. Base risk stays at 1%, but the computed position is multiplied by the session scale factor before finalizing. Updated conditions to reflect session-adjusted sizing.",
               "module_or_function": "trade_execution.py → calculate_position_size()",
-              "inputs": ["account_balance", "risk_per_trade (1%)", "entry_price", "stop_price", "leverage"],
-              "decision_logic": "Calculates position size based on fixed 1% risk per trade. Position = (balance × risk%) / |entry - stop| × leverage. Ensures margin does not exceed available balance.",
-              "outputs": ["position_size_usd", "position_size_contracts", "margin_required"],
+              "inputs": ["account_balance", "risk_per_trade (1%)", "entry_price", "stop_price", "leverage", "msce_position_scale_factor from step 7.8"],
+              "decision_logic": "Calculates base position size from fixed 1% risk, then applies msce_position_scale_factor as a final multiplier. Base: base_size = (balance × 0.01) / abs(entry - stop) × entry. Final: position_size = base_size × msce_position_scale_factor. Margin check uses the scaled size.",
+              "outputs": ["position_size_usd", "position_size_contracts", "margin_required", "msce_size_applied: bool"],
               "conditions": {
-                "risk_formula": "position_size = (balance × 0.01) / abs(entry - stop) × entry",
-                "margin_check": "margin = position_size / leverage; must be ≤ available_balance",
-                "no_dynamic_scaling": "Risk is FIXED at 1% — does not adjust based on confidence or score"
+                "base_risk_formula": "base_size = (balance × 0.01) / abs(entry - stop) × entry",
+                "session_scaling": "position_size = base_size × msce_position_scale_factor — overlap=×1.10, ny/london=×1.00, asia=×0.75, off_hours=×0.50",
+                "margin_check": "margin = position_size / leverage; must be ≤ available_balance (use scaled size)",
+                "scaling_floor": "position_size must remain ≥ exchange minimum order size after scaling; if not → NO TRADE"
               }
             },
             {
@@ -581,14 +652,32 @@
               "step_id": "8.3",
               "name": "ORDER_PLACEMENT",
               "module_or_function": "trade_execution.py → generate_execution_plan()",
-              "inputs": ["position_size", "entry_price", "stop_price", "target_price", "direction"],
-              "decision_logic": "Generates the final order specification. Primary entry is MARKET order (95% of entries — at BOS confirmation). Limit orders used for partial take-profits.",
+              "inputs": ["position_size (session-scaled from step 8.1)", "entry_price", "stop_price", "target_price", "direction", "execution_confidence_pct from step 8.4"],
+              "decision_logic": "Generates the final order specification. Only reached if step 8.4 execution_confidence_pct >= MSCE_MIN_EXECUTION_CONFIDENCE. Primary entry is MARKET order (95% of entries — at BOS confirmation). Limit orders used for partial take-profits.",
               "outputs": ["order_spec: {type, side, size, price, sl, tp}", "order_submitted: bool"],
               "conditions": {
+                "confidence_gate": "execution_confidence_pct from step 8.4 must be >= 0.60 (MSCE_MIN_EXECUTION_CONFIDENCE) — enforced before reaching this step",
                 "entry_order_type": "MARKET (at BOS confirmation) — 95% of trades",
                 "limit_alternative": "LIMIT at refined LTF price — 5% of trades (better entry but may miss)",
                 "stop_loss_order": "Placed simultaneously as SL order",
                 "take_profit_order": "Placed simultaneously as TP order"
+              }
+            },
+            {
+              "step_id": "8.4",
+              "name": "MSCE_EXECUTION_CONFIDENCE",
+              "_annotation": "NEW (MSCE session scaling): Final confidence gate before order placement. Computes a normalized execution_confidence_pct from msce_adjusted_score and execution_confidence_modifier. Trades below MSCE_MIN_EXECUTION_CONFIDENCE (0.60) are hard-blocked and logged with full MSCE context for post-trade attribution.",
+              "module_or_function": "trade_execution.py → compute_execution_confidence()",
+              "inputs": ["msce_adjusted_score from step 7.8", "execution_confidence_modifier from step 7.8", "active_session from step 7.8", "threshold (50 v1 / 60 v2)"],
+              "decision_logic": "Computes execution_confidence_pct = clamp((msce_adjusted_score / threshold) × execution_confidence_modifier, 0.0, 1.0). If execution_confidence_pct < 0.60, the trade is hard-blocked — not just de-scored. Logs active_session, msce_score_multiplier, msce_position_scale_factor, and execution_confidence_pct for every evaluation regardless of outcome.",
+              "outputs": ["execution_confidence_pct: float [0.0–1.0]", "execution_approved: bool", "msce_log_entry: {active_session, msce_score_multiplier, msce_position_scale_factor, execution_confidence_pct}"],
+              "conditions": {
+                "confidence_formula": "execution_confidence_pct = clamp((msce_adjusted_score / threshold) × execution_confidence_modifier, 0.0, 1.0)",
+                "approved": "execution_confidence_pct >= 0.60 → execution_approved = true → proceed to step 8.3",
+                "blocked": "execution_confidence_pct < 0.60 → execution_approved = false → NO TRADE; log full msce_log_entry with reason",
+                "asia_typical": "Asia session with borderline score: 0.95× multiplier typically yields execution_confidence_pct ≈ 0.55–0.58 → blocked",
+                "overlap_typical": "Overlap session with strong score: 1.20× multiplier amplifies to near 1.0 → approved with high confidence",
+                "off_hours_behavior": "0.90× multiplier hard-blocks most marginal setups below the 0.60 floor"
               }
             }
           ]
@@ -736,8 +825,8 @@
     "4_schematic_build": "Range + Candles → Tap1/2/3 → Model classification",
     "5_bos_confirmation": "Post-Tap3 candles → MTF BOS (body-close required) → [5.2] BOS structural validity HARD GATE → LTF cascade refinement",
     "6_gating": "All upstream → 8 hard gates (any fail = reject): HTF/LTF alignment, BOS confirmed, R:R ≥ 1.5, POI+S/D at Tap3, liquidity sweep valid, TCT 5A schematic valid, RIG counter-bias, POI confluence at entry",
-    "7_scoring": "Gate results → 6 trees + bonus → composite score (0-100)",
-    "8_execution": "Score ≥ threshold → position sizing → liquidation check → order placement",
+    "7_scoring": "Gate results → 6 trees + bonus → composite score (0-100) → MSCE session multiplier (step 7.8) → msce_adjusted_score",
+    "8_execution": "msce_adjusted_score ≥ threshold → session-scaled position sizing (step 8.1, ×0.50–1.10) → liquidation check → MSCE confidence gate (step 8.4, min 0.60) → order placement",
     "9_management": "Open position → partial TP → trailing SL → final exit",
     "10_persistence": "All state → JSON on disk + GitHub sync"
   },
