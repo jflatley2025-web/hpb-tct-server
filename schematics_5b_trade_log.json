@@ -1,7 +1,42 @@
 {
   "balance": 4470.81,
   "starting_balance": 5000.0,
-  "current_trade": null,
+  "current_trade": {
+    "id": 9,
+    "symbol": "BTCUSDT",
+    "timeframe": "1h",
+    "direction": "bearish",
+    "model": "Model_1",
+    "entry_price": 71099.72,
+    "stop_price": 72036.35,
+    "target_price": 68979.18,
+    "tp1_price": 70039.45,
+    "tp1_hit": false,
+    "position_size": 3393.79,
+    "margin": 339.38,
+    "risk_amount": 44.71,
+    "leverage": 10,
+    "rr": 2.26,
+    "entry_score": 93,
+    "entry_reasons": [
+      "Range: 20/20 (horizontal=True, 6CR=True, stacking=True)",
+      "Taps: 20/20 (Model_1)",
+      "Liquidity: 20/20 (sweep)",
+      "BOS: 20/20 (inside range (high confidence))",
+      "POI: 10/10 (FVG + OB)",
+      "Directional: HTF reversal exception (confirmed distribution vs bullish HTF)",
+      "Session: 7/10 (NY session)",
+      "R:R bonus: +1 (2.3)",
+      "Reversal penalty: -5"
+    ],
+    "htf_bias": "bullish",
+    "liquidation_price": 77854.19,
+    "liquidation_safe": true,
+    "opened_at": "2026-03-13T19:05:36.150860+00:00",
+    "status": "open",
+    "live_pnl_pct": -0.09,
+    "current_price": 71160.33
+  },
   "trade_history": [
     {
       "id": 1,
@@ -310,8 +345,8 @@
   ],
   "total_wins": 0,
   "total_losses": 8,
-  "last_scan_time": "2026-03-13T18:38:51.494480+00:00",
-  "last_scan_action": "no_qualifying_setups",
+  "last_scan_time": "2026-03-13T20:02:51.308129+00:00",
+  "last_scan_action": "holding",
   "last_error": null,
   "trading_mode": "claude"
 }
