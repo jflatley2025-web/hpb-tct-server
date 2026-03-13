@@ -1,10 +1,10 @@
 {
   "meta": {
     "title": "HPB-TCT Trading Bot — Complete Operational Workflow Logic Map",
-    "version": "1.1",
+    "version": "1.2",
     "generated": "2026-03-12",
     "updated": "2026-03-13",
-    "description": "Machine-readable hierarchical map of all decision logic in the Schematics-5B trading engine. Covers HTF→LTF market bias initialization (established at workflow start, referenced by all downstream steps), range validation, liquidity checks, session scaling, counter-bias protection, execution confidence, and trade management.",
+    "description": "Machine-readable hierarchical map of all decision logic in the Schematics-5B trading engine. Covers HTF→LTF market bias initialization (established at workflow start, referenced by all downstream steps), range validation with impulsive/V-shape hard invalidation and S/R alignment checks, BOS structural validity (body-close required), POI confluence gating (FVG/RTZ/OB/S&R), liquidity checks, session scaling, counter-bias protection, execution confidence, and trade management.",
     "entry_point": "schematics_5b_trader.py → Schematics5BTrader._scan_and_trade_locked()",
     "scoring_model": "6-tree v1 (threshold 50) or 9-phase v2 (threshold 60)",
     "bias_init_rule": "HTF→LTF market bias MUST be established at step 2.0 before any downstream step proceeds. All steps from 3.0 onward receive htf_bias and ltf_bias as required inputs."
@@ -30,7 +30,15 @@
     "LTF_BOS_TIMEFRAMES": ["5m", "1m"],
     "MAX_STALE_CANDLES": {
       "1d": 2, "4h": 3, "1h": 3, "30m": 4, "15m": 6, "5m": 10, "1m": 30
-    }
+    },
+    "SR_PROXIMITY_PCT": 0.005,
+    "BOS_BODY_CLOSE_REQUIRED": true,
+    "BOS_MIN_BODY_TO_RANGE_PCT": 0.001,
+    "POI_TIER1_TYPES": ["FVG", "RTZ"],
+    "POI_TIER2_TYPES": ["OB", "SR_LEVEL"],
+    "POI_PROXIMITY_TO_TAP3_PCT": 0.01,
+    "IMPULSE_MAX_DIRECTION_CHANGE_PCT": 0.15,
+    "SR_LOOKBACK_CANDLES": 200
   },
 
   "workflow": [
@@ -127,13 +135,50 @@
             {
               "step_id": "3.1",
               "name": "RANGE_QUALITY_SCORING",
+              "_annotation": "MODIFIED (range validation): V-shape rejection upgraded from a soft note to a HARD GATE. A range that fails the direction-change threshold is now immediately rejected — it does not produce a low quality score, it terminates evaluation of the current symbol+TF pair. Added impulse_ratio output to feed step 3.3.",
               "module_or_function": "tct_schematics.py (inline logic)",
               "inputs": ["range boundaries", "candle data within range"],
-              "decision_logic": "Scores the quality of the identified range by checking horizontal character, liquidity stacking at boundaries, and EQ interaction frequency.",
-              "outputs": ["range_quality_score", "is_horizontal: bool", "has_liquidity_stacking: bool"],
+              "decision_logic": "Scores the quality of the identified range by checking horizontal character, liquidity stacking at boundaries, and EQ interaction frequency. If the direction-change test fails, emits range_valid=False which causes step 3.0 to discard this range candidate immediately (HARD FAIL at the range level, not at the gate level).",
+              "outputs": ["range_quality_score", "is_horizontal: bool", "has_liquidity_stacking: bool", "impulse_ratio: float"],
               "conditions": {
                 "liquidity_stacking": "2+ equal highs (within 0.1%) at range_high OR 2+ equal lows at range_low → indicates stop-loss clustering",
-                "V_shape_rejection": "If most price action is directional with < 15% direction changes → NOT a valid range"
+                "V_shape_hard_gate": "HARD GATE — direction_change_pct < IMPULSE_MAX_DIRECTION_CHANGE_PCT (0.15) → range_valid = False → DISCARD (was previously a soft warning)",
+                "eq_crossing_check": "EQ crossings < 10% of candle count → range_valid = False → DISCARD",
+                "impulse_ratio_output": "impulse_ratio = (directional candles) / (total candles) — forwarded to step 3.3 for deeper impulse analysis"
+              }
+            },
+            {
+              "step_id": "3.2",
+              "name": "SUPPORT_RESISTANCE_ALIGNMENT",
+              "_annotation": "NEW (S/R validation): Checks that range_high and range_low are anchored to meaningful HTF support/resistance levels. Ranges that form in no-man's land (unrelated to prior structure) receive a reduced quality score. Ranges anchored to HTF S/R receive a quality bonus passed into tree 1 scoring (step 7.1).",
+              "module_or_function": "market_structure.py → check_sr_alignment(range_high, range_low, htf_pivots)",
+              "inputs": ["range_high", "range_low", "swing_highs[] from step 2.1", "swing_lows[] from step 2.1", "HTF candle data (1D, 4H)"],
+              "decision_logic": "Compares range_high and range_low against the last SR_LOOKBACK_CANDLES (200) candles of HTF data to find significant pivot clusters within SR_PROXIMITY_PCT (0.5%). An S/R level is 'significant' if 2+ prior pivots exist within that tolerance band. Checks range_high against resistance clusters and range_low against support clusters.",
+              "outputs": ["range_high_sr_aligned: bool", "range_low_sr_aligned: bool", "sr_quality_bonus: 0 | 5 | 10", "nearest_sr_levels: []"],
+              "conditions": {
+                "full_alignment": "Both range_high AND range_low align with prior HTF pivots within 0.5% → sr_quality_bonus = 10",
+                "partial_alignment": "One boundary aligned → sr_quality_bonus = 5",
+                "no_alignment": "Neither boundary near prior structure → sr_quality_bonus = 0 (NOT a hard gate — range proceeds with reduced score)",
+                "sr_definition": "An S/R level is a price band where 2+ prior swing pivots (highs or lows) cluster within SR_PROXIMITY_PCT",
+                "psychological_levels": "Round numbers (100, 1000, etc.) and prior ATH/ATL count as implicit S/R levels",
+                "htf_priority": "1D pivots weighted 2× over 4H pivots when computing sr_quality_bonus"
+              }
+            },
+            {
+              "step_id": "3.3",
+              "name": "IMPULSIVE_MOVE_INVALIDATION",
+              "_annotation": "NEW (range validation): Dedicated hard gate that invalidates any range whose internal price action is classified as impulsive rather than consolidation. An impulsive range indicates a continuation move, not an accumulation/distribution schematic. Consumes impulse_ratio from step 3.1.",
+              "module_or_function": "tct_schematics.py → validate_range_character(candles, impulse_ratio)",
+              "inputs": ["candle data within range boundaries", "impulse_ratio from step 3.1", "EQ from step 3.0"],
+              "decision_logic": "Applies a three-factor impulse test to the range. A range fails (is impulsive) if it triggers any TWO of the three impulse indicators: (1) impulse_ratio > 0.70, (2) average candle body size in directional run > 2× average body size in opposing run, (3) price spends < 20% of candle count within 10% of EQ. Any two failures → range_valid = False → HARD FAIL.",
+              "outputs": ["impulsive: bool", "impulse_reason: string[]", "range_character: 'consolidation' | 'impulse' | 'borderline'"],
+              "conditions": {
+                "HARD_GATE": "impulsive == True → range_valid = False → discard range candidate immediately",
+                "impulse_factor_1": "impulse_ratio > 0.70 (from step 3.1) → contributes to impulse classification",
+                "impulse_factor_2": "avg_body_directional / avg_body_opposing > 2.0 → strong momentum bias within range",
+                "impulse_factor_3": "EQ_dwell_pct < 0.20 — price avoided midpoint, consistent with trending rather than ranging",
+                "borderline": "Exactly ONE factor triggered → range_character = 'borderline' → proceed but record warning; quality score reduced in step 7.1",
+                "v_shape_catch": "A V-shape (steep down + steep up, or vice versa) fails factor_1 and factor_3 simultaneously → always classified as impulsive → HARD FAIL"
               }
             }
           ]
@@ -187,18 +232,19 @@
           "step_id": "5.0",
           "name": "BOS_CONFIRMATION_AND_LTF_CASCADE",
           "module_or_function": "schematics_5b_trader.py → _try_confirm_with_ltf_bos() / refine_schematic_bos_with_ltf()",
-          "_annotation": "MODIFIED (bias-init enforcement): Added htf_bias and ltf_bias to inputs. BOS direction is validated against htf_bias before cascade refinement begins — a BOS in the wrong direction relative to htf_bias is discarded immediately rather than being refined on LTF.",
+          "_annotation": "MODIFIED (bias-init enforcement + BOS validity): Added htf_bias and ltf_bias to inputs. BOS direction is validated against htf_bias before cascade refinement begins — a BOS in the wrong direction relative to htf_bias is discarded immediately rather than being refined on LTF. BOS must now pass step 5.2 structural validity before bos_confirmed is set to True.",
           "inputs": ["schematic from step 4.0", "MTF candle data", "LTF candle data (5m, 1m)", "htf_bias from step 2.0", "ltf_bias from step 2.3"],
-          "decision_logic": "After Tap3, searches for a Break of Structure (BOS) — a candle that CLOSES above the highest point between Tap2 and Tap3 (bullish) or below the lowest point (bearish). Cascades through lower timeframes (5m → 1m) to find the earliest confirmation for best risk-reward. Lowest TF BOS overwrites higher TF BOS.",
+          "decision_logic": "After Tap3, searches for a Break of Structure (BOS) — a candle whose BODY CLOSES above the highest point between Tap2 and Tap3 (bullish) or below the lowest point (bearish). Wick-only closes do not qualify. Cascades through lower timeframes (5m → 1m) to find the earliest confirmation for best risk-reward. Lowest TF BOS overwrites higher TF BOS. Each BOS candidate is forwarded to step 5.2 for structural validity before being accepted.",
           "outputs": ["bos_confirmed: bool", "bos_price", "bos_timeframe", "bos_candle_index", "refined_entry_price", "refined_stop_price"],
           "conditions": {
-            "mtf_bos_search": "On the schematic timeframe, find first candle CLOSE beyond the swing high/low between Tap2-Tap3",
+            "mtf_bos_search": "On the schematic timeframe, find first candle BODY CLOSE beyond the swing high/low between Tap2-Tap3 (wick-only closes do not qualify)",
             "ltf_cascade": "After MTF BOS found, search 5m then 1m for earlier BOS — LOWEST TF wins (best R:R)",
             "bos_staleness_check": "BOS must occur within MAX_STALE candles of Tap3 (varies by TF: 1d=2, 4h=3, 1h=3, 30m=4, 5m=10, 1m=30). If exceeded → STALE → REJECT",
             "ltf_internal_structure": "Primary: search for BOS using internal structure swings between Tap2-Tap3 timestamps",
             "ltf_fallback": "If no internal structure, use post-Tap3 swings as fallback BOS points",
             "eq_filter_v1": "In v1 mode: BOS must be below EQ for accumulation, above EQ for distribution",
-            "hard_gate": "If no BOS found on any timeframe → HARD FAIL → cannot enter trade"
+            "hard_gate": "If no BOS found on any timeframe → HARD FAIL → cannot enter trade",
+            "structural_validity_gate": "Every BOS candidate must pass step 5.2 before bos_confirmed = True is set"
           },
           "children": [
             {
@@ -206,12 +252,27 @@
               "name": "LTF_BOS_REFINEMENT",
               "module_or_function": "schematics_5b_trader.py → refine_schematic_bos_with_ltf()",
               "inputs": ["MTF BOS price/time", "5m and 1m candle data"],
-              "decision_logic": "Fetches LTF candles around the MTF BOS zone. Identifies LTF swing structure and finds first LTF BOS (close beyond LTF swing). If found, uses LTF BOS price as entry and LTF swing extreme as stop — tighter risk, better R:R.",
+              "decision_logic": "Fetches LTF candles around the MTF BOS zone. Identifies LTF swing structure and finds first LTF BOS (body close beyond LTF swing). If found, uses LTF BOS price as entry and LTF swing extreme as stop — tighter risk, better R:R.",
               "outputs": ["ltf_bos_price", "ltf_stop_price", "ltf_timeframe", "improved_rr"],
               "conditions": {
                 "5m_first": "Search 5m candles first",
                 "1m_override": "If 1m BOS found, it overwrites 5m BOS (tighter = better)",
                 "no_ltf_found": "If no LTF BOS → fall back to MTF BOS levels"
+              }
+            },
+            {
+              "step_id": "5.2",
+              "name": "BOS_STRUCTURAL_VALIDITY_CHECK",
+              "_annotation": "NEW (BOS validation): Hard gate that rejects BOS candidates that are structurally weak — e.g., wick-only closes, low-body candles that barely clear the level, or BOS that occurs into a known S/R wall. Prevents false BOS entries caused by thin-market wicks or stop-hunt spikes.",
+              "module_or_function": "market_structure.py → validate_bos_structure(bos_candle, structure_level, sr_levels)",
+              "inputs": ["bos_candle OHLCV", "structure_level (swing high/low being broken)", "bos_timeframe", "sr_levels from step 3.2"],
+              "decision_logic": "Applies three checks to each BOS candidate: (1) body-close check — candle body (min(open,close)) must close beyond the structure level, not just the wick; (2) body-size check — body size must exceed BOS_MIN_BODY_TO_RANGE_PCT (0.1% of price) to filter noise; (3) S/R wall check — if a prior HTF S/R level exists within SR_PROXIMITY_PCT (0.5%) BEYOND the BOS level in the trade direction, the BOS is marked 'contested' and may be rejected unless POI is present at that S/R level.",
+              "outputs": ["bos_structurally_valid: bool", "bos_body_close: bool", "bos_contested: bool", "contesting_sr_level: float | null"],
+              "conditions": {
+                "HARD_GATE_body_close": "BOS_BODY_CLOSE_REQUIRED = True → candle body must close beyond structure_level, wick-only = REJECT",
+                "HARD_GATE_body_size": "body_size < BOS_MIN_BODY_TO_RANGE_PCT → too small to be meaningful → REJECT",
+                "contested_bos": "A valid SR wall exists within SR_PROXIMITY_PCT beyond the BOS in the trade direction → bos_contested = True; does NOT auto-reject but reduces BOS quality score in step 7.5 and requires Tier-1 POI at that level (step 6.8)",
+                "poi_at_sr_exception": "If an unmitigated FVG or RTZ exists at the contesting S/R level → bos_contested downgraded to bos_into_poi → allowed"
               }
             }
           ]
@@ -273,16 +334,19 @@
             },
             {
               "step_id": "6.4",
-              "name": "SUPPLY_DEMAND_VALIDATION_GATE",
-              "module_or_function": "decision_tree_bridge.py → _score_supply_demand_tree()",
-              "inputs": ["FVG zones (Fair Value Gaps)", "OB zones (Order Blocks)", "tap3_price", "schematic.direction"],
-              "decision_logic": "Verifies that a valid supply or demand zone exists near Tap3. FVG is a 3-candle pattern leaving an unmitigated gap. OB is a swing-structure point (last opposing candle before impulse). At least one must be present in the correct zone.",
-              "outputs": ["sd_valid: bool", "fvg_present: bool", "ob_present: bool"],
+              "name": "SUPPLY_DEMAND_AND_POI_IDENTIFICATION_GATE",
+              "_annotation": "MODIFIED (POI validation): Renamed from SUPPLY_DEMAND_VALIDATION_GATE to SUPPLY_DEMAND_AND_POI_IDENTIFICATION_GATE. Now identifies and classifies ALL active POIs (FVG, OB, RTZ) near Tap3, not just checking presence. Outputs a typed poi_list used by step 6.8 for confluence scoring. RTZ added as a valid Tier-1 POI type.",
+              "module_or_function": "decision_tree_bridge.py → _score_supply_demand_tree() + identify_poi_list()",
+              "inputs": ["FVG zones (Fair Value Gaps)", "OB zones (Order Blocks)", "RTZ zones (Reaction Trading Zones)", "tap3_price", "schematic.direction"],
+              "decision_logic": "Identifies all unmitigated supply/demand POIs within POI_PROXIMITY_TO_TAP3_PCT (1%) of Tap3. Classifies each POI by tier: Tier-1 = FVG or RTZ (strongest magnetic pull), Tier-2 = OB or S/R level (structural significance). Verifies at least one POI of any tier exists in the correct directional zone. Forwards the full poi_list to step 6.8 for confluence analysis.",
+              "outputs": ["sd_valid: bool", "fvg_present: bool", "ob_present: bool", "rtz_present: bool", "poi_list: [{type, tier, price, mitigated: bool}]"],
               "conditions": {
-                "for_bullish": "Demand zone (FVG or OB) must exist BELOW or AT Tap3 level",
-                "for_bearish": "Supply zone (FVG or OB) must exist ABOVE or AT Tap3 level",
-                "hard_gate": "If NO FVG and NO OB near Tap3 → HARD FAIL (unless schematic already confirmed via other path)",
-                "fvg_definition": "3 consecutive candles where candle[1].low > candle[0].high (bullish) or candle[1].high < candle[0].low (bearish)"
+                "for_bullish": "Demand zone (FVG, RTZ, or OB) must exist BELOW or AT Tap3 level",
+                "for_bearish": "Supply zone (FVG, RTZ, or OB) must exist ABOVE or AT Tap3 level",
+                "hard_gate": "If NO POI of any tier near Tap3 → HARD FAIL",
+                "fvg_definition": "3 consecutive candles where candle[1].low > candle[0].high (bullish) or candle[1].high < candle[0].low (bearish)",
+                "rtz_definition": "A Reaction Trading Zone is a price band where at least 2 prior significant reactions occurred, regardless of whether a clean FVG or OB is present",
+                "mitigation_check": "POIs that have been fully mitigated (price has traded through them) are excluded from the valid poi_list"
               }
             },
             {
@@ -322,6 +386,23 @@
                 "hard_fail_if": "HTF range intact (duration ≥ 24h) AND local displacement < 25% AND htf_bias ≠ session_bias → REJECT",
                 "exception_choch": "If Change of Character (CHoCH) detected via domino effect (L3→L2→L1 confirmation) → bypass RIG",
                 "exception_model_flow": "Model 1 → Model 2 conversion or schematic conversion → bypass allowed"
+              }
+            },
+            {
+              "step_id": "6.8",
+              "name": "POINT_OF_INTEREST_CONFLUENCE_GATE",
+              "_annotation": "NEW (POI validation): Hard gate that requires a qualifying Tier-1 or Tier-2 POI to be present at BOTH the Tap3 zone AND the BOS entry zone. A POI only at Tap3 but not at the entry is insufficient — the entry itself must have structural justification. Consumes poi_list from step 6.4 and BOS entry zone from step 5.0.",
+              "module_or_function": "decision_tree_bridge.py → validate_poi_confluence(poi_list, entry_zone, tap3_price)",
+              "inputs": ["poi_list from step 6.4", "refined_entry_price from step 5.0 / 5.1", "tap3_price from step 4.0", "bos_contested from step 5.2", "sr_levels from step 3.2"],
+              "decision_logic": "Checks two zones for POI presence: Zone A = Tap3 area (within POI_PROXIMITY_TO_TAP3_PCT of tap3_price) and Zone B = BOS entry area (within POI_PROXIMITY_TO_TAP3_PCT of refined_entry_price). Requires at least one unmitigated POI in Zone A AND at least one unmitigated POI in Zone B. If a contested BOS was flagged in step 5.2, the contesting S/R level must itself have a Tier-1 POI or the trade is rejected.",
+              "outputs": ["poi_tap3_valid: bool", "poi_entry_valid: bool", "poi_confluence_passed: bool", "best_poi_tier: 1 | 2 | null"],
+              "conditions": {
+                "HARD_GATE_zone_A": "No unmitigated POI in Zone A (Tap3 ± 1%) → HARD FAIL",
+                "HARD_GATE_zone_B": "No unmitigated POI in Zone B (entry ± 1%) → HARD FAIL",
+                "tier_1_bonus": "Tier-1 POI (FVG or RTZ) in Zone B → best_poi_tier = 1 → +5 pts forwarded to tree 2 scoring (step 7.2)",
+                "tier_2_only": "Only Tier-2 POI (OB or S/R level) in Zone B → best_poi_tier = 2 → no bonus; trade still valid",
+                "contested_bos_sr_requirement": "bos_contested = True → contesting S/R level MUST have a Tier-1 POI or trade is REJECTED",
+                "sr_level_as_poi": "An S/R level identified in step 3.2 within POI_PROXIMITY_TO_TAP3_PCT of the entry counts as a Tier-2 POI in Zone B"
               }
             }
           ]
@@ -651,10 +732,10 @@
   "data_flow_summary": {
     "1_market_data": "Exchange API → OHLCV candles (multi-TF)",
     "2_structure_analysis": "Candles → 6CR Pivots (1D) → Swing H/L → HTF Bias [step 2.0–2.2] → LTF Bias derived from MTF candles (4H/1H/30M) [step 2.3] → htf_bias + ltf_bias propagated to ALL downstream steps (3.0–8.0)",
-    "3_range_detection": "Candles + htf_bias + ltf_bias → Range boundaries → EQ + DL2",
+    "3_range_detection": "Candles + htf_bias + ltf_bias → Range boundaries → EQ + DL2 → [3.1] V-shape/impulse HARD GATE → [3.2] S/R alignment quality check → [3.3] Impulsive move HARD GATE",
     "4_schematic_build": "Range + Candles → Tap1/2/3 → Model classification",
-    "5_bos_confirmation": "Post-Tap3 candles → MTF BOS → LTF cascade refinement",
-    "6_gating": "All upstream → 7 hard gates (any fail = reject)",
+    "5_bos_confirmation": "Post-Tap3 candles → MTF BOS (body-close required) → [5.2] BOS structural validity HARD GATE → LTF cascade refinement",
+    "6_gating": "All upstream → 8 hard gates (any fail = reject): HTF/LTF alignment, BOS confirmed, R:R ≥ 1.5, POI+S/D at Tap3, liquidity sweep valid, TCT 5A schematic valid, RIG counter-bias, POI confluence at entry",
     "7_scoring": "Gate results → 6 trees + bonus → composite score (0-100)",
     "8_execution": "Score ≥ threshold → position sizing → liquidation check → order placement",
     "9_management": "Open position → partial TP → trailing SL → final exit",
