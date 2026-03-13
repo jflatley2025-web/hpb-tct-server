@@ -1,11 +1,14 @@
 {
   "meta": {
     "title": "HPB-TCT Trading Bot — Complete Operational Workflow Logic Map",
-    "version": "1.0",
-    "generated": "2026-03-12",
+    "version": "1.1",
+    "generated": "2026-03-13",
     "description": "Machine-readable hierarchical map of all decision logic in the Schematics-5B trading engine. Covers market bias determination, range validation, liquidity checks, session scaling, counter-bias protection, execution confidence, and trade management.",
     "entry_point": "schematics_5b_trader.py → Schematics5BTrader._scan_and_trade_locked()",
-    "scoring_model": "6-tree v1 (threshold 50) or 9-phase v2 (threshold 60)"
+    "scoring_model": "6-tree v1 (threshold 50) or 9-phase v2 (threshold 60)",
+    "changelog": {
+      "1.1": "Added MSCE (Multi-Session Confidence Engine) session multipliers for Asia, London, and NY sessions. Expanded step 7.8 with full per-session definitions and rationale. Added step 8.4 to apply MSCE multiplier to execution confidence before threshold gating."
+    }
   },
 
   "constants": {
@@ -28,7 +31,55 @@
     "LTF_BOS_TIMEFRAMES": ["5m", "1m"],
     "MAX_STALE_CANDLES": {
       "1d": 2, "4h": 3, "1h": 3, "30m": 4, "15m": 6, "5m": 10, "1m": 30
-    }
+    },
+
+    "_annotation_msce": "MSCE = Multi-Session Confidence Engine. Multipliers are applied to the composite_score AFTER all tree scoring to produce an adjusted_confidence value. This adjusted value is what is compared against the entry threshold in step 8.4. The 1% fixed risk rule (step 8.1) is never touched by MSCE — only entry gating changes.",
+    "MSCE_SESSION_MULTIPLIERS": {
+      "_note": "UTC windows are non-overlapping. Priority order for overlap resolution: london_ny > ny > london > asia > off_hours.",
+      "asia": {
+        "utc_start": 0,
+        "utc_end": 7,
+        "multiplier": 0.85,
+        "score_additive": 3,
+        "label": "Asia session",
+        "rationale": "Low liquidity, thin order books, frequent stop-hunts with no follow-through. Setups have higher false-positive rate. Confidence reduced."
+      },
+      "london": {
+        "utc_start": 7,
+        "utc_end": 13,
+        "multiplier": 1.10,
+        "score_additive": 7,
+        "label": "London session",
+        "rationale": "European institutional participation begins. Volume ramps, FVGs fill reliably, BOS signals carry more weight. Confidence elevated."
+      },
+      "london_ny": {
+        "utc_start": 13,
+        "utc_end": 16,
+        "multiplier": 1.25,
+        "score_additive": 10,
+        "label": "London/NY overlap",
+        "rationale": "Peak global liquidity window. Both European and US institutions active simultaneously. Highest probability of clean directional moves with follow-through. Maximum confidence."
+      },
+      "ny": {
+        "utc_start": 16,
+        "utc_end": 21,
+        "multiplier": 1.15,
+        "score_additive": 7,
+        "label": "NY session",
+        "rationale": "US institutions dominate. High volume, clear price discovery. Strong momentum continuation. Confidence elevated but below overlap peak."
+      },
+      "off_hours": {
+        "utc_start": 21,
+        "utc_end": 24,
+        "multiplier": 0.90,
+        "score_additive": 2,
+        "label": "NY close / off-hours",
+        "rationale": "NY session winding down. Position squaring creates noise. Setups taken here often reverse at Asia open. Confidence slightly reduced."
+      }
+    },
+    "MSCE_ADJUSTED_THRESHOLD_V2": 60,
+    "MSCE_ADJUSTED_THRESHOLD_V1": 50,
+    "_annotation_msce_threshold": "Thresholds remain the same numeric values but are compared against adjusted_confidence = composite_score × session_multiplier, not raw composite_score. This means a 60-pt raw score in Asia (×0.85) produces adjusted_confidence=51 and FAILS the v2 threshold, while the same score in London/NY overlap (×1.25) produces 75 and passes comfortably."
   },
 
   "workflow": [
@@ -411,19 +462,54 @@
               "name": "SESSION_TIMING_ADJUSTMENT",
               "module_or_function": "decision_tree_bridge.py → _score_session_timing()",
               "inputs": ["current UTC hour"],
-              "decision_logic": "Adjusts score based on which trading session is active. Higher scores during high-volume sessions (London/NY overlap), lower during Asia/off-hours. NOT a hard gate — just moves the needle on total score.",
-              "outputs": ["session_score: 2-10"],
+              "decision_logic": "Determines the active trading session from the current UTC hour and returns both a session score additive (added directly to composite_score) and a session confidence multiplier (used in step 8.4). NOT a hard gate — but the multiplier in step 8.4 CAN cause a trade to fail threshold after adjustment.",
+              "outputs": ["session_score: 2-10", "active_session: string", "session_multiplier: float"],
+              "_annotation": "MSCE v1.1 — Step 7.8 now outputs both a score additive (unchanged from v1.0) and a session_multiplier. The multiplier is NOT applied here; it is passed to step 8.4 for adjusted_confidence computation. Score additives in conditions match constants.MSCE_SESSION_MULTIPLIERS[session].score_additive.",
               "conditions": {
-                "london_ny_overlap": "13:00-16:00 UTC → 10 pts (peak liquidity)",
-                "ny_session": "13:00-21:00 UTC → 7 pts",
-                "london_session": "07:00-16:00 UTC → 7 pts",
-                "asia_session": "00:00-07:00 UTC → 3 pts (low volume)",
-                "off_hours": "Other times → 2 pts",
-                "multi_session_weights": {
-                  "asia_multiplier": 0.95,
-                  "london_multiplier": 1.05,
-                  "ny_multiplier": 1.15
+                "_session_windows_note": "Windows are non-overlapping UTC ranges. london_ny is evaluated BEFORE london and ny to capture the overlap correctly.",
+                "london_ny_overlap": {
+                  "utc_range": "13:00–16:00 UTC",
+                  "score_additive": 10,
+                  "session_multiplier": 1.25,
+                  "label": "London/NY overlap — peak liquidity",
+                  "rationale": "Both European and US institutions active. Highest historical follow-through rate on BOS signals. Maximum confidence."
+                },
+                "ny_session": {
+                  "utc_range": "16:00–21:00 UTC",
+                  "score_additive": 7,
+                  "session_multiplier": 1.15,
+                  "label": "NY session — strong confidence",
+                  "rationale": "US institutional flow dominant after London close. Clean directional moves, reliable FVG fills."
+                },
+                "london_session": {
+                  "utc_range": "07:00–13:00 UTC",
+                  "score_additive": 7,
+                  "session_multiplier": 1.10,
+                  "label": "London session — elevated confidence",
+                  "rationale": "European open ramps volume. Range breakouts carry more weight than Asia. Slightly lower than NY due to frequent reversals at London close."
+                },
+                "asia_session": {
+                  "utc_range": "00:00–07:00 UTC",
+                  "score_additive": 3,
+                  "session_multiplier": 0.85,
+                  "label": "Asia session — reduced confidence",
+                  "rationale": "Low liquidity, thin books. Stop-hunt deviations are common but reversal follow-through is weak. Higher false-positive rate on BOS. Multiplier intentionally conservative."
+                },
+                "off_hours": {
+                  "utc_range": "21:00–24:00 UTC",
+                  "score_additive": 2,
+                  "session_multiplier": 0.90,
+                  "label": "NY close / off-hours — slightly reduced confidence",
+                  "rationale": "Position squaring at NY close creates noise. Setups often reverse at Asia open. Small penalty applied."
                 }
+              },
+              "msce_multiplier_table": {
+                "_note": "Reference table matching constants.MSCE_SESSION_MULTIPLIERS. Source of truth is the constants block.",
+                "asia":       { "utc": "00–07", "multiplier": 0.85, "score_additive": 3  },
+                "london":     { "utc": "07–13", "multiplier": 1.10, "score_additive": 7  },
+                "london_ny":  { "utc": "13–16", "multiplier": 1.25, "score_additive": 10 },
+                "ny":         { "utc": "16–21", "multiplier": 1.15, "score_additive": 7  },
+                "off_hours":  { "utc": "21–24", "multiplier": 0.90, "score_additive": 2  }
               }
             }
           ]
@@ -433,12 +519,13 @@
           "step_id": "8.0",
           "name": "TRADE_EXECUTION",
           "module_or_function": "trade_execution.py → generate_execution_plan() / calculate_position_size()",
-          "inputs": ["composite_score from step 7.0", "entry_price", "stop_price", "target_price", "account_balance", "leverage"],
-          "decision_logic": "If composite score >= threshold, generates a full execution plan including position sizing, margin requirements, and liquidation safety checks. Verifies that the liquidation price is safely beyond the stop loss before placing any order.",
+          "inputs": ["composite_score from step 7.0", "session_multiplier from step 7.8", "entry_price", "stop_price", "target_price", "account_balance", "leverage"],
+          "decision_logic": "If composite score >= threshold, proceeds to MSCE confidence adjustment (step 8.4), then position sizing, liquidation safety check, and order placement. Step 8.4 may reject the trade even after passing the raw threshold if the session multiplier reduces adjusted_confidence below threshold.",
           "outputs": ["position_size (USDT)", "margin_required", "liquidation_price", "order_type", "execution_plan"],
           "conditions": {
-            "score_gate": "composite_score >= threshold (50 v1 / 60 v2) → proceed to execution",
-            "below_threshold": "composite_score < threshold → NO TRADE, log reason, continue scanning"
+            "score_gate": "composite_score >= threshold (50 v1 / 60 v2) → proceed to step 8.4 MSCE confidence check",
+            "msce_gate": "adjusted_confidence (composite_score × session_multiplier) >= threshold → proceed to order placement",
+            "below_threshold": "composite_score < threshold OR adjusted_confidence < threshold → NO TRADE, log reason, continue scanning"
           },
           "children": [
             {
@@ -451,7 +538,7 @@
               "conditions": {
                 "risk_formula": "position_size = (balance × 0.01) / abs(entry - stop) × entry",
                 "margin_check": "margin = position_size / leverage; must be ≤ available_balance",
-                "no_dynamic_scaling": "Risk is FIXED at 1% — does not adjust based on confidence or score"
+                "no_dynamic_scaling": "Risk is FIXED at 1% — does not adjust based on confidence, score, or MSCE session multiplier. The MSCE multiplier affects ONLY the execution confidence gate (step 8.4), never position size."
               }
             },
             {
@@ -481,6 +568,47 @@
                 "limit_alternative": "LIMIT at refined LTF price — 5% of trades (better entry but may miss)",
                 "stop_loss_order": "Placed simultaneously as SL order",
                 "take_profit_order": "Placed simultaneously as TP order"
+              }
+            },
+            {
+              "step_id": "8.4",
+              "name": "MSCE_EXECUTION_CONFIDENCE_ADJUSTMENT",
+              "module_or_function": "decision_tree_bridge.py → apply_msce_session_multiplier()",
+              "_annotation": "NEW in v1.1 — MSCE (Multi-Session Confidence Engine) step. Applies the session_multiplier from step 7.8 to the raw composite_score to produce an adjusted_confidence value. The adjusted_confidence is then re-checked against the entry threshold. This is the ONLY place the multiplier is applied. The 1% fixed risk rule in step 8.1 is NOT affected — position sizing is never scaled by session.",
+              "inputs": [
+                "composite_score from step 7.0",
+                "session_multiplier from step 7.8",
+                "active_session from step 7.8",
+                "entry_threshold (50 v1 / 60 v2)"
+              ],
+              "decision_logic": "Multiplies composite_score by the MSCE session multiplier to obtain adjusted_confidence. If adjusted_confidence falls below the entry threshold, the trade is rejected at this late stage. If it passes, execution proceeds normally. This creates a session-aware confidence floor without altering the scoring trees or risk parameters.",
+              "outputs": [
+                "adjusted_confidence: float",
+                "msce_gate_passed: bool",
+                "confidence_delta: float (adjusted_confidence - composite_score)",
+                "rejection_reason: 'MSCE_SESSION_CONFIDENCE_TOO_LOW' | null"
+              ],
+              "conditions": {
+                "formula": "adjusted_confidence = composite_score × session_multiplier",
+                "pass": "adjusted_confidence >= entry_threshold → proceed to order placement",
+                "fail": "adjusted_confidence < entry_threshold → REJECT trade, log 'MSCE_SESSION_CONFIDENCE_TOO_LOW: {active_session} multiplier {session_multiplier} reduced {composite_score} → {adjusted_confidence}'",
+                "examples": {
+                  "asia_near_threshold": "composite_score=62, asia_multiplier=0.85 → adjusted_confidence=52.7 → FAILS v2 threshold (60)",
+                  "london_ny_boost":     "composite_score=52, london_ny_multiplier=1.25 → adjusted_confidence=65.0 → PASSES v2 threshold (60)",
+                  "off_hours_marginal":  "composite_score=67, off_hours_multiplier=0.90 → adjusted_confidence=60.3 → PASSES v2 threshold (60) — barely",
+                  "ny_standard":         "composite_score=60, ny_multiplier=1.15 → adjusted_confidence=69.0 → PASSES v2 threshold comfortably"
+                },
+                "no_position_size_scaling": "MSCE multiplier NEVER adjusts position size or risk %. The 1% fixed risk rule from step 8.1 is invariant. Only the entry gate (confidence threshold) is affected.",
+                "log_always": "Always log active_session, session_multiplier, composite_score, adjusted_confidence, and gate result — regardless of pass/fail",
+                "fallback": "If session cannot be determined from UTC hour → use multiplier=1.0 (neutral) and log warning"
+              },
+              "msce_session_multiplier_reference": {
+                "_note": "Quick-reference copy. Canonical values live in constants.MSCE_SESSION_MULTIPLIERS.",
+                "asia":      { "utc": "00–07", "multiplier": 0.85 },
+                "london":    { "utc": "07–13", "multiplier": 1.10 },
+                "london_ny": { "utc": "13–16", "multiplier": 1.25 },
+                "ny":        { "utc": "16–21", "multiplier": 1.15 },
+                "off_hours": { "utc": "21–24", "multiplier": 0.90 }
               }
             }
           ]
@@ -628,8 +756,9 @@
     "4_schematic_build": "Range + Candles → Tap1/2/3 → Model classification",
     "5_bos_confirmation": "Post-Tap3 candles → MTF BOS → LTF cascade refinement",
     "6_gating": "All upstream → 7 hard gates (any fail = reject)",
-    "7_scoring": "Gate results → 6 trees + bonus → composite score (0-100)",
-    "8_execution": "Score ≥ threshold → position sizing → liquidation check → order placement",
+    "7_scoring": "Gate results → 6 trees + bonus + session additive → composite score (0-100); session_multiplier output to step 8.4",
+    "8_execution": "Score ≥ threshold → [8.4 MSCE: adjusted_confidence = score × session_multiplier, re-check threshold] → position sizing (fixed 1%) → liquidation check → order placement",
+    "8_msce_note": "MSCE multiplier (0.85–1.25) is applied ONLY at the execution confidence gate (step 8.4). Position size is never scaled by session.",
     "9_management": "Open position → partial TP → trailing SL → final exit",
     "10_persistence": "All state → JSON on disk + GitHub sync"
   },
