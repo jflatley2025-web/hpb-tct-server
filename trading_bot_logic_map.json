@@ -1,7 +1,7 @@
 {
   "workflow_name": "TCT_5B_Full_Workflow",
   "version": "v1.4",
-  "description": "Full TCT 5B pipeline including HTF/LTF alignment, RIG, POI, scoring, execution, and trade management.",
+  "description": "Full TCT 5B pipeline including HTF/LTF alignment, RIG, POI, scoring, execution, and  trade management.",
   "steps": [
     {
       "step_id": "6.0",
