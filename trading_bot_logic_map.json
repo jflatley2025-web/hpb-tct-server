@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "HPB-TCT Trading Bot — Complete Operational Workflow Logic Map",
-    "version": "1.3",
+    "version": "1.4",
     "generated": "2026-03-13",
     "description": "Machine-readable hierarchical map of all decision logic in the Schematics-5B trading engine. Covers market bias determination, range validation, liquidity checks, session scaling, counter-bias protection, execution confidence, and trade management.",
     "entry_point": "schematics_5b_trader.py → Schematics5BTrader._scan_and_trade_locked()",
@@ -9,7 +9,8 @@
     "changelog": {
       "1.1": "Added MSCE (Multi-Session Confidence Engine) session multipliers for Asia, London, and NY sessions. Expanded step 7.8 with full per-session definitions and rationale. Added step 8.4 to apply MSCE multiplier to execution confidence before threshold gating.",
       "1.2": "Implemented full Range Integrity Gate (RIG) at step 6.7. Replaced 3-condition stub with 4-sub-step implementation: 6.7.1 HTF range integrity assessment (duration, DL2 violations, displacement), 6.7.2 counter-bias detection, 6.7.3 CHoCH domino bypass check (L3→L2→L1 + model-flow), 6.7.4 session-adjusted RIG verdict. Added RIG constants block with per-session displacement thresholds. Updated step 6.0 inputs.",
-      "1.3": "Aggregated execution confidence correctly. Added COMPOSITE_SCORE_RAW_MAX(110), COMPOSITE_SCORE_MAX(100), and RIG_CONFIDENCE_PENALTIES constants. Fixed step 7.0 with explicit score formula, component max table, and score cap annotation. Removed threshold pre-check from step 7.0 conditions. Expanded step 8.4 into EXECUTION_CONFIDENCE_AGGREGATION: unified three-factor formula (min(score,100) × session_multiplier × rig_confidence_factor), single authoritative threshold gate, full confidence_components schema, worked examples for all session×RIG combinations. Removed redundant threshold pre-filter from step 8.0."
+      "1.3": "Aggregated execution confidence correctly. Added COMPOSITE_SCORE_RAW_MAX(110), COMPOSITE_SCORE_MAX(100), and RIG_CONFIDENCE_PENALTIES constants. Fixed step 7.0 with explicit score formula, component max table, and score cap annotation. Removed threshold pre-check from step 7.0 conditions. Expanded step 8.4 into EXECUTION_CONFIDENCE_AGGREGATION: unified three-factor formula (min(score,100) × session_multiplier × rig_confidence_factor), single authoritative threshold gate, full confidence_components schema, worked examples for all session×RIG combinations. Removed redundant threshold pre-filter from step 8.0.",
+      "1.4": "Added altcoin and liquidity alignment. New hard gate step 6.8 (ALTCOIN_LIQUIDITY_ALIGNMENT_GATE) with 3 sub-steps: 6.8.1 symbol tier classification (major/large_cap_alt/small_cap_alt by 24h volume), 6.8.2 volume+spread hard gate (min 10M USDT, max 0.15% spread), 6.8.3 BTC correlation gate (small-cap double-counter = hard fail; large-cap misalignment = soft penalty). New soft scoring tree step 7.9 (TREE_9_MARKET_MICROSTRUCTURE, 0-10 pts) with sub-steps: 7.9.1 funding rate assessment (0-4 pts, direction-sensitive), 7.9.2 OI trend alignment (0-3 pts), 7.9.3 CVD alignment (0-3 pts, BTC correlation soft-penalty applied here). Updated score formula to include T9, raw_max updated 110→120. Added 7 new altcoin/liquidity constants."
     }
   },
 
@@ -117,7 +118,31 @@
       "choch_bypass:partial_domino":{ "factor": 0.90, "rationale": "Only 2-of-3 CHoCH levels confirmed — moderate conviction; 10% confidence reduction" },
       "displacement_sufficient":    { "factor": 0.85, "rationale": "Counter-bias trade that passed via price displacement alone — no CHoCH structural support; 15% confidence reduction (highest penalty)" }
     },
-    "_annotation_exec_confidence_formula": "Full execution confidence chain: (1) raw_score = sum of T1-T6 + rr_bonus + session_additive; (2) capped_score = min(raw_score, 100); (3) session_adjusted = capped_score × session_multiplier; (4) execution_confidence = session_adjusted × rig_confidence_factor. Gate: execution_confidence >= ENTRY_THRESHOLD (60 v2, 50 v1) → ENTER. Single check at step 8.4 — no earlier threshold pre-filter."
+    "_annotation_exec_confidence_formula": "Full execution confidence chain: (1) raw_score = sum of T1-T6 + rr_bonus + session_additive + microstructure_score; (2) capped_score = min(raw_score, 100); (3) session_adjusted = capped_score × session_multiplier; (4) execution_confidence = session_adjusted × rig_confidence_factor. Gate: execution_confidence >= ENTRY_THRESHOLD (60 v2, 50 v1) → ENTER. Single check at step 8.4 — no earlier threshold pre-filter.",
+
+    "_annotation_altcoin_liquidity": "Altcoin and liquidity alignment checks are split across two areas: (1) hard gate at step 6.8 — enforces minimum volume, spread, and BTC correlation floors that cannot be scored around; (2) soft scoring tree at step 7.9 — awards 0-10 pts for market microstructure quality (funding, OI, CVD).",
+    "ALTCOIN_MIN_24H_VOLUME_USDT": 10000000,
+    "_annotation_alt_min_vol": "Minimum 24-hour trading volume in USDT for any non-major symbol. Below $10M, FVGs do not fill cleanly and SL orders risk material slippage. Hard fail at step 6.8.2.",
+    "ALTCOIN_SPREAD_MAX_PCT": 0.0015,
+    "_annotation_alt_spread": "Maximum bid-ask spread as a fraction of mid-price (0.15%). Above this, entry precision is degraded beyond acceptable tolerance for TCT setups. Hard fail at step 6.8.2.",
+    "ALTCOIN_TIER_MAJOR_VOLUME_USD": 500000000,
+    "_annotation_alt_tier_major": "Symbols with 24h volume >= $500M are classified as 'major' (BTC, ETH). Exempt from BTC correlation gate — they ARE the reference.",
+    "ALTCOIN_TIER_LARGE_CAP_VOLUME_USD": 50000000,
+    "_annotation_alt_tier_large": "Symbols with 24h volume $50M-$500M are classified as 'large_cap_alt' (SOL, BNB, XRP, etc.). BTC correlation misalignment triggers a score penalty (step 7.9) but NOT a hard fail.",
+    "ALTCOIN_TIER_SMALL_CAP_THRESHOLD_USD": 50000000,
+    "_annotation_alt_tier_small": "Symbols below $50M 24h volume are 'small_cap_alt'. Subject to stricter BTC correlation gate: double-counter (counter-BTC AND counter-htf_bias) is a HARD FAIL at step 6.8.3.",
+    "FUNDING_RATE_NEUTRAL_THRESHOLD": 0.0001,
+    "_annotation_funding_neutral": "Funding rates below 0.01%/8h (absolute value) are considered neutral. Full score awarded at step 7.9.1.",
+    "FUNDING_RATE_ELEVATED_THRESHOLD": 0.0003,
+    "_annotation_funding_elevated": "Funding rates 0.01%-0.03%/8h suggest moderate positioning imbalance. Partial score penalty at step 7.9.1 for overcrowded-side trades.",
+    "FUNDING_RATE_EXTREME_THRESHOLD": 0.0005,
+    "_annotation_funding_extreme": "Funding rates above 0.05%/8h indicate severely overcrowded positions. Score penalised to 0 at step 7.9.1 for the crowded-side trade direction.",
+    "OI_TREND_LOOKBACK_PERIODS": 6,
+    "_annotation_oi_lookback": "OI trend is measured over the last 6 × 4H candles (24h). Rising OI = institutional commitment; declining OI = unwinding.",
+    "CVD_TREND_LOOKBACK_PERIODS": 12,
+    "_annotation_cvd_lookback": "CVD trend is measured over the last 12 × 1H candles (12h). CVD trending in the trade direction confirms net buy/sell pressure alignment.",
+    "COMPOSITE_SCORE_RAW_MAX": 120,
+    "_annotation_raw_max_updated": "Updated in v1.4 from 110 to 120 to account for T9 (market microstructure, 0-10 pts). Breakdown: T1(20)+T2(20)+T3(15)+T4(20)+T5(15)+T6(5)+T7_rr(5)+T8_session(10)+T9_microstructure(10) = 120. Cap remains at 100."
   },
 
   "workflow": [
@@ -303,7 +328,7 @@
           "outputs": ["all_gates_passed: bool", "rejection_reason: string | null", "rig_details: object"],
           "conditions": {
             "HARD_GATES": "ALL must pass or trade is rejected",
-            "gate_order": "6.1 HTF alignment → 6.2 BOS confirmed → 6.3 R:R ≥ 1.5 → 6.4 S/D zone → 6.5 liquidity sweep → 6.6 TCT 5A validity → 6.7 RIG counter-bias protection"
+            "gate_order": "6.1 HTF alignment → 6.2 BOS confirmed → 6.3 R:R ≥ 1.5 → 6.4 S/D zone → 6.5 liquidity sweep → 6.6 TCT 5A validity → 6.7 RIG counter-bias protection → 6.8 altcoin/liquidity alignment"
           },
           "children": [
             {
@@ -543,6 +568,111 @@
                   }
                 }
               ]
+            },
+            {
+              "step_id": "6.8",
+              "name": "ALTCOIN_LIQUIDITY_ALIGNMENT_GATE",
+              "module_or_function": "decision_tree_bridge.py → _check_altcoin_liquidity_alignment()",
+              "_annotation": "NEW in v1.4. Hard gate added after RIG (6.7). Validates that the trading symbol has sufficient liquidity for safe execution and that altcoin setups are not structurally opposed to BTC/ETH directional flow. Runs after all prior gates to avoid wasting liquidity API calls on setups that fail earlier checks.",
+              "inputs": [
+                "symbol (e.g. 'SOLUSDT')",
+                "volume_24h_usdt from exchange ticker",
+                "current_bid, current_ask (for spread calculation)",
+                "btc_4h_bias (from BTC HTF structure, same method as step 2.0)",
+                "schematic.direction from step 4.0",
+                "htf_bias from step 2.0"
+              ],
+              "outputs": [
+                "altcoin_gate_passed: bool",
+                "symbol_tier: 'major' | 'large_cap_alt' | 'small_cap_alt'",
+                "volume_24h_usdt: float",
+                "spread_pct: float",
+                "btc_correlation_status: 'exempt' | 'aligned' | 'misaligned_soft' | 'misaligned_hard'",
+                "rejection_reason: string | null"
+              ],
+              "decision_logic": "Runs three sub-checks in order. (1) Classify the symbol tier by 24h volume. (2) Hard-check minimum volume and spread against tier-appropriate floors. (3) For altcoins, check BTC 4H directional alignment — small-cap double-counter is a hard fail; large-cap misalignment is flagged for score penalty only.",
+              "conditions": {
+                "fast_pass_major": "symbol_tier == 'major' → skip BTC correlation check (BTC/ETH ARE the reference); proceed to sub-steps 6.8.1 and 6.8.2 only",
+                "hard_fail_volume": "volume_24h_usdt < ALTCOIN_MIN_24H_VOLUME_USDT (10M) → REJECT: INSUFFICIENT_LIQUIDITY",
+                "hard_fail_spread": "spread_pct > ALTCOIN_SPREAD_MAX_PCT (0.15%) → REJECT: SPREAD_TOO_WIDE"
+              },
+              "children": [
+                {
+                  "step_id": "6.8.1",
+                  "name": "SYMBOL_TIER_CLASSIFICATION",
+                  "module_or_function": "decision_tree_bridge.py → _classify_symbol_tier()",
+                  "_annotation": "NEW in v1.4. Classifies the symbol into a liquidity tier based on 24h volume. Tier determines which subsequent checks apply and at what strictness. Tier is NOT a hard gate itself — it informs 6.8.2 and 6.8.3.",
+                  "inputs": [
+                    "symbol",
+                    "volume_24h_usdt",
+                    "current_bid, current_ask"
+                  ],
+                  "decision_logic": "Classifies by 24h volume thresholds. Computes spread_pct from current bid/ask. Outputs are passed to 6.8.2 and 6.8.3.",
+                  "outputs": [
+                    "symbol_tier: 'major' | 'large_cap_alt' | 'small_cap_alt'",
+                    "volume_24h_usdt: float",
+                    "spread_pct: float (= (ask - bid) / mid_price)"
+                  ],
+                  "conditions": {
+                    "major": "volume_24h_usdt >= ALTCOIN_TIER_MAJOR_VOLUME_USD ($500M) → symbol_tier = 'major' (e.g. BTCUSDT, ETHUSDT)",
+                    "large_cap_alt": "volume_24h_usdt >= ALTCOIN_TIER_LARGE_CAP_VOLUME_USD ($50M) AND < $500M → symbol_tier = 'large_cap_alt' (e.g. SOLUSDT, BNBUSDT, XRPUSDT)",
+                    "small_cap_alt": "volume_24h_usdt < $50M → symbol_tier = 'small_cap_alt'",
+                    "spread_formula": "spread_pct = (current_ask - current_bid) / ((current_ask + current_bid) / 2)"
+                  }
+                },
+                {
+                  "step_id": "6.8.2",
+                  "name": "VOLUME_AND_SPREAD_GATE",
+                  "module_or_function": "decision_tree_bridge.py → _check_volume_and_spread()",
+                  "_annotation": "NEW in v1.4. Hard gate on execution feasibility. Minimum volume ensures FVGs and liquidity zones are real (not sparse, easily swept by a single large order). Maximum spread ensures entry price precision is not degraded below TCT tolerance.",
+                  "inputs": [
+                    "volume_24h_usdt from step 6.8.1",
+                    "spread_pct from step 6.8.1",
+                    "symbol_tier from step 6.8.1"
+                  ],
+                  "decision_logic": "Hard fails if volume is below the minimum or spread is above the maximum. These thresholds apply to ALL tiers — even majors can fail if their spread is anomalous (e.g. during extreme volatility events).",
+                  "outputs": [
+                    "volume_gate_passed: bool",
+                    "spread_gate_passed: bool",
+                    "rejection_reason: string | null"
+                  ],
+                  "conditions": {
+                    "volume_hard_fail": "volume_24h_usdt < ALTCOIN_MIN_24H_VOLUME_USDT (10M USDT) → REJECT. rejection_reason = 'INSUFFICIENT_LIQUIDITY: {symbol} volume={volume_24h_usdt:.0f} < 10M threshold'",
+                    "spread_hard_fail": "spread_pct > ALTCOIN_SPREAD_MAX_PCT (0.15%) → REJECT. rejection_reason = 'SPREAD_TOO_WIDE: {symbol} spread={spread_pct:.4f} > 0.15% threshold'",
+                    "pass": "volume_24h_usdt >= 10M AND spread_pct <= 0.15% → PASS",
+                    "volume_rationale": "Below $10M volume, limit orders at FVG boundaries may not fill or may move price significantly. SL and TP orders cannot be relied upon to execute at stated prices.",
+                    "spread_rationale": "A 0.15% spread on a 0.2% BOS distance (step 5.0) means the setup's entry edge is nearly consumed by transaction costs before the trade begins."
+                  }
+                },
+                {
+                  "step_id": "6.8.3",
+                  "name": "BTC_CORRELATION_ALIGNMENT_GATE",
+                  "module_or_function": "decision_tree_bridge.py → _check_btc_correlation()",
+                  "_annotation": "NEW in v1.4. Altcoins are structurally correlated to BTC during most market regimes. A counter-BTC setup on an altcoin carries significantly elevated failure risk. Hard gate for small-cap double-counter (counter-BTC + counter-htf_bias). Soft penalty for large-cap misalignment (score deduction at step 7.9).",
+                  "inputs": [
+                    "symbol_tier from step 6.8.1",
+                    "btc_4h_bias: 'bullish' | 'bearish' | 'neutral' (from BTC HTF structure, same 6CR pivot method as step 2.0 applied to BTC 4H)",
+                    "schematic.direction from step 4.0",
+                    "htf_bias from step 2.0"
+                  ],
+                  "decision_logic": "Major symbols bypass this check entirely. For large_cap_alt: checks BTC 4H bias against schematic direction — misalignment flags btc_correlation_status='misaligned_soft' for penalty at step 7.9, but does NOT hard fail. For small_cap_alt: if BTC 4H bias is OPPOSITE to schematic.direction AND htf_bias is ALSO opposite (double-counter) → HARD FAIL. If only BTC is misaligned but htf_bias is aligned → soft penalty only.",
+                  "outputs": [
+                    "btc_correlation_status: 'exempt' | 'aligned' | 'misaligned_soft' | 'misaligned_hard'",
+                    "btc_4h_bias: string",
+                    "correlation_gate_passed: bool",
+                    "rejection_reason: string | null"
+                  ],
+                  "conditions": {
+                    "exempt": "symbol_tier == 'major' → btc_correlation_status = 'exempt', correlation_gate_passed = True",
+                    "aligned": "schematic.direction matches btc_4h_bias → btc_correlation_status = 'aligned', correlation_gate_passed = True",
+                    "btc_neutral_pass": "btc_4h_bias == 'neutral' → btc_correlation_status = 'aligned' (neutral BTC does not oppose any direction), correlation_gate_passed = True",
+                    "large_cap_misalignment": "symbol_tier == 'large_cap_alt' AND schematic.direction ≠ btc_4h_bias AND btc_4h_bias ≠ 'neutral' → btc_correlation_status = 'misaligned_soft', correlation_gate_passed = True (soft penalty at 7.9, NOT a hard fail)",
+                    "small_cap_soft_fail": "symbol_tier == 'small_cap_alt' AND schematic.direction ≠ btc_4h_bias AND htf_bias == schematic.direction → btc_correlation_status = 'misaligned_soft', correlation_gate_passed = True (htf aligned but BTC misaligned — score penalty only)",
+                    "small_cap_hard_fail": "symbol_tier == 'small_cap_alt' AND schematic.direction ≠ btc_4h_bias AND htf_bias ≠ schematic.direction → btc_correlation_status = 'misaligned_hard', REJECT. rejection_reason = 'SMALL_CAP_DOUBLE_COUNTER: {symbol} tier=small_cap, schematic={schematic.direction}, btc_4h={btc_4h_bias}, htf_bias={htf_bias}'",
+                    "double_counter_rationale": "Small-cap alts moving against BOTH BTC flow and their own HTF structure simultaneously have historically near-zero follow-through probability. This is the highest-risk counter-bias configuration and is non-negotiable."
+                  }
+                }
+              ]
             }
           ]
         },
@@ -568,20 +698,22 @@
             "session_multiplier: float (passed through to step 8.4)"
           ],
           "conditions": {
-            "score_formula": "raw_composite_score = range_score(T1) + sd_score(T2) + liquidity_score(T3) + tct_5a_score(T4) + tct_5b_score(T5) + advanced_score(T6) + rr_bonus(T7) + session_additive(T8)",
+            "score_formula": "raw_composite_score = range_score(T1) + sd_score(T2) + liquidity_score(T3) + tct_5a_score(T4) + tct_5b_score(T5) + advanced_score(T6) + rr_bonus(T7) + session_additive(T8) + microstructure_score(T9)",
             "score_cap": "composite_score = min(raw_composite_score, COMPOSITE_SCORE_MAX=100)",
-            "score_cap_rationale": "Session additive can push raw score above 100 in peak session (e.g. perfect setup in London/NY overlap: 95 tree pts + 10 session = 105 raw → capped at 100). Cap ensures multipliers in step 8.4 always start from a bounded [0,100] base.",
+            "score_cap_rationale": "Session additive and microstructure score can push raw above 100. Cap at 100 ensures step 8.4 multipliers always operate on a bounded [0,100] base.",
             "max_by_component": {
-              "T1_range_structure": "0-20",
-              "T2_supply_demand":   "0-20",
-              "T3_liquidity":       "0-15",
-              "T4_tct_5a":          "0-20",
-              "T5_tct_5b":          "0-15",
-              "T6_advanced":        "0-5",
-              "T7_rr_bonus":        "0-5",
-              "T8_session_additive":"2-10",
-              "raw_max":            110,
-              "capped_max":         100
+              "T1_range_structure":       "0-20",
+              "T2_supply_demand":         "0-20",
+              "T3_liquidity":             "0-15",
+              "T4_tct_5a":               "0-20",
+              "T5_tct_5b":               "0-15",
+              "T6_advanced":             "0-5",
+              "T7_rr_bonus":             "0-5",
+              "T8_session_additive":     "2-10",
+              "T9_microstructure":       "0-10",
+              "raw_max":                 120,
+              "capped_max":              100,
+              "_note_v1_4": "T9 added in v1.4. Raw max updated from 110 to 120. Cap unchanged at 100."
             },
             "no_threshold_check": "Step 7.0 does NOT check against entry threshold. The sole threshold comparison is at step 8.4 after session_multiplier and rig_confidence_factor are applied."
           },
@@ -731,6 +863,82 @@
                 "ny":         { "utc": "16–21", "multiplier": 1.15, "score_additive": 7  },
                 "off_hours":  { "utc": "21–24", "multiplier": 0.90, "score_additive": 2  }
               }
+            },
+            {
+              "step_id": "7.9",
+              "name": "TREE_9_MARKET_MICROSTRUCTURE",
+              "module_or_function": "decision_tree_bridge.py → _score_market_microstructure()",
+              "_annotation": "NEW in v1.4. Soft scoring tree for market microstructure quality. NOT a hard gate — low scores reduce the composite score but do not reject the trade. Contributes 0-10 pts to raw_composite_score. Inputs are exchange-sourced: funding rate (perpetual), open interest, and CVD from the 1H chart.",
+              "inputs": [
+                "current_funding_rate_per_8h (perpetual futures funding)",
+                "oi_series: open interest over last OI_TREND_LOOKBACK_PERIODS (6 × 4H candles)",
+                "cvd_series: cumulative volume delta over last CVD_TREND_LOOKBACK_PERIODS (12 × 1H candles)",
+                "schematic.direction from step 4.0",
+                "btc_correlation_status from step 6.8.3"
+              ],
+              "outputs": ["microstructure_score: 0-10"],
+              "decision_logic": "Sums three sub-scores: funding_rate_score (0-4 pts), oi_trend_score (0-3 pts), and cvd_alignment_score (0-3 pts). Returns total microstructure_score for addition to composite_score in step 7.0.",
+              "children": [
+                {
+                  "step_id": "7.9.1",
+                  "name": "FUNDING_RATE_ASSESSMENT",
+                  "module_or_function": "decision_tree_bridge.py → _score_funding_rate()",
+                  "_annotation": "NEW in v1.4. Funding rate measures whether the perpetual futures market is overcrowded in one direction. High positive funding means longs are paying shorts — longs are overcrowded, increasing reversal risk for long trades. Scoring is direction-sensitive: extreme funding AGAINST the trade direction = maximum penalty; extreme funding IN FAVOR (market paying you) = reward.",
+                  "inputs": [
+                    "current_funding_rate_per_8h",
+                    "schematic.direction"
+                  ],
+                  "outputs": ["funding_rate_score: 0-4"],
+                  "conditions": {
+                    "neutral_funding": "abs(funding_rate) < FUNDING_RATE_NEUTRAL_THRESHOLD (0.01%) → funding_rate_score = 4 (healthy, no crowd imbalance)",
+                    "elevated_against_trade_long": "funding_rate > FUNDING_RATE_ELEVATED_THRESHOLD (0.03%) AND schematic.direction == 'bullish' → funding_rate_score = 2 (longs overcrowded, elevated risk)",
+                    "elevated_against_trade_short": "funding_rate < -FUNDING_RATE_ELEVATED_THRESHOLD AND schematic.direction == 'bearish' → funding_rate_score = 2 (shorts overcrowded)",
+                    "extreme_against_trade_long": "funding_rate > FUNDING_RATE_EXTREME_THRESHOLD (0.05%) AND schematic.direction == 'bullish' → funding_rate_score = 0 (severely overcrowded longs — high reversal risk)",
+                    "extreme_against_trade_short": "funding_rate < -FUNDING_RATE_EXTREME_THRESHOLD AND schematic.direction == 'bearish' → funding_rate_score = 0 (severely overcrowded shorts)",
+                    "funding_favors_trade_long": "funding_rate < -FUNDING_RATE_ELEVATED_THRESHOLD AND schematic.direction == 'bullish' → funding_rate_score = 4 (shorts paying longs — squeeze fuel available)",
+                    "funding_favors_trade_short": "funding_rate > FUNDING_RATE_ELEVATED_THRESHOLD AND schematic.direction == 'bearish' → funding_rate_score = 4 (longs paying shorts — squeeze fuel available)",
+                    "elevated_aligned": "Elevated funding in trade direction (not extreme) → funding_rate_score = 3"
+                  }
+                },
+                {
+                  "step_id": "7.9.2",
+                  "name": "OI_TREND_ALIGNMENT",
+                  "module_or_function": "decision_tree_bridge.py → _score_oi_trend()",
+                  "_annotation": "NEW in v1.4. Open interest trend measures whether institutional smart money is entering or exiting. Rising OI in the direction of the trade indicates new positions are being built — conviction. Declining OI signals unwinding, which is hostile to continuation setups.",
+                  "inputs": [
+                    "oi_series (last 6 × 4H candles = 24h window)",
+                    "schematic.direction"
+                  ],
+                  "outputs": ["oi_trend_score: 0-3"],
+                  "conditions": {
+                    "oi_trend_formula": "oi_trend = (oi_series[-1] - oi_series[0]) / oi_series[0] (fractional change over 24h)",
+                    "rising_oi_aligned": "oi_trend > +0.02 (>2% increase) AND price is moving in schematic.direction → oi_trend_score = 3 (institutional flow entering in trade direction)",
+                    "flat_oi": "abs(oi_trend) <= 0.02 → oi_trend_score = 1 (neutral — no clear commitment signal)",
+                    "rising_oi_opposing": "oi_trend > +0.02 AND price is moving AGAINST schematic.direction → oi_trend_score = 2 (OI building but against our direction — potential stop hunt territory, still useful context)",
+                    "declining_oi": "oi_trend < -0.02 → oi_trend_score = 0 (positions being closed — hostile to continuation)",
+                    "oi_direction_proxy": "Price direction for OI alignment is inferred from the last 6 × 4H candle close sequence (same direction as schematic = aligned OI buildup)"
+                  }
+                },
+                {
+                  "step_id": "7.9.3",
+                  "name": "CVD_ALIGNMENT",
+                  "module_or_function": "decision_tree_bridge.py → _score_cvd_alignment()",
+                  "_annotation": "NEW in v1.4. CVD (Cumulative Volume Delta) measures net buying vs selling pressure. A bullish schematic with rising CVD means real buy orders are being executed at ask — confirming institutional accumulation. Divergence (price rising but CVD flat/declining) warns of low-conviction moves.",
+                  "inputs": [
+                    "cvd_series (last 12 × 1H candles = 12h window)",
+                    "schematic.direction"
+                  ],
+                  "outputs": ["cvd_alignment_score: 0-3"],
+                  "conditions": {
+                    "cvd_trend_formula": "cvd_trend_direction = 'bullish' if cvd_series[-1] > cvd_series[0] else 'bearish'",
+                    "strong_aligned_cvd": "cvd_trend_direction == schematic.direction AND abs(cvd_series[-1] - cvd_series[0]) / max(abs(cvd_series)) > 0.10 (>10% of range moved) → cvd_alignment_score = 3 (strong confirming pressure)",
+                    "weak_aligned_cvd": "cvd_trend_direction == schematic.direction AND change <= 10% → cvd_alignment_score = 2 (mild confirmation)",
+                    "flat_cvd": "CVD change < 2% of range → cvd_alignment_score = 1 (neutral — no directional pressure signal)",
+                    "diverging_cvd": "cvd_trend_direction ≠ schematic.direction → cvd_alignment_score = 0 (divergence: price moving one way, order flow the other — high reversal risk)",
+                    "btc_correlation_bonus": "If btc_correlation_status == 'misaligned_soft' (large-cap alt counter-BTC) → cvd_alignment_score = max(cvd_alignment_score - 1, 0) (apply -1 penalty to CVD score to reflect additional counter-flow risk)"
+                  }
+                }
+              ]
             }
           ]
         },
@@ -1001,8 +1209,8 @@
     "3_range_detection": "Candles → Range boundaries → EQ + DL2",
     "4_schematic_build": "Range + Candles → Tap1/2/3 → Model classification",
     "5_bos_confirmation": "Post-Tap3 candles → MTF BOS → LTF cascade refinement",
-    "6_gating": "All upstream → 7 hard gates (any fail = reject). Gate 6.7 (RIG): if counter-bias trade + intact HTF range → check CHoCH domino bypass → apply session-adjusted displacement threshold → PASS or HARD FAIL",
-    "7_scoring": "Gate results → trees T1-T6 + rr_bonus(T7) + session_additive(T8) → raw_score(max 110) → capped composite_score(max 100). session_multiplier passed through to step 8.4.",
+    "6_gating": "All upstream → 8 hard gates (any fail = reject). Gate 6.7 (RIG): counter-bias+intact HTF range → CHoCH domino → session displacement threshold. Gate 6.8 (Altcoin/Liquidity): symbol tier → volume/spread floor → BTC correlation (small-cap double-counter = hard fail).",
+    "7_scoring": "Gate results → trees T1-T6 + rr_bonus(T7) + session_additive(T8) + microstructure(T9: funding+OI+CVD) → raw_score(max 120) → capped composite_score(max 100). session_multiplier and rig_verdict_path passed through to step 8.4.",
     "8_execution": "[8.4 EXECUTION_CONFIDENCE_AGGREGATION: execution_confidence = min(composite_score,100) × session_multiplier × rig_confidence_factor → single threshold gate (60 v2 / 50 v1)] → position sizing (fixed 1%) → liquidation check → order placement",
     "8_confidence_formula_note": "Three-factor formula: (1) score cap at 100, (2) MSCE session multiplier (0.85-1.25), (3) RIG penalty factor (0.85-1.00 based on how the trade cleared gate 6.7). No other threshold checks exist in the pipeline.",
     "9_management": "Open position → partial TP → trailing SL → final exit",
@@ -1047,6 +1255,18 @@
       "description": "Session threshold for Asia (0.15) may be too tight, filtering valid counter-trend entries during Asian range breakouts that precede London momentum",
       "impact": "Pre-London momentum setups that form during Asia session (00:00–07:00 UTC) and represent genuine structure shifts will be blocked unless displacement reaches 15%. This 15% threshold was chosen conservatively and may need calibration against backtested Asia session data.",
       "mitigation": "RIG_DISPLACEMENT_SESSION_THRESHOLDS.asia is a tunable constant. If backtesting shows valid Asia counter-bias setups being blocked, raise to 0.18–0.20."
+    },
+    {
+      "id": "F8",
+      "description": "Small-cap altcoin double-counter hard fail (step 6.8.3) may block valid setups where the small-cap is decoupling from BTC due to token-specific catalyst (listing, unlock, news)",
+      "impact": "Protocol-specific catalysts can temporarily decouple altcoins from BTC correlation. A token with genuine fundamental flow against BTC direction will be blocked as a 'double-counter' even if the structural setup is valid.",
+      "mitigation": "ALTCOIN_TIER thresholds are tunable constants. Symbols experiencing known catalyst events could be promoted to 'large_cap_alt' tier via config override to convert the hard fail to a soft penalty. No automated solution — requires operator judgment."
+    },
+    {
+      "id": "F9",
+      "description": "Volume threshold ($10M/24h) may be too high for valid setups on mid-cap alts during low-activity hours (Asia session) when volume naturally drops below the floor",
+      "impact": "A symbol that normally clears $10M/24h but happens to be evaluated during an Asia session lull where hourly run-rate would extrapolate to $8M will be rejected. The 24h snapshot is not time-normalised.",
+      "mitigation": "A time-normalised volume check (e.g. volume_current_hour × 24 >= threshold) would reduce false rejections. ALTCOIN_MIN_24H_VOLUME_USDT is a tunable constant and could be lowered to $5M for Asia-session evaluations."
     }
   ]
 }
