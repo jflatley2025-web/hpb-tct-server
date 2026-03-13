@@ -1,13 +1,14 @@
 {
   "meta": {
     "title": "HPB-TCT Trading Bot — Complete Operational Workflow Logic Map",
-    "version": "1.1",
+    "version": "1.2",
     "generated": "2026-03-13",
     "description": "Machine-readable hierarchical map of all decision logic in the Schematics-5B trading engine. Covers market bias determination, range validation, liquidity checks, session scaling, counter-bias protection, execution confidence, and trade management.",
     "entry_point": "schematics_5b_trader.py → Schematics5BTrader._scan_and_trade_locked()",
     "scoring_model": "6-tree v1 (threshold 50) or 9-phase v2 (threshold 60)",
     "changelog": {
-      "1.1": "Added MSCE (Multi-Session Confidence Engine) session multipliers for Asia, London, and NY sessions. Expanded step 7.8 with full per-session definitions and rationale. Added step 8.4 to apply MSCE multiplier to execution confidence before threshold gating."
+      "1.1": "Added MSCE (Multi-Session Confidence Engine) session multipliers for Asia, London, and NY sessions. Expanded step 7.8 with full per-session definitions and rationale. Added step 8.4 to apply MSCE multiplier to execution confidence before threshold gating.",
+      "1.2": "Implemented full Range Integrity Gate (RIG) at step 6.7. Replaced 3-condition stub with 4-sub-step implementation: 6.7.1 HTF range integrity assessment (duration, DL2 violations, displacement), 6.7.2 counter-bias detection, 6.7.3 CHoCH domino bypass check (L3→L2→L1 + model-flow), 6.7.4 session-adjusted RIG verdict. Added RIG constants block with per-session displacement thresholds. Updated step 6.0 inputs."
     }
   },
 
@@ -79,7 +80,27 @@
     },
     "MSCE_ADJUSTED_THRESHOLD_V2": 60,
     "MSCE_ADJUSTED_THRESHOLD_V1": 50,
-    "_annotation_msce_threshold": "Thresholds remain the same numeric values but are compared against adjusted_confidence = composite_score × session_multiplier, not raw composite_score. This means a 60-pt raw score in Asia (×0.85) produces adjusted_confidence=51 and FAILS the v2 threshold, while the same score in London/NY overlap (×1.25) produces 75 and passes comfortably."
+    "_annotation_msce_threshold": "Thresholds remain the same numeric values but are compared against adjusted_confidence = composite_score × session_multiplier, not raw composite_score. This means a 60-pt raw score in Asia (×0.85) produces adjusted_confidence=51 and FAILS the v2 threshold, while the same score in London/NY overlap (×1.25) produces 75 and passes comfortably.",
+
+    "_annotation_rig": "RIG = Range Integrity Gate. Protects against counter-bias trades entered while an HTF range is still structurally intact. A counter-bias trade is one whose direction is OPPOSITE to htf_bias while the HTF range has not been broken. The gate is bypassed when CHoCH is confirmed across 3 timeframe levels (L3→L2→L1) or when a model-flow conversion signals genuine intent change.",
+    "RIG_MIN_DURATION_HOURS": 24,
+    "_annotation_rig_duration": "A range must have been holding for at least 24 hours to be considered 'intact' for RIG purposes. Younger ranges have not had time to build structural significance.",
+    "RIG_DISPLACEMENT_THRESHOLD_PCT": 0.25,
+    "_annotation_rig_displacement": "Default: if current price has moved ≥ 25% of range size AWAY from the nearest boundary, the range is likely breaking and counter-bias entries become permitted. Session-specific overrides apply (see RIG_DISPLACEMENT_SESSION_THRESHOLDS).",
+    "RIG_DISPLACEMENT_SESSION_THRESHOLDS": {
+      "_note": "Per-session displacement thresholds for the RIG verdict (step 6.7.4). Lower value = stricter gate = harder to get a counter-bias trade approved. Asia is strictest because counter-bias moves rarely follow through in low-liquidity sessions.",
+      "asia":      0.15,
+      "london":    0.25,
+      "london_ny": 0.30,
+      "ny":        0.28,
+      "off_hours": 0.20
+    },
+    "RIG_CHOCH_LEVELS_REQUIRED": 3,
+    "_annotation_rig_choch": "Full CHoCH bypass requires BOS confirmation on all 3 levels: L3 (1D), L2 (4H), L1 (1H) in the direction of the local trade. 2-of-3 grants a partial bypass (displacement threshold halved). Fewer than 2 = no bypass.",
+    "RIG_DL2_VIOLATION_LOOKBACK_CANDLES": 3,
+    "_annotation_rig_dl2": "When checking whether a DL2 close violation was 'accepted back', look at the next N candles (default 3). If price has not returned inside DL2 within 3 candles → TRUE BREAK → range is no longer intact.",
+    "RIG_BOUNDARY_PROXIMITY_PCT": 0.005,
+    "_annotation_rig_proximity": "Price is considered 'at the range boundary' (for displacement calc) if it is within 0.5% of range_high or range_low. This prevents false high-displacement readings when price is just at the edge."
   },
 
   "workflow": [
@@ -250,11 +271,22 @@
           "step_id": "6.0",
           "name": "GATING_CHECKS",
           "module_or_function": "decision_tree_bridge.py → compute_composite_score_v2() (inline gates)",
-          "inputs": ["htf_bias from step 2.0", "schematic from step 4.0", "bos_confirmed from step 5.0", "calculated R:R", "FVG/OB zones"],
-          "decision_logic": "Series of hard gates that must ALL pass before scoring proceeds. Any single hard gate failure results in immediate rejection — the trade is NOT taken regardless of other factors.",
-          "outputs": ["all_gates_passed: bool", "rejection_reason: string | null"],
+          "inputs": [
+            "htf_bias from step 2.0",
+            "schematic from step 4.0 (direction, model_type, tap prices)",
+            "bos_confirmed from step 5.0",
+            "calculated R:R",
+            "FVG/OB zones",
+            "htf_range_high, htf_range_low, htf_EQ, htf_DL2_above, htf_DL2_below, range_start_timestamp from step 3.0",
+            "current_price, current_timestamp",
+            "HTF candles (1D, 4H, 1H) for RIG CHoCH check",
+            "active_session from step 7.8 (for RIG session-adjusted thresholds)"
+          ],
+          "decision_logic": "Series of hard gates that must ALL pass before scoring proceeds. Any single hard gate failure results in immediate rejection — the trade is NOT taken regardless of other factors. Gate 6.7 (RIG) is the final gate and uses session-aware displacement thresholds to block counter-bias trades in intact HTF ranges.",
+          "outputs": ["all_gates_passed: bool", "rejection_reason: string | null", "rig_details: object"],
           "conditions": {
-            "HARD_GATES": "ALL must pass or trade is rejected"
+            "HARD_GATES": "ALL must pass or trade is rejected",
+            "gate_order": "6.1 HTF alignment → 6.2 BOS confirmed → 6.3 R:R ≥ 1.5 → 6.4 S/D zone → 6.5 liquidity sweep → 6.6 TCT 5A validity → 6.7 RIG counter-bias protection"
           },
           "children": [
             {
@@ -340,15 +372,160 @@
             {
               "step_id": "6.7",
               "name": "COUNTER_BIAS_RANGE_INTEGRITY_GATE",
-              "module_or_function": "High_Probability_Model_v17_RIG.config → Range Integrity Gate (RIG)",
-              "inputs": ["htf_range_duration", "local_displacement", "htf_bias", "session_bias"],
-              "decision_logic": "Prevents counter-bias entries when the HTF range is still intact. If the higher timeframe range has held for 24+ hours and local displacement is weak, counter-bias entries are blocked.",
-              "outputs": ["rig_passed: bool"],
+              "module_or_function": "decision_tree_bridge.py → _check_range_integrity_gate()",
+              "_annotation": "RIG v1.2 — Full implementation. Expanded from a 3-condition stub into a 4-sub-step gate. Evaluates whether the HTF range is genuinely intact, whether the local trade is counter-bias, whether CHoCH provides a structural bypass, and applies session-specific displacement thresholds for the final verdict. This is a HARD GATE — any rejection is non-negotiable and stops the pipeline immediately.",
+              "inputs": [
+                "htf_bias from step 2.0",
+                "schematic.direction from step 4.0",
+                "htf_range_high, htf_range_low, htf_EQ, htf_DL2_above, htf_DL2_below from step 3.0",
+                "range_start_timestamp from step 3.0",
+                "current_timestamp",
+                "current_price",
+                "HTF candles (1D, 4H, 1H) for CHoCH check",
+                "active_session from step 7.8",
+                "schematic_model_type from step 4.0 (for model-flow bypass)"
+              ],
+              "outputs": [
+                "rig_passed: bool",
+                "rig_rejection_reason: string | null",
+                "range_intact: bool",
+                "is_counter_bias: bool",
+                "choch_bypass_eligible: bool",
+                "effective_displacement_threshold: float"
+              ],
+              "decision_logic": "Runs four sequential sub-checks. If the trade is NOT counter-bias, the gate passes immediately without evaluating further. If counter-bias, checks whether the HTF range is intact, whether CHoCH provides a structural bypass, and applies session-adjusted thresholds to determine whether displacement is sufficient to allow entry.",
               "conditions": {
-                "hard_fail_if": "HTF range intact (duration ≥ 24h) AND local displacement < 25% AND htf_bias ≠ session_bias → REJECT",
-                "exception_choch": "If Change of Character (CHoCH) detected via domino effect (L3→L2→L1 confirmation) → bypass RIG",
-                "exception_model_flow": "Model 1 → Model 2 conversion or schematic conversion → bypass allowed"
-              }
+                "fast_pass": "htf_bias == schematic.direction OR htf_bias == 'neutral' → RIG not applicable → PASS immediately (no sub-checks needed)",
+                "hard_fail_final": "is_counter_bias AND range_intact AND current_displacement_pct < effective_displacement_threshold AND choch_bypass_eligible == False → REJECT"
+              },
+              "children": [
+                {
+                  "step_id": "6.7.1",
+                  "name": "HTF_RANGE_INTEGRITY_ASSESSMENT",
+                  "module_or_function": "decision_tree_bridge.py → _assess_htf_range_integrity()",
+                  "_annotation": "NEW in v1.2. Measures the three dimensions of range integrity: time held, boundary violation history, and current price displacement from boundary. All three feed the final RIG verdict.",
+                  "inputs": [
+                    "htf_range_high, htf_range_low",
+                    "htf_DL2_above, htf_DL2_below",
+                    "range_start_timestamp",
+                    "current_timestamp",
+                    "current_price",
+                    "HTF candles covering range lifetime"
+                  ],
+                  "decision_logic": "Computes range_duration_hours from range_start_timestamp to now. Scans all candles since range start for DL2 close violations: a violation is a candle that CLOSES beyond DL2 and is NOT accepted back within RIG_DL2_VIOLATION_LOOKBACK_CANDLES (3) candles. Computes current_displacement_pct as abs(current_price - nearest_range_boundary) / range_size. Range is 'intact' only if boundary_violation_count == 0 AND range_duration_hours >= RIG_MIN_DURATION_HOURS (24).",
+                  "outputs": [
+                    "range_intact: bool",
+                    "range_duration_hours: float",
+                    "boundary_violation_count: int",
+                    "current_displacement_pct: float",
+                    "nearest_boundary: 'high' | 'low'",
+                    "nearest_boundary_price: float"
+                  ],
+                  "conditions": {
+                    "range_intact_definition": "boundary_violation_count == 0 AND range_duration_hours >= 24",
+                    "range_too_young": "range_duration_hours < 24 → range_intact = False (range has not had time to build structural significance)",
+                    "boundary_violation_definition": "A candle CLOSES beyond DL2 (above DL2_above or below DL2_below) AND price does NOT return inside DL2 within the next 3 candles → counts as 1 violation",
+                    "boundary_accepted_back": "If a candle closes beyond DL2 but returns inside within 3 candles → NOT a violation (same logic as step 6.5 liquidity gate)",
+                    "displacement_formula": "current_displacement_pct = abs(current_price - nearest_boundary_price) / (range_high - range_low)",
+                    "nearest_boundary": "nearest_boundary = 'low' if abs(current_price - range_low) < abs(current_price - range_high), else 'high'",
+                    "proximity_edge_case": "If current_price is within RIG_BOUNDARY_PROXIMITY_PCT (0.5%) of range boundary → displacement treated as 0.0 (price is at boundary, not displaced)"
+                  }
+                },
+                {
+                  "step_id": "6.7.2",
+                  "name": "COUNTER_BIAS_DETECTION",
+                  "module_or_function": "decision_tree_bridge.py → _detect_counter_bias()",
+                  "_annotation": "NEW in v1.2. Formally classifies whether the current trade setup conflicts with the HTF bias inside an intact range. This is the predicate that determines whether the remaining RIG sub-steps need to run.",
+                  "inputs": [
+                    "htf_bias from step 2.0",
+                    "schematic.direction from step 4.0",
+                    "range_intact from step 6.7.1"
+                  ],
+                  "decision_logic": "A trade is counter-bias if its direction is opposite to HTF bias AND the HTF range is still intact. If the range is NOT intact (boundary broken), counter-bias detection is irrelevant — the range has already signaled a potential trend shift, so the trade is not protected.",
+                  "outputs": [
+                    "is_counter_bias: bool",
+                    "bias_conflict_type: 'bullish_range_bearish_trade' | 'bearish_range_bullish_trade' | 'none'"
+                  ],
+                  "conditions": {
+                    "bullish_range_bearish_trade": "htf_bias == 'bullish' AND schematic.direction == 'bearish' AND range_intact == True → is_counter_bias = True, bias_conflict_type = 'bullish_range_bearish_trade'",
+                    "bearish_range_bullish_trade": "htf_bias == 'bearish' AND schematic.direction == 'bullish' AND range_intact == True → is_counter_bias = True, bias_conflict_type = 'bearish_range_bullish_trade'",
+                    "aligned": "htf_bias == schematic.direction → is_counter_bias = False (with-bias trade, RIG does not apply)",
+                    "neutral_bias": "htf_bias == 'neutral' → is_counter_bias = False (neutral bias has no protected direction; v2 hard-fails neutral at step 6.1 before reaching RIG)",
+                    "broken_range_exception": "range_intact == False → is_counter_bias = False (range boundary has been violated, structural protection is lifted)"
+                  }
+                },
+                {
+                  "step_id": "6.7.3",
+                  "name": "CHOCH_DOMINO_BYPASS_CHECK",
+                  "module_or_function": "decision_tree_bridge.py → _check_choch_domino()",
+                  "_annotation": "NEW in v1.2. Evaluates whether a multi-timeframe Change of Character (CHoCH) domino has confirmed, which would indicate the HTF range IS in fact breaking down despite appearing intact on surface metrics. L3→L2→L1 is the required confirmation cascade. Also handles model-flow bypass.",
+                  "inputs": [
+                    "1D swing data (L3)",
+                    "4H swing data (L2)",
+                    "1H swing data (L1)",
+                    "schematic.direction (to determine which direction BOS must be)",
+                    "schematic_model_type from step 4.0",
+                    "htf_bias"
+                  ],
+                  "decision_logic": "For each timeframe level, checks whether the most recent swing structure has produced a BOS (close beyond prior swing) in the direction of the local schematic. L3 = 1D, L2 = 4H, L1 = 1H. If all 3 levels confirm → full bypass. If 2 levels confirm → partial bypass (displacement threshold halved). Fewer than 2 = no bypass. Additionally checks for model-flow conversions (Model 1→2, acc→dist or dist→acc) which independently grant full bypass.",
+                  "outputs": [
+                    "choch_bypass_eligible: bool",
+                    "choch_level_count: int (0-3)",
+                    "choch_bypass_type: 'full_domino' | 'partial_domino' | 'model_flow' | 'none'",
+                    "confirmed_levels: string[] (e.g. ['L3', 'L2'])"
+                  ],
+                  "conditions": {
+                    "L3_choch": "1D timeframe: most recent swing structure shows a CLOSE beyond the prior daily swing in schematic.direction → L3 confirmed",
+                    "L2_choch": "4H timeframe: most recent swing structure shows a CLOSE beyond the prior 4H swing in schematic.direction → L2 confirmed",
+                    "L1_choch": "1H timeframe: most recent swing structure shows a CLOSE beyond the prior 1H swing in schematic.direction → L1 confirmed",
+                    "full_domino_bypass": "choch_level_count >= 3 → choch_bypass_eligible = True, choch_bypass_type = 'full_domino' → RIG BYPASSED",
+                    "partial_domino_bypass": "choch_level_count == 2 → choch_bypass_eligible = True, choch_bypass_type = 'partial_domino' → displacement threshold halved in step 6.7.4",
+                    "no_bypass": "choch_level_count < 2 → choch_bypass_eligible = False",
+                    "model_flow_bypass_m1_to_m2": "schematic_model_type converted from Model_1 → Model_2 since last evaluation → choch_bypass_eligible = True, choch_bypass_type = 'model_flow' (Model 2 implies range is absorbing counter-bias pressure)",
+                    "model_flow_bypass_schematic_flip": "schematic previously acc, now detected as dist (or vice versa) → choch_bypass_eligible = True, choch_bypass_type = 'model_flow' (schematic flip = clear market intent reversal)",
+                    "bos_direction_requirement": "For bullish schematic: BOS = close above prior swing HIGH. For bearish schematic: BOS = close below prior swing LOW. Wick-only does NOT count."
+                  }
+                },
+                {
+                  "step_id": "6.7.4",
+                  "name": "SESSION_ADJUSTED_RIG_VERDICT",
+                  "module_or_function": "decision_tree_bridge.py → _rig_final_verdict()",
+                  "_annotation": "NEW in v1.2. Applies session-specific displacement thresholds and renders the final hard-gate decision. This is the only step that can produce a RIG_HARD_FAIL rejection. Session-aware thresholds reflect that counter-bias moves are more dangerous in low-liquidity sessions (Asia) and more forgivable near session transitions where structure shifts are real.",
+                  "inputs": [
+                    "is_counter_bias from step 6.7.2",
+                    "range_intact from step 6.7.1",
+                    "current_displacement_pct from step 6.7.1",
+                    "choch_bypass_eligible from step 6.7.3",
+                    "choch_bypass_type from step 6.7.3",
+                    "active_session from step 7.8",
+                    "range_duration_hours from step 6.7.1"
+                  ],
+                  "decision_logic": "Works through a priority-ordered decision tree. Fast passes exit immediately without computing thresholds. Only when the trade is confirmed counter-bias, the range is intact, and no CHoCH bypass is available does the gate compare current_displacement_pct against the session-adjusted threshold to reach a final verdict.",
+                  "outputs": [
+                    "rig_passed: bool",
+                    "rig_rejection_reason: string | null",
+                    "effective_displacement_threshold: float",
+                    "rig_verdict_path: string (which condition triggered the verdict)"
+                  ],
+                  "conditions": {
+                    "_evaluation_order": "Conditions are checked in order. First match wins.",
+                    "pass_1_not_counter_bias": "is_counter_bias == False → PASS immediately. rig_verdict_path = 'aligned_trade'",
+                    "pass_2_range_not_intact": "range_intact == False → PASS immediately. rig_verdict_path = 'range_boundary_broken'",
+                    "pass_3_full_choch_bypass": "choch_bypass_eligible == True AND choch_bypass_type IN ['full_domino', 'model_flow'] → PASS. rig_verdict_path = 'choch_bypass:{choch_bypass_type}'",
+                    "session_threshold_lookup": "effective_displacement_threshold = RIG_DISPLACEMENT_SESSION_THRESHOLDS[active_session]: asia=0.15, london=0.25, london_ny=0.30, ny=0.28, off_hours=0.20",
+                    "partial_choch_threshold_reduction": "If choch_bypass_type == 'partial_domino' → effective_displacement_threshold = effective_displacement_threshold × 0.50 (halved — 2-of-3 levels confirmed, make it easier to pass)",
+                    "pass_4_sufficient_displacement": "current_displacement_pct >= effective_displacement_threshold → PASS. rig_verdict_path = 'displacement_sufficient:{current_displacement_pct:.3f}>={effective_displacement_threshold:.3f}'",
+                    "fail_hard": "current_displacement_pct < effective_displacement_threshold → HARD FAIL. rig_rejection_reason = 'RIG_COUNTER_BIAS_INTACT_RANGE: {bias_conflict_type}, session={active_session}, displacement={current_displacement_pct:.3f} < threshold={effective_displacement_threshold:.3f}, range_age={range_duration_hours:.1f}h'",
+                    "session_threshold_rationale": {
+                      "asia_0.15": "Asia session: counter-bias setups almost never follow through in thin markets. Require only 15% displacement — if price is this close to the boundary it is almost certainly just noise.",
+                      "london_0.25": "London standard: 25% displacement is the baseline before a counter-bias trade is considered structurally justified.",
+                      "london_ny_0.30": "London/NY overlap: highest-volume window, structure shifts ARE real here. Allow 30% displacement — a larger displacement is meaningful when liquidity is deep.",
+                      "ny_0.28": "NY session: similar to overlap but slightly tighter — late-session moves can reverse at close.",
+                      "off_hours_0.20": "Off-hours: position squaring creates noise. Tighter than standard to reduce false signals from thin-market moves."
+                    }
+                  }
+                }
+              ]
             }
           ]
         },
@@ -755,7 +932,7 @@
     "3_range_detection": "Candles → Range boundaries → EQ + DL2",
     "4_schematic_build": "Range + Candles → Tap1/2/3 → Model classification",
     "5_bos_confirmation": "Post-Tap3 candles → MTF BOS → LTF cascade refinement",
-    "6_gating": "All upstream → 7 hard gates (any fail = reject)",
+    "6_gating": "All upstream → 7 hard gates (any fail = reject). Gate 6.7 (RIG): if counter-bias trade + intact HTF range → check CHoCH domino bypass → apply session-adjusted displacement threshold → PASS or HARD FAIL",
     "7_scoring": "Gate results → 6 trees + bonus + session additive → composite score (0-100); session_multiplier output to step 8.4",
     "8_execution": "Score ≥ threshold → [8.4 MSCE: adjusted_confidence = score × session_multiplier, re-check threshold] → position sizing (fixed 1%) → liquidation check → order placement",
     "8_msce_note": "MSCE multiplier (0.85–1.25) is applied ONLY at the execution confidence gate (step 8.4). Position size is never scaled by session.",
@@ -786,8 +963,21 @@
     },
     {
       "id": "F5",
-      "description": "Counter-bias entry blocked by RIG when trend shift IS occurring but CHoCH not yet confirmed",
-      "impact": "Early trend shifts may be systematically missed"
+      "description": "Counter-bias entry blocked by RIG when trend shift IS occurring but CHoCH not yet confirmed across all 3 levels (L3→L2→L1 domino not complete)",
+      "impact": "Early trend shifts may be systematically missed. Partial bypass (2-of-3 levels) halves the displacement threshold as a mitigation, but the full RIG block remains until L3 confirms.",
+      "mitigation": "Watch for CHoCH level count in diagnostic output. If L1 and L2 are confirmed but L3 is pending, the partial bypass is active. If model-flow conversion (Model 1→2 or schematic flip) occurs, bypass is granted independently of CHoCH."
+    },
+    {
+      "id": "F6",
+      "description": "RIG fast-pass for 'range_intact == False' may let counter-bias trades through when range has TECHNICALLY been violated but is actually just re-accumulating",
+      "impact": "A single DL2 close violation that gets accepted back in ≤3 candles is classified as a sweep (not a violation) — so the range remains intact. But if 4+ candles elapse before return, it's a violation and the range loses protection. Re-accumulation patterns may be misclassified as broken ranges.",
+      "mitigation": "RIG_DL2_VIOLATION_LOOKBACK_CANDLES (default 3) controls this boundary. Tuning upward (e.g., to 5) would retain range protection longer but risks treating true breaks as sweeps."
+    },
+    {
+      "id": "F7",
+      "description": "Session threshold for Asia (0.15) may be too tight, filtering valid counter-trend entries during Asian range breakouts that precede London momentum",
+      "impact": "Pre-London momentum setups that form during Asia session (00:00–07:00 UTC) and represent genuine structure shifts will be blocked unless displacement reaches 15%. This 15% threshold was chosen conservatively and may need calibration against backtested Asia session data.",
+      "mitigation": "RIG_DISPLACEMENT_SESSION_THRESHOLDS.asia is a tunable constant. If backtesting shows valid Asia counter-bias setups being blocked, raise to 0.18–0.20."
     }
   ]
 }
