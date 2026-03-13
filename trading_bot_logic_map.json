@@ -1,11 +1,13 @@
 {
   "meta": {
     "title": "HPB-TCT Trading Bot — Complete Operational Workflow Logic Map",
-    "version": "1.0",
+    "version": "1.1",
     "generated": "2026-03-12",
-    "description": "Machine-readable hierarchical map of all decision logic in the Schematics-5B trading engine. Covers market bias determination, range validation, liquidity checks, session scaling, counter-bias protection, execution confidence, and trade management.",
+    "updated": "2026-03-13",
+    "description": "Machine-readable hierarchical map of all decision logic in the Schematics-5B trading engine. Covers HTF→LTF market bias initialization (established at workflow start, referenced by all downstream steps), range validation, liquidity checks, session scaling, counter-bias protection, execution confidence, and trade management.",
     "entry_point": "schematics_5b_trader.py → Schematics5BTrader._scan_and_trade_locked()",
-    "scoring_model": "6-tree v1 (threshold 50) or 9-phase v2 (threshold 60)"
+    "scoring_model": "6-tree v1 (threshold 50) or 9-phase v2 (threshold 60)",
+    "bias_init_rule": "HTF→LTF market bias MUST be established at step 2.0 before any downstream step proceeds. All steps from 3.0 onward receive htf_bias and ltf_bias as required inputs."
   },
 
   "constants": {
@@ -47,11 +49,12 @@
       "children": [
         {
           "step_id": "2.0",
-          "name": "HTF_BIAS_DETERMINATION",
+          "name": "HTF_TO_LTF_MARKET_BIAS_INIT",
           "module_or_function": "decision_tree_bridge.py → detect_htf_market_structure(df)",
+          "_annotation": "MODIFIED (bias-init enforcement): Renamed from HTF_BIAS_DETERMINATION to HTF_TO_LTF_MARKET_BIAS_INIT. This step is the canonical bias initialization gate for the entire workflow. HTF bias is established first (steps 2.1–2.2), then cascaded to LTF (step 2.3). No downstream step may proceed until both htf_bias and ltf_bias are resolved. Added ltf_bias to outputs.",
           "inputs": ["1D OHLCV candles (last 100)", "cached bias (if TTL not expired)"],
-          "decision_logic": "Determines the Higher Time Frame directional bias using 6-candle-rule pivot detection on daily candles. Identifies swing highs and swing lows, then classifies the last two of each to determine market structure direction. Structure break confirmation requires a candle CLOSE beyond the prior swing level.",
-          "outputs": ["htf_bias: 'bullish' | 'bearish' | 'neutral'", "htf_structure_details"],
+          "decision_logic": "Determines the Higher Time Frame directional bias using 6-candle-rule pivot detection on daily candles. Identifies swing highs and swing lows, then classifies the last two of each to determine market structure direction. Structure break confirmation requires a candle CLOSE beyond the prior swing level. After HTF bias is resolved, derives the aligned LTF bias (step 2.3) before releasing control to step 3.0.",
+          "outputs": ["htf_bias: 'bullish' | 'bearish' | 'neutral'", "htf_structure_details", "ltf_bias: 'bullish' | 'bearish' | 'neutral'"],
           "conditions": {
             "cache_hit": "If cached bias exists and TTL not expired (24h for directional, 1h for neutral) → return cached value without recomputation",
             "bullish_classification": "Last 2 swing highs form Higher High AND last 2 swing lows form Higher Low → 'bullish'",
@@ -85,6 +88,22 @@
                 "LH": "swing_highs[-1] < swing_highs[-2]",
                 "LL": "swing_lows[-1] < swing_lows[-2]"
               }
+            },
+            {
+              "step_id": "2.3",
+              "name": "LTF_BIAS_DERIVATION",
+              "module_or_function": "decision_tree_bridge.py → derive_ltf_bias(htf_bias, mtf_candles)",
+              "_annotation": "NEW (bias-init enforcement): Derives the Lower Time Frame directional bias by applying 6CR pivot detection on the MTF timeframes (4H, 1H, 30M) and aligning the result against the HTF bias established in steps 2.1–2.2. This step completes the HTF→LTF bias cascade and is the last step before the workflow advances to range analysis (step 3.0).",
+              "inputs": ["htf_bias from step 2.0", "MTF OHLCV candles (4H, 1H, 30M)", "cached ltf_bias (if TTL not expired)"],
+              "decision_logic": "Runs 6CR pivot detection on each MTF timeframe (4H, 1H, 30M) to determine LTF market structure. Aligns LTF structure with HTF bias: if HTF is bullish/bearish and LTF confirms the same direction, ltf_bias mirrors htf_bias. If LTF is counter-HTF, ltf_bias is set to 'counter' and downstream gating (steps 6.1, 6.7) applies counter-bias protection. If HTF is 'neutral', ltf_bias inherits 'neutral' and step 6.1 triggers a hard fail in v2.",
+              "outputs": ["ltf_bias: 'bullish' | 'bearish' | 'neutral' | 'counter'", "ltf_structure_details", "ltf_dominant_timeframe"],
+              "conditions": {
+                "aligned": "htf_bias == ltf_structure on dominant MTF → ltf_bias = htf_bias",
+                "counter": "ltf_structure opposes htf_bias → ltf_bias = 'counter' (triggers RIG gate at step 6.7)",
+                "neutral_inheritance": "htf_bias == 'neutral' → ltf_bias = 'neutral' (hard fail in v2 at step 6.1)",
+                "dominant_tf_priority": "4H takes precedence over 1H over 30M when LTF TFs disagree",
+                "cache_ttl": "Same TTL rules as htf_bias: 24h for directional, 1h for neutral"
+              }
             }
           ]
         },
@@ -93,7 +112,8 @@
           "step_id": "3.0",
           "name": "RANGE_FORMATION_AND_VALIDATION",
           "module_or_function": "tct_schematics.py → TCTSchematicDetector._find_accumulation_ranges() / _find_distribution_ranges()",
-          "inputs": ["MTF OHLCV candles (4h, 1h, 30m)", "detected swing highs/lows from step 2.1"],
+          "_annotation": "MODIFIED (bias-init enforcement): Added htf_bias and ltf_bias from step 2.0 to inputs. Range search direction (accumulation vs. distribution) is gated on htf_bias + ltf_bias — a bullish bias targets accumulation ranges; bearish targets distribution. A 'neutral' or 'counter' ltf_bias causes this step to log a warning and proceed with reduced confidence.",
+          "inputs": ["MTF OHLCV candles (4h, 1h, 30m)", "detected swing highs/lows from step 2.1", "htf_bias from step 2.0", "ltf_bias from step 2.3"],
           "decision_logic": "Identifies horizontal consolidation ranges by finding swing high/low boundaries. Calculates Equilibrium (EQ) and Deviation Limits (DL2). Validates that the range is genuinely horizontal (not a V-shaped impulse) and that EQ has been touched.",
           "outputs": ["range_high", "range_low", "equilibrium (EQ)", "DL2_above", "DL2_below", "range_valid: bool", "tap1_price"],
           "conditions": {
@@ -123,7 +143,8 @@
           "step_id": "4.0",
           "name": "DEVIATION_AND_SCHEMATIC_DETECTION",
           "module_or_function": "tct_schematics.py → _build_accumulation_schematic() / _build_distribution_schematic()",
-          "inputs": ["validated range from step 3.0", "candle data", "range_high", "range_low", "EQ", "DL2"],
+          "_annotation": "MODIFIED (bias-init enforcement): Added htf_bias and ltf_bias to inputs. Schematic direction (accumulation vs. distribution) must agree with htf_bias and ltf_bias. A schematic whose direction conflicts with htf_bias is flagged as counter-bias and forwarded to step 6.1 for hard gate evaluation.",
+          "inputs": ["validated range from step 3.0", "candle data", "range_high", "range_low", "EQ", "DL2", "htf_bias from step 2.0", "ltf_bias from step 2.3"],
           "decision_logic": "After identifying Tap1 (first touch of range boundary), searches for Tap2 (first deviation beyond range) and Tap3 (deeper deviation or higher-low retest). Classifies as Model 1 or Model 2 based on the relationship between Tap2 and Tap3. Validates that deviations stay within DL2.",
           "outputs": ["schematic_type: 'Model_1' | 'Model_2'", "tap2_price", "tap3_price", "direction: 'bullish' | 'bearish'", "schematic_valid: bool"],
           "conditions": {
@@ -166,7 +187,8 @@
           "step_id": "5.0",
           "name": "BOS_CONFIRMATION_AND_LTF_CASCADE",
           "module_or_function": "schematics_5b_trader.py → _try_confirm_with_ltf_bos() / refine_schematic_bos_with_ltf()",
-          "inputs": ["schematic from step 4.0", "MTF candle data", "LTF candle data (5m, 1m)"],
+          "_annotation": "MODIFIED (bias-init enforcement): Added htf_bias and ltf_bias to inputs. BOS direction is validated against htf_bias before cascade refinement begins — a BOS in the wrong direction relative to htf_bias is discarded immediately rather than being refined on LTF.",
+          "inputs": ["schematic from step 4.0", "MTF candle data", "LTF candle data (5m, 1m)", "htf_bias from step 2.0", "ltf_bias from step 2.3"],
           "decision_logic": "After Tap3, searches for a Break of Structure (BOS) — a candle that CLOSES above the highest point between Tap2 and Tap3 (bullish) or below the lowest point (bearish). Cascades through lower timeframes (5m → 1m) to find the earliest confirmation for best risk-reward. Lowest TF BOS overwrites higher TF BOS.",
           "outputs": ["bos_confirmed: bool", "bos_price", "bos_timeframe", "bos_candle_index", "refined_entry_price", "refined_stop_price"],
           "conditions": {
@@ -199,7 +221,8 @@
           "step_id": "6.0",
           "name": "GATING_CHECKS",
           "module_or_function": "decision_tree_bridge.py → compute_composite_score_v2() (inline gates)",
-          "inputs": ["htf_bias from step 2.0", "schematic from step 4.0", "bos_confirmed from step 5.0", "calculated R:R", "FVG/OB zones"],
+          "_annotation": "MODIFIED (bias-init enforcement): Added ltf_bias from step 2.3 to inputs alongside existing htf_bias. Both bias values are now threaded into all child gate steps (6.1, 6.7) to enable full HTF+LTF alignment validation.",
+          "inputs": ["htf_bias from step 2.0", "ltf_bias from step 2.3", "schematic from step 4.0", "bos_confirmed from step 5.0", "calculated R:R", "FVG/OB zones"],
           "decision_logic": "Series of hard gates that must ALL pass before scoring proceeds. Any single hard gate failure results in immediate rejection — the trade is NOT taken regardless of other factors.",
           "outputs": ["all_gates_passed: bool", "rejection_reason: string | null"],
           "conditions": {
@@ -208,14 +231,16 @@
           "children": [
             {
               "step_id": "6.1",
-              "name": "HTF_ALIGNMENT_GATE",
+              "name": "HTF_LTF_ALIGNMENT_GATE",
+              "_annotation": "MODIFIED (bias-init enforcement): Renamed from HTF_ALIGNMENT_GATE to HTF_LTF_ALIGNMENT_GATE. Added ltf_bias to inputs. Gate now evaluates full HTF+LTF alignment: both biases must agree with schematic direction. A schematic that aligns with htf_bias but opposes ltf_bias is allowed only if ltf_bias == 'counter' and RIG (step 6.7) passes.",
               "module_or_function": "decision_tree_bridge.py (inline)",
-              "inputs": ["htf_bias", "schematic.direction"],
-              "decision_logic": "Checks that the trade direction aligns with HTF bias. Counter-bias trades (e.g., bearish setup during bullish HTF) are typically rejected.",
-              "outputs": ["htf_aligned: bool"],
+              "inputs": ["htf_bias from step 2.0", "ltf_bias from step 2.3", "schematic.direction"],
+              "decision_logic": "Checks that the trade direction aligns with both HTF and LTF bias. Counter-bias trades (e.g., bearish setup during bullish HTF) are typically rejected.",
+              "outputs": ["htf_aligned: bool", "ltf_aligned: bool"],
               "conditions": {
-                "pass": "htf_bias == schematic.direction OR htf_bias == 'neutral'",
-                "fail_hard": "htf_bias is OPPOSITE to schematic.direction → REJECT",
+                "full_pass": "htf_bias == schematic.direction AND ltf_bias == schematic.direction → strongest signal",
+                "htf_only_pass": "htf_bias == schematic.direction AND ltf_bias == 'counter' → allowed only if RIG gate (step 6.7) passes",
+                "fail_hard_htf": "htf_bias is OPPOSITE to schematic.direction → REJECT regardless of ltf_bias",
                 "exception_neutral": "htf_bias == 'neutral' → HARD FAIL in v2 (neutral = uncertain = no entry)",
                 "exception_trend_shift": "If CHoCH (Change of Character) detected in HTF → counter-bias entry MAY be allowed"
               }
@@ -306,7 +331,8 @@
           "step_id": "7.0",
           "name": "COMPOSITE_SCORING",
           "module_or_function": "decision_tree_bridge.py → compute_composite_score_v2()",
-          "inputs": ["all gate results from step 6.0", "range quality from step 3.0", "schematic details from step 4.0", "BOS details from step 5.0", "session timing", "R:R ratio"],
+          "_annotation": "MODIFIED (bias-init enforcement): Added htf_bias and ltf_bias to inputs. The scoring engine now receives both bias values and uses them as a context signal across all scoring trees. A fully aligned HTF+LTF bias does not add bonus points but a counter ltf_bias applies a score penalty (−5 pts) via tree 5 (TCT 5B real-world) to reflect execution risk.",
+          "inputs": ["all gate results from step 6.0", "range quality from step 3.0", "schematic details from step 4.0", "BOS details from step 5.0", "session timing", "R:R ratio", "htf_bias from step 2.0", "ltf_bias from step 2.3"],
           "decision_logic": "If all hard gates pass, computes a composite score from 0-100 across 6 scoring trees plus R:R bonus. Each tree contributes a weighted score. The total must meet or exceed the entry threshold (60 for v2, 50 for v1) to trigger trade entry.",
           "outputs": ["composite_score: int (0-100)", "tree_results: object", "entry_decision: bool"],
           "conditions": {
@@ -433,7 +459,8 @@
           "step_id": "8.0",
           "name": "TRADE_EXECUTION",
           "module_or_function": "trade_execution.py → generate_execution_plan() / calculate_position_size()",
-          "inputs": ["composite_score from step 7.0", "entry_price", "stop_price", "target_price", "account_balance", "leverage"],
+          "_annotation": "MODIFIED (bias-init enforcement): Added htf_bias and ltf_bias to inputs. Both bias values are embedded in the execution plan metadata and persisted with the trade log (step 10.0) so that post-trade analysis can attribute outcomes to specific bias states.",
+          "inputs": ["composite_score from step 7.0", "entry_price", "stop_price", "target_price", "account_balance", "leverage", "htf_bias from step 2.0", "ltf_bias from step 2.3"],
           "decision_logic": "If composite score >= threshold, generates a full execution plan including position sizing, margin requirements, and liquidation safety checks. Verifies that the liquidation price is safely beyond the stop loss before placing any order.",
           "outputs": ["position_size (USDT)", "margin_required", "liquidation_price", "order_type", "execution_plan"],
           "conditions": {
@@ -623,8 +650,8 @@
 
   "data_flow_summary": {
     "1_market_data": "Exchange API → OHLCV candles (multi-TF)",
-    "2_structure_analysis": "Candles → 6CR Pivots → Swing H/L → HTF Bias",
-    "3_range_detection": "Candles → Range boundaries → EQ + DL2",
+    "2_structure_analysis": "Candles → 6CR Pivots (1D) → Swing H/L → HTF Bias [step 2.0–2.2] → LTF Bias derived from MTF candles (4H/1H/30M) [step 2.3] → htf_bias + ltf_bias propagated to ALL downstream steps (3.0–8.0)",
+    "3_range_detection": "Candles + htf_bias + ltf_bias → Range boundaries → EQ + DL2",
     "4_schematic_build": "Range + Candles → Tap1/2/3 → Model classification",
     "5_bos_confirmation": "Post-Tap3 candles → MTF BOS → LTF cascade refinement",
     "6_gating": "All upstream → 7 hard gates (any fail = reject)",
