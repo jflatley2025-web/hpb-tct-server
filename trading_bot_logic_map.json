@@ -3,7 +3,7 @@
     "title": "HPB-TCT Trading Bot — Complete Operational Workflow Logic Map",
     "version": "1.2",
     "generated": "2026-03-12",
-    "updated": "2026-03-13",
+    "updated": "2026-03-14",
     "description": "Machine-readable hierarchical map of all decision logic in the Schematics-5B trading engine. Covers HTF→LTF market bias initialization (established at workflow start, referenced by all downstream steps), range validation with impulsive/V-shape hard invalidation and S/R alignment checks, BOS structural validity (body-close required), POI confluence gating (FVG/RTZ/OB/S&R), liquidity checks, session scaling, counter-bias protection, execution confidence, and trade management.",
     "entry_point": "schematics_5b_trader.py → Schematics5BTrader._scan_and_trade_locked()",
     "scoring_model": "6-tree v1 (threshold 50) or 9-phase v2 (threshold 60)",
