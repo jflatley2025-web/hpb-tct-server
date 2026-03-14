@@ -1,7 +1,7 @@
 """
 TCT Lecture 2 — Ranges: Decision Tree (Python)
 
-Encodes the full decision logic from TCT 2024 Mentorship Lecture 2 | Ranges.
+Encodes the full decision logic from TCT 2024  Mentorship Lecture 2 | Ranges.
 Includes bonus internal ranges, liquidity stacking, and S/D confluence.
 
 Usage:
@@ -186,6 +186,15 @@ def phase8_sd_confluence(inputs: RangeInputs, result: RangeEvaluation):
         result.passed_phases.append("Phase 8: No DL adjustment — use raw DL")
 
 def phase9_set_targets(inputs: RangeInputs, result: RangeEvaluation):
+    """
+    Set trade targets and entry note on the evaluation result based on the established trade bias and timeframe.
+    
+    Updates result.primary_target, result.minimum_target, and result.entry_note for SHORT or LONG biases, uses timeframe_category to tailor the entry note tone, and appends a Phase 9 pass message to result.passed_phases when targets are assigned. Operates in-place on the given RangeEvaluation.
+    
+    Parameters:
+        inputs (RangeInputs): Input flags and metadata about the assessed range, including timeframe_category.
+        result (RangeEvaluation): Mutable evaluation object to populate with targets, notes, and phase status.
+    """
     tf_notes = {
         "low": "Lower TF — quick reversal, be strict",
         "mid": "Mid TF — moderate tolerance",
