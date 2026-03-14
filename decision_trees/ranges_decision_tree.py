@@ -1,7 +1,7 @@
 """
 TCT Lecture 2 — Ranges: Decision Tree (Python)
 
-Encodes the full decision logic from TCT 2024 Mentorship Lecture 2 | Ranges.
+Encodes the full decision logic from TCT 2024  Mentorship Lecture 2 | Ranges.
 Includes bonus internal ranges, liquidity stacking, and S/D confluence.
 
 Usage:
