@@ -80,6 +80,10 @@ class RangeEvaluation:
 # Phase functions
 # ──────────────────────────────────────────────────────────
 def phase1_identify_trend(inputs: RangeInputs, result: RangeEvaluation) -> bool:
+    """Determine trend direction and set the Fibonacci draw direction.
+
+    Returns False (halting evaluation) if trend is unclear.
+    """
     if inputs.higher_highs_higher_lows:
         result.trend = Trend.UPTREND
         result.fib_direction = "Top → Bottom (high to low)"
@@ -96,6 +100,10 @@ def phase1_identify_trend(inputs: RangeInputs, result: RangeEvaluation) -> bool:
     return False
 
 def phase2_confirm_range(inputs: RangeInputs, result: RangeEvaluation) -> bool:
+    """Validate the range using the six-candle rule and equilibrium touch.
+
+    Returns False if either condition is not met.
+    """
     if not inputs.six_candle_rule_passes:
         result.failed_at_phase = "Phase 2: Six candle rule not satisfied"
         return False
@@ -108,6 +116,7 @@ def phase2_confirm_range(inputs: RangeInputs, result: RangeEvaluation) -> bool:
     return True
 
 def phase3_rationality_check(inputs: RangeInputs, result: RangeEvaluation) -> bool:
+    """Reject V-shaped or irrational ranges; only horizontal ranges are tradeable."""
     if not inputs.range_looks_horizontal:
         result.range_rational = False
         result.failed_at_phase = "Phase 3: V-shaped / irrational range"
@@ -118,11 +127,16 @@ def phase3_rationality_check(inputs: RangeInputs, result: RangeEvaluation) -> bo
     return True
 
 def phase4_map_zones(inputs: RangeInputs, result: RangeEvaluation):
+    """Record the standard Fib zone labels (0.0 = High, 0.5 = EQ, 1.0 = Low, ±DL)."""
     result.passed_phases.append(
         "Phase 4: Zones mapped — 0.0=Range High, 0.5=EQ, 1.0=Range Low, -0.3/1.3=DL"
     )
 
 def phase5_breach_direction(inputs: RangeInputs, result: RangeEvaluation) -> bool:
+    """Set trade bias based on which range extreme price is testing.
+
+    Returns False if price is not at either extreme.
+    """
     if inputs.price_at_range_high:
         result.trade_bias = TradeBias.SHORT
         result.passed_phases.append("Phase 5: Price at Range High — bearish setup")
@@ -136,6 +150,10 @@ def phase5_breach_direction(inputs: RangeInputs, result: RangeEvaluation) -> boo
     return False
 
 def phase6_classify_deviation(inputs: RangeInputs, result: RangeEvaluation) -> bool:
+    """Classify the price deviation as Type 1 wick, Type 2 bad BOS, multi-close, or a true range break.
+
+    Returns False on a confirmed range break or no deviation yet.
+    """
     if inputs.is_wick_only:
         result.deviation_type = DeviationType.TYPE1_WICK
         result.extend_range_boundary = True
@@ -168,6 +186,7 @@ def phase6_classify_deviation(inputs: RangeInputs, result: RangeEvaluation) -> b
     return False
 
 def phase7_adjust_range(inputs: RangeInputs, result: RangeEvaluation):
+    """Extend the breached range boundary and signal that the DL must be recalculated."""
     if not result.extend_range_boundary:
         return
     if inputs.price_at_range_high:
@@ -176,6 +195,7 @@ def phase7_adjust_range(inputs: RangeInputs, result: RangeEvaluation):
         result.passed_phases.append("Phase 7: Extend Range Low and recalc DL")
 
 def phase8_sd_confluence(inputs: RangeInputs, result: RangeEvaluation):
+    """Adjust the deviation level (DL) when a confluent S/D zone overlaps it."""
     if inputs.price_at_range_low and inputs.demand_zone_overlaps_dl_below:
         result.dl_adjustment = "Demand zone below Range Low moves DL to bottom of zone"
         result.passed_phases.append("Phase 8: DL adjusted for demand zone")
@@ -186,6 +206,7 @@ def phase8_sd_confluence(inputs: RangeInputs, result: RangeEvaluation):
         result.passed_phases.append("Phase 8: No DL adjustment — use raw DL")
 
 def phase9_set_targets(inputs: RangeInputs, result: RangeEvaluation):
+    """Set primary/minimum targets and entry note based on bias and timeframe category."""
     tf_notes = {
         "low": "Lower TF — quick reversal, be strict",
         "mid": "Mid TF — moderate tolerance",
@@ -209,6 +230,7 @@ def phase9_set_targets(inputs: RangeInputs, result: RangeEvaluation):
 # Master evaluation entry point
 # ──────────────────────────────────────────────────────────
 def evaluate_range_setup(inputs: RangeInputs) -> RangeEvaluation:
+    """Run all nine decision-tree phases and return a fully populated RangeEvaluation."""
     result = RangeEvaluation()
 
     if not phase1_identify_trend(inputs, result):
