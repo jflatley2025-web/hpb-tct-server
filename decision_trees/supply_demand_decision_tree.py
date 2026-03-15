@@ -55,6 +55,20 @@ class ZonePriority(Enum):
     SUPPLY_CHAIN_SECOND = "Supply chain 2nd OB — strong reaction expected"
 
 
+class ZoneLifecycle(Enum):
+    """Machine-readable terminal state of the S&D zone evaluation.
+
+    evaluate_sd_zone is a one-shot pipeline — these are terminal exit states,
+    not a stateful lifecycle.  Use alongside failed_at_phase / wait_reason for
+    the human-readable explanation of *why* the zone reached this state.
+    """
+    EVALUATING = "Evaluation in progress"
+    FAILED = "Zone structurally invalid (context, FVG, or competing zones)"
+    RETIRED = "Zone fully mitigated — remove from chart"
+    WAITING = "Zone valid but entry conditions not yet met"
+    TRIGGERED = "Zone valid and entry confirmed"
+
+
 class TradeBias(Enum):
     LONG = "Long / Buy — demand zone confirmed"
     SHORT = "Short / Sell — supply zone confirmed"
@@ -149,6 +163,7 @@ class SDZoneInputs:
 
 @dataclass
 class SDZoneEvaluation:
+    lifecycle_state: ZoneLifecycle = ZoneLifecycle.EVALUATING
     zone_direction: Optional[ZoneDirection] = None
     zone_type: Optional[ZoneType] = None
     fvg_valid: bool = False
@@ -160,9 +175,10 @@ class SDZoneEvaluation:
     entry_note: str = ""
     warnings: list[str] = field(default_factory=list)
     passed_phases: list[str] = field(default_factory=list)
+    # Human-readable explanations — lifecycle_state is the machine-readable
+    # companion.  Check lifecycle_state for programmatic branching; use these
+    # strings for logging / display.
     failed_at_phase: Optional[str] = None
-    # Populated instead of failed_at_phase when the zone is valid but entry
-    # conditions are not yet met — distinguishes "waiting" from "invalid".
     wait_reason: Optional[str] = None
 
 
@@ -172,10 +188,12 @@ class SDZoneEvaluation:
 
 def phase1_build_context(inputs: SDZoneInputs, result: SDZoneEvaluation) -> bool:
     if inputs.market_context == MarketContext.UNCLEAR:
+        result.lifecycle_state = ZoneLifecycle.FAILED
         result.failed_at_phase = "Phase 1: Market context unclear — wait for structure."
         return False
 
     if not inputs.context_reason_exists:
+        result.lifecycle_state = ZoneLifecycle.FAILED
         result.failed_at_phase = "Phase 1: No structural reason — do not place zones."
         return False
 
@@ -203,12 +221,14 @@ def phase3_confirm_fvg(inputs: SDZoneInputs, result: SDZoneEvaluation) -> bool:
 
     if not fvg.gap_exists:
         result.fvg_valid = False
+        result.lifecycle_state = ZoneLifecycle.FAILED
         result.failed_at_phase = "Phase 3: No FVG detected — invalid zone."
         return False
 
     # Reject micro-gaps when gap_size is provided.
     if fvg.gap_size is not None and fvg.gap_size <= 0:
         result.fvg_valid = False
+        result.lifecycle_state = ZoneLifecycle.FAILED
         result.failed_at_phase = (
             f"Phase 3: Micro FVG rejected — gap_size {fvg.gap_size} is not positive."
         )
@@ -217,12 +237,14 @@ def phase3_confirm_fvg(inputs: SDZoneInputs, result: SDZoneEvaluation) -> bool:
     # Reject fully filled gaps — no remaining inefficiency.
     if fvg.fill_state == FillState.FILLED:
         result.fvg_valid = False
+        result.lifecycle_state = ZoneLifecycle.FAILED
         result.failed_at_phase = "Phase 3: FVG fully filled — gap no longer valid."
         return False
 
     # Reject complete overlap (wicks connect, no real gap).
     if fvg.overlap_ratio is not None and fvg.overlap_ratio >= 1.0:
         result.fvg_valid = False
+        result.lifecycle_state = ZoneLifecycle.FAILED
         result.failed_at_phase = (
             f"Phase 3: FVG overlap ratio {fvg.overlap_ratio:.0%} — "
             "wicks connect, no effective gap."
@@ -232,6 +254,7 @@ def phase3_confirm_fvg(inputs: SDZoneInputs, result: SDZoneEvaluation) -> bool:
     # Standard FVG requires at least 3 candles.
     if fvg.candle_span < 3:
         result.fvg_valid = False
+        result.lifecycle_state = ZoneLifecycle.FAILED
         result.failed_at_phase = (
             f"Phase 3: FVG candle span {fvg.candle_span} too short — minimum 3 required."
         )
@@ -313,11 +336,13 @@ def phase5_check_mitigation(inputs: SDZoneInputs, result: SDZoneEvaluation) -> b
     result.mitigation_status = inputs.mitigation_status
 
     if inputs.mitigation_status == MitigationStatus.FULL_MITIGATION:
+        result.lifecycle_state = ZoneLifecycle.RETIRED
         result.failed_at_phase = "Phase 5: FULLY MITIGATED — remove zone."
         return False
 
     if inputs.mitigation_status == MitigationStatus.MINOR_MITIGATION:
         if not inputs.is_only_zone_in_area:
+            result.lifecycle_state = ZoneLifecycle.FAILED
             result.failed_at_phase = "Phase 5: Minor mitigation but other zones exist — skip this zone."
             return False
         result.warnings.append(
@@ -368,11 +393,13 @@ def phase7_assess_extreme(inputs: SDZoneInputs, result: SDZoneEvaluation):
 
 def phase8_entry(inputs: SDZoneInputs, result: SDZoneEvaluation):
     if not inputs.price_inside_zone:
+        result.lifecycle_state = ZoneLifecycle.WAITING
         result.trade_bias = TradeBias.WAIT
         result.wait_reason = "Phase 8: Price not yet inside zone — zone is your POI, wait for arrival."
         return
 
     if not inputs.tct_schematic_confirmed:
+        result.lifecycle_state = ZoneLifecycle.WAITING
         result.trade_bias = TradeBias.WAIT
         result.wait_reason = (
             "Phase 8: Price inside zone but TCT schematic not confirmed. "
@@ -403,6 +430,7 @@ def phase8_entry(inputs: SDZoneInputs, result: SDZoneEvaluation):
         else:
             result.primary_target = "Range Low or next structural low"
 
+    result.lifecycle_state = ZoneLifecycle.TRIGGERED
     result.entry_note = (
         f"{result.trade_bias.value} — TCT schematic confirmed inside "
         f"{inputs.zone_direction.value}. Target: {result.primary_target}."
@@ -457,6 +485,7 @@ def print_evaluation(result: SDZoneEvaluation):
     print("\n" + "=" * 62)
     print("  TCT SUPPLY & DEMAND DECISION TREE — EVALUATION RESULT")
     print("=" * 62)
+    print(f"  Lifecycle:       {result.lifecycle_state.value}")
     print(f"  Zone Direction:  {result.zone_direction.value if result.zone_direction else 'N/A'}")
     print(f"  Zone Type:       {result.zone_type.value if result.zone_type else 'N/A'}")
     print(f"  FVG Valid:       {'YES' if result.fvg_valid else 'NO'}")
