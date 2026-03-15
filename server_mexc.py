@@ -6190,7 +6190,12 @@ async def dashboard():
             justify-content: space-between;
             align-items: center;
             border-bottom: 1px solid #2d2d44;
+            flex-wrap: wrap;
         }
+        .page-nav{display:flex;gap:4px;flex-basis:100%;padding:4px 0 2px;border-top:1px solid #1e1e2d;margin-top:4px;flex-wrap:wrap}
+        .nav-link{font-size:.65rem;padding:2px 8px;border:1px solid #333;border-radius:3px;text-decoration:none;color:#888;white-space:nowrap}
+        .nav-link:hover{color:#e0e0e0;border-color:#555;background:#1a1a28}
+        .nav-link.active{background:rgba(0,212,255,.12);color:#00d4ff;border-color:#00d4ff;font-weight:600}
         .header h1 {
             font-size: 1.5rem;
             color: #00d4ff;
@@ -7398,6 +7403,14 @@ async def dashboard():
             </div>
             <div class="price-display" id="currentPrice">--</div>
             <button class="refresh-btn" onclick="refreshData()">Refresh</button>
+        </div>
+        <div class="page-nav">
+            <a href="/market-structure" class="nav-link">Market Structure</a>
+            <a href="/ranges" class="nav-link">Ranges</a>
+            <a href="/supply-demand" class="nav-link">Supply &amp; Demand</a>
+            <a href="/liquidity" class="nav-link">Liquidity</a>
+            <a href="/schematics-5A" class="nav-link">Schematics 5A</a>
+            <a href="/schematics-5B" class="nav-link">Schematics 5B</a>
         </div>
     </div>
 
