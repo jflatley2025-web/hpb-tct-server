@@ -41,6 +41,12 @@ class MitigationStatus(Enum):
     FULL_MITIGATION = "Fully mitigated + expansion away — RETIRE this zone"
 
 
+class FillState(Enum):
+    UNFILLED = "Unfilled — gap intact"
+    PARTIAL = "Partially filled — some price action inside gap"
+    FILLED = "Fully filled — gap completely closed"
+
+
 class ZonePriority(Enum):
     EXTREME = "Extreme zone — last remaining before range High/Low (highest priority)"
     MULTI_TF_CONFLUENCE = "Multi-TF confluence — higher TF + lower TF OB both unmitigated"
@@ -53,6 +59,44 @@ class TradeBias(Enum):
     LONG = "Long / Buy — demand zone confirmed"
     SHORT = "Short / Sell — supply zone confirmed"
     WAIT = "Wait — zone not yet reached or conditions not met"
+
+
+# ──────────────────────────────
+# FVG Descriptor
+# ──────────────────────────────
+
+@dataclass
+class FVGInfo:
+    """Pre-computed FVG attributes for Phase 3 validation.
+
+    Analogous to MitigationStatus: the caller computes these from candle data,
+    the decision tree validates them.  Convenience constructors are provided for
+    callers that only have boolean-level information.
+    """
+    gap_exists: bool
+    gap_size: Optional[float] = None        # price units; None = caller lacks price data
+    fill_state: FillState = FillState.UNFILLED
+    overlap_ratio: Optional[float] = None   # 0.0–1.0; None = unknown
+    candle_span: int = 3                    # standard FVG = 3 candles
+    tapped_from_top_down: bool = False
+
+    def __post_init__(self):
+        if self.gap_size is not None and self.gap_size < 0:
+            raise ValueError(f"gap_size cannot be negative: {self.gap_size}")
+        if self.overlap_ratio is not None and not (0.0 <= self.overlap_ratio <= 1.0):
+            raise ValueError(f"overlap_ratio must be in [0, 1]: {self.overlap_ratio}")
+        if self.candle_span < 1:
+            raise ValueError(f"candle_span must be >= 1: {self.candle_span}")
+
+    @classmethod
+    def confirmed(cls, tapped_from_top_down: bool = False, **kwargs) -> "FVGInfo":
+        """Convenience: FVG confirmed with boolean-only info (sensible defaults)."""
+        return cls(gap_exists=True, tapped_from_top_down=tapped_from_top_down, **kwargs)
+
+    @classmethod
+    def absent(cls) -> "FVGInfo":
+        """Convenience: no FVG detected."""
+        return cls(gap_exists=False)
 
 
 # ──────────────────────────────
@@ -69,16 +113,20 @@ class SDZoneInputs:
     # Phase 2
     zone_type: ZoneType
 
-    # Phase 3
-    # FVG presence is captured as two booleans for now. A richer FVGInfo
-    # dataclass (gap_size, fill_state, candle_span, overlap_flag, etc.) can be
-    # introduced once OHLC/candle data is available in SDZoneInputs — doing so
-    # before that point would add fields that are always None and break all
-    # current call sites with no functional gain.
-    fvg_confirmed: bool
-    fvg_tapped_from_top_down: bool
+    # Phase 3 — FVG descriptor (replaces former fvg_confirmed / fvg_tapped booleans).
+    # Callers that only have boolean-level info can use FVGInfo.confirmed() or
+    # FVGInfo.absent().  Callers with OHLC data should populate gap_size,
+    # fill_state, overlap_ratio, and candle_span for full Phase 3 validation.
+    fvg_info: FVGInfo
 
     # Phase 4
+    # NOTE: Numeric zone boundaries (zone_top, zone_bottom, or a zone_bounds
+    # dataclass) are intentionally deferred.  SDZoneInputs does not yet carry
+    # OHLC candle arrays or price data, so any numeric boundary fields would
+    # always be None today.  Phase 4 uses draw_note (prose) for boundary
+    # descriptions.  When candle/price data is added to SDZoneInputs, introduce
+    # a ZoneBounds dataclass here (top: float, bottom: float, candle_indices,
+    # boundary_source) and have phase4_draw_zone populate it deterministically.
     adjacent_candle_has_more_extreme_wick: bool
 
     # Phase 5
@@ -151,14 +199,55 @@ def phase2_identify_zone_type(inputs: SDZoneInputs, result: SDZoneEvaluation) ->
 
 
 def phase3_confirm_fvg(inputs: SDZoneInputs, result: SDZoneEvaluation) -> bool:
-    if not inputs.fvg_confirmed:
+    fvg = inputs.fvg_info
+
+    if not fvg.gap_exists:
         result.fvg_valid = False
         result.failed_at_phase = "Phase 3: No FVG detected — invalid zone."
         return False
 
+    # Reject micro-gaps when gap_size is provided.
+    if fvg.gap_size is not None and fvg.gap_size <= 0:
+        result.fvg_valid = False
+        result.failed_at_phase = (
+            f"Phase 3: Micro FVG rejected — gap_size {fvg.gap_size} is not positive."
+        )
+        return False
+
+    # Reject fully filled gaps — no remaining inefficiency.
+    if fvg.fill_state == FillState.FILLED:
+        result.fvg_valid = False
+        result.failed_at_phase = "Phase 3: FVG fully filled — gap no longer valid."
+        return False
+
+    # Reject complete overlap (wicks connect, no real gap).
+    if fvg.overlap_ratio is not None and fvg.overlap_ratio >= 1.0:
+        result.fvg_valid = False
+        result.failed_at_phase = (
+            f"Phase 3: FVG overlap ratio {fvg.overlap_ratio:.0%} — "
+            "wicks connect, no effective gap."
+        )
+        return False
+
+    # Standard FVG requires at least 3 candles.
+    if fvg.candle_span < 3:
+        result.fvg_valid = False
+        result.failed_at_phase = (
+            f"Phase 3: FVG candle span {fvg.candle_span} too short — minimum 3 required."
+        )
+        return False
+
+    # All checks passed — FVG is valid.
     result.fvg_valid = True
-    fvg_note = " (FVG tapped from top down)" if inputs.fvg_tapped_from_top_down else ""
-    result.passed_phases.append(f"Phase 3: FVG confirmed — valid inefficiency{fvg_note}.")
+    detail_parts: list[str] = []
+    if fvg.tapped_from_top_down:
+        detail_parts.append("tapped from top down")
+    if fvg.fill_state == FillState.PARTIAL:
+        detail_parts.append("partially filled")
+    if fvg.gap_size is not None:
+        detail_parts.append(f"gap size: {fvg.gap_size}")
+    detail = f" ({', '.join(detail_parts)})" if detail_parts else ""
+    result.passed_phases.append(f"Phase 3: FVG confirmed — valid inefficiency{detail}.")
     return True
 
 
@@ -405,8 +494,7 @@ if __name__ == "__main__":
         zone_direction=ZoneDirection.DEMAND,
         context_reason_exists=True,
         zone_type=ZoneType.ORDER_BLOCK,
-        fvg_confirmed=True,
-        fvg_tapped_from_top_down=False,
+        fvg_info=FVGInfo.confirmed(),
         adjacent_candle_has_more_extreme_wick=True,
         mitigation_status=MitigationStatus.UNMITIGATED,
         is_only_zone_in_area=False,
@@ -426,8 +514,7 @@ if __name__ == "__main__":
         zone_direction=ZoneDirection.SUPPLY,
         context_reason_exists=True,
         zone_type=ZoneType.STRUCTURE_ZONE,
-        fvg_confirmed=True,
-        fvg_tapped_from_top_down=False,
+        fvg_info=FVGInfo.confirmed(),
         adjacent_candle_has_more_extreme_wick=False,
         mitigation_status=MitigationStatus.UNMITIGATED,
         is_only_zone_in_area=False,
@@ -447,8 +534,7 @@ if __name__ == "__main__":
         zone_direction=ZoneDirection.SUPPLY,
         context_reason_exists=True,
         zone_type=ZoneType.ORDER_BLOCK,
-        fvg_confirmed=False,
-        fvg_tapped_from_top_down=False,
+        fvg_info=FVGInfo.absent(),
         adjacent_candle_has_more_extreme_wick=False,
         mitigation_status=MitigationStatus.UNMITIGATED,
         is_only_zone_in_area=False,
