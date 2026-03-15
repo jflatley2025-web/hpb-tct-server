@@ -198,6 +198,7 @@ class MarketStructureEngine:
 
         highs = df["high"].values
         lows = df["low"].values
+        _MIN_TOL = 1e-12
 
         pools = {
             "equal_highs": [],
@@ -214,10 +215,10 @@ class MarketStructureEngine:
             if lows[i] < lows[i-1] and lows[i] < lows[i+1]:
                 pools["swing_lows"].append(lows[i])
 
-            if abs(highs[i] - highs[i-1]) < highs[i]*0.001:
+            if abs(highs[i] - highs[i-1]) < max(abs(highs[i]) * 0.001, _MIN_TOL):
                 pools["equal_highs"].append(highs[i])
 
-            if abs(lows[i] - lows[i-1]) < lows[i]*0.001:
+            if abs(lows[i] - lows[i-1]) < max(abs(lows[i]) * 0.001, _MIN_TOL):
                 pools["equal_lows"].append(lows[i])
 
         return pools
