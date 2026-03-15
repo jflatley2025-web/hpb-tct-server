@@ -34,8 +34,8 @@
     "liquidation_safe": true,
     "opened_at": "2026-03-13T19:05:36.150860+00:00",
     "status": "open",
-    "live_pnl_pct": 0.14,
-    "current_price": 71003.55
+    "live_pnl_pct": -0.11,
+    "current_price": 71177.02
   },
   "trade_history": [
     {
@@ -345,7 +345,7 @@
   ],
   "total_wins": 0,
   "total_losses": 8,
-  "last_scan_time": "2026-03-15T01:04:37.353386+00:00",
+  "last_scan_time": "2026-03-15T02:04:53.843678+00:00",
   "last_scan_action": "holding",
   "last_error": "Could not fetch price data",
   "trading_mode": "jack"
