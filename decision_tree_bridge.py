@@ -31,7 +31,6 @@ import logging
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional, Tuple
-
 from decision_trees.ranges_decision_tree import (
     RangeInputs, RangeEvaluation, Trend, TradeBias as RangeTradeBias,
     DeviationType, evaluate_range_setup,
@@ -685,6 +684,22 @@ def _estimate_path_quality(df: pd.DataFrame, direction: str,
     return PathQuality.OBSTRUCTED
 
 
+def range_integrity_gate(range_high: float, range_low: float, current_price: float) -> bool:
+    """Return False if current price is near the range equilibrium (0.5 Fib).
+
+    A range is not ready for a trade when price sits at the midpoint rather than
+    at one of the extremes. The gate passes (True) when price is in the outer
+    40% of the range (upper or lower), and fails (False) when price is inside
+    the central 20% equilibrium zone.
+    """
+    if range_high <= range_low or current_price <= 0:
+        return True  # Cannot determine — allow through
+    rng = range_high - range_low
+    eq = (range_high + range_low) / 2.0
+    eq_zone = rng * 0.20
+    return abs(current_price - eq) > eq_zone
+
+
 # ================================================================
 # BUILDER FUNCTIONS — convert candles+schematic → decision tree inputs
 # ================================================================
@@ -1299,7 +1314,13 @@ def compute_composite_score_v2(
     range_info = schematic.get("range") or {}
     range_high = range_info.get("high", 0)
     range_low = range_info.get("low", 0)
+    rig_pass = range_integrity_gate(range_high, range_low, current_price)
 
+    if not rig_pass:
+        phase_results["range_integrity"] = {"passed": False}
+        return {**fail,
+                "reasons": ["Price inside equilibrium — range not ready"],
+                "phase_results": phase_results}
     time_ok, time_gap = _check_time_displacement(schematic)
     liq_stack = _detect_liquidity_stacking(df, range_high, range_low)
     is_v_shape = _reject_v_shape(df, range_high, range_low)
@@ -1445,6 +1466,23 @@ def compute_composite_score_v2(
     phase_results["liquidity"] = {**sweep_v2, "passed": True, "score": liq_score}
     score += liq_score
     reasons.append(f"Liquidity: {liq_score}/20 ({sweep_v2['classification']})")
+
+    # ── Phase 4.5: L3 Execution Structure Confirmation ──
+    # Verify that execution-level (short-lookback) market structure confirms
+    # the trade direction before proceeding to BOS validation.
+    l3_hh_hl, l3_lh_ll = _detect_trend(df, lookback=10)
+    if direction == "bullish":
+        l3_confirmed = l3_hh_hl
+    else:
+        l3_confirmed = l3_lh_ll
+
+    if not l3_confirmed:
+        phase_results["l3_structure"] = {"passed": False}
+        return {**fail, "score": score,
+                "reasons": reasons + ["Phase 4.5: No L3 execution structure"],
+                "phase_results": phase_results}
+
+    phase_results["l3_structure"] = {"passed": True}
 
     # ── Phase 5: Break of Structure ──
     bos = schematic.get("bos_confirmation") or {}
