@@ -289,7 +289,7 @@ class MarketStructureEngine:
                              current_price: float):
 
         if range_high <= range_low:
-            return True
+            return False
 
         midpoint = (range_high + range_low) / 2
         range_size = range_high - range_low
