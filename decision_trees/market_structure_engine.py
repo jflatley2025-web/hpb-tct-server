@@ -50,7 +50,7 @@ class SweepResult:
 
 class MarketStructureEngine:
 
-    def __init__(self):
+    def __init__(self) -> None:
         pass
 
     # ========================================================
