@@ -95,15 +95,17 @@ class FVGInfo:
     tapped_from_top_down: bool = False
 
     def __post_init__(self):
-        if self.gap_size is not None and self.gap_size < 0:
-            raise ValueError(f"gap_size cannot be negative: {self.gap_size}")
-        if self.overlap_ratio is not None and not (0.0 <= self.overlap_ratio <= 1.0):
-            raise ValueError(f"overlap_ratio must be in [0, 1]: {self.overlap_ratio}")
+        if self.gap_size is not None and self.gap_size <= 0:
+            raise ValueError(f"gap_size must be positive: {self.gap_size}")
+        if self.overlap_ratio is not None and not (0.0 <= self.overlap_ratio < 1.0):
+            raise ValueError(
+                f"overlap_ratio must be in [0, 1): {self.overlap_ratio}"
+            )
         if self.candle_span < 1:
             raise ValueError(f"candle_span must be >= 1: {self.candle_span}")
 
     @classmethod
-    def confirmed(cls, tapped_from_top_down: bool = False, **kwargs) -> "FVGInfo":
+    def confirmed(cls, *, tapped_from_top_down: bool = False, **kwargs) -> "FVGInfo":
         """Convenience: FVG confirmed with boolean-only info (sensible defaults)."""
         return cls(gap_exists=True, tapped_from_top_down=tapped_from_top_down, **kwargs)
 
@@ -187,6 +189,7 @@ class SDZoneEvaluation:
 # ──────────────────────────────
 
 def phase1_build_context(inputs: SDZoneInputs, result: SDZoneEvaluation) -> bool:
+    """Validate market context and flag counter-trend zones."""
     if inputs.market_context == MarketContext.UNCLEAR:
         result.lifecycle_state = ZoneLifecycle.FAILED
         result.failed_at_phase = "Phase 1: Market context unclear — wait for structure."
@@ -229,11 +232,13 @@ def phase1_build_context(inputs: SDZoneInputs, result: SDZoneEvaluation) -> bool
 
 
 def phase2_identify_zone_type(inputs: SDZoneInputs, result: SDZoneEvaluation) -> bool:
+    """Record zone type (ORDER_BLOCK or STRUCTURE_ZONE)."""
     result.passed_phases.append(f"Phase 2: Zone type identified — {inputs.zone_type.value}")
     return True
 
 
 def phase3_confirm_fvg(inputs: SDZoneInputs, result: SDZoneEvaluation) -> bool:
+    """Validate FVG attributes (gap, fill state, overlap, span)."""
     fvg = inputs.fvg_info
 
     if not fvg.gap_exists:
@@ -291,65 +296,56 @@ def phase3_confirm_fvg(inputs: SDZoneInputs, result: SDZoneEvaluation) -> bool:
     return True
 
 
+# Keyed by (ZoneType, ZoneDirection, adjacent_candle_has_more_extreme_wick).
+_DRAW_NOTES: dict[tuple[ZoneType, ZoneDirection, bool], str] = {
+    (ZoneType.ORDER_BLOCK, ZoneDirection.SUPPLY, True): (
+        "SUPPLY OB: Extend top to adjacent candle wick high (most extreme). "
+        "Single-candle OB boundary."
+    ),
+    (ZoneType.ORDER_BLOCK, ZoneDirection.SUPPLY, False): (
+        "SUPPLY OB: Box from wick low to wick high of last bullish candle "
+        "before bearish expansion."
+    ),
+    (ZoneType.ORDER_BLOCK, ZoneDirection.DEMAND, True): (
+        "DEMAND OB: Extend bottom to adjacent candle wick low (most extreme). "
+        "Single-candle OB boundary."
+    ),
+    (ZoneType.ORDER_BLOCK, ZoneDirection.DEMAND, False): (
+        "DEMAND OB: Box from wick low to wick high of last bearish candle "
+        "before bullish expansion."
+    ),
+    (ZoneType.STRUCTURE_ZONE, ZoneDirection.SUPPLY, True): (
+        "SUPPLY STRUCTURE ZONE: Box spans multiple candles in the structure leg. "
+        "Extend top to the most extreme wick high across the structure candles."
+    ),
+    (ZoneType.STRUCTURE_ZONE, ZoneDirection.SUPPLY, False): (
+        "SUPPLY STRUCTURE ZONE: Box from the lowest wick low to the highest "
+        "wick high across all candles in the structure leg before expansion."
+    ),
+    (ZoneType.STRUCTURE_ZONE, ZoneDirection.DEMAND, True): (
+        "DEMAND STRUCTURE ZONE: Box spans multiple candles in the structure leg. "
+        "Extend bottom to the most extreme wick low across the structure candles."
+    ),
+    (ZoneType.STRUCTURE_ZONE, ZoneDirection.DEMAND, False): (
+        "DEMAND STRUCTURE ZONE: Box from the lowest wick low to the highest "
+        "wick high across all candles in the structure leg before expansion."
+    ),
+}
+
+
 def phase4_draw_zone(inputs: SDZoneInputs, result: SDZoneEvaluation):
-    # Zone boundaries are expressed as human-readable prose in draw_note,
-    # branched by zone_type (ORDER_BLOCK vs STRUCTURE_ZONE) and direction.
+    """Set draw_note prose describing zone boundaries by type and direction."""
     # A machine-readable zone_bounds field (top/bottom floats, candle indices,
     # timestamps) should be added once SDZoneInputs carries OHLC candle arrays
     # — until then there is no numeric data to populate such a field.
-    if inputs.zone_type == ZoneType.ORDER_BLOCK:
-        if inputs.zone_direction == ZoneDirection.SUPPLY:
-            if inputs.adjacent_candle_has_more_extreme_wick:
-                result.draw_note = (
-                    "SUPPLY OB: Extend top to adjacent candle wick high (most extreme). "
-                    "Single-candle OB boundary."
-                )
-            else:
-                result.draw_note = (
-                    "SUPPLY OB: Box from wick low to wick high of last bullish candle "
-                    "before bearish expansion."
-                )
-        else:
-            if inputs.adjacent_candle_has_more_extreme_wick:
-                result.draw_note = (
-                    "DEMAND OB: Extend bottom to adjacent candle wick low (most extreme). "
-                    "Single-candle OB boundary."
-                )
-            else:
-                result.draw_note = (
-                    "DEMAND OB: Box from wick low to wick high of last bearish candle "
-                    "before bullish expansion."
-                )
-    else:
-        # STRUCTURE_ZONE: multi-candle zone — boundaries span the full
-        # structure leg, not a single candle.
-        if inputs.zone_direction == ZoneDirection.SUPPLY:
-            if inputs.adjacent_candle_has_more_extreme_wick:
-                result.draw_note = (
-                    "SUPPLY STRUCTURE ZONE: Box spans multiple candles in the structure leg. "
-                    "Extend top to the most extreme wick high across the structure candles."
-                )
-            else:
-                result.draw_note = (
-                    "SUPPLY STRUCTURE ZONE: Box from the lowest wick low to the highest "
-                    "wick high across all candles in the structure leg before expansion."
-                )
-        else:
-            if inputs.adjacent_candle_has_more_extreme_wick:
-                result.draw_note = (
-                    "DEMAND STRUCTURE ZONE: Box spans multiple candles in the structure leg. "
-                    "Extend bottom to the most extreme wick low across the structure candles."
-                )
-            else:
-                result.draw_note = (
-                    "DEMAND STRUCTURE ZONE: Box from the lowest wick low to the highest "
-                    "wick high across all candles in the structure leg before expansion."
-                )
-
+    key = (inputs.zone_type, inputs.zone_direction,
+           inputs.adjacent_candle_has_more_extreme_wick)
+    result.draw_note = _DRAW_NOTES[key]
     result.passed_phases.append(f"Phase 4: Drawing note — {result.draw_note}")
 
 
 def phase5_check_mitigation(inputs: SDZoneInputs, result: SDZoneEvaluation) -> bool:
+    """Check mitigation status; retire fully mitigated zones."""
     result.mitigation_status = inputs.mitigation_status
 
     if inputs.mitigation_status == MitigationStatus.FULL_MITIGATION:
@@ -378,6 +374,7 @@ def phase5_check_mitigation(inputs: SDZoneInputs, result: SDZoneEvaluation) -> b
 
 
 def phase6_refine_timeframe(inputs: SDZoneInputs, result: SDZoneEvaluation):
+    """Determine zone priority based on timeframe confluence."""
     if inputs.is_supply_chain_second_ob:
         result.priority = ZonePriority.SUPPLY_CHAIN_SECOND
         result.passed_phases.append("Phase 6: Supply chain 2nd OB — high priority.")
@@ -404,6 +401,7 @@ def phase6_refine_timeframe(inputs: SDZoneInputs, result: SDZoneEvaluation):
 
 
 def phase7_assess_extreme(inputs: SDZoneInputs, result: SDZoneEvaluation):
+    """Upgrade priority to EXTREME if zone is last before range boundary."""
     if inputs.is_extreme_zone:
         result.priority = ZonePriority.EXTREME
         result.passed_phases.append("Phase 7: EXTREME ZONE — highest priority.")
@@ -414,6 +412,7 @@ def phase7_assess_extreme(inputs: SDZoneInputs, result: SDZoneEvaluation):
 
 
 def phase8_entry(inputs: SDZoneInputs, result: SDZoneEvaluation):
+    """Determine trade bias and target if price is in zone with TCT confirmation."""
     if not inputs.price_inside_zone:
         result.lifecycle_state = ZoneLifecycle.WAITING
         result.trade_bias = TradeBias.WAIT
