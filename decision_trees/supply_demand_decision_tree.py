@@ -202,6 +202,23 @@ def phase1_build_context(inputs: SDZoneInputs, result: SDZoneEvaluation) -> bool
         MarketContext.UPTREND: "Uptrend: demand zones at higher-low pivots",
         MarketContext.DOWNTREND: "Downtrend: supply zones at lower-high pivots",
     }
+    # Flag counter-trend pairs so downstream can handle them explicitly.
+    # Counter-trend zones are not rejected (they exist at structure) but should
+    # not be treated identically to with-trend zones.
+    counter_trend = (
+        (inputs.market_context == MarketContext.UPTREND
+         and inputs.zone_direction == ZoneDirection.SUPPLY)
+        or
+        (inputs.market_context == MarketContext.DOWNTREND
+         and inputs.zone_direction == ZoneDirection.DEMAND)
+    )
+    if counter_trend:
+        result.warnings.append(
+            f"Phase 1: Counter-trend zone — {inputs.zone_direction.name} "
+            f"in {inputs.market_context.name}. Valid at structure but use "
+            "reduced size or tighter targets."
+        )
+
     result.passed_phases.append(
         f"Phase 1: Context confirmed — {inputs.market_context.name}. "
         f"{context_map.get(inputs.market_context)}"
@@ -355,7 +372,7 @@ def phase5_check_mitigation(inputs: SDZoneInputs, result: SDZoneEvaluation) -> b
         result.warnings.append("Phase 5: Wick only — liquidity grab, zone remains valid.")
 
     result.passed_phases.append(
-        f"Phase 5: Mitigation check passed — {inputs.mitigation_status.value}"
+        f"Phase 5: Mitigation check passed — {result.mitigation_status.value}"
     )
     return True
 
