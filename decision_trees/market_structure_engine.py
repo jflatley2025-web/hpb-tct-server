@@ -57,24 +57,30 @@ class MarketStructureEngine:
     # Pivot Detection
     # ========================================================
 
-    def detect_pivots(self, df: pd.DataFrame, window: int = 3):
+    def detect_pivots(
+        self, df: pd.DataFrame, window: int = 3
+    ) -> Tuple[List[Tuple[int, float]], List[Tuple[int, float]]]:
 
         highs = df["high"].values
         lows = df["low"].values
 
-        pivot_highs = []
-        pivot_lows = []
+        pivot_highs: List[Tuple[int, float]] = []
+        pivot_lows: List[Tuple[int, float]] = []
 
         for i in range(window, len(df) - window):
 
-            high_slice = highs[i-window:i+window+1]
-            low_slice = lows[i-window:i+window+1]
+            high_slice = highs[i - window:i + window + 1]
+            low_slice = lows[i - window:i + window + 1]
 
-            if highs[i] == max(high_slice):
-                pivot_highs.append((i, highs[i]))
+            # Tie-break: only the first candle of a plateau is a pivot.
+            # Require highs[i] to be strictly greater than every candle
+            # in the left half of the window so equal adjacent highs only
+            # produce one pivot (the leftmost occurrence).
+            if highs[i] == max(high_slice) and highs[i] > max(highs[i - window:i]):
+                pivot_highs.append((i, float(highs[i])))
 
-            if lows[i] == min(low_slice):
-                pivot_lows.append((i, lows[i]))
+            if lows[i] == min(low_slice) and lows[i] < min(lows[i - window:i]):
+                pivot_lows.append((i, float(lows[i])))
 
         return pivot_highs, pivot_lows
 
@@ -188,7 +194,7 @@ class MarketStructureEngine:
     # Liquidity Pool Detection
     # ========================================================
 
-    def detect_liquidity_pools(self, df: pd.DataFrame):
+    def detect_liquidity_pools(self, df: pd.DataFrame) -> Dict[str, List[float]]:
 
         highs = df["high"].values
         lows = df["low"].values
