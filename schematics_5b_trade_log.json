@@ -34,8 +34,8 @@
     "liquidation_safe": true,
     "opened_at": "2026-03-13T19:05:36.150860+00:00",
     "status": "open",
-    "live_pnl_pct": -0.54,
-    "current_price": 71482.28
+    "live_pnl_pct": -0.46,
+    "current_price": 71426.87
   },
   "trade_history": [
     {
@@ -345,7 +345,7 @@
   ],
   "total_wins": 0,
   "total_losses": 8,
-  "last_scan_time": "2026-03-15T15:44:57.204786+00:00",
+  "last_scan_time": "2026-03-15T16:49:10.977232+00:00",
   "last_scan_action": "holding",
   "last_error": null,
   "trading_mode": "claude"
