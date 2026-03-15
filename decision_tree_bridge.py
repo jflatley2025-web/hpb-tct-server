@@ -31,7 +31,7 @@ import logging
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional, Tuple
-
+from market_structure_engine import MarketStructureEngine
 from decision_trees.ranges_decision_tree import (
     RangeInputs, RangeEvaluation, Trend, TradeBias as RangeTradeBias,
     DeviationType, evaluate_range_setup,
@@ -695,7 +695,7 @@ def build_range_inputs(df: pd.DataFrame, schematic: Dict, current_price: float) 
     range_high = range_info.get("high", 0)
     range_low = range_info.get("low", 0)
 
-    hh_hl, lh_ll = _detect_trend(df)
+    structure = structure_engine.detect_l1_structure(df)
     six_candle = _six_candle_rule(df, range_high, range_low)
     eq_touched = _check_equilibrium_touched(df, range_high, range_low)
     horizontal = _range_looks_horizontal(df, range_high, range_low)
@@ -794,7 +794,7 @@ def build_liquidity_inputs(df: pd.DataFrame, schematic: Dict,
     range_high = range_info.get("high", 0)
     range_low = range_info.get("low", 0)
 
-    sweep = _detect_liquidity_sweep(df, range_high, range_low, direction)
+   sweep = structure_engine.detect_sweep(df, range_high, range_low, direction)
 
     if direction == "bullish":
         sweep_side = SweepSide.SELL_SIDE
@@ -971,7 +971,14 @@ def build_flip_inputs(schematic: Dict, active_trade: Optional[Dict]) -> Optional
         opposing_bos_confirmed=opposing and schematic.get("is_confirmed", False),
         supply_demand_at_opposite_extreme=opposing,
     )
+# L3 execution structure confirmation
+l3_confirmed = structure_engine.detect_l3_structure(df, direction)
 
+if not l3_confirmed:
+    phase_results["l3_structure"] = {"passed": False}
+    return {**fail, "score": score,
+            "reasons": reasons + ["Phase 4.5: No L3 execution structure"],
+            "phase_results": phase_results}
 
 # ================================================================
 # COMPOSITE SCORING — run all trees, produce final evaluation dict
@@ -1005,6 +1012,7 @@ def compute_composite_score(
     is_confirmed = schematic.get("is_confirmed", False)
 
     # Live R:R calculation (same as old evaluator)
+    structure_engine = MarketStructureEngine()
     stop_price = (schematic.get("stop_loss") or {}).get("price")
     target_price_val = (schematic.get("target") or {}).get("price")
     if stop_price and target_price_val and current_price > 0:
@@ -1299,7 +1307,13 @@ def compute_composite_score_v2(
     range_info = schematic.get("range") or {}
     range_high = range_info.get("high", 0)
     range_low = range_info.get("low", 0)
+rig_pass = range_integrity_gate(range_high, range_low, current_price)
 
+if not rig_pass:
+    phase_results["range_integrity"] = {"passed": False}
+    return {**fail,
+            "reasons": ["Price inside equilibrium — range not ready"],
+            "phase_results": phase_results}
     time_ok, time_gap = _check_time_displacement(schematic)
     liq_stack = _detect_liquidity_stacking(df, range_high, range_low)
     is_v_shape = _reject_v_shape(df, range_high, range_low)
