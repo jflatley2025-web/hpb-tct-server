@@ -10,7 +10,7 @@ Usage:
 
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Optional, List
+from typing import Optional
 
 
 # ──────────────────────────────
@@ -105,9 +105,12 @@ class SDZoneEvaluation:
     primary_target: str = ""
     draw_note: str = ""
     entry_note: str = ""
-    warnings: List[str] = field(default_factory=list)
-    passed_phases: List[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    passed_phases: list[str] = field(default_factory=list)
     failed_at_phase: Optional[str] = None
+    # Populated instead of failed_at_phase when the zone is valid but entry
+    # conditions are not yet met — distinguishes "waiting" from "invalid".
+    wait_reason: Optional[str] = None
 
 
 # ──────────────────────────────
@@ -183,6 +186,8 @@ def phase5_check_mitigation(inputs: SDZoneInputs, result: SDZoneEvaluation) -> b
         result.warnings.append(
             "Phase 5: Sole-zone exception — redraw and still treat as unmitigated."
         )
+        # Machine state must reflect the exception so downstream sees UNMITIGATED.
+        result.mitigation_status = MitigationStatus.UNMITIGATED
 
     if inputs.mitigation_status == MitigationStatus.PARTIAL_WICK:
         result.warnings.append("Phase 5: Wick only — liquidity grab, zone remains valid.")
@@ -199,7 +204,11 @@ def phase6_refine_timeframe(inputs: SDZoneInputs, result: SDZoneEvaluation):
         result.passed_phases.append("Phase 6: Supply chain 2nd OB — high priority.")
         return
 
-    if inputs.higher_tf_ob_unmitigated and not inputs.higher_tf_ob_mitigated_on_lower:
+    if (
+        inputs.higher_tf_ob_unmitigated
+        and not inputs.higher_tf_ob_mitigated_on_lower
+        and inputs.refined_ob_found_on_lower_tf
+    ):
         result.priority = ZonePriority.MULTI_TF_CONFLUENCE
         result.passed_phases.append("Phase 6: Multi-TF confluence — best case.")
     elif inputs.refined_ob_found_on_lower_tf:
@@ -223,37 +232,37 @@ def phase7_assess_extreme(inputs: SDZoneInputs, result: SDZoneEvaluation):
 def phase8_entry(inputs: SDZoneInputs, result: SDZoneEvaluation):
     if not inputs.price_inside_zone:
         result.trade_bias = TradeBias.WAIT
-        result.failed_at_phase = "Phase 8: Price not yet inside zone — wait."
+        result.wait_reason = "Phase 8: Price not yet inside zone — zone is your POI, wait for arrival."
         return
 
     if not inputs.tct_schematic_confirmed:
         result.trade_bias = TradeBias.WAIT
-        result.failed_at_phase = (
-            "Phase 8: Price inside zone but TCT schematic not confirmed — wait. "
+        result.wait_reason = (
+            "Phase 8: Price inside zone but TCT schematic not confirmed. "
             "Do NOT enter on zone touch alone. "
             "Wait for TCT Model 1 or Model 2 confirmation inside the zone."
         )
         return
 
-    # Set trade bias and primary targets based on zone direction and context
+    # Set trade bias and primary targets — extreme zone takes highest precedence.
     if inputs.zone_direction == ZoneDirection.DEMAND:
         result.trade_bias = TradeBias.LONG
-        if inputs.market_context == MarketContext.RANGE:
+        if inputs.is_extreme_zone:
+            result.primary_target = "Body of the range / upper supply zone"
+        elif inputs.market_context == MarketContext.RANGE:
             result.primary_target = "Range High (or upper range supply zone)"
         elif inputs.market_context == MarketContext.UPTREND:
             result.primary_target = "Next higher high (trend continuation)"
-        elif inputs.is_extreme_zone:
-            result.primary_target = "Body of the range / upper supply zone"
         else:
             result.primary_target = "Range High or next structural high"
     else:
         result.trade_bias = TradeBias.SHORT
-        if inputs.market_context == MarketContext.RANGE:
+        if inputs.is_extreme_zone:
+            result.primary_target = "Body of the range / lower demand zone"
+        elif inputs.market_context == MarketContext.RANGE:
             result.primary_target = "Range Low (or lower range demand zone)"
         elif inputs.market_context == MarketContext.DOWNTREND:
             result.primary_target = "Next lower low (trend continuation)"
-        elif inputs.is_extreme_zone:
-            result.primary_target = "Body of the range / lower demand zone"
         else:
             result.primary_target = "Range Low or next structural low"
 
@@ -328,6 +337,8 @@ def print_evaluation(result: SDZoneEvaluation):
         print(f"    ✓ {p}")
     if result.failed_at_phase:
         print(f"  Stopped At: ✗ {result.failed_at_phase}")
+    if result.wait_reason:
+        print(f"  Waiting:    ⏳ {result.wait_reason}")
     if result.warnings:
         print("  Warnings:")
         for w in result.warnings:
