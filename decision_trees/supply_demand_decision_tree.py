@@ -390,9 +390,14 @@ def phase6_refine_timeframe(inputs: SDZoneInputs, result: SDZoneEvaluation):
     ):
         result.priority = ZonePriority.MULTI_TF_CONFLUENCE
         result.passed_phases.append("Phase 6: Multi-TF confluence — best case.")
-    elif inputs.refined_ob_found_on_lower_tf:
+    elif (
+        inputs.refined_ob_found_on_lower_tf
+        and inputs.zone_type == ZoneType.STRUCTURE_ZONE
+    ):
         result.priority = ZonePriority.STRUCTURE_PLUS_OB
-        result.passed_phases.append("Phase 6: Refined OB found — place both zones.")
+        result.passed_phases.append(
+            "Phase 6: Structure zone with refined OB on lower TF — place both zones."
+        )
     else:
         result.priority = ZonePriority.SINGLE_OB
         result.passed_phases.append("Phase 6: Single-layer OB — valid.")
