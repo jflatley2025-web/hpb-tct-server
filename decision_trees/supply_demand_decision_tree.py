@@ -163,20 +163,59 @@ def phase3_confirm_fvg(inputs: SDZoneInputs, result: SDZoneEvaluation) -> bool:
 
 
 def phase4_draw_zone(inputs: SDZoneInputs, result: SDZoneEvaluation):
-    # Zone boundaries are expressed as human-readable prose in draw_note.
-    # Numeric fields (zone_top, zone_bottom) can be added to SDZoneEvaluation
-    # once SDZoneInputs carries actual OHLC/wick price values — until then any
-    # such fields would always be None and mislead consumers.
-    if inputs.zone_direction == ZoneDirection.SUPPLY:
-        if inputs.adjacent_candle_has_more_extreme_wick:
-            result.draw_note = "SUPPLY OB: Extend top to adjacent candle wick high (most extreme)."
+    # Zone boundaries are expressed as human-readable prose in draw_note,
+    # branched by zone_type (ORDER_BLOCK vs STRUCTURE_ZONE) and direction.
+    # A machine-readable zone_bounds field (top/bottom floats, candle indices,
+    # timestamps) should be added once SDZoneInputs carries OHLC candle arrays
+    # — until then there is no numeric data to populate such a field.
+    if inputs.zone_type == ZoneType.ORDER_BLOCK:
+        if inputs.zone_direction == ZoneDirection.SUPPLY:
+            if inputs.adjacent_candle_has_more_extreme_wick:
+                result.draw_note = (
+                    "SUPPLY OB: Extend top to adjacent candle wick high (most extreme). "
+                    "Single-candle OB boundary."
+                )
+            else:
+                result.draw_note = (
+                    "SUPPLY OB: Box from wick low to wick high of last bullish candle "
+                    "before bearish expansion."
+                )
         else:
-            result.draw_note = "SUPPLY OB: Box from wick low to wick high of last bullish candle."
+            if inputs.adjacent_candle_has_more_extreme_wick:
+                result.draw_note = (
+                    "DEMAND OB: Extend bottom to adjacent candle wick low (most extreme). "
+                    "Single-candle OB boundary."
+                )
+            else:
+                result.draw_note = (
+                    "DEMAND OB: Box from wick low to wick high of last bearish candle "
+                    "before bullish expansion."
+                )
     else:
-        if inputs.adjacent_candle_has_more_extreme_wick:
-            result.draw_note = "DEMAND OB: Extend bottom to adjacent candle wick low (most extreme)."
+        # STRUCTURE_ZONE: multi-candle zone — boundaries span the full
+        # structure leg, not a single candle.
+        if inputs.zone_direction == ZoneDirection.SUPPLY:
+            if inputs.adjacent_candle_has_more_extreme_wick:
+                result.draw_note = (
+                    "SUPPLY STRUCTURE ZONE: Box spans multiple candles in the structure leg. "
+                    "Extend top to the most extreme wick high across the structure candles."
+                )
+            else:
+                result.draw_note = (
+                    "SUPPLY STRUCTURE ZONE: Box from the lowest wick low to the highest "
+                    "wick high across all candles in the structure leg before expansion."
+                )
         else:
-            result.draw_note = "DEMAND OB: Box from wick low to wick high of last bearish candle."
+            if inputs.adjacent_candle_has_more_extreme_wick:
+                result.draw_note = (
+                    "DEMAND STRUCTURE ZONE: Box spans multiple candles in the structure leg. "
+                    "Extend bottom to the most extreme wick low across the structure candles."
+                )
+            else:
+                result.draw_note = (
+                    "DEMAND STRUCTURE ZONE: Box from the lowest wick low to the highest "
+                    "wick high across all candles in the structure leg before expansion."
+                )
 
     result.passed_phases.append(f"Phase 4: Drawing note — {result.draw_note}")
 
