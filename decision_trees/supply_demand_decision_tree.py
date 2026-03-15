@@ -70,6 +70,11 @@ class SDZoneInputs:
     zone_type: ZoneType
 
     # Phase 3
+    # FVG presence is captured as two booleans for now. A richer FVGInfo
+    # dataclass (gap_size, fill_state, candle_span, overlap_flag, etc.) can be
+    # introduced once OHLC/candle data is available in SDZoneInputs — doing so
+    # before that point would add fields that are always None and break all
+    # current call sites with no functional gain.
     fvg_confirmed: bool
     fvg_tapped_from_top_down: bool
 
@@ -158,6 +163,10 @@ def phase3_confirm_fvg(inputs: SDZoneInputs, result: SDZoneEvaluation) -> bool:
 
 
 def phase4_draw_zone(inputs: SDZoneInputs, result: SDZoneEvaluation):
+    # Zone boundaries are expressed as human-readable prose in draw_note.
+    # Numeric fields (zone_top, zone_bottom) can be added to SDZoneEvaluation
+    # once SDZoneInputs carries actual OHLC/wick price values — until then any
+    # such fields would always be None and mislead consumers.
     if inputs.zone_direction == ZoneDirection.SUPPLY:
         if inputs.adjacent_candle_has_more_extreme_wick:
             result.draw_note = "SUPPLY OB: Extend top to adjacent candle wick high (most extreme)."
