@@ -194,7 +194,7 @@ class MarketStructureEngine:
     # Liquidity Pool Detection
     # ========================================================
 
-    def detect_liquidity_pools(self, df: pd.DataFrame):
+    def detect_liquidity_pools(self, df: pd.DataFrame) -> Dict[str, List[float]]:
 
         highs = df["high"].values
         lows = df["low"].values
