@@ -6,7 +6,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-<title>TCT Lecture 3 — Supply & Demand Decision Tree</title>
+<title>TCT Lecture 3 — Supply &amp; Demand Decision Tree</title>
 
 <style>
 
@@ -98,13 +98,16 @@ transform:rotate(90deg);
 
 .phase-body{
 border-top:1px solid var(--border);
-padding:16px;
-display:none;
+padding:0 16px;
+max-height:0;
+overflow:hidden;
+transition:max-height .25s ease, padding .25s ease;
 background:var(--bg);
 }
 
 .phase-body.open{
-display:block;
+max-height:4000px;
+padding:16px;
 }
 
 .node{
@@ -207,9 +210,14 @@ font-size:13px;
 color:var(--muted);
 }
 
+.scan-list{
+margin-left:18px;
+line-height:1.8;
+}
+
 @media print{
 
-.phase-body{display:block!important}
+.phase-body{max-height:none!important;padding:16px!important;overflow:visible!important}
 .phase-toggle{display:none}
 
 body{
@@ -242,7 +250,7 @@ Hybrid documentation + machine-parsable decision tree for the TCT Supply & Deman
 <!-- PHASE 1 -->
 <div class="phase" id="phase-1-structure">
 
-<div class="phase-header" onclick="toggle(this)">
+<div class="phase-header" onclick="toggle(this)" onkeydown="if(event.key==='Enter'||event.key===' ')toggle(this)" tabindex="0" role="button" aria-expanded="true">
 <div class="phase-number" style="background:#1a2a3a;color:#58a6ff">1</div>
 <div class="phase-title">Build Structural Context</div>
 <div class="phase-toggle open">›</div>
@@ -292,7 +300,7 @@ No clear structure → wait.
 <!-- PHASE 2 -->
 <div class="phase" id="phase-2-zone-type">
 
-<div class="phase-header" onclick="toggle(this)">
+<div class="phase-header" onclick="toggle(this)" onkeydown="if(event.key==='Enter'||event.key===' ')toggle(this)" tabindex="0" role="button" aria-expanded="false">
 <div class="phase-number" style="background:#3a1a1a;color:#f85149">2</div>
 <div class="phase-title">Identify Zone Type</div>
 <div class="phase-toggle">›</div>
@@ -302,11 +310,14 @@ No clear structure → wait.
 
 <table class="rule-table">
 
+<thead>
 <tr>
 <th>Zone Type</th>
 <th>Description</th>
 </tr>
+</thead>
 
+<tbody>
 <tr>
 <td>Order Block</td>
 <td>Single candle preceding expansion containing FVG.</td>
@@ -316,6 +327,7 @@ No clear structure → wait.
 <td>Structure Supply / Demand</td>
 <td>Multi-candle base preceding strong impulse.</td>
 </tr>
+</tbody>
 
 </table>
 
@@ -326,7 +338,7 @@ No clear structure → wait.
 <!-- PHASE 3 -->
 <div class="phase" id="phase-3-fvg">
 
-<div class="phase-header" onclick="toggle(this)">
+<div class="phase-header" onclick="toggle(this)" onkeydown="if(event.key==='Enter'||event.key===' ')toggle(this)" tabindex="0" role="button" aria-expanded="false">
 <div class="phase-number" style="background:#3a2a10;color:#d29922">3</div>
 <div class="phase-title">Confirm Fair Value Gap</div>
 <div class="phase-toggle">›</div>
@@ -358,7 +370,7 @@ No → FVG confirmed.
 <!-- PHASE 4 -->
 <div class="phase" id="phase-4-draw">
 
-<div class="phase-header" onclick="toggle(this)">
+<div class="phase-header" onclick="toggle(this)" onkeydown="if(event.key==='Enter'||event.key===' ')toggle(this)" tabindex="0" role="button" aria-expanded="false">
 <div class="phase-number" style="background:#1a2a3a;color:#58a6ff">4</div>
 <div class="phase-title">Draw Zone Boundaries</div>
 <div class="phase-toggle">›</div>
@@ -377,7 +389,7 @@ Use the most extreme wick across OB and adjacent candles.
 <!-- PHASE 5 -->
 <div class="phase" id="phase-5-mitigation">
 
-<div class="phase-header" onclick="toggle(this)">
+<div class="phase-header" onclick="toggle(this)" onkeydown="if(event.key==='Enter'||event.key===' ')toggle(this)" tabindex="0" role="button" aria-expanded="false">
 <div class="phase-number" style="background:#3a1a1a;color:#f85149">5</div>
 <div class="phase-title">Check Zone Mitigation</div>
 <div class="phase-toggle">›</div>
@@ -411,7 +423,7 @@ No → zone still valid.
 <!-- PHASE 6 -->
 <div class="phase" id="phase-6-refinement">
 
-<div class="phase-header" onclick="toggle(this)">
+<div class="phase-header" onclick="toggle(this)" onkeydown="if(event.key==='Enter'||event.key===' ')toggle(this)" tabindex="0" role="button" aria-expanded="false">
 <div class="phase-number" style="background:#2a1a3a;color:#bc8cff">6</div>
 <div class="phase-title">Refine Across Timeframes</div>
 <div class="phase-toggle">›</div>
@@ -430,7 +442,7 @@ Scan HTF → LTF to locate refined OB within broader zone.
 <!-- PHASE 7 -->
 <div class="phase" id="phase-7-priority">
 
-<div class="phase-header" onclick="toggle(this)">
+<div class="phase-header" onclick="toggle(this)" onkeydown="if(event.key==='Enter'||event.key===' ')toggle(this)" tabindex="0" role="button" aria-expanded="false">
 <div class="phase-number" style="background:#1a3a24;color:#3fb950">7</div>
 <div class="phase-title">Zone Priority</div>
 <div class="phase-toggle">›</div>
@@ -440,11 +452,14 @@ Scan HTF → LTF to locate refined OB within broader zone.
 
 <table class="rule-table">
 
+<thead>
 <tr>
 <th>Priority</th>
 <th>Zone Type</th>
 </tr>
+</thead>
 
+<tbody>
 <tr>
 <td>1</td>
 <td>Extreme Supply / Demand</td>
@@ -464,6 +479,7 @@ Scan HTF → LTF to locate refined OB within broader zone.
 <td>4</td>
 <td>Single OB</td>
 </tr>
+</tbody>
 
 </table>
 
@@ -474,7 +490,7 @@ Scan HTF → LTF to locate refined OB within broader zone.
 <!-- PHASE 8 -->
 <div class="phase" id="phase-8-confirmation">
 
-<div class="phase-header" onclick="toggle(this)">
+<div class="phase-header" onclick="toggle(this)" onkeydown="if(event.key==='Enter'||event.key===' ')toggle(this)" tabindex="0" role="button" aria-expanded="false">
 <div class="phase-number" style="background:#1a2a3a;color:#58a6ff">8</div>
 <div class="phase-title">Wait for Confirmation</div>
 <div class="phase-toggle">›</div>
@@ -493,7 +509,7 @@ Do NOT trade the touch. Wait for a TCT schematic inside the zone.
 <!-- PHASE 9 -->
 <div class="phase" id="phase-9-retire">
 
-<div class="phase-header" onclick="toggle(this)">
+<div class="phase-header" onclick="toggle(this)" onkeydown="if(event.key==='Enter'||event.key===' ')toggle(this)" tabindex="0" role="button" aria-expanded="false">
 <div class="phase-number" style="background:#3a1a1a;color:#f85149">9</div>
 <div class="phase-title">Post-Reaction Zone Handling</div>
 <div class="phase-toggle">›</div>
@@ -512,7 +528,7 @@ After mitigation + expansion → remove zone.
 <!-- PHASE 10 -->
 <div class="phase" id="phase-10-checklist">
 
-<div class="phase-header" onclick="toggle(this)">
+<div class="phase-header" onclick="toggle(this)" onkeydown="if(event.key==='Enter'||event.key===' ')toggle(this)" tabindex="0" role="button" aria-expanded="false">
 <div class="phase-number" style="background:#2a1a3a;color:#bc8cff">10</div>
 <div class="phase-title">Pre-Trade Checklist</div>
 <div class="phase-toggle">›</div>
@@ -541,7 +557,7 @@ After mitigation + expansion → remove zone.
 
 <div class="phase" id="bonus-scan-workflow">
 
-<div class="phase-header" onclick="toggle(this)">
+<div class="phase-header" onclick="toggle(this)" onkeydown="if(event.key==='Enter'||event.key===' ')toggle(this)" tabindex="0" role="button" aria-expanded="false">
 <div class="phase-number" style="background:#1c2128;color:#8b949e">+</div>
 <div class="phase-title">Zone Scanning Workflow</div>
 <div class="phase-toggle">›</div>
@@ -549,7 +565,7 @@ After mitigation + expansion → remove zone.
 
 <div class="phase-body">
 
-<ol style="margin-left:18px;line-height:1.8">
+<ol class="scan-list">
 
 <li>Identify structure context</li>
 <li>Mark range extremes if applicable</li>
@@ -572,7 +588,7 @@ After mitigation + expansion → remove zone.
 
 <div class="phase" id="master-rule-table">
 
-<div class="phase-header" onclick="toggle(this)">
+<div class="phase-header" onclick="toggle(this)" onkeydown="if(event.key==='Enter'||event.key===' ')toggle(this)" tabindex="0" role="button" aria-expanded="false">
 <div class="phase-number" style="background:#1c2128;color:#8b949e">≡</div>
 <div class="phase-title">Master If / Then Rule Table</div>
 <div class="phase-toggle">›</div>
@@ -582,11 +598,14 @@ After mitigation + expansion → remove zone.
 
 <table class="rule-table">
 
+<thead>
 <tr>
 <th>Condition</th>
 <th>Action</th>
 </tr>
+</thead>
 
+<tbody>
 <tr>
 <td>Last bearish candle before expansion + FVG</td>
 <td>Valid demand OB</td>
@@ -631,6 +650,7 @@ After mitigation + expansion → remove zone.
 <td>TCT schematic confirmed in supply</td>
 <td>Short entry</td>
 </tr>
+</tbody>
 
 </table>
 
@@ -649,6 +669,7 @@ const open = body.classList.contains("open")
 
 body.classList.toggle("open",!open)
 arrow.classList.toggle("open",!open)
+header.setAttribute("aria-expanded", String(!open))
 
 }
 
