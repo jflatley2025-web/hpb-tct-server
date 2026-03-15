@@ -7409,8 +7409,8 @@ async def dashboard():
             <a href="/ranges" class="nav-link">Ranges</a>
             <a href="/supply-demand" class="nav-link">Supply &amp; Demand</a>
             <a href="/liquidity" class="nav-link">Liquidity</a>
-            <a href="/schematics-5A" class="nav-link">Schematics 5A</a>
-            <a href="/schematics-5B" class="nav-link">Schematics 5B</a>
+            <a href="/schematics-5a" class="nav-link">Schematics 5A</a>
+            <a href="/schematics-5b" class="nav-link">Schematics 5B</a>
         </div>
     </div>
 
