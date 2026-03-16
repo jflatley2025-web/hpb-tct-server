@@ -57,6 +57,11 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 import logging
 
+from pivot_cache import PivotCache
+from range_engine_controller import RangeEngineController
+from range_utils import check_equilibrium_touch
+from session_manipulation import get_active_session, apply_session_multiplier
+
 logger = logging.getLogger("TCT-Schematics")
 
 
@@ -108,9 +113,20 @@ class TCTSchematicDetector:
     WOV_IN_WOV_MIN_RR_IMPROVEMENT = 2.0  # WOV entry should at least double R:R
     M1_TO_M2_FOLLOW_THROUGH_BONUS = 1.5  # M1→M2 typically extends target by 50%
 
-    def __init__(self, candles: pd.DataFrame):
-        """Initialize with candle data."""
+    def __init__(self, candles: pd.DataFrame, pivot_cache: PivotCache = None,
+                 range_engine_mode: str = None):
+        """Initialize with candle data and optional centralized pivot cache."""
         self.candles = candles.reset_index(drop=True)
+        # Centralized pivot cache — eliminates structural drift
+        # Validate injected cache matches our candles; rebuild if stale
+        if pivot_cache is not None and len(pivot_cache.candles) != len(self.candles):
+            logger.debug("Injected PivotCache length mismatch — rebuilding")
+            pivot_cache = None
+        self._pivot_cache = pivot_cache or PivotCache(self.candles, lookback=self.SIX_CANDLE_LOOKBACK // 2)
+        # Range engine controller with feature flag
+        self._range_controller = RangeEngineController(
+            mode=range_engine_mode, pivot_cache=self._pivot_cache
+        )
 
     def detect_all_schematics(self, detected_ranges: List[Dict] = None) -> Dict:
         """
@@ -159,7 +175,40 @@ class TCTSchematicDetector:
         schematics = []
 
         # Find potential range formations
-        ranges = detected_ranges if detected_ranges else self._find_accumulation_ranges()
+        if detected_ranges:
+            ranges = detected_ranges
+        else:
+            try:
+                ranges = self._range_controller.detect_ranges(
+                    self.candles, "accumulation", htf_bias="bearish",
+                    pivot_cache=self._pivot_cache,
+                )
+            except Exception as e:
+                logger.debug(f"Range controller failed, falling back to legacy: {e}")
+                ranges = self._find_accumulation_ranges()
+
+        # Rank ranges by Tap1 (range_low) path quality — best candidates first
+        # Each candidate is scored against its own range context, not a shared ref
+        if len(ranges) > 1:
+            scored_ranges = []
+            for r in ranges:
+                candidates = [{"idx": r["range_low_idx"], "price": r["range_low"]}]
+                ranked = self._rank_ms_lows_by_path_quality(candidates, r)
+                # Ranker returns a reordered list; use relative position as score proxy
+                # A single-element list always returns the same item, so we compute
+                # the score directly using the same logic as the ranker
+                range_size = r.get("range_size", 0)
+                if range_size > 0:
+                    distance = r["range_low"] - r.get("range_low", 0)
+                    demand_zones = self._find_demand_zones_below(r["range_low"], r)
+                    significant = [z for z in demand_zones
+                                   if (z["top"] - z["bottom"]) > range_size * 0.1]
+                    score = 30 if not significant else -len(significant) * 15
+                else:
+                    score = 0
+                scored_ranges.append((score, r))
+            scored_ranges.sort(key=lambda x: x[0], reverse=True)
+            ranges = [r for _, r in scored_ranges]
 
         for range_data in ranges:
             try:
@@ -466,8 +515,18 @@ class TCTSchematicDetector:
         """
         schematics = []
 
-        # Find potential range formations
-        ranges = detected_ranges if detected_ranges else self._find_distribution_ranges()
+        # Find potential range formations — use L2 range engine when available
+        if detected_ranges:
+            ranges = detected_ranges
+        else:
+            try:
+                ranges = self._range_controller.detect_ranges(
+                    self.candles, "distribution", htf_bias="bullish",
+                    pivot_cache=self._pivot_cache,
+                )
+            except Exception as e:
+                logger.debug(f"Range controller failed, falling back to legacy: {e}")
+                ranges = self._find_distribution_ranges()
 
         for range_data in ranges:
             try:
@@ -491,21 +550,43 @@ class TCTSchematicDetector:
                 # TCT: Try to find Model 2 Tap3 (lower high at extreme liquidity/supply)
                 tap3_m2 = self._find_distribution_tap3_model2(range_data, tap1, tap2)
 
-                # Build Model 1 schematic if valid
+                # Build Model 1 schematic if valid (sweep gate)
                 if tap3_m1:
-                    schematic = self._build_distribution_schematic(
-                        range_data, tap1, tap2, tap3_m1, model_type="Model_1"
+                    # Liquidity sweep validation: deviation must be a liquidity
+                    # grab, not a true break. Must validate BEFORE schematic
+                    # construction per correct pipeline ordering.
+                    sweep_m1 = self._validate_distribution_sweep(
+                        range_data, tap2, tap3_m1
                     )
-                    if schematic:
-                        schematics.append(schematic)
+                    if sweep_m1["has_sweep"] and sweep_m1["classification"] == "true_break":
+                        logger.debug(
+                            f"Distribution M1 aborted: deviation classified as true_break "
+                            f"(swept={sweep_m1['pools_swept']})"
+                        )
+                    else:
+                        schematic = self._build_distribution_schematic(
+                            range_data, tap1, tap2, tap3_m1, model_type="Model_1"
+                        )
+                        if schematic:
+                            schematic["sweep_validation"] = sweep_m1
+                            schematics.append(schematic)
 
-                # Build Model 2 schematic if valid
+                # Build Model 2 schematic if valid (sweep gate)
                 if tap3_m2:
-                    schematic = self._build_distribution_schematic(
-                        range_data, tap1, tap2, tap3_m2, model_type="Model_2"
+                    sweep_m2 = self._validate_distribution_sweep(
+                        range_data, tap2, tap3_m2
                     )
-                    if schematic:
-                        schematics.append(schematic)
+                    if sweep_m2["has_sweep"] and sweep_m2["classification"] == "true_break":
+                        logger.debug(
+                            f"Distribution M2 aborted: deviation classified as true_break"
+                        )
+                    else:
+                        schematic = self._build_distribution_schematic(
+                            range_data, tap1, tap2, tap3_m2, model_type="Model_2"
+                        )
+                        if schematic:
+                            schematic["sweep_validation"] = sweep_m2
+                            schematics.append(schematic)
 
                     # TCT 5B: Check for Model 2 → Model 1 failure transition
                     # "A model two when you have a lower high, and when that fails
@@ -791,7 +872,8 @@ class TCTSchematicDetector:
             # TCT: Look for break back to bullish on internal structure
             # EQ filter preserved: BOS must confirm below EQ (in the discount zone)
             bos = self._find_bullish_bos(tap3_idx, highest_point_price, tap3_price,
-                                          equilibrium=equilibrium)
+                                          equilibrium=equilibrium,
+                                          range_data=range_data)
 
             if bos:
                 return {
@@ -815,7 +897,8 @@ class TCTSchematicDetector:
             # Watch LTF structure from lowest point to Tap3 high
             # TCT: Look for break back to bearish on internal structure
             bos = self._find_bearish_bos(tap3_idx, lowest_point_price, tap3_price,
-                                          equilibrium=equilibrium)
+                                          equilibrium=equilibrium,
+                                          range_data=range_data)
 
             if bos:
                 return {
@@ -833,7 +916,8 @@ class TCTSchematicDetector:
         return None
 
     def _find_bullish_bos(self, start_idx: int, high_price: float, low_price: float,
-                           equilibrium: float = None, window: int = 25) -> Optional[Dict]:
+                           equilibrium: float = None, window: int = 25,
+                           range_data: Optional[Dict] = None) -> Optional[Dict]:
         """
         Find bullish break of structure after Tap3 using LTF internal structure.
 
@@ -880,7 +964,12 @@ class TCTSchematicDetector:
         # filter, there is no confirmed BOS — return None rather than guess with a
         # distant historical swing that produces entries far from the discount zone.
 
-        # Try each swing high (lowest price first) — BOS = first broken MS level
+        # Supply-path ranking: rank MS high candidates by path quality to range high.
+        # Prefer MS highs with a clean path (no significant supply above).
+        if range_data and swing_highs:
+            swing_highs = self._rank_ms_highs_by_path_quality(swing_highs, range_data)
+
+        # Try each swing high (best path quality first) — BOS = first broken MS level
         for sh in swing_highs:
             # BOS must confirm AFTER tap3, never before the deviation completes
             search_start = max(sh["idx"] + 1, start_idx + 1)
@@ -903,7 +992,8 @@ class TCTSchematicDetector:
         return None
 
     def _find_bearish_bos(self, start_idx: int, low_price: float, high_price: float,
-                           equilibrium: float = None, window: int = 25) -> Optional[Dict]:
+                           equilibrium: float = None, window: int = 25,
+                           range_data: Optional[Dict] = None) -> Optional[Dict]:
         """
         Find bearish break of structure after Tap3 using LTF internal structure.
 
@@ -950,7 +1040,12 @@ class TCTSchematicDetector:
         # filter, there is no confirmed BOS — return None rather than guess with a
         # distant historical swing that produces entries far from the premium zone.
 
-        # Try each swing low (highest price first) — BOS = first broken MS level
+        # Demand-path ranking: rank MS low candidates by path quality to range low.
+        # Prefer MS lows with a clean path (no significant demand underneath).
+        if range_data and swing_lows:
+            swing_lows = self._rank_ms_lows_by_path_quality(swing_lows, range_data)
+
+        # Try each swing low (best path quality first) — BOS = first broken MS level
         for sl in swing_lows:
             # BOS must confirm AFTER tap3, never before the deviation completes
             search_start = max(sl["idx"] + 1, start_idx + 1)
@@ -959,8 +1054,8 @@ class TCTSchematicDetector:
                 # BOS close must break the swing low AND the entry level
                 # (swing low) must be below tap3 high — otherwise stop < entry.
                 # TCT: "enter on the break" = the MS level that was broken.
-                if close_price < sl["price"] and sl["price"] < high_price:
-                    is_inside_range = sl["price"] > low_price
+                if close_price < sl["price"] and sl["price"] < high_price and sl["price"] > low_price:
+                    is_inside_range = sl["price"] > low_price and sl["price"] < high_price
                     return {
                         "idx": i,
                         "price": sl["price"],
@@ -971,6 +1066,106 @@ class TCTSchematicDetector:
                     }
 
         return None
+
+    def _rank_ms_lows_by_path_quality(self, swing_lows: List[Dict],
+                                       range_data: Dict) -> List[Dict]:
+        """
+        Rank MS low candidates by path quality to range low.
+
+        TCT: "The correct market structure low must be the one that leads
+        to a smooth path toward the range low (no significant demand underneath)."
+
+        Scoring factors:
+        - distance_to_range_low: More room = higher score
+        - demand_zone_strength: Fewer/smaller demand zones = higher score
+        - clean_path_score: No significant demand = bonus
+        """
+        range_low = range_data["range_low"]
+        range_size = range_data["range_size"]
+
+        if range_size <= 0:
+            return swing_lows
+
+        scored = []
+        for sl in swing_lows:
+            score = 0.0
+
+            # 1. Distance to range low (more room to target = higher score)
+            distance = sl["price"] - range_low
+            if distance > 0:
+                score += (distance / range_size) * 40  # 0-40 pts
+
+            # 2. Demand zone strength below this MS low
+            demand_zones = self._find_demand_zones_below(sl["price"], range_data)
+            significant = [z for z in demand_zones
+                           if (z["top"] - z["bottom"]) > range_size * 0.1]
+
+            # Penalize per significant demand zone (-15 each)
+            score -= len(significant) * 15
+
+            # 3. Clean path bonus (no significant demand = +30)
+            if not significant:
+                score += 30
+
+            # 4. Proximity to premium zone (higher MS low = better for shorts)
+            if sl["price"] > range_data.get("equilibrium", 0):
+                score += 10  # Premium zone bonus
+
+            scored.append((sl, score))
+
+        # Sort by score descending (best path quality first)
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return [s[0] for s in scored]
+
+    def _rank_ms_highs_by_path_quality(self, swing_highs: List[Dict],
+                                        range_data: Dict) -> List[Dict]:
+        """
+        Rank MS high candidates by path quality to range high.
+
+        TCT: "The correct market structure high must be the one that leads
+        to a smooth path toward the range high (no significant supply above)."
+
+        Scoring factors:
+        - distance_to_range_high: More room = higher score
+        - supply_zone_strength: Fewer/smaller supply zones = higher score
+        - clean_path_score: No significant supply = bonus
+        """
+        range_high = range_data["range_high"]
+        range_size = range_data["range_size"]
+
+        if range_size <= 0:
+            return swing_highs
+
+        scored = []
+        for sh in swing_highs:
+            score = 0.0
+
+            # 1. Distance to range high (more room to target = higher score)
+            distance = range_high - sh["price"]
+            if distance > 0:
+                score += (distance / range_size) * 40  # 0-40 pts
+
+            # 2. Supply zone strength above this MS high
+            supply_zones = self._find_supply_zones_above(sh["price"], range_data)
+            significant = [z for z in supply_zones
+                           if (z["top"] - z["bottom"]) > range_size * 0.1]
+
+            # Penalize per significant supply zone (-15 each)
+            score -= len(significant) * 15
+
+            # 3. Clean path bonus (no significant supply = +30)
+            if not significant:
+                score += 30
+
+            # 4. Proximity to discount zone (lower MS high = better for longs)
+            if sh["price"] < range_data.get("equilibrium", float("inf")):
+                score += 10  # Discount zone bonus
+
+            scored.append((sh, score))
+
+        # Sort by score descending (best path quality first)
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return [s[0] for s in scored]
 
     # ================================================================
     # EXTREME LIQUIDITY & DEMAND/SUPPLY DETECTION
@@ -1250,6 +1445,17 @@ class TCTSchematicDetector:
             range_data, schematic_type
         )
 
+        # Session context: prefer BOS/entry timestamp, fall back to Tap3
+        chosen_timestamp = None
+        if bos and bos.get("bos_idx") is not None:
+            try:
+                chosen_timestamp = str(self.candles.iloc[bos["bos_idx"]].get("open_time", ""))
+            except (IndexError, KeyError):
+                pass
+        if not chosen_timestamp:
+            chosen_timestamp = tap3.get("time")
+        session_context = self._get_session_context(chosen_timestamp)
+
         return {
             "schematic_type": schematic_type,
             "direction": "bullish",
@@ -1268,6 +1474,7 @@ class TCTSchematicDetector:
             "wyckoff_high": range_data["range_high"],  # TCT: Target
             "wyckoff_low": tap3["price"] if tap3.get("is_deviation") else tap2["price"],
             "bos_confirmation": bos,
+            "session_context": session_context,
             "entry": {
                 "type": "BOS_confirmation",
                 "price": entry_price,
@@ -1318,6 +1525,8 @@ class TCTSchematicDetector:
                 "follow_through_bias": context_follow_through.get("bias", "neutral"),
                 "enhanced_target": context_follow_through.get("enhanced_target")
             },
+            # Session manipulation context (MSCE integration)
+            "session_context": session_context,
             "timestamp": datetime.utcnow().isoformat()
         }
 
@@ -1460,6 +1669,17 @@ class TCTSchematicDetector:
             range_data, schematic_type
         )
 
+        # Session context: prefer BOS/entry timestamp, fall back to Tap3
+        chosen_timestamp = None
+        if bos and bos.get("bos_idx") is not None:
+            try:
+                chosen_timestamp = str(self.candles.iloc[bos["bos_idx"]].get("open_time", ""))
+            except (IndexError, KeyError):
+                pass
+        if not chosen_timestamp:
+            chosen_timestamp = tap3.get("time")
+        session_context = self._get_session_context(chosen_timestamp)
+
         return {
             "schematic_type": schematic_type,
             "direction": "bearish",
@@ -1478,6 +1698,7 @@ class TCTSchematicDetector:
             "wyckoff_high": tap3["price"] if tap3.get("is_deviation") else tap2["price"],
             "wyckoff_low": range_data["range_low"],  # TCT: Target
             "bos_confirmation": bos,
+            "session_context": session_context,
             "entry": {
                 "type": "BOS_confirmation",
                 "price": entry_price,
@@ -1528,6 +1749,8 @@ class TCTSchematicDetector:
                 "follow_through_bias": context_follow_through.get("bias", "neutral"),
                 "enhanced_target": context_follow_through.get("enhanced_target")
             },
+            # Session manipulation context (MSCE integration)
+            "session_context": session_context,
             "timestamp": datetime.utcnow().isoformat()
         }
 
@@ -3321,6 +3544,7 @@ class TCTSchematicDetector:
     # UTILITY METHODS
     # ================================================================
 
+
     def _is_inside_bar(self, idx: int) -> bool:
         """
         Check if candle at idx is an inside bar (TCT Lecture 1).
@@ -3335,91 +3559,19 @@ class TCTSchematicDetector:
 
     def _is_swing_high(self, idx: int, lookback: int = None) -> bool:
         """
-        Check if index is a swing high using TCT 6-candle rule.
-
-        TCT Lecture 1: A valid pivot high requires 2 consecutive bullish candles
-        followed by 2 consecutive bearish candles (inside bars excluded from count).
-        The pivot is at the highest point of the sequence.
-        Also falls back to traditional lookback check for compatibility.
+        Check if index is a swing high. Delegates to centralized PivotCache
+        to eliminate structural drift across modules.
         """
-        lookback = lookback or self.SIX_CANDLE_LOOKBACK // 2
-
-        if idx < lookback or idx >= len(self.candles) - lookback:
-            return False
-
-        current = float(self.candles.iloc[idx]["high"])
-
-        # Collect non-inside-bar candles before idx
-        before = []
-        for i in range(idx - 1, max(idx - lookback - 3, -1), -1):
-            if not self._is_inside_bar(i):
-                before.append(i)
-            if len(before) >= lookback:
-                break
-
-        # Collect non-inside-bar candles after idx
-        after = []
-        for i in range(idx + 1, min(idx + lookback + 3, len(self.candles))):
-            if not self._is_inside_bar(i):
-                after.append(i)
-            if len(after) >= lookback:
-                break
-
-        if len(before) < lookback or len(after) < lookback:
-            return False
-
-        # All non-inside-bar candles before and after must have lower highs
-        for i in before:
-            if float(self.candles.iloc[i]["high"]) >= current:
-                return False
-        for i in after:
-            if float(self.candles.iloc[i]["high"]) >= current:
-                return False
-
-        return True
+        lb = lookback or self.SIX_CANDLE_LOOKBACK // 2
+        return self._pivot_cache.get_swing_high(idx, lookback=lb)
 
     def _is_swing_low(self, idx: int, lookback: int = None) -> bool:
         """
-        Check if index is a swing low using TCT 6-candle rule.
-
-        TCT Lecture 1: A valid pivot low requires 2 consecutive bearish candles
-        followed by 2 consecutive bullish candles (inside bars excluded from count).
-        The pivot is at the lowest point of the sequence.
+        Check if index is a swing low. Delegates to centralized PivotCache
+        to eliminate structural drift across modules.
         """
-        lookback = lookback or self.SIX_CANDLE_LOOKBACK // 2
-
-        if idx < lookback or idx >= len(self.candles) - lookback:
-            return False
-
-        current = float(self.candles.iloc[idx]["low"])
-
-        # Collect non-inside-bar candles before idx
-        before = []
-        for i in range(idx - 1, max(idx - lookback - 3, -1), -1):
-            if not self._is_inside_bar(i):
-                before.append(i)
-            if len(before) >= lookback:
-                break
-
-        # Collect non-inside-bar candles after idx
-        after = []
-        for i in range(idx + 1, min(idx + lookback + 3, len(self.candles))):
-            if not self._is_inside_bar(i):
-                after.append(i)
-            if len(after) >= lookback:
-                break
-
-        if len(before) < lookback or len(after) < lookback:
-            return False
-
-        for i in before:
-            if float(self.candles.iloc[i]["low"]) <= current:
-                return False
-        for i in after:
-            if float(self.candles.iloc[i]["low"]) <= current:
-                return False
-
-        return True
+        lb = lookback or self.SIX_CANDLE_LOOKBACK // 2
+        return self._pivot_cache.get_swing_low(idx, lookback=lb)
 
     def _find_previous_swing_high(self, current_idx: int) -> Optional[Dict]:
         """Find the previous swing high before current index."""
@@ -3447,28 +3599,122 @@ class TCTSchematicDetector:
 
         TCT: "When we have a move back to the equilibrium, that's when the range is confirmed"
 
-        Checks both during range formation (between pivots) and after the
-        range is fully formed.
+        Delegates to the shared check_equilibrium_touch utility in range_utils.
         """
-        start = min(idx1, idx2)
-        end = max(idx1, idx2)
+        return check_equilibrium_touch(
+            self.candles, idx1, idx2, equilibrium,
+            check_between=True, post_range_candles=30,
+        )
 
-        # Check between the two pivots (during range formation)
-        for i in range(start + 1, end):
-            candle = self.candles.iloc[i]
-            if candle["low"] <= equilibrium <= candle["high"]:
-                return True
+    def _get_session_context(self, timestamp: Optional[str] = None) -> Dict:
+        """
+        Return trading session context for a given timestamp.
 
-        # Check candles after the range formation (confirmation bounce)
-        check_start = end + 1
-        check_end = min(check_start + 30, len(self.candles))
+        Prefers the BOS/entry confirmation timestamp when available;
+        falls back to Tap3 timestamp otherwise.
+        """
+        default = {"session": None, "boost_applied": False, "multiplier": 1.0}
+        if not timestamp:
+            return default
+        try:
+            ts = pd.Timestamp(timestamp)
+            if ts.tzinfo is None:
+                from datetime import timezone
+                ts = ts.replace(tzinfo=timezone.utc)
+            return apply_session_multiplier(50.0, ts.to_pydatetime())
+        except (TypeError, ValueError, Exception):
+            return default
 
-        for i in range(check_start, check_end):
-            candle = self.candles.iloc[i]
-            if candle["low"] <= equilibrium <= candle["high"]:
-                return True
+    def _validate_distribution_sweep(
+        self,
+        tap2: Dict,
+        tap3: Dict,
+        range_data: Dict,
+    ) -> Dict:
+        """
+        Validate a distribution sweep using a window that always
+        includes the tap2 and tap3 pivots.
 
-        return False
+        Uses the shared MarketStructureEngine to detect the sweep
+        over a window anchored to the original pivots so they remain
+        in scope for accurate classification.
+        """
+        from decision_trees.market_structure_engine import MarketStructureEngine
+
+        buffer = 10
+        start_idx = max(0, tap2["idx"] - buffer)
+        end_idx = min(len(self.candles), tap3["idx"] + buffer)
+        window_df = self.candles.iloc[start_idx:end_idx].reset_index(drop=True)
+
+        ms = MarketStructureEngine()
+        sweep = ms.detect_sweep(
+            window_df,
+            range_high=range_data["range_high"],
+            range_low=range_data["range_low"],
+            direction="bearish",
+        )
+        return {
+            "classification": sweep.classification,
+            "swept": sweep.swept,
+            "returned_inside": sweep.returned_inside,
+            "sweep_count": sweep.sweep_count,
+        }
+
+    def _validate_distribution_sweep(self, range_data: Dict, tap2: Dict,
+                                      tap3: Dict) -> Dict:
+        """
+        Validate that the distribution deviation actually sweeps built-up
+        liquidity above the range high, rather than being a true breakout.
+
+        Uses MarketStructureEngine.detect_liquidity_pools() and detect_sweep()
+        to classify the deviation.
+
+        Must be called BEFORE schematic construction.
+        """
+        result = {
+            "has_sweep": False,
+            "classification": "no_sweep",
+            "pools_swept": 0,
+            "returned_inside": False,
+        }
+
+        try:
+            from decision_trees.market_structure_engine import MarketStructureEngine
+            ms_engine = MarketStructureEngine()
+
+            range_high = range_data["range_high"]
+            range_low = range_data["range_low"]
+
+            # Get the candle window around the deviation
+            start_idx = max(0, range_data.get("range_high_idx", 0) - 5)
+            end_idx = min(len(self.candles), tap3["idx"] + 10)
+            window_df = self.candles.iloc[start_idx:end_idx].copy()
+
+            if len(window_df) < 5:
+                return result
+
+            # Detect liquidity pools (stacked highs, equal highs)
+            pools = ms_engine.detect_liquidity_pools(window_df)
+            stacked_highs = pools.get("equal_highs", []) + pools.get("swing_highs", [])
+
+            # Count pools near or below range high (these get swept by deviation)
+            pools_near_range_high = [
+                p for p in stacked_highs
+                if abs(p - range_high) <= range_data["range_size"] * 0.15
+            ]
+
+            # Detect sweep classification
+            sweep = ms_engine.detect_sweep(window_df, range_high, range_low, "bearish")
+
+            result["has_sweep"] = sweep.swept
+            result["classification"] = sweep.classification
+            result["pools_swept"] = len(pools_near_range_high)
+            result["returned_inside"] = sweep.returned_inside
+
+        except Exception as e:
+            logger.debug(f"Sweep validation error: {e}")
+
+        return result
 
     def _validate_deviation_came_back_inside(self, tab: Dict, range_data: Dict, direction: str) -> bool:
         """
@@ -3623,13 +3869,17 @@ class TCTSchematicDetector:
         return round(min(total_score, 1.0), 3)
 
 
-def detect_tct_schematics(candles: pd.DataFrame, detected_ranges: List[Dict] = None) -> Dict:
+def detect_tct_schematics(candles: pd.DataFrame, detected_ranges: List[Dict] = None,
+                           pivot_cache: "PivotCache" = None,
+                           range_engine_mode: str = None) -> Dict:
     """
     Main entry point for TCT schematic detection.
 
     Args:
         candles: DataFrame with OHLC data
         detected_ranges: Optional pre-detected ranges
+        pivot_cache: Optional centralized pivot cache (avoids recomputation)
+        range_engine_mode: Optional range engine mode override
 
     Returns: Dict with accumulation and distribution schematics
     """
@@ -3643,7 +3893,10 @@ def detect_tct_schematics(candles: pd.DataFrame, detected_ranges: List[Dict] = N
         }
 
     try:
-        detector = TCTSchematicDetector(candles)
+        detector = TCTSchematicDetector(
+            candles, pivot_cache=pivot_cache,
+            range_engine_mode=range_engine_mode,
+        )
         return detector.detect_all_schematics(detected_ranges)
     except Exception as e:
         logger.error(f"[ERROR] TCT Schematic detection failed: {e}")
