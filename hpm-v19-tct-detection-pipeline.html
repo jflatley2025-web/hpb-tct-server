@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>HPM v19 / TCT Detection Pipeline</title>
+
+<style>
+
+body{
+    font-family: Arial, Helvetica, sans-serif;
+    background:#0f172a;
+    color:white;
+    display:flex;
+    justify-content:center;
+    padding:40px;
+}
+
+.pipeline{
+    width:520px;
+}
+
+.box{
+    background:#1e293b;
+    border:2px solid #3b82f6;
+    border-radius:8px;
+    padding:16px;
+    text-align:center;
+    margin:0 auto;
+}
+
+.box h3{
+    margin:0 0 8px 0;
+    color:#60a5fa;
+}
+
+.box ul{
+    padding-left:18px;
+    text-align:left;
+    margin:8px 0 0 0;
+}
+
+.arrow{
+    width:2px;
+    height:40px;
+    background:#94a3b8;
+    margin:0 auto;
+    position:relative;
+}
+
+.arrow:after{
+    content:"";
+    position:absolute;
+    bottom:-6px;
+    left:-5px;
+    border-left:6px solid transparent;
+    border-right:6px solid transparent;
+    border-top:8px solid #94a3b8;
+}
+
+.title{
+    text-align:center;
+    font-size:26px;
+    margin-bottom:30px;
+    font-weight:bold;
+}
+
+</style>
+</head>
+
+<body>
+
+<div class="pipeline">
+
+<div class="title">HPM v19 / TCT Detection Pipeline</div>
+
+<div class="box">
+<h3>Market Data Feed</h3>
+<p>Candles / OHLCV Stream</p>
+</div>
+
+<div class="arrow"></div>
+
+<div class="box">
+<h3>Context Evaluation</h3>
+<ul>
+<li>1A BTC Context Anchor</li>
+<li>1B USDT.D Correlation</li>
+<li>1C Alt Alignment</li>
+</ul>
+</div>
+
+<div class="arrow"></div>
+
+<div class="box">
+<h3>PivotCache Engine</h3>
+<ul>
+<li>6-candle pivot detection</li>
+<li>Inside bar exclusion</li>
+<li>Shared pivot store</li>
+<li>Used by all modules</li>
+</ul>
+</div>
+
+<div class="arrow"></div>
+
+<div class="box">
+<h3>Range Detection (RCM)</h3>
+<ul>
+<li>RangeEngineController</li>
+<li>L1 (legacy)</li>
+<li>L2 (TCT correct)</li>
+<li>Compare / strict_L2 modes</li>
+<li>Uses PivotCache pivots</li>
+</ul>
+</div>
+
+<div class="arrow"></div>
+
+<div class="box">
+<h3>Range Integrity Gate (RIG)</h3>
+<ul>
+<li>Minimum duration ≥ 24h</li>
+<li>Reject micro ranges</li>
+<li>Validate equilibrium touch</li>
+</ul>
+</div>
+
+<div class="arrow"></div>
+
+<div class="box">
+<h3>Deviation Detection</h3>
+<p>Price breaks range boundary to test liquidity pools</p>
+</div>
+
+<div class="arrow"></div>
+
+<div class="box">
+<h3>Liquidity Sweep Validation</h3>
+<ul>
+<li>Classify sweep</li>
+<li>Liquidity grab</li>
+<li>True break</li>
+<li>Require return inside range</li>
+</ul>
+</div>
+
+<div class="arrow"></div>
+
+<div class="box">
+<h3>Tap Detection</h3>
+<ul>
+<li>Tap 1 – initial pivot</li>
+<li>Tap 2 – return into range</li>
+<li>Tap 3 – deviation tap</li>
+<li>Uses PivotCache pivots</li>
+</ul>
+</div>
+
+<div class="arrow"></div>
+
+<div class="box">
+<h3>BOS Detection</h3>
+<ul>
+<li>Bullish / Bearish BOS</li>
+<li>Demand path ranking</li>
+<li>Liquidity below</li>
+<li>Distance to range low</li>
+</ul>
+</div>
+
+<div class="arrow"></div>
+
+<div class="box">
+<h3>Session Manipulation (MSCE)</h3>
+<ul>
+<li>Asia / London / NY windows</li>
+<li>Execution confidence multiplier</li>
+</ul>
+</div>
+
+<div class="arrow"></div>
+
+<div class="box">
+<h3>Execution Gate (1D)</h3>
+<p>Validate final trade conditions</p>
+</div>
+
+<div class="arrow"></div>
+
+<div class="box">
+<h3>Trade Entry Engine</h3>
+<ul>
+<li>Position sizing</li>
+<li>Risk management</li>
+<li>Order placement</li>
+</ul>
+</div>
+
+</div>
+
+</body>
+</html>
