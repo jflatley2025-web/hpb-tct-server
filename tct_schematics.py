@@ -844,7 +844,8 @@ class TCTSchematicDetector:
             # TCT: Look for break back to bullish on internal structure
             # EQ filter preserved: BOS must confirm below EQ (in the discount zone)
             bos = self._find_bullish_bos(tap3_idx, highest_point_price, tap3_price,
-                                          equilibrium=equilibrium)
+                                          equilibrium=equilibrium,
+                                          range_data=range_data)
 
             if bos:
                 return {
@@ -887,7 +888,8 @@ class TCTSchematicDetector:
         return None
 
     def _find_bullish_bos(self, start_idx: int, high_price: float, low_price: float,
-                           equilibrium: float = None, window: int = 25) -> Optional[Dict]:
+                           equilibrium: float = None, window: int = 25,
+                           range_data: Optional[Dict] = None) -> Optional[Dict]:
         """
         Find bullish break of structure after Tap3 using LTF internal structure.
 
@@ -934,7 +936,12 @@ class TCTSchematicDetector:
         # filter, there is no confirmed BOS — return None rather than guess with a
         # distant historical swing that produces entries far from the discount zone.
 
-        # Try each swing high (lowest price first) — BOS = first broken MS level
+        # Supply-path ranking: rank MS high candidates by path quality to range high.
+        # Prefer MS highs with a clean path (no significant supply above).
+        if range_data and swing_highs:
+            swing_highs = self._rank_ms_highs_by_path_quality(swing_highs, range_data)
+
+        # Try each swing high (best path quality first) — BOS = first broken MS level
         for sh in swing_highs:
             # BOS must confirm AFTER tap3, never before the deviation completes
             search_start = max(sh["idx"] + 1, start_idx + 1)
@@ -1077,6 +1084,56 @@ class TCTSchematicDetector:
                 score += 10  # Premium zone bonus
 
             scored.append((sl, score))
+
+        # Sort by score descending (best path quality first)
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return [s[0] for s in scored]
+
+    def _rank_ms_highs_by_path_quality(self, swing_highs: List[Dict],
+                                        range_data: Dict) -> List[Dict]:
+        """
+        Rank MS high candidates by path quality to range high.
+
+        TCT: "The correct market structure high must be the one that leads
+        to a smooth path toward the range high (no significant supply above)."
+
+        Scoring factors:
+        - distance_to_range_high: More room = higher score
+        - supply_zone_strength: Fewer/smaller supply zones = higher score
+        - clean_path_score: No significant supply = bonus
+        """
+        range_high = range_data["range_high"]
+        range_size = range_data["range_size"]
+
+        if range_size <= 0:
+            return swing_highs
+
+        scored = []
+        for sh in swing_highs:
+            score = 0.0
+
+            # 1. Distance to range high (more room to target = higher score)
+            distance = range_high - sh["price"]
+            if distance > 0:
+                score += (distance / range_size) * 40  # 0-40 pts
+
+            # 2. Supply zone strength above this MS high
+            supply_zones = self._find_supply_zones_above(sh["price"], range_data)
+            significant = [z for z in supply_zones
+                           if (z["top"] - z["bottom"]) > range_size * 0.1]
+
+            # Penalize per significant supply zone (-15 each)
+            score -= len(significant) * 15
+
+            # 3. Clean path bonus (no significant supply = +30)
+            if not significant:
+                score += 30
+
+            # 4. Proximity to discount zone (lower MS high = better for longs)
+            if sh["price"] < range_data.get("equilibrium", float("inf")):
+                score += 10  # Discount zone bonus
+
+            scored.append((sh, score))
 
         # Sort by score descending (best path quality first)
         scored.sort(key=lambda x: x[1], reverse=True)
@@ -3464,91 +3521,19 @@ class TCTSchematicDetector:
 
     def _is_swing_high(self, idx: int, lookback: int = None) -> bool:
         """
-        Check if index is a swing high using TCT 6-candle rule.
-
-        TCT Lecture 1: A valid pivot high requires 2 consecutive bullish candles
-        followed by 2 consecutive bearish candles (inside bars excluded from count).
-        The pivot is at the highest point of the sequence.
-        Also falls back to traditional lookback check for compatibility.
+        Check if index is a swing high. Delegates to centralized PivotCache
+        to eliminate structural drift across modules.
         """
-        lookback = lookback or self.SIX_CANDLE_LOOKBACK // 2
-
-        if idx < lookback or idx >= len(self.candles) - lookback:
-            return False
-
-        current = float(self.candles.iloc[idx]["high"])
-
-        # Collect non-inside-bar candles before idx
-        before = []
-        for i in range(idx - 1, max(idx - lookback - 3, -1), -1):
-            if not self._is_inside_bar(i):
-                before.append(i)
-            if len(before) >= lookback:
-                break
-
-        # Collect non-inside-bar candles after idx
-        after = []
-        for i in range(idx + 1, min(idx + lookback + 3, len(self.candles))):
-            if not self._is_inside_bar(i):
-                after.append(i)
-            if len(after) >= lookback:
-                break
-
-        if len(before) < lookback or len(after) < lookback:
-            return False
-
-        # All non-inside-bar candles before and after must have lower highs
-        for i in before:
-            if float(self.candles.iloc[i]["high"]) >= current:
-                return False
-        for i in after:
-            if float(self.candles.iloc[i]["high"]) >= current:
-                return False
-
-        return True
+        lb = lookback or self.SIX_CANDLE_LOOKBACK // 2
+        return self._pivot_cache.get_swing_high(idx, lookback=lb)
 
     def _is_swing_low(self, idx: int, lookback: int = None) -> bool:
         """
-        Check if index is a swing low using TCT 6-candle rule.
-
-        TCT Lecture 1: A valid pivot low requires 2 consecutive bearish candles
-        followed by 2 consecutive bullish candles (inside bars excluded from count).
-        The pivot is at the lowest point of the sequence.
+        Check if index is a swing low. Delegates to centralized PivotCache
+        to eliminate structural drift across modules.
         """
-        lookback = lookback or self.SIX_CANDLE_LOOKBACK // 2
-
-        if idx < lookback or idx >= len(self.candles) - lookback:
-            return False
-
-        current = float(self.candles.iloc[idx]["low"])
-
-        # Collect non-inside-bar candles before idx
-        before = []
-        for i in range(idx - 1, max(idx - lookback - 3, -1), -1):
-            if not self._is_inside_bar(i):
-                before.append(i)
-            if len(before) >= lookback:
-                break
-
-        # Collect non-inside-bar candles after idx
-        after = []
-        for i in range(idx + 1, min(idx + lookback + 3, len(self.candles))):
-            if not self._is_inside_bar(i):
-                after.append(i)
-            if len(after) >= lookback:
-                break
-
-        if len(before) < lookback or len(after) < lookback:
-            return False
-
-        for i in before:
-            if float(self.candles.iloc[i]["low"]) <= current:
-                return False
-        for i in after:
-            if float(self.candles.iloc[i]["low"]) <= current:
-                return False
-
-        return True
+        lb = lookback or self.SIX_CANDLE_LOOKBACK // 2
+        return self._pivot_cache.get_swing_low(idx, lookback=lb)
 
     def _find_previous_swing_high(self, current_idx: int) -> Optional[Dict]:
         """Find the previous swing high before current index."""

@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 from tct_schematics import detect_tct_schematics, TCTSchematicDetector
+from pivot_cache import PivotCache
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from trade_execution import (
     calculate_position_size,
@@ -534,6 +535,16 @@ def _try_confirm_with_ltf_bos(
     rng = schematic.get("range") or {}
     equilibrium = rng.get("equilibrium")
 
+    # Build range_data dict for demand-path ranking in BOS detection
+    range_data_for_bos = {
+        "range_high": rng.get("high") or rng.get("range_high"),
+        "range_low": rng.get("low") or rng.get("range_low"),
+        "range_size": rng.get("size") or rng.get("range_size", 0),
+        "equilibrium": equilibrium,
+        "range_high_idx": rng.get("range_high_idx", 0),
+        "range_low_idx": rng.get("range_low_idx", 0),
+    }
+
     tap2_time: Optional[pd.Timestamp] = None
     try:
         tap2_time_str = tap2.get("time", "")
@@ -569,7 +580,8 @@ def _try_confirm_with_ltf_bos(
         bos = None
         ref_high_used: Optional[float] = None
         try:
-            detector = TCTSchematicDetector(ltf_df_reset)
+            ltf_pc = PivotCache(ltf_df_reset, lookback=3)
+            detector = TCTSchematicDetector(ltf_df_reset, pivot_cache=ltf_pc)
             _ltf_highs = ltf_df_reset["high"].to_numpy()
             _ltf_lows = ltf_df_reset["low"].to_numpy()
 
@@ -601,6 +613,7 @@ def _try_confirm_with_ltf_bos(
                     tap3_ltf_pos, ref_low_used, tap3_price,
                     equilibrium=equilibrium,
                     window=ltf_window,
+                    range_data=range_data_for_bos,
                 )
                 ref_high_used = ref_low_used  # reuse field for logging
 
@@ -709,8 +722,19 @@ def refine_schematic_bos_with_ltf(
         return schematic
 
     direction = schematic.get("direction")
-    equilibrium = (schematic.get("range") or {}).get("equilibrium")
+    _rng_refine = schematic.get("range") or {}
+    equilibrium = _rng_refine.get("equilibrium")
     tap3_price = tap3.get("price")
+
+    # Build range_data for demand-path ranking in BOS detection
+    _range_data_refine = {
+        "range_high": _rng_refine.get("high") or _rng_refine.get("range_high"),
+        "range_low": _rng_refine.get("low") or _rng_refine.get("range_low"),
+        "range_size": _rng_refine.get("size") or _rng_refine.get("range_size", 0),
+        "equilibrium": equilibrium,
+        "range_high_idx": _rng_refine.get("range_high_idx", 0),
+        "range_low_idx": _rng_refine.get("range_low_idx", 0),
+    }
 
     # Reference prices already computed by MTF BOS detection — reuse them.
     if direction == "bullish":
@@ -768,7 +792,8 @@ def refine_schematic_bos_with_ltf(
 
         bos = None
         try:
-            detector = TCTSchematicDetector(ltf_df_reset)
+            ltf_pc = PivotCache(ltf_df_reset, lookback=3)
+            detector = TCTSchematicDetector(ltf_df_reset, pivot_cache=ltf_pc)
 
             # Pre-extract column arrays once to avoid repeated Series creation
             # inside the per-candle loops below (.iloc[i]["col"] allocates a
@@ -859,6 +884,7 @@ def refine_schematic_bos_with_ltf(
                     bos = detector._find_bearish_bos(
                         tap3_ltf_pos, ref_low, ref_high,
                         equilibrium=None, window=ltf_window,
+                        range_data=_range_data_refine,
                     )
 
         except Exception as e:

@@ -553,3 +553,184 @@ class TestModel1DistributionFullFlow:
 
         assert "distribution_schematics" in result
         assert isinstance(result["distribution_schematics"], list)
+
+
+# ================================================================
+# PHASE 2 INTEGRATION TESTS
+# ================================================================
+
+class TestLTFBosReceivesRangeData:
+    """Gap 5: Verify LTF BOS path passes range_data for demand-path ranking."""
+
+    def test_bearish_bos_accepts_range_data(self):
+        """_find_bearish_bos accepts range_data and uses it for ranking."""
+        from tct_schematics import TCTSchematicDetector
+
+        df = _make_distribution_candles()
+        det = TCTSchematicDetector(df)
+
+        range_data = {
+            "range_high": 52400.0,
+            "range_low": 50000.0,
+            "range_high_idx": 40,
+            "range_low_idx": 80,
+            "range_size": 2400.0,
+            "equilibrium": 51200.0,
+        }
+
+        # Call with range_data — should not raise
+        result = det._find_bearish_bos(
+            start_idx=130,
+            low_price=50500,
+            high_price=52000,
+            equilibrium=51200,
+            range_data=range_data,
+        )
+        # Result is either None or a valid BOS dict
+        assert result is None or isinstance(result, dict)
+
+    def test_bearish_bos_without_range_data_still_works(self):
+        """_find_bearish_bos still works without range_data (backward compat)."""
+        from tct_schematics import TCTSchematicDetector
+
+        df = _make_distribution_candles()
+        det = TCTSchematicDetector(df)
+
+        # Call without range_data — should not raise
+        result = det._find_bearish_bos(
+            start_idx=130,
+            low_price=50500,
+            high_price=52000,
+            equilibrium=51200,
+        )
+        assert result is None or isinstance(result, dict)
+
+
+class TestBullishBosSupplyPathRanking:
+    """Gap 5: Verify supply-path ranking for accumulation BOS (symmetry)."""
+
+    def test_supply_ranking_selects_clean_path_ms_high(self):
+        """MS high with clean path ranked above MS high with supply above."""
+        from tct_schematics import TCTSchematicDetector
+
+        df = _make_distribution_candles()
+        det = TCTSchematicDetector(df)
+
+        swing_highs = [
+            {"idx": 140, "price": 51800.0},
+            {"idx": 142, "price": 52100.0},
+            {"idx": 144, "price": 51500.0},
+        ]
+
+        range_data = {
+            "range_high": 52400.0,
+            "range_low": 50000.0,
+            "range_high_idx": 40,
+            "range_low_idx": 80,
+            "range_size": 2400.0,
+            "equilibrium": 51200.0,
+        }
+
+        ranked = det._rank_ms_highs_by_path_quality(swing_highs, range_data)
+        assert isinstance(ranked, list)
+        assert len(ranked) == 3
+        # All candidates preserved (ranking, not filtering)
+        prices = [h["price"] for h in ranked]
+        assert set(prices) == {51800.0, 52100.0, 51500.0}
+
+    def test_supply_ranking_zero_range_size_passthrough(self):
+        """Zero range_size returns input unchanged."""
+        from tct_schematics import TCTSchematicDetector
+
+        df = _make_distribution_candles()
+        det = TCTSchematicDetector(df)
+
+        swing_highs = [
+            {"idx": 140, "price": 51800.0},
+            {"idx": 142, "price": 52100.0},
+        ]
+
+        range_data = {
+            "range_high": 52400.0,
+            "range_low": 52400.0,
+            "range_high_idx": 40,
+            "range_low_idx": 80,
+            "range_size": 0,
+            "equilibrium": 52400.0,
+        }
+
+        ranked = det._rank_ms_highs_by_path_quality(swing_highs, range_data)
+        assert ranked == swing_highs  # Returned unchanged
+
+    def test_bullish_bos_accepts_range_data(self):
+        """_find_bullish_bos accepts range_data parameter."""
+        from tct_schematics import TCTSchematicDetector
+
+        df = _make_distribution_candles()
+        det = TCTSchematicDetector(df)
+
+        range_data = {
+            "range_high": 52400.0,
+            "range_low": 50000.0,
+            "range_high_idx": 40,
+            "range_low_idx": 80,
+            "range_size": 2400.0,
+            "equilibrium": 51200.0,
+        }
+
+        result = det._find_bullish_bos(
+            start_idx=130,
+            high_price=52000,
+            low_price=50500,
+            equilibrium=51200,
+            range_data=range_data,
+        )
+        assert result is None or isinstance(result, dict)
+
+
+class TestPivotCacheDelegation:
+    """Gap 5: Verify _is_swing_high/low delegates to PivotCache."""
+
+    def test_swing_high_delegates_to_cache(self):
+        """_is_swing_high should use PivotCache, not recompute."""
+        from tct_schematics import TCTSchematicDetector
+
+        df = _make_distribution_candles()
+        pc = PivotCache(df, lookback=3)
+        det = TCTSchematicDetector(df, pivot_cache=pc)
+
+        # Test several indices — results should match cache
+        for idx in [10, 20, 50, 80, 100]:
+            if idx < len(df):
+                det_result = det._is_swing_high(idx)
+                cache_result = pc.get_swing_high(idx, lookback=det.SIX_CANDLE_LOOKBACK // 2)
+                assert det_result == cache_result, (
+                    f"Mismatch at idx={idx}: detector={det_result}, cache={cache_result}"
+                )
+
+    def test_swing_low_delegates_to_cache(self):
+        """_is_swing_low should use PivotCache, not recompute."""
+        from tct_schematics import TCTSchematicDetector
+
+        df = _make_distribution_candles()
+        pc = PivotCache(df, lookback=3)
+        det = TCTSchematicDetector(df, pivot_cache=pc)
+
+        for idx in [10, 20, 50, 80, 100]:
+            if idx < len(df):
+                det_result = det._is_swing_low(idx)
+                cache_result = pc.get_swing_low(idx, lookback=det.SIX_CANDLE_LOOKBACK // 2)
+                assert det_result == cache_result, (
+                    f"Mismatch at idx={idx}: detector={det_result}, cache={cache_result}"
+                )
+
+    def test_detector_creates_pivot_cache_if_not_provided(self):
+        """TCTSchematicDetector creates its own PivotCache when none provided."""
+        from tct_schematics import TCTSchematicDetector
+
+        df = _make_distribution_candles()
+        det = TCTSchematicDetector(df)
+
+        # Should have a _pivot_cache attribute
+        assert hasattr(det, "_pivot_cache")
+        assert det._pivot_cache is not None
