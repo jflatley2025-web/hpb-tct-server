@@ -1,144 +1,147 @@
 """
-range_engine_l1.py — L1 Range Detection Engine.
+range_engine_l1.py — Legacy L1 Range Engine
+Extracts the existing L1 swing-based range detection logic from
+tct_schematics.py for use in the dual range engine architecture.
 
-Detects distribution and accumulation ranges using the TCT methodology
-with pivot-cache-aware swing detection and shared equilibrium-touch
-validation from range_utils.
+Uses simple swing high/low pivots (L1 primary trend structure) to
+identify range boundaries. This is the legacy behavior.
 """
 
 import logging
-import pandas as pd
 from typing import Dict, List, Optional
+import pandas as pd
 
 from pivot_cache import PivotCache
-from range_utils import check_equilibrium_touch
 
 logger = logging.getLogger("RangeEngineL1")
 
-# TCT deviation limit: 30 % of range size
-DEVIATION_LIMIT_PERCENT = 0.30
+DEVIATION_LIMIT_PERCENT = 0.30  # TCT: 30% of range size for DL
 
 
 class RangeEngineL1:
     """
-    L1 (primary) range detection engine.
-
-    Uses a shared PivotCache to find swing highs/lows and detects
-    accumulation and distribution ranges with equilibrium-touch
-    confirmation.
-
-    Parameters
-    ----------
-    pivot_cache : PivotCache
-        Pre-computed pivot cache for the candle data.
+    L1 range detection using simple swing high/low pivots.
+    This is the legacy range detection extracted from tct_schematics.py.
     """
 
-    def __init__(self, pivot_cache: PivotCache) -> None:
-        self._pc = pivot_cache
+    def __init__(self, pivot_cache: PivotCache):
+        self._pivot_cache = pivot_cache
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
-    def detect_accumulation_ranges(self) -> List[Dict]:
+    def detect_distribution_ranges(self, candles: pd.DataFrame) -> List[Dict]:
         """
-        Detect accumulation ranges (downtrend → consolidation).
-
-        TCT: "When we're trending down, we pull our range from bottom to top."
+        Find potential distribution ranges (trending up, pull from top to bottom).
+        TCT: "When we're trending up, we pull our range from top to bottom"
         """
-        candles = self._pc.candles
-        swing_lows = self._pc.swing_lows
-        swing_highs = self._pc.swing_highs
-        ranges: List[Dict] = []
+        ranges = []
 
-        for sl in swing_lows:
-            range_low = sl["price"]
-            range_low_idx = sl["idx"]
+        for i in range(10, len(candles) - 8):
+            if not self._pivot_cache.get_swing_high(i):
+                continue
 
-            # Find next swing high after this low
-            for sh in swing_highs:
-                if sh["idx"] <= range_low_idx:
+            range_high = float(candles.iloc[i]["high"])
+            range_high_idx = i
+
+            for j in range(i + 5, min(i + 50, len(candles) - 5)):
+                if not self._pivot_cache.get_swing_low(j):
                     continue
 
-                range_high = sh["price"]
-                range_high_idx = sh["idx"]
+                range_low = float(candles.iloc[j]["low"])
+                range_low_idx = j
 
-                if range_high <= range_low:
+                if range_high <= range_low * 1.005:
                     continue
 
                 range_size = range_high - range_low
                 equilibrium = (range_high + range_low) / 2
+                dl_low = range_low - (range_size * DEVIATION_LIMIT_PERCENT)
+                dl_high = range_high + (range_size * DEVIATION_LIMIT_PERCENT)
 
-                # Confirm with equilibrium touch
-                eq_touched = check_equilibrium_touch(
-                    candles, range_low_idx, range_high_idx, equilibrium,
-                    check_between=True, post_range_candles=30,
+                eq_touched = self._check_equilibrium_touch(
+                    candles, range_high_idx, range_low_idx, equilibrium
                 )
-                if not eq_touched:
-                    continue
 
-                ranges.append({
-                    "range_high": range_high,
-                    "range_low": range_low,
-                    "range_high_idx": range_high_idx,
-                    "range_low_idx": range_low_idx,
-                    "equilibrium": equilibrium,
-                    "range_size": range_size,
-                    "dl_high": range_high + range_size * DEVIATION_LIMIT_PERCENT,
-                    "dl_low": range_low - range_size * DEVIATION_LIMIT_PERCENT,
-                    "direction": "accumulation",
-                })
-                break  # first qualifying high per low
+                if eq_touched:
+                    ranges.append({
+                        "range_high": range_high,
+                        "range_low": range_low,
+                        "range_high_idx": range_high_idx,
+                        "range_low_idx": range_low_idx,
+                        "equilibrium": equilibrium,
+                        "range_size": range_size,
+                        "dl_high": dl_high,
+                        "dl_low": dl_low,
+                        "direction": "distribution",
+                        "engine": "L1",
+                    })
 
         return ranges
 
-    def detect_distribution_ranges(self) -> List[Dict]:
+    def detect_accumulation_ranges(self, candles: pd.DataFrame) -> List[Dict]:
         """
-        Detect distribution ranges (uptrend → consolidation).
-
-        TCT: "When we're trending up, we pull our range from top to bottom."
+        Find potential accumulation ranges (trending down, pull from bottom to top).
+        TCT: "When we're trending down, we pull our range from bottom to top"
         """
-        candles = self._pc.candles
-        swing_highs = self._pc.swing_highs
-        swing_lows = self._pc.swing_lows
-        ranges: List[Dict] = []
+        ranges = []
 
-        for sh in swing_highs:
-            range_high = sh["price"]
-            range_high_idx = sh["idx"]
+        for i in range(10, len(candles) - 8):
+            if not self._pivot_cache.get_swing_low(i):
+                continue
 
-            # Find next swing low after this high
-            for sl in swing_lows:
-                if sl["idx"] <= range_high_idx:
+            range_low = float(candles.iloc[i]["low"])
+            range_low_idx = i
+
+            for j in range(i + 5, min(i + 50, len(candles) - 5)):
+                if not self._pivot_cache.get_swing_high(j):
                     continue
 
-                range_low = sl["price"]
-                range_low_idx = sl["idx"]
+                range_high = float(candles.iloc[j]["high"])
+                range_high_idx = j
 
-                if range_high <= range_low:
+                if range_high <= range_low * 1.005:
                     continue
 
                 range_size = range_high - range_low
                 equilibrium = (range_high + range_low) / 2
+                dl_low = range_low - (range_size * DEVIATION_LIMIT_PERCENT)
+                dl_high = range_high + (range_size * DEVIATION_LIMIT_PERCENT)
 
-                eq_touched = check_equilibrium_touch(
-                    candles, range_high_idx, range_low_idx, equilibrium,
-                    check_between=True, post_range_candles=30,
+                eq_touched = self._check_equilibrium_touch(
+                    candles, range_low_idx, range_high_idx, equilibrium
                 )
-                if not eq_touched:
-                    continue
 
-                ranges.append({
-                    "range_high": range_high,
-                    "range_low": range_low,
-                    "range_high_idx": range_high_idx,
-                    "range_low_idx": range_low_idx,
-                    "equilibrium": equilibrium,
-                    "range_size": range_size,
-                    "dl_high": range_high + range_size * DEVIATION_LIMIT_PERCENT,
-                    "dl_low": range_low - range_size * DEVIATION_LIMIT_PERCENT,
-                    "direction": "distribution",
-                })
-                break  # first qualifying low per high
+                if eq_touched:
+                    ranges.append({
+                        "range_high": range_high,
+                        "range_low": range_low,
+                        "range_high_idx": range_high_idx,
+                        "range_low_idx": range_low_idx,
+                        "equilibrium": equilibrium,
+                        "range_size": range_size,
+                        "dl_high": dl_high,
+                        "dl_low": dl_low,
+                        "direction": "accumulation",
+                        "engine": "L1",
+                    })
 
         return ranges
+
+    @staticmethod
+    def _check_equilibrium_touch(candles: pd.DataFrame, idx1: int, idx2: int,
+                                  equilibrium: float) -> bool:
+        """Check if price touched equilibrium to confirm range."""
+        start = min(idx1, idx2)
+        end = max(idx1, idx2)
+
+        for i in range(start + 1, end):
+            candle = candles.iloc[i]
+            if candle["low"] <= equilibrium <= candle["high"]:
+                return True
+
+        check_start = end + 1
+        check_end = min(check_start + 30, len(candles))
+        for i in range(check_start, check_end):
+            candle = candles.iloc[i]
+            if candle["low"] <= equilibrium <= candle["high"]:
+                return True
+
+        return False

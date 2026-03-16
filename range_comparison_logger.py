@@ -1,76 +1,69 @@
 """
-range_comparison_logger.py — JSONL logger for range engine comparison data.
-
-Logs range detection results (L1, L2, or combined) to a JSONL file for
-offline analysis and backtesting comparison.
+range_comparison_logger.py — Range Engine Structural Diff Logger
+Logs differences between L1 and L2 range detection to JSONL for
+offline analysis during migration.
 """
 
 import json
-import os
 import logging
-from datetime import datetime
-from typing import Dict, Optional
+import os
+from datetime import datetime, timezone
+from typing import Dict, List, Optional
 
 logger = logging.getLogger("RangeComparisonLogger")
 
-DEFAULT_LOG_PATH = "logs/range_engine_comparison.jsonl"
+_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_LOG_PATH = os.path.join(_DIR, "logs", "range_engine_comparison.jsonl")
 
 
 class RangeComparisonLogger:
-    """
-    Append-only JSONL logger for range engine comparison results.
+    """Append-only JSONL logger for range engine comparison."""
 
-    Parameters
-    ----------
-    log_path : str
-        Path to the JSONL log file.  Defaults to
-        ``logs/range_engine_comparison.jsonl``.
-    """
-
-    def __init__(self, log_path: str = DEFAULT_LOG_PATH) -> None:
+    def __init__(self, log_path: str = DEFAULT_LOG_PATH):
         self._log_path = log_path
-        dir_path = os.path.dirname(self._log_path)
-        if dir_path:
-            os.makedirs(dir_path, exist_ok=True)
+        os.makedirs(os.path.dirname(self._log_path), exist_ok=True)
 
-    def log(
+    def log_comparison(
         self,
         symbol: str,
-        timeframe: str,
-        engine: str,
-        ranges: list,
-        *,
-        metadata: Optional[Dict] = None,
-    ) -> None:
-        """
-        Append one comparison entry to the log file.
+        session: Optional[str],
+        engine_used: str,
+        l1_ranges: List[Dict],
+        l2_ranges: List[Dict],
+        deviation_detected: bool = False,
+        liquidity_sweep_detected: bool = False,
+    ):
+        """Log a structural comparison between L1 and L2 range detection."""
+        best_l1 = l1_ranges[0] if l1_ranges else {}
+        best_l2 = l2_ranges[0] if l2_ranges else {}
 
-        Parameters
-        ----------
-        symbol : str
-            Trading pair (e.g. "BTCUSDT").
-        timeframe : str
-            Candle timeframe (e.g. "4h", "1h").
-        engine : str
-            Engine identifier (e.g. "L1", "L2", "legacy").
-        ranges : list
-            Detected range dicts.
-        metadata : dict, optional
-            Extra key-value pairs to include in the entry.
-        """
-        entry: Dict = {
-            "timestamp": datetime.utcnow().isoformat(),
+        entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "symbol": symbol,
-            "timeframe": timeframe,
-            "engine": engine,
-            "range_count": len(ranges),
-            "ranges": ranges,
+            "session": session,
+            "engine_used": engine_used,
+            "L1_range_high": best_l1.get("range_high"),
+            "L2_range_high": best_l2.get("range_high"),
+            "L1_range_low": best_l1.get("range_low"),
+            "L2_range_low": best_l2.get("range_low"),
+            "L1_count": len(l1_ranges),
+            "L2_count": len(l2_ranges),
+            "range_duration": self._calc_duration(best_l2 or best_l1),
+            "deviation_detected": deviation_detected,
+            "liquidity_sweep_detected": liquidity_sweep_detected,
         }
-        if metadata:
-            entry["metadata"] = metadata
 
         try:
-            with open(self._log_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry, default=str) + "\n")
+            with open(self._log_path, "a") as f:
+                f.write(json.dumps(entry) + "\n")
         except OSError as e:
-            logger.warning("Failed to write comparison log: %s", e)
+            logger.warning(f"Failed to write comparison log: {e}")
+
+    @staticmethod
+    def _calc_duration(range_data: Dict) -> Optional[int]:
+        """Calculate range duration in candles."""
+        high_idx = range_data.get("range_high_idx")
+        low_idx = range_data.get("range_low_idx")
+        if high_idx is not None and low_idx is not None:
+            return abs(low_idx - high_idx)
+        return None
