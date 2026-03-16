@@ -97,6 +97,15 @@ DUPLICATE_COOLDOWN_SECONDS = 300
 DUPLICATE_PRICE_TOLERANCE = 0.002
 
 
+def _get_entry_session_context(base_score: float) -> Dict:
+    """Get session manipulation context for trade entry (MSCE integration)."""
+    try:
+        from session_manipulation import apply_session_multiplier
+        return apply_session_multiplier(base_score)
+    except Exception:
+        return {"session": None, "boost_applied": False, "multiplier": 1.0}
+
+
 # ================================================================
 # GITHUB STORAGE (uses GITHUB_TOKEN_2)
 # ================================================================
@@ -1272,7 +1281,10 @@ class Schematics5BTrader:
                     }
                     continue
                 try:
-                    det = detect_tct_schematics(df, [])
+                    # Create PivotCache per TF to eliminate pivot drift
+                    from pivot_cache import PivotCache
+                    pc = PivotCache(df, lookback=3)
+                    det = detect_tct_schematics(df, [], pivot_cache=pc)
                     all_schematics_by_tf[tf] = (
                         det.get("accumulation_schematics", [])
                         + det.get("distribution_schematics", [])
@@ -1409,6 +1421,10 @@ class Schematics5BTrader:
                     })
             forming.sort(key=lambda x: (x.get("tap3") or {}).get("idx", 0), reverse=True)
 
+            # Session context (MSCE integration)
+            from session_manipulation import get_active_session, get_session_info
+            session_info = get_session_info()
+
             out.update({
                 "current_price": current_price,
                 "htf_bias": htf_bias,
@@ -1417,10 +1433,12 @@ class Schematics5BTrader:
                 "best_tf": best_tf_local,
                 "forming": forming[:5],
                 "timeframes": all_tf_results,
+                "session": session_info,
             })
             logger.info(
                 f"[5B] _scan_single_symbol done ({time.time()-_t0:.1f}s) — "
                 f"best_tf={best_tf_local}, best_score={best_score}, "
+                f"session={session_info.get('active_session', 'none')}, "
                 f"timeframes={list(all_tf_results.keys())}"
             )
 
@@ -1518,6 +1536,8 @@ class Schematics5BTrader:
             "liquidation_safe": safety["is_safe"],
             "opened_at": datetime.now(timezone.utc).isoformat(),
             "status": "open",
+            # MSCE session context
+            "session_context": _get_entry_session_context(evaluation["score"]),
         }
 
         self.state.current_trade = trade
