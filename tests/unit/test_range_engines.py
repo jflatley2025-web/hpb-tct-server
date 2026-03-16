@@ -733,3 +733,57 @@ class TestPivotCacheDelegation:
         # Should have a _pivot_cache attribute
         assert hasattr(det, "_pivot_cache")
         assert det._pivot_cache is not None
+
+
+# ================================================================
+# Demand Ranking (path quality) Tests — _rank_ms_lows_by_path_quality
+# ================================================================
+
+class TestDemandRankingPathQuality:
+    def test_clean_path_ranked_first(self):
+        """MS low with more room to range_low (clean path) ranks higher."""
+        from tct_schematics import TCTSchematicDetector
+
+        df = _make_distribution_candles()
+        det = TCTSchematicDetector(df)
+
+        # idx 140: price well above range_low — more room to target, above EQ
+        # idx 82: price near range_low — less room to target
+        swing_lows = [
+            {"idx": 82, "price": 50100.0},    # near range_low, less room
+            {"idx": 140, "price": 51500.0},    # above EQ, more room to target
+        ]
+        range_data = {
+            "range_high": 52400.0,
+            "range_low": 50000.0,
+            "range_high_idx": 40,
+            "range_low_idx": 80,
+            "range_size": 2400.0,
+            "equilibrium": 51200.0,
+        }
+
+        ranked = det._rank_ms_lows_by_path_quality(swing_lows, range_data)
+        assert len(ranked) == 2
+        # idx 140 has more room + premium zone bonus — should rank first
+        assert ranked[0]["idx"] == 140
+
+    def test_empty_and_single(self):
+        from tct_schematics import TCTSchematicDetector
+
+        df = _make_distribution_candles()
+        det = TCTSchematicDetector(df)
+
+        range_data = {
+            "range_high": 52400.0,
+            "range_low": 50000.0,
+            "range_high_idx": 40,
+            "range_low_idx": 80,
+            "range_size": 2400.0,
+            "equilibrium": 51200.0,
+        }
+
+        assert det._rank_ms_lows_by_path_quality([], range_data) == []
+
+        single = [{"idx": 80, "price": 50000.0}]
+        ranked = det._rank_ms_lows_by_path_quality(single, range_data)
+        assert ranked == single

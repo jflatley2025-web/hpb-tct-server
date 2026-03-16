@@ -182,6 +182,18 @@ class TCTSchematicDetector:
                 logger.debug(f"Range controller failed, falling back to legacy: {e}")
                 ranges = self._find_accumulation_ranges()
 
+        # Rank ranges by Tap1 (range_low) path quality — best candidates first
+        if len(ranges) > 1:
+            tap1_candidates = [
+                {"idx": r["range_low_idx"], "price": r["range_low"]}
+                for r in ranges
+            ]
+            # Use the first range as reference for ranking context
+            ref = ranges[0]
+            ranked = self._rank_ms_lows_by_path_quality(tap1_candidates, ref)
+            idx_order = [c["idx"] for c in ranked]
+            ranges = sorted(ranges, key=lambda r: idx_order.index(r["range_low_idx"]))
+
         for range_data in ranges:
             try:
                 # TCT: Tap1 is the range low
