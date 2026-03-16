@@ -8,7 +8,7 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Optional
 
 logger = logging.getLogger("RangeComparisonLogger")
 
@@ -21,21 +21,26 @@ class RangeComparisonLogger:
 
     def __init__(self, log_path: str = DEFAULT_LOG_PATH):
         self._log_path = log_path
-        os.makedirs(os.path.dirname(self._log_path), exist_ok=True)
+        dir_path = os.path.dirname(self._log_path)
+        if dir_path:
+            os.makedirs(dir_path, exist_ok=True)
 
     def log_comparison(
         self,
         symbol: str,
         session: Optional[str],
         engine_used: str,
-        l1_ranges: List[Dict],
-        l2_ranges: List[Dict],
+        l1_ranges: list[dict],
+        l2_ranges: list[dict],
         deviation_detected: bool = False,
         liquidity_sweep_detected: bool = False,
     ):
         """Log a structural comparison between L1 and L2 range detection."""
-        best_l1 = l1_ranges[0] if l1_ranges else {}
-        best_l2 = l2_ranges[0] if l2_ranges else {}
+        # Sort by range_size descending so index 0 is always the true best
+        sorted_l1 = sorted(l1_ranges, key=lambda r: r.get("range_size", 0), reverse=True)
+        sorted_l2 = sorted(l2_ranges, key=lambda r: r.get("range_size", 0), reverse=True)
+        best_l1 = sorted_l1[0] if sorted_l1 else {}
+        best_l2 = sorted_l2[0] if sorted_l2 else {}
 
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -54,13 +59,13 @@ class RangeComparisonLogger:
         }
 
         try:
-            with open(self._log_path, "a") as f:
+            with open(self._log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry) + "\n")
         except OSError as e:
             logger.warning(f"Failed to write comparison log: {e}")
 
     @staticmethod
-    def _calc_duration(range_data: Dict) -> Optional[int]:
+    def _calc_duration(range_data: dict) -> Optional[int]:
         """Calculate range duration in candles."""
         high_idx = range_data.get("range_high_idx")
         low_idx = range_data.get("range_low_idx")

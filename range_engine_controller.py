@@ -43,9 +43,13 @@ class RangeEngineController:
         self._logger = RangeComparisonLogger()
 
     def _ensure_engines(self, pivot_cache: PivotCache):
-        """Lazily initialize engines when pivot_cache is available."""
-        if self._pivot_cache is None:
+        """Lazily initialize engines when pivot_cache is available.
+        Reinitialize if a different pivot_cache is provided."""
+        if pivot_cache is not self._pivot_cache:
             self._pivot_cache = pivot_cache
+            self._l1 = RangeEngineL1(self._pivot_cache)
+            self._l2 = RangeEngineL2(self._pivot_cache)
+            return
         if self._l1 is None:
             self._l1 = RangeEngineL1(self._pivot_cache)
         if self._l2 is None:

@@ -576,14 +576,7 @@ def _try_confirm_with_ltf_bos(
     equilibrium = rng.get("equilibrium")
 
     # Build range_data dict for demand-path ranking in BOS detection
-    range_data_for_bos = {
-        "range_high": rng.get("high") or rng.get("range_high"),
-        "range_low": rng.get("low") or rng.get("range_low"),
-        "range_size": rng.get("size") or rng.get("range_size", 0),
-        "equilibrium": equilibrium,
-        "range_high_idx": rng.get("range_high_idx", 0),
-        "range_low_idx": rng.get("range_low_idx", 0),
-    }
+    range_data_for_bos = _build_range_data_for_bos(rng)
 
     tap2_time: Optional[pd.Timestamp] = None
     try:
@@ -767,14 +760,7 @@ def refine_schematic_bos_with_ltf(
     tap3_price = tap3.get("price")
 
     # Build range_data for demand-path ranking in BOS detection
-    _range_data_refine = {
-        "range_high": _rng_refine.get("high") or _rng_refine.get("range_high"),
-        "range_low": _rng_refine.get("low") or _rng_refine.get("range_low"),
-        "range_size": _rng_refine.get("size") or _rng_refine.get("range_size", 0),
-        "equilibrium": equilibrium,
-        "range_high_idx": _rng_refine.get("range_high_idx", 0),
-        "range_low_idx": _rng_refine.get("range_low_idx", 0),
-    }
+    _range_data_refine = _build_range_data_for_bos(_rng_refine)
 
     # Reference prices already computed by MTF BOS detection — reuse them.
     if direction == "bullish":
@@ -1348,7 +1334,6 @@ class Schematics5BTrader:
                     continue
                 try:
                     # Create PivotCache per TF to eliminate pivot drift
-                    from pivot_cache import PivotCache
                     pc = PivotCache(df, lookback=3)
                     det = detect_tct_schematics(df, [], pivot_cache=pc)
                     all_schematics_by_tf[tf] = (
@@ -1488,8 +1473,11 @@ class Schematics5BTrader:
             forming.sort(key=lambda x: (x.get("tap3") or {}).get("idx", 0), reverse=True)
 
             # Session context (MSCE integration)
-            from session_manipulation import get_active_session, get_session_info
-            session_info = get_session_info()
+            try:
+                from session_manipulation import get_session_info
+                session_info = get_session_info()
+            except ImportError:
+                session_info = None
 
             out.update({
                 "current_price": current_price,

@@ -59,6 +59,7 @@ import logging
 
 from pivot_cache import PivotCache
 from range_engine_controller import RangeEngineController
+from range_utils import check_equilibrium_touch
 from session_manipulation import get_active_session, apply_session_multiplier
 
 logger = logging.getLogger("TCT-Schematics")
@@ -117,6 +118,10 @@ class TCTSchematicDetector:
         """Initialize with candle data and optional centralized pivot cache."""
         self.candles = candles.reset_index(drop=True)
         # Centralized pivot cache — eliminates structural drift
+        # Validate injected cache matches our candles; rebuild if stale
+        if pivot_cache is not None and len(pivot_cache.candles) != len(self.candles):
+            logger.debug("Injected PivotCache length mismatch — rebuilding")
+            pivot_cache = None
         self._pivot_cache = pivot_cache or PivotCache(self.candles, lookback=self.SIX_CANDLE_LOOKBACK // 2)
         # Range engine controller with feature flag
         self._range_controller = RangeEngineController(
@@ -183,16 +188,27 @@ class TCTSchematicDetector:
                 ranges = self._find_accumulation_ranges()
 
         # Rank ranges by Tap1 (range_low) path quality — best candidates first
+        # Each candidate is scored against its own range context, not a shared ref
         if len(ranges) > 1:
-            tap1_candidates = [
-                {"idx": r["range_low_idx"], "price": r["range_low"]}
-                for r in ranges
-            ]
-            # Use the first range as reference for ranking context
-            ref = ranges[0]
-            ranked = self._rank_ms_lows_by_path_quality(tap1_candidates, ref)
-            idx_order = [c["idx"] for c in ranked]
-            ranges = sorted(ranges, key=lambda r: idx_order.index(r["range_low_idx"]))
+            scored_ranges = []
+            for r in ranges:
+                candidates = [{"idx": r["range_low_idx"], "price": r["range_low"]}]
+                ranked = self._rank_ms_lows_by_path_quality(candidates, r)
+                # Ranker returns a reordered list; use relative position as score proxy
+                # A single-element list always returns the same item, so we compute
+                # the score directly using the same logic as the ranker
+                range_size = r.get("range_size", 0)
+                if range_size > 0:
+                    distance = r["range_low"] - r.get("range_low", 0)
+                    demand_zones = self._find_demand_zones_below(r["range_low"], r)
+                    significant = [z for z in demand_zones
+                                   if (z["top"] - z["bottom"]) > range_size * 0.1]
+                    score = 30 if not significant else -len(significant) * 15
+                else:
+                    score = 0
+                scored_ranges.append((score, r))
+            scored_ranges.sort(key=lambda x: x[0], reverse=True)
+            ranges = [r for _, r in scored_ranges]
 
         for range_data in ranges:
             try:
@@ -1039,7 +1055,7 @@ class TCTSchematicDetector:
                 # (swing low) must be below tap3 high — otherwise stop < entry.
                 # TCT: "enter on the break" = the MS level that was broken.
                 if close_price < sl["price"] and sl["price"] < high_price and sl["price"] > low_price:
-                    is_inside_range = sl["price"] > low_price
+                    is_inside_range = sl["price"] > low_price and sl["price"] < high_price
                     return {
                         "idx": i,
                         "price": sl["price"],
@@ -1510,7 +1526,7 @@ class TCTSchematicDetector:
                 "enhanced_target": context_follow_through.get("enhanced_target")
             },
             # Session manipulation context (MSCE integration)
-            "session_context": self._get_session_context(tap3),
+            "session_context": session_context,
             "timestamp": datetime.utcnow().isoformat()
         }
 
@@ -1734,7 +1750,7 @@ class TCTSchematicDetector:
                 "enhanced_target": context_follow_through.get("enhanced_target")
             },
             # Session manipulation context (MSCE integration)
-            "session_context": self._get_session_context(tap3),
+            "session_context": session_context,
             "timestamp": datetime.utcnow().isoformat()
         }
 
@@ -3528,20 +3544,6 @@ class TCTSchematicDetector:
     # UTILITY METHODS
     # ================================================================
 
-    def _get_session_context(self, tap: Dict) -> Dict:
-        """Get session manipulation context for a tap's timestamp."""
-        try:
-            tap_time = tap.get("time")
-            if tap_time and tap_time != str(tap.get("idx", "")):
-                ts = pd.Timestamp(tap_time)
-                if ts.tzinfo is None:
-                    from datetime import timezone
-                    ts = ts.replace(tzinfo=timezone.utc)
-                session = get_active_session(ts.to_pydatetime())
-                return apply_session_multiplier(50.0, ts.to_pydatetime())
-            return {"session": None, "boost_applied": False, "multiplier": 1.0}
-        except Exception:
-            return {"session": None, "boost_applied": False, "multiplier": 1.0}
 
     def _is_inside_bar(self, idx: int) -> bool:
         """
@@ -3612,13 +3614,15 @@ class TCTSchematicDetector:
         falls back to Tap3 timestamp otherwise.
         """
         default = {"session": None, "boost_applied": False, "multiplier": 1.0}
-        try:
-            from session_manipulation import apply_session_multiplier
-        except (ImportError, ModuleNotFoundError):
+        if not timestamp:
             return default
         try:
-            return apply_session_multiplier(timestamp)
-        except (TypeError, ValueError):
+            ts = pd.Timestamp(timestamp)
+            if ts.tzinfo is None:
+                from datetime import timezone
+                ts = ts.replace(tzinfo=timezone.utc)
+            return apply_session_multiplier(50.0, ts.to_pydatetime())
+        except (TypeError, ValueError, Exception):
             return default
 
     def _validate_distribution_sweep(

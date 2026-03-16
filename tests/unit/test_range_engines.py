@@ -260,20 +260,31 @@ class TestRangeEngineL2:
 
     def test_24h_minimum_range_duration(self):
         """Ranges < 24h classified as micro-ranges, excluded."""
-        # Create very short candles (1 minute each, only 5 candles)
+        # 20 hourly candles = max 20h span, which is below the 24h minimum
         start = datetime(2026, 3, 1, tzinfo=timezone.utc)
         prices = [(100 + i, 105 + i, 95 + i, 102 + i) for i in range(20)]
-        df = _make_candles(prices, start_time=start)  # 20 hourly candles
+        df = _make_candles(prices, start_time=start)
         pc = PivotCache(df, lookback=2)
         engine = RangeEngineL2(pc)
-        # With hourly candles and only 20 candles, the range duration
-        # is limited. L2 requires 24h minimum.
+        ranges = engine.detect_distribution_ranges(df, htf_bias="bullish")
+        # With only 20 hourly candles the maximum span is <24h,
+        # so L2 should reject all ranges as micro-ranges
+        assert ranges == [], f"Expected no ranges for <24h data, got {len(ranges)}"
+
+    def test_24h_minimum_range_duration_valid(self):
+        """Ranges >= 24h pass the duration gate."""
+        start = datetime(2026, 3, 1, tzinfo=timezone.utc)
+        prices = [(100 + i, 105 + i, 95 + i, 102 + i) for i in range(30)]
+        df = _make_candles(prices, start_time=start)  # 30 hourly candles
+        pc = PivotCache(df, lookback=2)
+        engine = RangeEngineL2(pc)
         ranges = engine.detect_distribution_ranges(df, htf_bias="bullish")
         for r in ranges:
-            # If any range found, its duration should be >= 24h
             high_idx = r["range_high_idx"]
             low_idx = r["range_low_idx"]
-            assert abs(low_idx - high_idx) >= 5  # Minimum candle gap
+            assert abs(low_idx - high_idx) >= 24, (
+                f"Range duration {abs(low_idx - high_idx)} candles < 24h minimum"
+            )
 
 
 # ================================================================
@@ -526,11 +537,10 @@ class TestModel1DistributionFullFlow:
         assert "distribution_schematics" in result
         assert "accumulation_schematics" in result
 
-        # The detection should find at least candidates
         dist = result["distribution_schematics"]
         assert isinstance(dist, list)
 
-        # Check structure of any found schematics
+        # Validate structure of any found schematics
         for s in dist:
             assert "schematic_type" in s
             assert "quality_score" in s
@@ -539,6 +549,9 @@ class TestModel1DistributionFullFlow:
             assert "tap2" in s
             assert "tap3" in s
             assert "session_context" in s
+            # Domain-specific identifiers must be present
+            assert "model" in s, "Missing 'model' field in schematic"
+            assert "bos_confirmation" in s or "bos" in s, "Missing BOS field"
             if s.get("sweep_validation"):
                 assert "classification" in s["sweep_validation"]
 
@@ -636,6 +649,32 @@ class TestBullishBosSupplyPathRanking:
         # All candidates preserved (ranking, not filtering)
         prices = [h["price"] for h in ranked]
         assert set(prices) == {51800.0, 52100.0, 51500.0}
+        # Verify the ranking produces a deterministic order that differs from input
+        # (the ranker scores by distance-to-target and supply zone obstruction)
+        # The farthest from range_high with clean path should rank first
+        assert ranked[0]["price"] == 51500.0, (
+            f"Expected 51500.0 (farthest from range_high) ranked first, got {ranked[0]['price']}"
+        )
+
+    def test_supply_ranking_empty_supply_zones(self):
+        """When no supply zones are found, ranking still returns all candidates."""
+        from tct_schematics import TCTSchematicDetector
+
+        df = _make_distribution_candles()
+        det = TCTSchematicDetector(df)
+
+        swing_highs = [{"idx": 140, "price": 51800.0}]
+        range_data = {
+            "range_high": 52400.0,
+            "range_low": 50000.0,
+            "range_high_idx": 40,
+            "range_low_idx": 80,
+            "range_size": 2400.0,
+            "equilibrium": 51200.0,
+        }
+        ranked = det._rank_ms_highs_by_path_quality(swing_highs, range_data)
+        assert len(ranked) == 1
+        assert ranked[0]["price"] == 51800.0
 
     def test_supply_ranking_zero_range_size_passthrough(self):
         """Zero range_size returns input unchanged."""

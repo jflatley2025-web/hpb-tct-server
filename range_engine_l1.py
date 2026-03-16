@@ -12,6 +12,7 @@ from typing import Dict, List, Optional
 import pandas as pd
 
 from pivot_cache import PivotCache
+from range_utils import check_equilibrium_touch
 
 logger = logging.getLogger("RangeEngineL1")
 
@@ -56,8 +57,9 @@ class RangeEngineL1:
                 dl_low = range_low - (range_size * DEVIATION_LIMIT_PERCENT)
                 dl_high = range_high + (range_size * DEVIATION_LIMIT_PERCENT)
 
-                eq_touched = self._check_equilibrium_touch(
-                    candles, range_high_idx, range_low_idx, equilibrium
+                eq_touched = check_equilibrium_touch(
+                    candles, range_high_idx, range_low_idx, equilibrium,
+                    check_between=True, post_range_candles=30,
                 )
 
                 if eq_touched:
@@ -105,8 +107,9 @@ class RangeEngineL1:
                 dl_low = range_low - (range_size * DEVIATION_LIMIT_PERCENT)
                 dl_high = range_high + (range_size * DEVIATION_LIMIT_PERCENT)
 
-                eq_touched = self._check_equilibrium_touch(
-                    candles, range_low_idx, range_high_idx, equilibrium
+                eq_touched = check_equilibrium_touch(
+                    candles, range_low_idx, range_high_idx, equilibrium,
+                    check_between=True, post_range_candles=30,
                 )
 
                 if eq_touched:
@@ -124,24 +127,3 @@ class RangeEngineL1:
                     })
 
         return ranges
-
-    @staticmethod
-    def _check_equilibrium_touch(candles: pd.DataFrame, idx1: int, idx2: int,
-                                  equilibrium: float) -> bool:
-        """Check if price touched equilibrium to confirm range."""
-        start = min(idx1, idx2)
-        end = max(idx1, idx2)
-
-        for i in range(start + 1, end):
-            candle = candles.iloc[i]
-            if candle["low"] <= equilibrium <= candle["high"]:
-                return True
-
-        check_start = end + 1
-        check_end = min(check_start + 30, len(candles))
-        for i in range(check_start, check_end):
-            candle = candles.iloc[i]
-            if candle["low"] <= equilibrium <= candle["high"]:
-                return True
-
-        return False

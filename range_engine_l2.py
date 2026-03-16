@@ -16,6 +16,7 @@ import pandas as pd
 
 from pivot_cache import PivotCache
 from decision_trees.market_structure_engine import MarketStructureEngine
+from range_utils import check_equilibrium_touch
 
 logger = logging.getLogger("RangeEngineL2")
 
@@ -47,14 +48,14 @@ class RangeEngineL2:
         """
         ranges = []
 
-        # Step 1: Confirm L1 trend
+        # Step 1: Confirm L1 trend — L1 is authoritative
         l1_result = self._ms_engine.detect_l1_structure(candles)
-        if l1_result.trend != "bullish" and htf_bias != "bullish":
+        if l1_result.trend != "bullish":
             logger.debug("L2 distribution: L1 trend not bullish, skipping")
             return ranges
 
-        # Step 2: Detect L2 counter-structure
-        l2_result = self._ms_engine.detect_l2_structure(candles, "bullish")
+        # Step 2: Detect L2 counter-structure (htf_bias selects the pattern)
+        l2_result = self._ms_engine.detect_l2_structure(candles, htf_bias)
         if not l2_result["exists"]:
             logger.debug("L2 distribution: no bearish counter-structure found")
             return ranges
@@ -70,9 +71,8 @@ class RangeEngineL2:
         l2_lower_lows = self._find_l2_lower_lows(pivot_lows)
 
         if not l2_lower_highs or not l2_lower_lows:
-            # Fall back to regular pivots with L2 counter-structure validation
-            l2_lower_highs = pivot_highs[-5:] if len(pivot_highs) >= 5 else pivot_highs
-            l2_lower_lows = pivot_lows[-5:] if len(pivot_lows) >= 5 else pivot_lows
+            logger.debug("L2 distribution: insufficient L2 pivots for lower-highs/lower-lows")
+            return ranges
 
         # Step 4: Build ranges from L2 pivot pairs
         has_time = "open_time" in candles.columns
@@ -110,8 +110,9 @@ class RangeEngineL2:
                 dl_high = ph_price + (range_size * DEVIATION_LIMIT_PERCENT)
 
                 # Equilibrium touch confirmation
-                eq_touched = self._check_equilibrium_touch(
-                    candles, ph_idx, pl_idx, equilibrium
+                eq_touched = check_equilibrium_touch(
+                    candles, ph_idx, pl_idx, equilibrium,
+                    check_between=True, post_range_candles=30,
                 )
                 if not eq_touched:
                     continue
@@ -141,11 +142,12 @@ class RangeEngineL2:
         """
         ranges = []
 
+        # L1 trend is authoritative
         l1_result = self._ms_engine.detect_l1_structure(candles)
-        if l1_result.trend != "bearish" and htf_bias != "bearish":
+        if l1_result.trend != "bearish":
             return ranges
 
-        l2_result = self._ms_engine.detect_l2_structure(candles, "bearish")
+        l2_result = self._ms_engine.detect_l2_structure(candles, htf_bias)
         if not l2_result["exists"]:
             return ranges
 
@@ -156,8 +158,8 @@ class RangeEngineL2:
         l2_higher_highs = self._find_l2_higher_highs(pivot_highs)
 
         if not l2_higher_lows or not l2_higher_highs:
-            l2_higher_lows = pivot_lows[-5:] if len(pivot_lows) >= 5 else pivot_lows
-            l2_higher_highs = pivot_highs[-5:] if len(pivot_highs) >= 5 else pivot_highs
+            logger.debug("L2 accumulation: insufficient L2 pivots for higher-lows/higher-highs")
+            return ranges
 
         has_time = "open_time" in candles.columns
 
@@ -187,8 +189,9 @@ class RangeEngineL2:
                 dl_low = pl_price - (range_size * DEVIATION_LIMIT_PERCENT)
                 dl_high = ph_price + (range_size * DEVIATION_LIMIT_PERCENT)
 
-                eq_touched = self._check_equilibrium_touch(
-                    candles, pl_idx, ph_idx, equilibrium
+                eq_touched = check_equilibrium_touch(
+                    candles, pl_idx, ph_idx, equilibrium,
+                    check_between=True, post_range_candles=30,
                 )
                 if not eq_touched:
                     continue
@@ -204,7 +207,7 @@ class RangeEngineL2:
                     "dl_low": dl_low,
                     "direction": "accumulation",
                     "engine": "L2",
-                    "l1_trend": self._ms_engine.detect_l1_structure(candles).trend,
+                    "l1_trend": l1_result.trend,
                     "l2_counter": True,
                 })
 
@@ -289,23 +292,3 @@ class RangeEngineL2:
             # If timestamps unavailable, fall back to candle count heuristic
             return (end_idx - start_idx) >= 5
 
-    @staticmethod
-    def _check_equilibrium_touch(candles: pd.DataFrame, idx1: int, idx2: int,
-                                  equilibrium: float) -> bool:
-        """Check if price touched equilibrium to confirm range."""
-        start = min(idx1, idx2)
-        end = max(idx1, idx2)
-
-        for i in range(start + 1, end):
-            candle = candles.iloc[i]
-            if candle["low"] <= equilibrium <= candle["high"]:
-                return True
-
-        check_start = end + 1
-        check_end = min(check_start + 30, len(candles))
-        for i in range(check_start, check_end):
-            candle = candles.iloc[i]
-            if candle["low"] <= equilibrium <= candle["high"]:
-                return True
-
-        return False

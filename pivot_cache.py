@@ -31,6 +31,8 @@ class PivotCache:
         self._default_lookback = lookback
         self._pivot_highs: Dict[int, List[Dict]] = {}  # lookback -> [{idx, price}]
         self._pivot_lows: Dict[int, List[Dict]] = {}   # lookback -> [{idx, price}]
+        self._pivot_high_idx_sets: Dict[int, set] = {}  # lookback -> set of pivot high indices
+        self._pivot_low_idx_sets: Dict[int, set] = {}   # lookback -> set of pivot low indices
         self._inside_bars: Optional[set] = None
         self._computed = False
 
@@ -78,6 +80,8 @@ class PivotCache:
 
         self._pivot_highs[lookback] = highs
         self._pivot_lows[lookback] = lows
+        self._pivot_high_idx_sets[lookback] = {p["idx"] for p in highs}
+        self._pivot_low_idx_sets[lookback] = {p["idx"] for p in lows}
         logger.debug(
             f"PivotCache: computed lookback={lookback} — "
             f"{len(highs)} pivot highs, {len(lows)} pivot lows"
@@ -94,8 +98,9 @@ class PivotCache:
         current = float(self._candles.iloc[idx]["high"])
 
         # Collect non-inside-bar candles before idx
+        # Use dynamic bound: scan up to lookback*2 to handle long inside-bar runs
         before = []
-        for i in range(idx - 1, max(idx - lookback - 3, -1), -1):
+        for i in range(idx - 1, max(idx - lookback * 2, -1), -1):
             if not self._is_inside_bar(i):
                 before.append(i)
             if len(before) >= lookback:
@@ -103,7 +108,7 @@ class PivotCache:
 
         # Collect non-inside-bar candles after idx
         after = []
-        for i in range(idx + 1, min(idx + lookback + 3, len(self._candles))):
+        for i in range(idx + 1, min(idx + lookback * 2, len(self._candles))):
             if not self._is_inside_bar(i):
                 after.append(i)
             if len(after) >= lookback:
@@ -132,14 +137,14 @@ class PivotCache:
         current = float(self._candles.iloc[idx]["low"])
 
         before = []
-        for i in range(idx - 1, max(idx - lookback - 3, -1), -1):
+        for i in range(idx - 1, max(idx - lookback * 2, -1), -1):
             if not self._is_inside_bar(i):
                 before.append(i)
             if len(before) >= lookback:
                 break
 
         after = []
-        for i in range(idx + 1, min(idx + lookback + 3, len(self._candles))):
+        for i in range(idx + 1, min(idx + lookback * 2, len(self._candles))):
             if not self._is_inside_bar(i):
                 after.append(i)
             if len(after) >= lookback:
@@ -176,18 +181,18 @@ class PivotCache:
         return self._pivot_lows[lb]
 
     def get_swing_high(self, idx: int, lookback: int = None) -> bool:
-        """Check if a specific index is a swing high. Uses cached pivots."""
+        """Check if a specific index is a swing high. O(1) via cached index set."""
         lb = lookback or self._default_lookback
-        if lb not in self._pivot_highs:
+        if lb not in self._pivot_high_idx_sets:
             self._compute_pivots(lb)
-        return any(p["idx"] == idx for p in self._pivot_highs[lb])
+        return idx in self._pivot_high_idx_sets[lb]
 
     def get_swing_low(self, idx: int, lookback: int = None) -> bool:
-        """Check if a specific index is a swing low. Uses cached pivots."""
+        """Check if a specific index is a swing low. O(1) via cached index set."""
         lb = lookback or self._default_lookback
-        if lb not in self._pivot_lows:
+        if lb not in self._pivot_low_idx_sets:
             self._compute_pivots(lb)
-        return any(p["idx"] == idx for p in self._pivot_lows[lb])
+        return idx in self._pivot_low_idx_sets[lb]
 
     def get_swing_lows_in_range(self, start_idx: int, end_idx: int,
                                  lookback: int = None) -> List[Dict]:
@@ -211,6 +216,8 @@ class PivotCache:
         """Force recompute on next access (e.g. after new candles arrive)."""
         self._pivot_highs.clear()
         self._pivot_lows.clear()
+        self._pivot_high_idx_sets.clear()
+        self._pivot_low_idx_sets.clear()
         self._inside_bars = None
         self._computed = False
 

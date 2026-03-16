@@ -15,7 +15,7 @@ Session timing modifies execution confidence, NOT schematic quality scores.
 
 import logging
 from datetime import datetime, timezone, time as dt_time
-from typing import Dict, Optional
+from typing import Optional
 
 logger = logging.getLogger("SessionManipulation")
 
@@ -55,8 +55,9 @@ def get_active_session(timestamp: Optional[datetime] = None) -> Optional[str]:
     if timestamp is None:
         timestamp = datetime.now(timezone.utc)
 
-    # Ensure timezone-aware
+    # Ensure timezone-aware — warn on naive datetimes
     if timestamp.tzinfo is None:
+        logger.warning("Naive datetime passed to get_active_session; assuming UTC")
         timestamp = timestamp.replace(tzinfo=timezone.utc)
 
     current_time = timestamp.time()
@@ -66,9 +67,8 @@ def get_active_session(timestamp: Optional[datetime] = None) -> Optional[str]:
             # Asia window spans midnight: 23:30 -> 01:00
             if current_time >= window["start"] or current_time <= window["end"]:
                 return session_name
-        else:
-            if window["start"] <= current_time <= window["end"]:
-                return session_name
+        elif window["start"] <= current_time <= window["end"]:
+            return session_name
 
     return None
 
@@ -90,7 +90,7 @@ def get_session_multiplier(session_name: Optional[str]) -> float:
 def apply_session_multiplier(
     execution_confidence: float,
     timestamp: Optional[datetime] = None,
-) -> Dict:
+) -> dict:
     """
     Apply session manipulation multiplier to execution confidence.
 
@@ -125,7 +125,7 @@ def apply_session_multiplier(
     return result
 
 
-def get_session_info(timestamp: Optional[datetime] = None) -> Dict:
+def get_session_info(timestamp: Optional[datetime] = None) -> dict:
     """Return full session context for logging/display."""
     if timestamp is None:
         timestamp = datetime.now(timezone.utc)
