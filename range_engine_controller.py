@@ -1,6 +1,5 @@
 """
 range_engine_controller.py — Range Engine Feature Flag Controller
-==================================================================
 Controls which range engine (L1 legacy vs L2 TCT-correct) is used.
 
 Modes:

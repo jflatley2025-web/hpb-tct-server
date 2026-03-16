@@ -1,6 +1,5 @@
 """
 range_comparison_logger.py — Range Engine Structural Diff Logger
-=================================================================
 Logs differences between L1 and L2 range detection to JSONL for
 offline analysis during migration.
 """

@@ -1,6 +1,5 @@
 """
 test_range_engines.py — Unit tests for the distribution detection fix
-======================================================================
 Tests all 6 bug fixes:
 1. L2 range detection vs L1
 2. BOS low_price asymmetry fix

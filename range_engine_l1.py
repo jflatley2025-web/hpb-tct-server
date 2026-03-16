@@ -1,6 +1,5 @@
 """
 range_engine_l1.py — Legacy L1 Range Engine
-=============================================
 Extracts the existing L1 swing-based range detection logic from
 tct_schematics.py for use in the dual range engine architecture.
 

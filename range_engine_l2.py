@@ -1,6 +1,5 @@
 """
 range_engine_l2.py — TCT-Correct L2 Range Engine
-==================================================
 Pulls ranges from L2 structure pools per TCT methodology. L2 = counter-trend
 pullback structure within the primary L1 trend.
 

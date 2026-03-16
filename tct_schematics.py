@@ -522,7 +522,7 @@ class TCTSchematicDetector:
                 # TCT: Try to find Model 2 Tap3 (lower high at extreme liquidity/supply)
                 tap3_m2 = self._find_distribution_tap3_model2(range_data, tap1, tap2)
 
-                # Build Model 1 schematic if valid
+                # Build Model 1 schematic if valid (sweep gate)
                 if tap3_m1:
                     # Liquidity sweep validation: deviation must be a liquidity
                     # grab, not a true break. Must validate BEFORE schematic
@@ -543,7 +543,7 @@ class TCTSchematicDetector:
                             schematic["sweep_validation"] = sweep_m1
                             schematics.append(schematic)
 
-                # Build Model 2 schematic if valid
+                # Build Model 2 schematic if valid (sweep gate)
                 if tap3_m2:
                     sweep_m2 = self._validate_distribution_sweep(
                         range_data, tap2, tap3_m2
@@ -1417,6 +1417,17 @@ class TCTSchematicDetector:
             range_data, schematic_type
         )
 
+        # Session context: prefer BOS/entry timestamp, fall back to Tap3
+        chosen_timestamp = None
+        if bos and bos.get("bos_idx") is not None:
+            try:
+                chosen_timestamp = str(self.candles.iloc[bos["bos_idx"]].get("open_time", ""))
+            except (IndexError, KeyError):
+                pass
+        if not chosen_timestamp:
+            chosen_timestamp = tap3.get("time")
+        session_context = self._get_session_context(chosen_timestamp)
+
         return {
             "schematic_type": schematic_type,
             "direction": "bullish",
@@ -1435,6 +1446,7 @@ class TCTSchematicDetector:
             "wyckoff_high": range_data["range_high"],  # TCT: Target
             "wyckoff_low": tap3["price"] if tap3.get("is_deviation") else tap2["price"],
             "bos_confirmation": bos,
+            "session_context": session_context,
             "entry": {
                 "type": "BOS_confirmation",
                 "price": entry_price,
@@ -1629,6 +1641,17 @@ class TCTSchematicDetector:
             range_data, schematic_type
         )
 
+        # Session context: prefer BOS/entry timestamp, fall back to Tap3
+        chosen_timestamp = None
+        if bos and bos.get("bos_idx") is not None:
+            try:
+                chosen_timestamp = str(self.candles.iloc[bos["bos_idx"]].get("open_time", ""))
+            except (IndexError, KeyError):
+                pass
+        if not chosen_timestamp:
+            chosen_timestamp = tap3.get("time")
+        session_context = self._get_session_context(chosen_timestamp)
+
         return {
             "schematic_type": schematic_type,
             "direction": "bearish",
@@ -1647,6 +1670,7 @@ class TCTSchematicDetector:
             "wyckoff_high": tap3["price"] if tap3.get("is_deviation") else tap2["price"],
             "wyckoff_low": range_data["range_low"],  # TCT: Target
             "bos_confirmation": bos,
+            "session_context": session_context,
             "entry": {
                 "type": "BOS_confirmation",
                 "price": entry_price,
@@ -3561,28 +3585,64 @@ class TCTSchematicDetector:
 
         TCT: "When we have a move back to the equilibrium, that's when the range is confirmed"
 
-        Checks both during range formation (between pivots) and after the
-        range is fully formed.
+        Delegates to the shared check_equilibrium_touch utility in range_utils.
         """
-        start = min(idx1, idx2)
-        end = max(idx1, idx2)
+        return check_equilibrium_touch(
+            self.candles, idx1, idx2, equilibrium,
+            check_between=True, post_range_candles=30,
+        )
 
-        # Check between the two pivots (during range formation)
-        for i in range(start + 1, end):
-            candle = self.candles.iloc[i]
-            if candle["low"] <= equilibrium <= candle["high"]:
-                return True
+    def _get_session_context(self, timestamp: Optional[str] = None) -> Dict:
+        """
+        Return trading session context for a given timestamp.
 
-        # Check candles after the range formation (confirmation bounce)
-        check_start = end + 1
-        check_end = min(check_start + 30, len(self.candles))
+        Prefers the BOS/entry confirmation timestamp when available;
+        falls back to Tap3 timestamp otherwise.
+        """
+        default = {"session": None, "boost_applied": False, "multiplier": 1.0}
+        try:
+            from session_manipulation import apply_session_multiplier
+        except (ImportError, ModuleNotFoundError):
+            return default
+        try:
+            return apply_session_multiplier(timestamp)
+        except (TypeError, ValueError):
+            return default
 
-        for i in range(check_start, check_end):
-            candle = self.candles.iloc[i]
-            if candle["low"] <= equilibrium <= candle["high"]:
-                return True
+    def _validate_distribution_sweep(
+        self,
+        tap2: Dict,
+        tap3: Dict,
+        range_data: Dict,
+    ) -> Dict:
+        """
+        Validate a distribution sweep using a window that always
+        includes the tap2 and tap3 pivots.
 
-        return False
+        Uses the shared MarketStructureEngine to detect the sweep
+        over a window anchored to the original pivots so they remain
+        in scope for accurate classification.
+        """
+        from decision_trees.market_structure_engine import MarketStructureEngine
+
+        buffer = 10
+        start_idx = max(0, tap2["idx"] - buffer)
+        end_idx = min(len(self.candles), tap3["idx"] + buffer)
+        window_df = self.candles.iloc[start_idx:end_idx].reset_index(drop=True)
+
+        ms = MarketStructureEngine()
+        sweep = ms.detect_sweep(
+            window_df,
+            range_high=range_data["range_high"],
+            range_low=range_data["range_low"],
+            direction="bearish",
+        )
+        return {
+            "classification": sweep.classification,
+            "swept": sweep.swept,
+            "returned_inside": sweep.returned_inside,
+            "sweep_count": sweep.sweep_count,
+        }
 
     def _validate_distribution_sweep(self, range_data: Dict, tap2: Dict,
                                       tap3: Dict) -> Dict:

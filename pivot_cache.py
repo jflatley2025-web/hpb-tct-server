@@ -1,6 +1,5 @@
 """
 pivot_cache.py — Centralized Pivot Engine
-==========================================
 Computes pivots ONCE per candle batch. All modules (range detection, BOS,
 sweep detection, tap detection) consume from this cache to eliminate
 structural drift where each module independently recomputes pivots and
