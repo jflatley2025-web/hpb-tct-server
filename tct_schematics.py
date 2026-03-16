@@ -57,6 +57,8 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 import logging
 
+from range_utils import check_equilibrium_touch
+
 logger = logging.getLogger("TCT-Schematics")
 
 
@@ -3447,28 +3449,12 @@ class TCTSchematicDetector:
 
         TCT: "When we have a move back to the equilibrium, that's when the range is confirmed"
 
-        Checks both during range formation (between pivots) and after the
-        range is fully formed.
+        Delegates to the shared check_equilibrium_touch utility in range_utils.
         """
-        start = min(idx1, idx2)
-        end = max(idx1, idx2)
-
-        # Check between the two pivots (during range formation)
-        for i in range(start + 1, end):
-            candle = self.candles.iloc[i]
-            if candle["low"] <= equilibrium <= candle["high"]:
-                return True
-
-        # Check candles after the range formation (confirmation bounce)
-        check_start = end + 1
-        check_end = min(check_start + 30, len(self.candles))
-
-        for i in range(check_start, check_end):
-            candle = self.candles.iloc[i]
-            if candle["low"] <= equilibrium <= candle["high"]:
-                return True
-
-        return False
+        return check_equilibrium_touch(
+            self.candles, idx1, idx2, equilibrium,
+            check_between=True, post_range_candles=30,
+        )
 
     def _validate_deviation_came_back_inside(self, tab: Dict, range_data: Dict, direction: str) -> bool:
         """

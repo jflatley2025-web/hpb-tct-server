@@ -12,6 +12,7 @@ import numpy as np
 from datetime import datetime
 from typing import Dict, List, Optional
 
+from range_utils import check_equilibrium_touch
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -1289,26 +1290,13 @@ class TCTRangeDetector:
         """
         Check if price touched equilibrium after range formation.
 
-        TCT: "Move back up towards the equilibrium of the range - that's when the range is confirmed"
-        TCT: "Your range low is already confirmed the moment we have a move back up touching the equilibrium"
+        Delegates to the shared check_equilibrium_touch utility in range_utils.
+        Only checks post-range candles (20), not between pivots.
         """
-        start_idx = min(high_idx, low_idx)
-        end_idx = max(high_idx, low_idx)
-
-        # Check candles after the range formed
-        check_start = end_idx + 1
-        check_end = min(check_start + 20, len(candles))
-
-        if check_start >= len(candles):
-            return False
-
-        for i in range(check_start, check_end):
-            candle = candles.iloc[i]
-            # TCT: Check if any candle touched the equilibrium (0.5 level)
-            if candle["low"] <= equilibrium <= candle["high"]:
-                return True
-
-        return False
+        return check_equilibrium_touch(
+            candles, high_idx, low_idx, equilibrium,
+            check_between=False, post_range_candles=20,
+        )
 
     @staticmethod
     def _validate_six_candle_rule(candles: pd.DataFrame, high_idx: int, low_idx: int, trend: str) -> bool:
