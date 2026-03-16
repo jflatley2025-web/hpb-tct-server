@@ -39,4 +39,5 @@ tensor_trade_log_backup.json
 # Logs
 logs/
 *.jsonl
+!docs/sample_comparison.jsonl
 

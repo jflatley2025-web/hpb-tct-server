@@ -493,21 +493,35 @@ class TCTSchematicDetector:
                 # TCT: Try to find Model 2 Tap3 (lower high at extreme liquidity/supply)
                 tap3_m2 = self._find_distribution_tap3_model2(range_data, tap1, tap2)
 
-                # Build Model 1 schematic if valid
+                # Build Model 1 schematic if valid (sweep gate)
                 if tap3_m1:
-                    schematic = self._build_distribution_schematic(
-                        range_data, tap1, tap2, tap3_m1, model_type="Model_1"
-                    )
-                    if schematic:
-                        schematics.append(schematic)
+                    sweep_m1 = self._validate_distribution_sweep(tap2, tap3_m1, range_data)
+                    if sweep_m1["classification"] in ("true_break", "no_sweep"):
+                        logger.debug(
+                            "Skipping M1 distribution: sweep=%s", sweep_m1["classification"]
+                        )
+                    else:
+                        schematic = self._build_distribution_schematic(
+                            range_data, tap1, tap2, tap3_m1, model_type="Model_1"
+                        )
+                        if schematic:
+                            schematic["sweep_validation"] = sweep_m1
+                            schematics.append(schematic)
 
-                # Build Model 2 schematic if valid
+                # Build Model 2 schematic if valid (sweep gate)
                 if tap3_m2:
-                    schematic = self._build_distribution_schematic(
-                        range_data, tap1, tap2, tap3_m2, model_type="Model_2"
-                    )
-                    if schematic:
-                        schematics.append(schematic)
+                    sweep_m2 = self._validate_distribution_sweep(tap2, tap3_m2, range_data)
+                    if sweep_m2["classification"] in ("true_break", "no_sweep"):
+                        logger.debug(
+                            "Skipping M2 distribution: sweep=%s", sweep_m2["classification"]
+                        )
+                    else:
+                        schematic = self._build_distribution_schematic(
+                            range_data, tap1, tap2, tap3_m2, model_type="Model_2"
+                        )
+                        if schematic:
+                            schematic["sweep_validation"] = sweep_m2
+                            schematics.append(schematic)
 
                     # TCT 5B: Check for Model 2 → Model 1 failure transition
                     # "A model two when you have a lower high, and when that fails
@@ -1252,6 +1266,17 @@ class TCTSchematicDetector:
             range_data, schematic_type
         )
 
+        # Session context: prefer BOS/entry timestamp, fall back to Tap3
+        chosen_timestamp = None
+        if bos and bos.get("bos_idx") is not None:
+            try:
+                chosen_timestamp = str(self.candles.iloc[bos["bos_idx"]].get("open_time", ""))
+            except (IndexError, KeyError):
+                pass
+        if not chosen_timestamp:
+            chosen_timestamp = tap3.get("time")
+        session_context = self._get_session_context(chosen_timestamp)
+
         return {
             "schematic_type": schematic_type,
             "direction": "bullish",
@@ -1270,6 +1295,7 @@ class TCTSchematicDetector:
             "wyckoff_high": range_data["range_high"],  # TCT: Target
             "wyckoff_low": tap3["price"] if tap3.get("is_deviation") else tap2["price"],
             "bos_confirmation": bos,
+            "session_context": session_context,
             "entry": {
                 "type": "BOS_confirmation",
                 "price": entry_price,
@@ -1462,6 +1488,17 @@ class TCTSchematicDetector:
             range_data, schematic_type
         )
 
+        # Session context: prefer BOS/entry timestamp, fall back to Tap3
+        chosen_timestamp = None
+        if bos and bos.get("bos_idx") is not None:
+            try:
+                chosen_timestamp = str(self.candles.iloc[bos["bos_idx"]].get("open_time", ""))
+            except (IndexError, KeyError):
+                pass
+        if not chosen_timestamp:
+            chosen_timestamp = tap3.get("time")
+        session_context = self._get_session_context(chosen_timestamp)
+
         return {
             "schematic_type": schematic_type,
             "direction": "bearish",
@@ -1480,6 +1517,7 @@ class TCTSchematicDetector:
             "wyckoff_high": tap3["price"] if tap3.get("is_deviation") else tap2["price"],
             "wyckoff_low": range_data["range_low"],  # TCT: Target
             "bos_confirmation": bos,
+            "session_context": session_context,
             "entry": {
                 "type": "BOS_confirmation",
                 "price": entry_price,
@@ -3456,6 +3494,58 @@ class TCTSchematicDetector:
             check_between=True, post_range_candles=30,
         )
 
+    def _get_session_context(self, timestamp: Optional[str] = None) -> Dict:
+        """
+        Return trading session context for a given timestamp.
+
+        Prefers the BOS/entry confirmation timestamp when available;
+        falls back to Tap3 timestamp otherwise.
+        """
+        default = {"session": None, "boost_applied": False, "multiplier": 1.0}
+        try:
+            from session_manipulation import apply_session_multiplier
+        except (ImportError, ModuleNotFoundError):
+            return default
+        try:
+            return apply_session_multiplier(timestamp)
+        except (TypeError, ValueError):
+            return default
+
+    def _validate_distribution_sweep(
+        self,
+        tap2: Dict,
+        tap3: Dict,
+        range_data: Dict,
+    ) -> Dict:
+        """
+        Validate a distribution sweep using a window that always
+        includes the tap2 and tap3 pivots.
+
+        Uses the shared MarketStructureEngine to detect the sweep
+        over a window anchored to the original pivots so they remain
+        in scope for accurate classification.
+        """
+        from decision_trees.market_structure_engine import MarketStructureEngine
+
+        buffer = 10
+        start_idx = max(0, tap2["idx"] - buffer)
+        end_idx = min(len(self.candles), tap3["idx"] + buffer)
+        window_df = self.candles.iloc[start_idx:end_idx].reset_index(drop=True)
+
+        ms = MarketStructureEngine()
+        sweep = ms.detect_sweep(
+            window_df,
+            range_high=range_data["range_high"],
+            range_low=range_data["range_low"],
+            direction="bearish",
+        )
+        return {
+            "classification": sweep.classification,
+            "swept": sweep.swept,
+            "returned_inside": sweep.returned_inside,
+            "sweep_count": sweep.sweep_count,
+        }
+
     def _validate_deviation_came_back_inside(self, tab: Dict, range_data: Dict, direction: str) -> bool:
         """
         Validate that deviation came back inside range.
@@ -3609,13 +3699,19 @@ class TCTSchematicDetector:
         return round(min(total_score, 1.0), 3)
 
 
-def detect_tct_schematics(candles: pd.DataFrame, detected_ranges: List[Dict] = None) -> Dict:
+def detect_tct_schematics(
+    candles: pd.DataFrame,
+    detected_ranges: List[Dict] = None,
+    pivot_cache=None,
+) -> Dict:
     """
     Main entry point for TCT schematic detection.
 
     Args:
         candles: DataFrame with OHLC data
         detected_ranges: Optional pre-detected ranges
+        pivot_cache: Optional PivotCache instance (currently unused;
+            reserved for future pivot-cache-aware detection)
 
     Returns: Dict with accumulation and distribution schematics
     """

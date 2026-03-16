@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 from tct_schematics import detect_tct_schematics, TCTSchematicDetector
+from pivot_cache import PivotCache
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from trade_execution import (
     calculate_position_size,
@@ -95,6 +96,46 @@ TRADE_LOG_BACKUP_PATH = os.path.join(_DIR, "schematics_5b_trade_log_backup.json"
 # Deduplication
 DUPLICATE_COOLDOWN_SECONDS = 300
 DUPLICATE_PRICE_TOLERANCE = 0.002
+
+
+# ================================================================
+# SHARED HELPERS
+# ================================================================
+
+def _build_range_data_for_bos(rng: Dict) -> Dict:
+    """
+    Build the range_data dict needed for BOS validation from a range/
+    schematic dict that may use either "high"/"low" or "range_high"/
+    "range_low" key conventions.
+    """
+    return {
+        "range_high": rng.get("high") or rng.get("range_high"),
+        "range_low": rng.get("low") or rng.get("range_low"),
+        "range_size": rng.get("size") or rng.get("range_size", 0),
+        "equilibrium": rng.get("equilibrium", 0),
+        "range_high_idx": rng.get("range_high_idx", 0),
+        "range_low_idx": rng.get("range_low_idx", 0),
+    }
+
+
+def _get_entry_session_context(timestamp: Optional[str] = None) -> Dict:
+    """
+    Return session context for an entry timestamp.
+
+    Attempts to import session_manipulation and apply session multiplier.
+    Falls back to a neutral default on ImportError or runtime errors.
+    """
+    default = {"session": None, "boost_applied": False, "multiplier": 1.0}
+
+    try:
+        from session_manipulation import apply_session_multiplier
+    except (ImportError, ModuleNotFoundError):
+        return default
+
+    try:
+        return apply_session_multiplier(timestamp)
+    except (TypeError, ValueError):
+        return default
 
 
 # ================================================================
