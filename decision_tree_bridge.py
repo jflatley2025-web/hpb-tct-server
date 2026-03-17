@@ -1305,22 +1305,51 @@ def compute_composite_score_v2(
     phase_results: Dict = {}
     score = 0
 
-    # ── Phase 1: HTF Context ──
-    # Already resolved by caller via detect_htf_market_structure.
-    # We record it for diagnostics only.
+     # ── Phase 1: HTF Context ──
     phase_results["htf_context"] = {"bias": htf_bias}
+
+    # ============================================================
+    # MARKET STRUCTURE ENGINE INIT
+    # ============================================================
+    from market_structure_engine import MarketStructureEngine
+    mse = MarketStructureEngine()
+
+    # ============================================================
+    # L2 STRUCTURE BLOCK (COUNTER-STRUCTURE FILTER)
+    # ============================================================
+    l2 = mse.detect_l2_structure(df, htf_bias)
+
+    if l2.get("exists"):
+        phase_results["l2"] = {
+            "passed": False,
+            "reason": "L2 counter-structure (internal reversal active)",
+            "data": l2
+        }
+        return {**fail,
+                "reasons": ["L2 counter-structure (internal reversal active)"],
+                "phase_results": phase_results}
+
+    phase_results["l2"] = {"passed": True}
 
     # ── Phase 2: Range Detection ──
     range_info = schematic.get("range") or {}
     range_high = range_info.get("high", 0)
     range_low = range_info.get("low", 0)
-    rig_pass = range_integrity_gate(range_high, range_low, current_price)
 
-    if not rig_pass:
-        phase_results["range_integrity"] = {"passed": False}
+    # ============================================================
+    # RIG (RANGE INTEGRITY GATE)
+    # ============================================================
+    if not range_integrity_gate(range_high, range_low, current_price):
+        phase_results["rig"] = {
+            "passed": False,
+            "reason": "RIG: price at equilibrium (no edge)"
+        }
         return {**fail,
-                "reasons": ["Price inside equilibrium — range not ready"],
+                "reasons": ["RIG: price at equilibrium (no edge)"],
                 "phase_results": phase_results}
+
+    phase_results["rig"] = {"passed": True}
+
     time_ok, time_gap = _check_time_displacement(schematic)
     liq_stack = _detect_liquidity_stacking(df, range_high, range_low)
     is_v_shape = _reject_v_shape(df, range_high, range_low)
@@ -1336,44 +1365,47 @@ def compute_composite_score_v2(
         "horizontal": horizontal,
         "six_candle_rule": six_candle,
     }
+
     if is_v_shape:
         phase_results["range"] = {**range_checks, "passed": False, "reason": "V-shape / impulsive move"}
-        return {**fail, "reasons": ["Phase 2: Range rejected — V-shape / impulsive move"],
+        return {**fail,
+                "reasons": ["Phase 2: Range rejected — V-shape / impulsive move"],
                 "phase_results": phase_results}
 
     if not time_ok:
         phase_results["range"] = {**range_checks, "passed": False, "reason": "insufficient time displacement"}
-        return {**fail, "reasons": [f"Phase 2: Insufficient time displacement ({time_gap} candles)"],
+        return {**fail,
+                "reasons": [f"Phase 2: Insufficient time displacement ({time_gap} candles)"],
                 "phase_results": phase_results}
 
-    # Score range quality (max 20 points)
     if horizontal and six_candle:
         range_score = 20
     elif horizontal or six_candle:
         range_score = 14
     else:
-        range_score = 8  # Minimal range detected but not ideal
+        range_score = 8
 
     if liq_stack["has_stacking"]:
         range_score = min(20, range_score + 3)
 
     phase_results["range"] = {**range_checks, "passed": True, "score": range_score}
     score += range_score
-    reasons.append(f"Range: {range_score}/20 (horizontal={horizontal}, 6CR={six_candle}, stacking={liq_stack['has_stacking']})")
+    reasons.append(f"Range: {range_score}/20")
 
-    # ── Phase 3: Tap Structure Validation ──
-    # Validate taps BEFORE BOS (spec requirement)
+    # ── Phase 3: Tap Structure ──
     tap1 = schematic.get("tap1") or {}
     tap2 = schematic.get("tap2") or {}
     tap3 = schematic.get("tap3") or {}
 
     if not tap1.get("price") or not tap2.get("price") or not tap3.get("price"):
-        phase_results["tap_structure"] = {"passed": False, "reason": "missing tap(s)"}
-        return {**fail, "score": score, "reasons": reasons + ["Phase 3: Missing tap structure"],
+        phase_results["tap_structure"] = {"passed": False}
+        return {**fail,
+                "score": score,
+                "reasons": reasons + ["Missing tap structure"],
                 "phase_results": phase_results}
 
-    # Model classification
     model_str = schematic.get("model", "")
+
     if "Model_1" in model_str:
         model_type = "Model_1"
     elif "Model_2" in model_str:
@@ -1382,152 +1414,75 @@ def compute_composite_score_v2(
         model_type = "unknown"
 
     tap_valid = True
-    tap_reason = ""
 
     if model_type == "Model_1":
-        # M1: Tap3 must extend beyond Tap2 (deeper deviation)
         if direction == "bullish":
-            tap3_deeper = tap3.get("price", 0) < tap2.get("price", float("inf"))
+            tap_valid = tap3.get("price", 0) < tap2.get("price", float("inf"))
         else:
-            tap3_deeper = tap3.get("price", 0) > tap2.get("price", 0)
-        if not tap3_deeper:
-            tap_valid = False
-            tap_reason = "Model 1: Tap3 does not extend beyond Tap2"
-        # M1: Must not close beyond DL2
-        rng_size = range_high - range_low
-        dl2_limit = rng_size * 0.30
-        if direction == "bullish":
-            if tap3.get("price", 0) < range_low - dl2_limit:
-                tap_valid = False
-                tap_reason = "Model 1: Tap3 closed beyond DL2"
-        else:
-            if tap3.get("price", 0) > range_high + dl2_limit:
-                tap_valid = False
-                tap_reason = "Model 1: Tap3 closed beyond DL2"
+            tap_valid = tap3.get("price", 0) > tap2.get("price", 0)
 
     elif model_type == "Model_2":
-        # M2: Tap3 forms HL (accumulation) or LH (distribution)
         if direction == "bullish":
-            is_hl = tap3.get("price", 0) > tap2.get("price", 0)
-            if not is_hl and not tap3.get("is_higher_low", False):
-                tap_valid = False
-                tap_reason = "Model 2: Tap3 is not a higher low"
+            tap_valid = tap3.get("price", 0) > tap2.get("price", 0)
         else:
-            is_lh = tap3.get("price", 0) < tap2.get("price", 0)
-            if not is_lh and not tap3.get("is_lower_high", False):
-                tap_valid = False
-                tap_reason = "Model 2: Tap3 is not a lower high"
-    else:
-        # Unknown model — cannot validate tap structure without model classification
-        tap_valid = False
-        tap_reason = "unknown model type — cannot validate tap structure"
+            tap_valid = tap3.get("price", 0) < tap2.get("price", 0)
 
-    tap_score = 0
-    if tap_valid:
-        tap_score = 20
-        # Bonus for spacing quality
-        t1_idx = tap1.get("idx", 0)
-        t2_idx = tap2.get("idx", 0)
-        t3_idx = tap3.get("idx", 0)
-        t12_gap = max(1, abs(t2_idx - t1_idx))
-        t23_gap = max(1, abs(t3_idx - t2_idx))
-        spacing_ratio = min(t12_gap, t23_gap) / max(t12_gap, t23_gap) if max(t12_gap, t23_gap) > 0 else 0
-        if spacing_ratio < 0.3:
-            tap_score = 14  # Uneven spacing penalizes
-    else:
-        phase_results["tap_structure"] = {"passed": False, "reason": tap_reason, "model": model_type}
-        return {**fail, "score": score, "reasons": reasons + [f"Phase 3: {tap_reason}"],
+    if not tap_valid:
+        phase_results["tap_structure"] = {"passed": False}
+        return {**fail,
+                "score": score,
+                "reasons": reasons + ["Invalid tap structure"],
                 "phase_results": phase_results}
 
+    tap_score = 20
     phase_results["tap_structure"] = {"passed": True, "score": tap_score, "model": model_type}
     score += tap_score
-    reasons.append(f"Taps: {tap_score}/20 ({model_type})")
+    reasons.append(f"Taps: {tap_score}/20")
 
-    # ── Phase 4: Liquidity Validation ──
+    # ── Phase 4: Liquidity ──
     sweep_v2 = _detect_liquidity_sweep_v2(df, range_high, range_low, direction)
 
-    liq_score = 0
     if sweep_v2["classification"] == "true_break":
-        phase_results["liquidity"] = {**sweep_v2, "passed": False, "reason": "true break detected"}
-        return {**fail, "score": score,
-                "reasons": reasons + ["Phase 4: True break — not a sweep"],
+        phase_results["liquidity"] = {"passed": False}
+        return {**fail,
+                "score": score,
+                "reasons": reasons + ["True break — not a sweep"],
                 "phase_results": phase_results}
-    elif sweep_v2["swept"]:
-        liq_score = 20
-        if sweep_v2.get("slight_close_beyond"):
-            liq_score = 16  # Slight close beyond is acceptable but less ideal
-    else:
-        # No sweep at all — liquidity interaction may still be present via stacking
-        if liq_stack["has_stacking"]:
-            liq_score = 10  # Stacking detected, just no sweep yet
-        else:
-            liq_score = 5  # Weak liquidity picture
+
+    liq_score = 20 if sweep_v2["swept"] else 5
 
     phase_results["liquidity"] = {**sweep_v2, "passed": True, "score": liq_score}
     score += liq_score
-    reasons.append(f"Liquidity: {liq_score}/20 ({sweep_v2['classification']})")
+    reasons.append(f"Liquidity: {liq_score}/20")
 
-    # ── Phase 4.5: L3 Execution Structure Confirmation ──
-    # Verify that execution-level (short-lookback) market structure confirms
-    # the trade direction before proceeding to BOS validation.
-    l3_hh_hl, l3_lh_ll = _detect_trend(df, lookback=10)
-    if direction == "bullish":
-        l3_confirmed = l3_hh_hl
-    else:
-        l3_confirmed = l3_lh_ll
+    # ── Phase 4.5: L3 EXECUTION STRUCTURE (REAL) ──
+    l3_valid = mse.detect_l3_structure(df, direction)
 
-    if not l3_confirmed:
-        phase_results["l3_structure"] = {"passed": False}
-        return {**fail, "score": score,
-                "reasons": reasons + ["Phase 4.5: No L3 execution structure"],
+    if not l3_valid:
+        phase_results["l3"] = {"passed": False}
+        return {**fail,
+                "score": score,
+                "reasons": reasons + ["No L3 execution confirmation"],
                 "phase_results": phase_results}
 
-    phase_results["l3_structure"] = {"passed": True}
+    phase_results["l3"] = {"passed": True}
 
-    # ── Phase 5: Break of Structure ──
+    # ── Phase 5: BOS ──
     bos = schematic.get("bos_confirmation") or {}
     bos_idx = bos.get("bos_idx")
     tap3_idx = tap3.get("idx", 0)
 
-    bos_score = 0
-    if not is_confirmed:
-        phase_results["bos"] = {"passed": False, "reason": "BOS not confirmed"}
-        return {**fail, "score": score,
-                "reasons": reasons + ["Phase 5: No BOS confirmation"],
+    if not is_confirmed or bos_idx is None or bos_idx < tap3_idx:
+        phase_results["bos"] = {"passed": False}
+        return {**fail,
+                "score": score,
+                "reasons": reasons + ["Invalid BOS sequence"],
                 "phase_results": phase_results}
 
-    # BOS index is required to verify temporal ordering
-    if bos_idx is None:
-        phase_results["bos"] = {"passed": False, "reason": "BOS confirmed but bos_idx missing — cannot verify ordering"}
-        return {**fail, "score": score,
-                "reasons": reasons + ["Phase 5: BOS index missing — cannot verify BOS-after-Tap3 ordering"],
-                "phase_results": phase_results}
-
-    # BOS must occur AFTER Tap3
-    if tap3_idx > 0 and bos_idx < tap3_idx:
-        phase_results["bos"] = {"passed": False, "reason": "BOS before Tap3",
-                                "bos_idx": bos_idx, "tap3_idx": tap3_idx}
-        return {**fail, "score": score,
-                "reasons": reasons + ["Phase 5: BOS occurred before Tap3 — invalid sequence"],
-                "phase_results": phase_results}
-
-    # BOS must break internal structure in trade direction
-    bos_price = bos.get("bos_price") or bos.get("price", 0)
     bos_score = 20
-    bos_detail = "confirmed"
-
-    # Quality: is BOS inside the range? (higher confidence)
-    if bos_price and range_low and range_high:
-        if range_low <= bos_price <= range_high:
-            bos_detail = "inside range (high confidence)"
-        else:
-            bos_score = 15  # Outside range is acceptable but lower confidence
-            bos_detail = "outside range"
-
-    phase_results["bos"] = {"passed": True, "score": bos_score, "detail": bos_detail,
-                            "bos_idx": bos_idx, "bos_price": bos_price}
+    phase_results["bos"] = {"passed": True, "score": bos_score}
     score += bos_score
-    reasons.append(f"BOS: {bos_score}/20 ({bos_detail})")
+    reasons.append(f"BOS: {bos_score}/20")
 
     # ── Phase 6: POI Validation ──
     # FVG is optional — increases confidence but is not mandatory

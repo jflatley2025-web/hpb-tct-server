@@ -158,37 +158,59 @@ class MarketStructureEngine:
         }
 
 
-    # ========================================================
-    # L3 Execution Structure (Micro BOS)
-    # ========================================================
+   # ========================================================
+# L3 Execution Structure (Micro BOS)
+# ========================================================
 
-    def detect_l3_structure(self, df: pd.DataFrame, direction: str):
+def detect_l3_structure(self, df: pd.DataFrame, direction: str) -> bool:
 
-        if len(df) < 10:
-            return False
-
-        recent = df.tail(10)
-
-        highs = recent["high"].values
-        lows = recent["low"].values
-        closes = recent["close"].values
-
-        if direction == "bullish":
-
-            prev_high = max(highs[:-1])
-
-            if closes[-1] > prev_high:
-                return True
-
-        else:
-
-            prev_low = min(lows[:-1])
-
-            if closes[-1] < prev_low:
-                return True
-
+    if df is None or len(df) < 10:
         return False
 
+    recent = df.tail(10)
+
+    highs = recent["high"].values
+    lows = recent["low"].values
+    closes = recent["close"].values
+
+    compression = 0
+
+    # =========================
+    # BULLISH L3 (compression → breakout up)
+    # =========================
+    if direction == "bullish":
+
+        # Higher lows = compression
+        for i in range(1, len(lows)):
+            if lows[i] > lows[i - 1]:
+                compression += 1
+
+        prev_high = max(highs[:-1])
+
+        broke_structure = closes[-1] > prev_high
+
+        # Require BOTH compression + break
+        if compression >= 3 and broke_structure:
+            return True
+
+    # =========================
+    # BEARISH L3 (compression → breakdown)
+    # =========================
+    else:
+
+        # Lower highs = compression
+        for i in range(1, len(highs)):
+            if highs[i] < highs[i - 1]:
+                compression += 1
+
+        prev_low = min(lows[:-1])
+
+        broke_structure = closes[-1] < prev_low
+
+        if compression >= 3 and broke_structure:
+            return True
+
+    return False
 
     # ========================================================
     # Liquidity Pool Detection
@@ -227,55 +249,75 @@ class MarketStructureEngine:
     # Liquidity Sweep Detection
     # ========================================================
 
-    def detect_sweep(self, df: pd.DataFrame,
-                     range_high: float,
-                     range_low: float,
-                     direction: str) -> SweepResult:
+def detect_sweep(self, df, range_high, range_low, direction):
 
-        recent = df.tail(20)
+    recent = df.tail(20)
 
-        highs = recent["high"].values
-        lows = recent["low"].values
-        closes = recent["close"].values
+    highs = recent["high"].values
+    lows = recent["low"].values
+    closes = recent["close"].values
 
-        sweep_count = 0
-        returned = False
+    sweep_count = 0
+    returned = False
 
-        if direction == "bullish":
+    # =========================
+    # BULLISH (sell-side sweep)
+    # =========================
+    if direction == "bullish":
 
-            for i in range(len(lows)):
-                if lows[i] < range_low:
-                    sweep_count += 1
+        for i in range(len(lows)):
+            if lows[i] < range_low:
 
-                    if i < len(closes)-1:
-                        if closes[i+1] >= range_low:
-                            returned = True
+                sweep_count = 1
 
-        else:
+                if i < len(closes) - 1:
+                    if closes[i + 1] >= range_low:
+                        returned = True
+                    else:
+                        returned = False
+                else:
+                    returned = False
 
-            for i in range(len(highs)):
-                if highs[i] > range_high:
-                    sweep_count += 1
+                break
 
-                    if i < len(closes)-1:
-                        if closes[i+1] <= range_high:
-                            returned = True
+    # =========================
+    # BEARISH (buy-side sweep)
+    # =========================
+    else:
 
-        swept = sweep_count > 0
+        for i in range(len(highs)):
+            if highs[i] > range_high:
 
-        if swept and returned:
-            classification = "liquidity_grab"
-        elif swept:
-            classification = "true_break"
-        else:
-            classification = "no_sweep"
+                sweep_count = 1
 
-        return SweepResult(
-            swept=swept,
-            classification=classification,
-            returned_inside=returned,
-            sweep_count=sweep_count
-        )
+                if i < len(closes) - 1:
+                    if closes[i + 1] <= range_high:
+                        returned = True
+                    else:
+                        returned = False
+                else:
+                    returned = False
+
+                break
+
+    # =========================
+    # CLASSIFICATION
+    # =========================
+    swept = sweep_count > 0
+
+    if swept and returned:
+        classification = "liquidity_grab"
+    elif swept:
+        classification = "true_break"
+    else:
+        classification = "no_sweep"
+
+    return SweepResult(
+        swept=swept,
+        classification=classification,
+        returned_inside=returned,
+        sweep_count=sweep_count
+    )
 
 
     # ========================================================
