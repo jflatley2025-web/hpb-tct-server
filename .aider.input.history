@@ -1,0 +1,15 @@
+
+# 2026-03-11 16:43:16.711767
++Y
+
+# 2026-03-11 16:46:24.196834
++N
+
+# 2026-03-11 16:46:32.922109
++/add schematics_5b_trader.py
+
+# 2026-03-11 16:47:10.062187
++In schematics_5b_trader.py, I need two changes: 1. Add a new module-level function `_try_confirm_with_ltf_bos` just before the `refine_schematic_bos_with_ltf` function. This function takes a forming schematic (tap1+tap2+tap3 present, is_confirmed=False) and a dict of LTF DataFrames (keyed by timeframe string, e.g. "5m"/"1m"), and attempts to confirm it by finding the first bullish/bearish BOS below EQ on the lowest available LTF. Logic: - Extract tap3 time, tap3 price, tap2 time, direction, and equilibrium from the schematic's "tap2", "tap3", "range" fields. - For each timeframe in LTF_BOS_TIMEFRAMES (highest  lowest): a. Find tap3's position in the LTF DataFrame by matching open_time >= tap3_time. b. Find tap2's position the same way (for computing the highest/lowest point between tap2 and tap3 on LTF). c. Compute ref_high (bullish) or ref_low (bearish) as the max/min of the LTF highs/lows in the [tap2_ltf_pos : tap3_ltf_pos+1] window. d. Create a TCTSchematicDetector(ltf_df_reset) and call _find_bullish_bos (bullish) or _find_bearish_bos (bearish) starting at tap3_ltf_pos, passing equilibrium=equilibrium (keep the EQ filter  BOS must confirm below EQ), window=max(remaining candles, 25). e. If a BOS is found, save it as best_bos and continue to the next (lower) TF so the lowest confirmed TF wins. - If best_bos is None after all LTFs, return the schematic unchanged. - Otherwise, build a bos_confirmation dict matching the structure from MTF BOS detection (type, highest/lowest_point_between_tabs, bos_idx, bos_price, is_inside_range, confirmed=True, ltf_initial_confirm=True, ltf_timeframe). Set is_confirmed=True, bos_confirmation, and entry (price=best_bos["price"], type=f"LTF_BOS_{best_ltf}") on a shallow copy of the schematic and return it. 2. In the `_scan_single_symbol` method of `Schematics5BTrader`, add a "Phase A.5" block immediately after Phase A (the MTF detection loop) and before Phase B (the evaluation loop that starts with `for tf in reversed(active_mtf_tfs)`). Phase A.5 should iterate over all timeframes in active_mtf_tfs, and for each schematic in all_schematics_by_tf[tf] that is NOT yet confirmed but HAS tap1, tap2, and tap3, call _try_confirm_with_ltf_bos(s, ltf_dfs) and replace s with the result. Log a message like "[5B] Phase A.5 (LTF BOS confirm) done" with elapsed time. Background: TCT methodology requires entering on the first bullish BOS prior to EQ (lowest TF possible). On MTF (4H) candles, Model 2 accumulation schematics never get their BOS confirmed because the 4H candles are too coarse  price crosses EQ before a 4H swing high forms below it. The 5m/1m candles already show a confirmed BOS below EQ but the existing LTF refinement only runs on already-confirmed schematics, creating a deadlock. Phase A.5 breaks that deadlock. Do not change tct_schematics.py. The EQ filter in _find_bullish_bos is correct and must stay.
+
+# 2026-03-11 16:47:49.903047
++N

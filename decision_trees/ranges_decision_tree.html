@@ -219,15 +219,15 @@
   .pill-bear { background: #3a1a1a; color: var(--red);   border: 1px solid var(--red); }
   .pill-neut { background: #1a2a3a; color: var(--blue);  border: 1px solid var(--blue); }
   .pill-warn { background: #3a2a10; color: var(--yellow); border: 1px solid var(--yellow); }
-  `@media` print {
+  @media print {
     .phase-body { display: block !important; }
     .phase-toggle { display: none; }
-    body { background: `#fff`; color: `#111`; padding: 12px; font-size: 12px; }
-    .phase-header { background: `#f0f0f0` !important; cursor: default; }
-    .action { background: `#f8f8f8`; border-color: `#ccc`; }
-    .rule-table tr:nth-child(even) td { background: `#f5f5f5`; }
-    .tip, .quote { background: `#f8f8f8`; }
-    `@page` { margin: 1.5cm; }
+    body { background: #fff; color: #111; padding: 12px; font-size: 12px; }
+    .phase-header { background: #f0f0f0 !important; cursor: default; }
+    .action { background: #f8f8f8; border-color: #ccc; }
+    .rule-table tr:nth-child(even) td { background: #f5f5f5; }
+    .tip, .quote { background: #f8f8f8; }
+    @page { margin: 1.5cm; }
   }
 </style>
 </head>
@@ -257,6 +257,33 @@
   </div>
   <div class="phase-body open">
     <div class="tree">
+	<div class="node">
+  <div class="question">Is the market behaving like accumulation or distribution?</div>
+
+  <div class="branch">
+    <div class="branch-label label-if">→ Accumulation</div>
+    <div class="action bullish">
+      Liquidity forming near range lows. Expect eventual upside expansion.
+    </div>
+  </div>
+
+  <div class="branch">
+    <div class="branch-label label-if">→ Distribution</div>
+    <div class="action bearish">
+      Liquidity forming near range highs. Expect eventual downside expansion.
+    </div>
+  </div>
+
+  <div class="branch">
+    <div class="branch-label label-if">→ Unclear</div>
+    <div class="action skip">
+      Step up one timeframe before determining trend direction.
+    </div>
+  </div>
+</div>
+	
+	
+	
       <div class="node">
         <div class="question">Is price making higher highs and higher lows on your working timeframe?</div>
         <div class="branch">
@@ -290,7 +317,7 @@
 <div class="phase">
   <div class="phase-header" onclick="toggle(this)">
     <div class="phase-number" style="background:#1a3a24;color:var(--green)">2</div>
-    <div class="phase-title">Confirm the Range (Six Candle Rule + Equilibrium Touch)</div>
+    <div class="phase-title">Six Candle Rule — minimum pivot structure used to identify market structure highs and lows</div>
     <div class="phase-toggle">›</div>
   </div>
   <div class="phase-body">
@@ -317,6 +344,11 @@
         <td class="cond">Move UP and touch or approach the 0.5 Fib (EQ)</td>
       </tr>
     </table>
+	<div class="tip">
+  <strong>Important:</strong> The six candle rule defines pivot points
+  (structure highs and lows). These pivots are later used to identify ranges —
+  the rule itself does not confirm a range.
+</div>
 
     <div class="tree" style="margin-top:14px">
       <div class="node">
@@ -388,10 +420,55 @@
           </div>
         </div>
       </div>
+<div class="node">
+  <div class="question">Are highs or lows stacking to form a liquidity curve?</div>
+
+  <div class="branch">
+    <div class="branch-label label-yes">✓ Yes</div>
+    <div class="action neutral">
+      Liquidity stacking strengthens the validity of the range.
     </div>
-    <div class="tip">
+  </div>
+
+  <div class="branch">
+    <div class="branch-label label-no">✗ No</div>
+    <div class="action warn">
+      A range can still exist, but lack of liquidity stacking reduces confidence.
+    </div>
+  </div>
+
+</div>
+
+<div class="node">
+  <div class="question">Has the range existed for at least one full session or higher timeframe rotation?</div>
+
+  <div class="branch">
+    <div class="branch-label label-yes">✓ Yes — sufficient time development</div>
+    <div class="action neutral">
+      Range has had enough time to develop meaningful liquidity on both sides.
+      Continue to the next validation step.
+    </div>
+  </div>
+
+  <div class="branch">
+    <div class="branch-label label-no">✗ No — range formed too quickly</div>
+    <div class="action warn">
+      This may be a temporary consolidation or a trend impulse rather than a true range.
+      Either wait for more time development or drop to a lower timeframe and reassess.
+    </div>
+  </div>
+
+</div>
+<div class="tip">
       <strong>V-Shape Test:</strong> If the structure forms a tight, narrow V, treat it as market structure (a pool), not a range. If the V is wide with nearly flat tops/bottoms, it qualifies as a range.
     </div>
+ <div class="branch">
+    <div class="branch-label label-no">✗ No</div>
+    <div class="action warn">
+      A range can still exist, but lack of liquidity stacking reduces confidence.
+    </div>
+  </div>
+</div>
   </div>
 </div>
 
@@ -634,7 +711,7 @@
         <div class="branch">
           <div class="branch-label label-yes">✓ Yes</div>
           <div class="action bearish">
-            <strong>Extend the Range High</strong> upward to the deviation high (the wick tip or the high close).<br>
+            <strong>Extend the Range High</strong> only if the deviation produces a confirmed structure shift.  Otherwise treat the move as a liquidity sweep. (the wick tip or the high close).<br>
             Recalculate the DL: the new DL above is 30% of the new (larger) range size above the new Range High.
           </div>
         </div>
@@ -644,7 +721,7 @@
         <div class="branch">
           <div class="branch-label label-yes">✓ Yes</div>
           <div class="action bullish">
-            <strong>Extend the Range Low</strong> downward to the deviation low.<br>
+            <strong>Extend the Range Low</strong> only if the deviation produces a confirmed structure shift. Otherwise treat the move as a liquidity sweep.<br>
             Recalculate the DL: the new DL below is 30% of the new (larger) range size below the new Range Low.
           </div>
         </div>
@@ -661,7 +738,7 @@
 <div class="phase">
   <div class="phase-header" onclick="toggle(this)">
     <div class="phase-number" style="background:#3a2a10;color:var(--yellow)">8</div>
-    <div class="phase-title">Check Supply / Demand Zone Confluence with the DL</div>
+   <div class="phase-title">Check Supply / Demand Creation & Mitigation Confluence with the DL</div>
     <div class="phase-toggle">›</div>
   </div>
   <div class="phase-body">
@@ -782,6 +859,7 @@
       <li>Trade bias determined (long or short)</li>
       <li>TCT schematic forming or confirmed at the extreme</li>
       <li>Target identified (opposite range extreme or inner zone)</li>
+	  <li>Tap sequence forming (1-tap, 2-tap, or 3-tap structure)</li>
     </ul>
   </div>
 </div>
