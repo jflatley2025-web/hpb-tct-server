@@ -37,6 +37,7 @@ _DT_6      = _read_dt("tct_6_advanced_schematics_decision_tree.html")
 _DT_RANGES = _read_dt("ranges_decision_tree.html")
 _DT_LIQ    = _read_dt("liquidity_decision_tree.html")
 _DT_SD     = _read_dt("supply_demand_decision_tree.html")
+_DT_MS     = _read_dt("market_structure_decision_tree.html")
 
 # ChromaDB + SentenceTransformer are initialized lazily on first use so the
 # heavy model weights (all-MiniLM-L6-v2 + torch) don't load at startup and
@@ -248,6 +249,9 @@ def dt_liq():    return HTMLResponse(_DT_LIQ)
 
 @app.get("/decision_trees/supply_demand_decision_tree.html",        include_in_schema=False)
 def dt_sd():     return HTMLResponse(_DT_SD)
+
+@app.get("/decision_trees/market_structure_decision_tree.html",     include_in_schema=False)
+def dt_ms():     return HTMLResponse(_DT_MS)
 
 latest_ranges = {"LTF": [], "HTF": []}
 scan_interval_sec = 120
