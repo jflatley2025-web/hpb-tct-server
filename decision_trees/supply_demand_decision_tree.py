@@ -1,8 +1,7 @@
 """
 TCT Lecture 3 — Supply & Demand: Decision Tree (Python)
-
-Encodes the full decision logic from TCT 2024 Mentorship Lecture 3 | Supply & Demand.
-Each function corresponds to one phase of the decision tree.
+Fully aligned with the hybrid HTML logic for HPM v19.
+Optimized for deterministic evaluation in a trading engine.
 
 Usage:
     from decision_trees.supply_demand_decision_tree import evaluate_sd_zone
@@ -14,9 +13,9 @@ from enum import Enum, auto
 from typing import Optional
 
 
-# ──────────────────────────────────────────────────────────
+# ──────────────────────────────
 # Enumerations
-# ──────────────────────────────────────────────────────────
+# ──────────────────────────────
 
 class MarketContext(Enum):
     RANGE = auto()
@@ -42,6 +41,12 @@ class MitigationStatus(Enum):
     FULL_MITIGATION = "Fully mitigated + expansion away — RETIRE this zone"
 
 
+class FillState(Enum):
+    UNFILLED = "Unfilled — gap intact"
+    PARTIAL = "Partially filled — some price action inside gap"
+    FILLED = "Fully filled — gap completely closed"
+
+
 class ZonePriority(Enum):
     EXTREME = "Extreme zone — last remaining before range High/Low (highest priority)"
     MULTI_TF_CONFLUENCE = "Multi-TF confluence — higher TF + lower TF OB both unmitigated"
@@ -50,59 +55,117 @@ class ZonePriority(Enum):
     SUPPLY_CHAIN_SECOND = "Supply chain 2nd OB — strong reaction expected"
 
 
+class ZoneLifecycle(Enum):
+    """Machine-readable terminal state of the S&D zone evaluation.
+
+    evaluate_sd_zone is a one-shot pipeline — these are terminal exit states,
+    not a stateful lifecycle.  Use alongside failed_at_phase / wait_reason for
+    the human-readable explanation of *why* the zone reached this state.
+    """
+    EVALUATING = "Evaluation in progress"
+    FAILED = "Zone structurally invalid (context, FVG, or competing zones)"
+    RETIRED = "Zone fully mitigated — remove from chart"
+    WAITING = "Zone valid but entry conditions not yet met"
+    TRIGGERED = "Zone valid and entry confirmed"
+
+
 class TradeBias(Enum):
     LONG = "Long / Buy — demand zone confirmed"
     SHORT = "Short / Sell — supply zone confirmed"
     WAIT = "Wait — zone not yet reached or conditions not met"
 
 
-# ──────────────────────────────────────────────────────────
-# Input / Output dataclasses
-# ──────────────────────────────────────────────────────────
+# ──────────────────────────────
+# FVG Descriptor
+# ──────────────────────────────
+
+@dataclass
+class FVGInfo:
+    """Pre-computed FVG attributes for Phase 3 validation.
+
+    Analogous to MitigationStatus: the caller computes these from candle data,
+    the decision tree validates them.  Convenience constructors are provided for
+    callers that only have boolean-level information.
+    """
+    gap_exists: bool
+    gap_size: Optional[float] = None        # price units; None = caller lacks price data
+    fill_state: FillState = FillState.UNFILLED
+    overlap_ratio: Optional[float] = None   # 0.0–1.0; None = unknown
+    candle_span: int = 3                    # standard FVG = 3 candles
+    tapped_from_top_down: bool = False
+
+    def __post_init__(self):
+        if self.gap_size is not None and self.gap_size <= 0:
+            raise ValueError(f"gap_size must be positive: {self.gap_size}")
+        if self.overlap_ratio is not None and not (0.0 <= self.overlap_ratio < 1.0):
+            raise ValueError(
+                f"overlap_ratio must be in [0, 1): {self.overlap_ratio}"
+            )
+        if self.candle_span < 1:
+            raise ValueError(f"candle_span must be >= 1: {self.candle_span}")
+
+    @classmethod
+    def confirmed(cls, *, tapped_from_top_down: bool = False, **kwargs) -> "FVGInfo":
+        """Convenience: FVG confirmed with boolean-only info (sensible defaults)."""
+        return cls(gap_exists=True, tapped_from_top_down=tapped_from_top_down, **kwargs)
+
+    @classmethod
+    def absent(cls) -> "FVGInfo":
+        """Convenience: no FVG detected."""
+        return cls(gap_exists=False)
+
+
+# ──────────────────────────────
+# Input / Output Dataclasses
+# ──────────────────────────────
 
 @dataclass
 class SDZoneInputs:
-    """All observable conditions needed to evaluate a supply/demand zone."""
+    # Phase 1
+    market_context: MarketContext
+    zone_direction: ZoneDirection
+    context_reason_exists: bool
 
-    # Phase 1 — Context
-    market_context: MarketContext           # RANGE, UPTREND, DOWNTREND, UNCLEAR
-    zone_direction: ZoneDirection           # SUPPLY or DEMAND
-    context_reason_exists: bool            # True if there is a structural reason for this zone
+    # Phase 2
+    zone_type: ZoneType
 
-    # Phase 2 — Zone type
-    zone_type: ZoneType                    # ORDER_BLOCK or STRUCTURE_ZONE
+    # Phase 3 — FVG descriptor (replaces former fvg_confirmed / fvg_tapped booleans).
+    # Callers that only have boolean-level info can use FVGInfo.confirmed() or
+    # FVGInfo.absent().  Callers with OHLC data should populate gap_size,
+    # fill_state, overlap_ratio, and candle_span for full Phase 3 validation.
+    fvg_info: FVGInfo
 
-    # Phase 3 — FVG validation
-    fvg_confirmed: bool                    # Wick C1 and wick C3 do NOT connect → True = FVG exists
-    fvg_tapped_from_top_down: bool         # True if FVG was entered from the "better" direction
+    # Phase 4
+    # NOTE: Numeric zone boundaries (zone_top, zone_bottom, or a zone_bounds
+    # dataclass) are intentionally deferred.  SDZoneInputs does not yet carry
+    # OHLC candle arrays or price data, so any numeric boundary fields would
+    # always be None today.  Phase 4 uses draw_note (prose) for boundary
+    # descriptions.  When candle/price data is added to SDZoneInputs, introduce
+    # a ZoneBounds dataclass here (top: float, bottom: float, candle_indices,
+    # boundary_source) and have phase4_draw_zone populate it deterministically.
+    adjacent_candle_has_more_extreme_wick: bool
 
-    # Phase 4 — Drawing inputs
-    # (Drawing is done on the chart — these flags capture edge cases)
-    adjacent_candle_has_more_extreme_wick: bool  # True if the wick must be extended to adjacent candle
-
-    # Phase 5 — Mitigation status
+    # Phase 5
     mitigation_status: MitigationStatus
+    is_only_zone_in_area: bool  # Only relevant for MINOR_MITIGATION
 
-    # Only relevant if mitigation_status == MINOR_MITIGATION:
-    is_only_zone_in_area: bool             # True if no other supply/demand zones exist nearby
+    # Phase 6
+    refined_ob_found_on_lower_tf: bool
+    higher_tf_ob_unmitigated: bool
+    higher_tf_ob_mitigated_on_lower: bool
+    is_supply_chain_second_ob: bool
 
-    # Phase 6 — Timeframe refinement
-    refined_ob_found_on_lower_tf: bool     # True if a more precise OB was found on a lower TF
-    higher_tf_ob_unmitigated: bool         # True if the same zone is also unmitigated on a higher TF
-    higher_tf_ob_mitigated_on_lower: bool  # Higher TF OB but mitigated on lower TF (still usable)
-    is_supply_chain_second_ob: bool        # True if this is the 2nd OB in a supply chain
+    # Phase 7
+    is_extreme_zone: bool
 
-    # Phase 7 — Extreme zone
-    is_extreme_zone: bool                  # Last remaining supply before range high / demand before range low
-
-    # Phase 8 — Entry
-    price_inside_zone: bool                # True if price has entered the zone
-    tct_schematic_confirmed: bool          # True if TCT Model 1 or Model 2 confirmation received
+    # Phase 8
+    price_inside_zone: bool
+    tct_schematic_confirmed: bool
 
 
 @dataclass
 class SDZoneEvaluation:
-    """Result of the full S&D decision tree evaluation."""
+    lifecycle_state: ZoneLifecycle = ZoneLifecycle.EVALUATING
     zone_direction: Optional[ZoneDirection] = None
     zone_type: Optional[ZoneType] = None
     fvg_valid: bool = False
@@ -112,42 +175,56 @@ class SDZoneEvaluation:
     primary_target: str = ""
     draw_note: str = ""
     entry_note: str = ""
-    warnings: list = field(default_factory=list)
-    passed_phases: list = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    passed_phases: list[str] = field(default_factory=list)
+    # Human-readable explanations — lifecycle_state is the machine-readable
+    # companion.  Check lifecycle_state for programmatic branching; use these
+    # strings for logging / display.
     failed_at_phase: Optional[str] = None
+    wait_reason: Optional[str] = None
 
 
-# ──────────────────────────────────────────────────────────
-# Phase functions
-# ──────────────────────────────────────────────────────────
+# ──────────────────────────────
+# Phase Functions
+# ──────────────────────────────
 
 def phase1_build_context(inputs: SDZoneInputs, result: SDZoneEvaluation) -> bool:
-    """Phase 1: Confirm structural context exists before placing any zone."""
+    """Validate market context and flag counter-trend zones."""
     if inputs.market_context == MarketContext.UNCLEAR:
-        result.failed_at_phase = (
-            "Phase 1: Market context unclear — do not place zones. "
-            "Wait for structure to become defined."
-        )
+        result.lifecycle_state = ZoneLifecycle.FAILED
+        result.failed_at_phase = "Phase 1: Market context unclear — wait for structure."
         return False
 
     if not inputs.context_reason_exists:
-        result.failed_at_phase = (
-            "Phase 1: No structural reason for this zone. "
-            "Do not randomly place OBs — context is always key."
-        )
+        result.lifecycle_state = ZoneLifecycle.FAILED
+        result.failed_at_phase = "Phase 1: No structural reason — do not place zones."
         return False
 
     context_map = {
-        MarketContext.RANGE: (
-            "Range context: supply in upper section / above Range High; "
-            "demand in lower section / below Range Low"
-        ),
-        MarketContext.UPTREND: "Uptrend: demand zones at higher low pivots",
-        MarketContext.DOWNTREND: "Downtrend: supply zones at lower high pivots",
+        MarketContext.RANGE: "Range: supply upper / demand lower",
+        MarketContext.UPTREND: "Uptrend: demand zones at higher-low pivots",
+        MarketContext.DOWNTREND: "Downtrend: supply zones at lower-high pivots",
     }
+    # Flag counter-trend pairs so downstream can handle them explicitly.
+    # Counter-trend zones are not rejected (they exist at structure) but should
+    # not be treated identically to with-trend zones.
+    counter_trend = (
+        (inputs.market_context == MarketContext.UPTREND
+         and inputs.zone_direction == ZoneDirection.SUPPLY)
+        or
+        (inputs.market_context == MarketContext.DOWNTREND
+         and inputs.zone_direction == ZoneDirection.DEMAND)
+    )
+    if counter_trend:
+        result.warnings.append(
+            f"Phase 1: Counter-trend zone — {inputs.zone_direction.name} "
+            f"in {inputs.market_context.name}. Valid at structure but use "
+            "reduced size or tighter targets."
+        )
+
     result.passed_phases.append(
         f"Phase 1: Context confirmed — {inputs.market_context.name}. "
-        f"{context_map.get(inputs.market_context, '')}"
+        f"{context_map.get(inputs.market_context)}"
     )
     result.zone_direction = inputs.zone_direction
     result.zone_type = inputs.zone_type
@@ -155,138 +232,179 @@ def phase1_build_context(inputs: SDZoneInputs, result: SDZoneEvaluation) -> bool
 
 
 def phase2_identify_zone_type(inputs: SDZoneInputs, result: SDZoneEvaluation) -> bool:
-    """Phase 2: Identify and record zone type (always passes if context passed)."""
-    result.passed_phases.append(
-        f"Phase 2: Zone type identified — {inputs.zone_type.value}"
-    )
+    """Record zone type (ORDER_BLOCK or STRUCTURE_ZONE)."""
+    result.passed_phases.append(f"Phase 2: Zone type identified — {inputs.zone_type.value}")
     return True
 
 
 def phase3_confirm_fvg(inputs: SDZoneInputs, result: SDZoneEvaluation) -> bool:
-    """Phase 3: Validate the Fair Value Gap — non-negotiable requirement."""
-    if not inputs.fvg_confirmed:
+    """Validate FVG attributes (gap, fill state, overlap, span)."""
+    fvg = inputs.fvg_info
+
+    if not fvg.gap_exists:
         result.fvg_valid = False
+        result.lifecycle_state = ZoneLifecycle.FAILED
+        result.failed_at_phase = "Phase 3: No FVG detected — invalid zone."
+        return False
+
+    # Reject micro-gaps when gap_size is provided.
+    if fvg.gap_size is not None and fvg.gap_size <= 0:
+        result.fvg_valid = False
+        result.lifecycle_state = ZoneLifecycle.FAILED
         result.failed_at_phase = (
-            "Phase 3: No FVG detected — wick of candle 1 connects to wick of candle 3. "
-            "This is NOT a valid order block or structure zone. Disqualified."
+            f"Phase 3: Micro FVG rejected — gap_size {fvg.gap_size} is not positive."
         )
         return False
 
+    # Reject fully filled gaps — no remaining inefficiency.
+    if fvg.fill_state == FillState.FILLED:
+        result.fvg_valid = False
+        result.lifecycle_state = ZoneLifecycle.FAILED
+        result.failed_at_phase = "Phase 3: FVG fully filled — gap no longer valid."
+        return False
+
+    # Reject complete overlap (wicks connect, no real gap).
+    if fvg.overlap_ratio is not None and fvg.overlap_ratio >= 1.0:
+        result.fvg_valid = False
+        result.lifecycle_state = ZoneLifecycle.FAILED
+        result.failed_at_phase = (
+            f"Phase 3: FVG overlap ratio {fvg.overlap_ratio:.0%} — "
+            "wicks connect, no effective gap."
+        )
+        return False
+
+    # Standard FVG requires at least 3 candles.
+    if fvg.candle_span < 3:
+        result.fvg_valid = False
+        result.lifecycle_state = ZoneLifecycle.FAILED
+        result.failed_at_phase = (
+            f"Phase 3: FVG candle span {fvg.candle_span} too short — minimum 3 required."
+        )
+        return False
+
+    # All checks passed — FVG is valid.
     result.fvg_valid = True
-    fvg_note = ""
-    if inputs.fvg_tapped_from_top_down:
-        fvg_note = " (FVG tapped from top down — retains more validity if previously entered)"
-    result.passed_phases.append(
-        f"Phase 3: FVG confirmed — valid inefficiency exists.{fvg_note}"
-    )
+    detail_parts: list[str] = []
+    if fvg.tapped_from_top_down:
+        detail_parts.append("tapped from top down")
+    if fvg.fill_state == FillState.PARTIAL:
+        detail_parts.append("partially filled")
+    if fvg.gap_size is not None:
+        detail_parts.append(f"gap size: {fvg.gap_size}")
+    detail = f" ({', '.join(detail_parts)})" if detail_parts else ""
+    result.passed_phases.append(f"Phase 3: FVG confirmed — valid inefficiency{detail}.")
     return True
 
 
-def phase4_draw_zone(inputs: SDZoneInputs, result: SDZoneEvaluation):
-    """Phase 4: Record drawing notes (always passes — drawing is done on chart)."""
-    if inputs.zone_direction == ZoneDirection.SUPPLY:
-        if inputs.adjacent_candle_has_more_extreme_wick:
-            result.draw_note = (
-                "SUPPLY OB: Extend the top of the box to include the adjacent candle's wick high "
-                "(most extreme wick across candles 1–2 defines the boundary)."
-            )
-        else:
-            result.draw_note = (
-                "SUPPLY OB: Box from wick low to wick high of the last bullish candle before expansion."
-            )
-    else:
-        if inputs.adjacent_candle_has_more_extreme_wick:
-            result.draw_note = (
-                "DEMAND OB: Extend the bottom of the box to include the adjacent candle's wick low "
-                "(most extreme wick across candles 1–2 defines the boundary)."
-            )
-        else:
-            result.draw_note = (
-                "DEMAND OB: Box from wick low to wick high of the last bearish candle before expansion."
-            )
+# Keyed by (ZoneType, ZoneDirection, adjacent_candle_has_more_extreme_wick).
+_DRAW_NOTES: dict[tuple[ZoneType, ZoneDirection, bool], str] = {
+    (ZoneType.ORDER_BLOCK, ZoneDirection.SUPPLY, True): (
+        "SUPPLY OB: Extend top to adjacent candle wick high (most extreme). "
+        "Single-candle OB boundary."
+    ),
+    (ZoneType.ORDER_BLOCK, ZoneDirection.SUPPLY, False): (
+        "SUPPLY OB: Box from wick low to wick high of last bullish candle "
+        "before bearish expansion."
+    ),
+    (ZoneType.ORDER_BLOCK, ZoneDirection.DEMAND, True): (
+        "DEMAND OB: Extend bottom to adjacent candle wick low (most extreme). "
+        "Single-candle OB boundary."
+    ),
+    (ZoneType.ORDER_BLOCK, ZoneDirection.DEMAND, False): (
+        "DEMAND OB: Box from wick low to wick high of last bearish candle "
+        "before bullish expansion."
+    ),
+    (ZoneType.STRUCTURE_ZONE, ZoneDirection.SUPPLY, True): (
+        "SUPPLY STRUCTURE ZONE: Box spans multiple candles in the structure leg. "
+        "Extend top to the most extreme wick high across the structure candles."
+    ),
+    (ZoneType.STRUCTURE_ZONE, ZoneDirection.SUPPLY, False): (
+        "SUPPLY STRUCTURE ZONE: Box from the lowest wick low to the highest "
+        "wick high across all candles in the structure leg before expansion."
+    ),
+    (ZoneType.STRUCTURE_ZONE, ZoneDirection.DEMAND, True): (
+        "DEMAND STRUCTURE ZONE: Box spans multiple candles in the structure leg. "
+        "Extend bottom to the most extreme wick low across the structure candles."
+    ),
+    (ZoneType.STRUCTURE_ZONE, ZoneDirection.DEMAND, False): (
+        "DEMAND STRUCTURE ZONE: Box from the lowest wick low to the highest "
+        "wick high across all candles in the structure leg before expansion."
+    ),
+}
 
+
+def phase4_draw_zone(inputs: SDZoneInputs, result: SDZoneEvaluation):
+    """Set draw_note prose describing zone boundaries by type and direction."""
+    # A machine-readable zone_bounds field (top/bottom floats, candle indices,
+    # timestamps) should be added once SDZoneInputs carries OHLC candle arrays
+    # — until then there is no numeric data to populate such a field.
+    key = (inputs.zone_type, inputs.zone_direction,
+           inputs.adjacent_candle_has_more_extreme_wick)
+    result.draw_note = _DRAW_NOTES[key]
     result.passed_phases.append(f"Phase 4: Drawing note — {result.draw_note}")
 
 
 def phase5_check_mitigation(inputs: SDZoneInputs, result: SDZoneEvaluation) -> bool:
-    """Phase 5: Check mitigation status. Full mitigation = zone retired."""
+    """Check mitigation status; retire fully mitigated zones."""
     result.mitigation_status = inputs.mitigation_status
 
     if inputs.mitigation_status == MitigationStatus.FULL_MITIGATION:
-        result.failed_at_phase = (
-            "Phase 5: Zone is FULLY MITIGATED — price entered, reacted, and expanded away. "
-            "Remove this zone from the chart. Do not reuse."
-        )
+        result.lifecycle_state = ZoneLifecycle.RETIRED
+        result.failed_at_phase = "Phase 5: FULLY MITIGATED — remove zone."
         return False
 
     if inputs.mitigation_status == MitigationStatus.MINOR_MITIGATION:
         if not inputs.is_only_zone_in_area:
-            result.failed_at_phase = (
-                "Phase 5: Zone was mitigated (not just a wick) and other zones exist nearby. "
-                "Use an adjacent unmitigated zone instead."
-            )
+            result.lifecycle_state = ZoneLifecycle.FAILED
+            result.failed_at_phase = "Phase 5: Minor mitigation but other zones exist — skip this zone."
             return False
         result.warnings.append(
-            "Phase 5 (sole-zone exception): Minor mitigation but this is the only zone in the area. "
-            "Redraw above the mitigation point (supply) or below it (demand). "
-            "Still treat as unmitigated — watch for TCT confirmation."
+            "Phase 5: Sole-zone exception — redraw and still treat as unmitigated."
         )
+        # Machine state must reflect the exception so downstream sees UNMITIGATED.
+        result.mitigation_status = MitigationStatus.UNMITIGATED
 
     if inputs.mitigation_status == MitigationStatus.PARTIAL_WICK:
-        result.warnings.append(
-            "Phase 5: Price wicked through the zone — this is a liquidity grab, not invalidation. "
-            "Zone remains valid."
-        )
+        result.warnings.append("Phase 5: Wick only — liquidity grab, zone remains valid.")
 
     result.passed_phases.append(
-        f"Phase 5: Mitigation check passed — status: {inputs.mitigation_status.value}"
+        f"Phase 5: Mitigation check passed — {result.mitigation_status.value}"
     )
     return True
 
 
 def phase6_refine_timeframe(inputs: SDZoneInputs, result: SDZoneEvaluation):
-    """Phase 6: Determine zone priority based on timeframe confluence."""
+    """Determine zone priority based on timeframe confluence."""
     if inputs.is_supply_chain_second_ob:
         result.priority = ZonePriority.SUPPLY_CHAIN_SECOND
-        result.passed_phases.append(
-            "Phase 6: Supply chain 2nd OB detected — strong reaction expected. "
-            "Mark as high priority."
-        )
+        result.passed_phases.append("Phase 6: Supply chain 2nd OB — high priority.")
         return
 
-    if inputs.higher_tf_ob_unmitigated and not inputs.higher_tf_ob_mitigated_on_lower:
+    if (
+        inputs.higher_tf_ob_unmitigated
+        and not inputs.higher_tf_ob_mitigated_on_lower
+        and inputs.refined_ob_found_on_lower_tf
+    ):
         result.priority = ZonePriority.MULTI_TF_CONFLUENCE
-        result.passed_phases.append(
-            "Phase 6: Multi-TF confluence — higher TF OB also unmitigated on lower TF. Best case."
-        )
-    elif inputs.refined_ob_found_on_lower_tf:
+        result.passed_phases.append("Phase 6: Multi-TF confluence — best case.")
+    elif (
+        inputs.refined_ob_found_on_lower_tf
+        and inputs.zone_type == ZoneType.STRUCTURE_ZONE
+    ):
         result.priority = ZonePriority.STRUCTURE_PLUS_OB
         result.passed_phases.append(
-            "Phase 6: Refined OB found on lower TF inside structure zone. "
-            "Place both on chart — watch whichever price enters."
-        )
-    elif inputs.higher_tf_ob_mitigated_on_lower:
-        result.priority = ZonePriority.SINGLE_OB
-        result.warnings.append(
-            "Phase 6: Higher TF OB is mitigated on lower TF — still usable but less ideal. "
-            "Higher TF structure takes precedence."
-        )
-        result.passed_phases.append(
-            "Phase 6: Higher TF OB (mitigated on lower TF) — valid, lower confluence."
+            "Phase 6: Structure zone with refined OB on lower TF — place both zones."
         )
     else:
         result.priority = ZonePriority.SINGLE_OB
-        result.passed_phases.append("Phase 6: Single-layer OB — valid, standard confluence.")
+        result.passed_phases.append("Phase 6: Single-layer OB — valid.")
 
 
 def phase7_assess_extreme(inputs: SDZoneInputs, result: SDZoneEvaluation):
-    """Phase 7: Upgrade priority if this is an extreme zone."""
+    """Upgrade priority to EXTREME if zone is last before range boundary."""
     if inputs.is_extreme_zone:
         result.priority = ZonePriority.EXTREME
-        result.passed_phases.append(
-            "Phase 7: EXTREME ZONE — last remaining unmitigated zone before range extreme. "
-            "Highest priority. Expect strong reaction. New ranges often form here."
-        )
+        result.passed_phases.append("Phase 7: EXTREME ZONE — highest priority.")
     else:
         result.passed_phases.append(
             f"Phase 7: Standard zone. Priority: {result.priority.value if result.priority else 'N/A'}"
@@ -294,53 +412,51 @@ def phase7_assess_extreme(inputs: SDZoneInputs, result: SDZoneEvaluation):
 
 
 def phase8_entry(inputs: SDZoneInputs, result: SDZoneEvaluation):
-    """Phase 8: Determine if entry conditions are met."""
+    """Determine trade bias and target if price is in zone with TCT confirmation."""
     if not inputs.price_inside_zone:
+        result.lifecycle_state = ZoneLifecycle.WAITING
         result.trade_bias = TradeBias.WAIT
-        result.failed_at_phase = (
-            "Phase 8: Price has not yet entered the zone. "
-            "This zone is your POI — wait for price to arrive."
-        )
+        result.wait_reason = "Phase 8: Price not yet inside zone — zone is your POI, wait for arrival."
         return
 
     if not inputs.tct_schematic_confirmed:
+        result.lifecycle_state = ZoneLifecycle.WAITING
         result.trade_bias = TradeBias.WAIT
-        result.failed_at_phase = (
-            "Phase 8: Price is inside the zone but no TCT schematic confirmed yet. "
+        result.wait_reason = (
+            "Phase 8: Price inside zone but TCT schematic not confirmed. "
             "Do NOT enter on zone touch alone. "
             "Wait for TCT Model 1 or Model 2 confirmation inside the zone."
         )
         return
 
-    # Set bias and targets
+    # Set trade bias and primary targets — extreme zone takes highest precedence.
     if inputs.zone_direction == ZoneDirection.DEMAND:
         result.trade_bias = TradeBias.LONG
-        if inputs.market_context == MarketContext.RANGE:
+        if inputs.is_extreme_zone:
+            result.primary_target = "Body of the range / upper supply zone"
+        elif inputs.market_context == MarketContext.RANGE:
             result.primary_target = "Range High (or upper range supply zone)"
         elif inputs.market_context == MarketContext.UPTREND:
             result.primary_target = "Next higher high (trend continuation)"
-        elif inputs.is_extreme_zone:
-            result.primary_target = "Body of the range / upper supply zone"
         else:
             result.primary_target = "Range High or next structural high"
     else:
         result.trade_bias = TradeBias.SHORT
-        if inputs.market_context == MarketContext.RANGE:
+        if inputs.is_extreme_zone:
+            result.primary_target = "Body of the range / lower demand zone"
+        elif inputs.market_context == MarketContext.RANGE:
             result.primary_target = "Range Low (or lower range demand zone)"
         elif inputs.market_context == MarketContext.DOWNTREND:
             result.primary_target = "Next lower low (trend continuation)"
-        elif inputs.is_extreme_zone:
-            result.primary_target = "Body of the range / lower demand zone"
         else:
             result.primary_target = "Range Low or next structural low"
 
+    result.lifecycle_state = ZoneLifecycle.TRIGGERED
     result.entry_note = (
         f"{result.trade_bias.value} — TCT schematic confirmed inside "
         f"{inputs.zone_direction.value}. Target: {result.primary_target}."
     )
-    result.passed_phases.append(
-        f"Phase 8: Entry conditions met — {result.trade_bias.value}"
-    )
+    result.passed_phases.append(f"Phase 8: Entry conditions met — {result.trade_bias.value}")
 
 
 # ──────────────────────────────────────────────────────────
@@ -390,6 +506,7 @@ def print_evaluation(result: SDZoneEvaluation):
     print("\n" + "=" * 62)
     print("  TCT SUPPLY & DEMAND DECISION TREE — EVALUATION RESULT")
     print("=" * 62)
+    print(f"  Lifecycle:       {result.lifecycle_state.value}")
     print(f"  Zone Direction:  {result.zone_direction.value if result.zone_direction else 'N/A'}")
     print(f"  Zone Type:       {result.zone_type.value if result.zone_type else 'N/A'}")
     print(f"  FVG Valid:       {'YES' if result.fvg_valid else 'NO'}")
@@ -407,6 +524,8 @@ def print_evaluation(result: SDZoneEvaluation):
         print(f"    ✓ {p}")
     if result.failed_at_phase:
         print(f"  Stopped At: ✗ {result.failed_at_phase}")
+    if result.wait_reason:
+        print(f"  Waiting:    ⏳ {result.wait_reason}")
     if result.warnings:
         print("  Warnings:")
         for w in result.warnings:
@@ -425,8 +544,7 @@ if __name__ == "__main__":
         zone_direction=ZoneDirection.DEMAND,
         context_reason_exists=True,
         zone_type=ZoneType.ORDER_BLOCK,
-        fvg_confirmed=True,
-        fvg_tapped_from_top_down=False,
+        fvg_info=FVGInfo.confirmed(),
         adjacent_candle_has_more_extreme_wick=True,
         mitigation_status=MitigationStatus.UNMITIGATED,
         is_only_zone_in_area=False,
@@ -446,8 +564,7 @@ if __name__ == "__main__":
         zone_direction=ZoneDirection.SUPPLY,
         context_reason_exists=True,
         zone_type=ZoneType.STRUCTURE_ZONE,
-        fvg_confirmed=True,
-        fvg_tapped_from_top_down=False,
+        fvg_info=FVGInfo.confirmed(),
         adjacent_candle_has_more_extreme_wick=False,
         mitigation_status=MitigationStatus.UNMITIGATED,
         is_only_zone_in_area=False,
@@ -467,8 +584,7 @@ if __name__ == "__main__":
         zone_direction=ZoneDirection.SUPPLY,
         context_reason_exists=True,
         zone_type=ZoneType.ORDER_BLOCK,
-        fvg_confirmed=False,
-        fvg_tapped_from_top_down=False,
+        fvg_info=FVGInfo.absent(),
         adjacent_candle_has_more_extreme_wick=False,
         mitigation_status=MitigationStatus.UNMITIGATED,
         is_only_zone_in_area=False,

@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>HPM v19 Market Structure Decision Tree</title>
+
+<style>
+
+body{
+font-family:Arial;
+background:#0f1116;
+color:white;
+display:flex;
+justify-content:center;
+padding:40px;
+}
+
+.container{
+width:900px;
+background:#161a22;
+padding:30px;
+border-radius:10px;
+box-shadow:0 0 20px rgba(0,0,0,0.6);
+}
+
+h1{
+text-align:center;
+margin-bottom:25px;
+}
+
+.node{
+background:#202734;
+padding:20px;
+border-radius:8px;
+margin-bottom:20px;
+font-size:20px;
+text-align:center;
+}
+
+.buttons{
+display:flex;
+justify-content:center;
+gap:15px;
+margin-top:15px;
+}
+
+button{
+background:#3c6df0;
+border:none;
+padding:10px 20px;
+border-radius:6px;
+color:white;
+cursor:pointer;
+font-size:16px;
+transition:0.2s;
+}
+
+button:hover{
+background:#2c54c7;
+}
+
+button.red{
+background:#e84c4c;
+}
+
+button.green{
+background:#22c55e;
+}
+
+.result{
+margin-top:30px;
+padding:20px;
+border-radius:8px;
+background:#0f131b;
+text-align:center;
+font-size:18px;
+}
+
+.hidden{
+display:none;
+}
+
+.back{
+margin-top:15px;
+background:#555;
+}
+
+</style>
+</head>
+
+
+<body>
+
+<div class="container">
+
+<h1>HPM v19 Market Structure Engine</h1>
+
+<div id="tree"></div>
+
+<div class="result hidden" id="result"></div>
+
+</div>
+
+
+<script>
+
+const steps = {
+
+start:{
+question:"Identify Level 1 Market Structure",
+answers:[
+{text:"Bullish (HL → HH)", next:"l2"},
+{text:"Bearish (LH → LL)", next:"l2"},
+{text:"Neutral / Range", next:"reject"}
+]
+},
+
+l2:{
+question:"Is Level 2 Counter Structure Present?",
+answers:[
+{text:"Yes", next:"range"},
+{text:"No", next:"reject"}
+]
+},
+
+range:{
+question:"Is Range Valid? (RCM ≥ 24h)",
+answers:[
+{text:"Yes", next:"tap1"},
+{text:"No", next:"reject"}
+]
+},
+
+tap1:{
+question:"Tap 1 identified?",
+answers:[
+{text:"Yes", next:"tap2"},
+{text:"No", next:"reject"}
+]
+},
+
+tap2:{
+question:"Tap 2 formed?",
+answers:[
+{text:"Yes", next:"tap3"},
+{text:"No", next:"reject"}
+]
+},
+
+tap3:{
+question:"Valid Tap 3 deviation near Tap 1?",
+answers:[
+{text:"Yes", next:"liquidity"},
+{text:"No", next:"reject"}
+]
+},
+
+liquidity:{
+question:"Liquidity sweep into POI?",
+answers:[
+{text:"Yes", next:"l3"},
+{text:"No", next:"wait"}
+]
+},
+
+l3:{
+question:"Level 3 Structure Break (BOS)?",
+answers:[
+{text:"Yes", next:"execution"},
+{text:"No", next:"wait"}
+]
+},
+
+execution:{
+question:"Does BOS open smooth path to range target?",
+answers:[
+{text:"Yes", next:"rig"},
+{text:"No", next:"reject"}
+]
+},
+
+rig:{
+question:"Range Integrity Gate Check (RIG)",
+answers:[
+{text:"PASS", next:"execute"},
+{text:"BLOCK", next:"blocked"}
+]
+}
+
+}
+
+
+let history=[]
+
+function renderStep(step){
+
+const tree=document.getElementById("tree")
+
+const s=steps[step]
+
+tree.innerHTML=""
+
+let node=document.createElement("div")
+node.className="node"
+node.innerText=s.question
+tree.appendChild(node)
+
+let btnBox=document.createElement("div")
+btnBox.className="buttons"
+
+s.answers.forEach(a=>{
+
+let b=document.createElement("button")
+b.innerText=a.text
+
+b.onclick=()=>{
+
+history.push(step)
+
+if(a.next==="execute") showResult("✅ EXECUTE TRADE","green")
+
+else if(a.next==="reject") showResult("❌ Setup Invalid","red")
+
+else if(a.next==="wait") showResult("⏳ Wait for Confirmation","yellow")
+
+else if(a.next==="blocked") showResult("⛔ Trade Blocked by RIG","red")
+
+else renderStep(a.next)
+
+}
+
+btnBox.appendChild(b)
+
+})
+
+tree.appendChild(btnBox)
+
+if(history.length>0){
+
+let back=document.createElement("button")
+back.innerText="Back"
+back.className="back"
+
+back.onclick=()=>{
+
+let prev=history.pop()
+renderStep(prev)
+
+}
+
+tree.appendChild(back)
+
+}
+
+}
+
+
+function showResult(text,color){
+
+const tree=document.getElementById("tree")
+tree.innerHTML=""
+
+const result=document.getElementById("result")
+
+result.classList.remove("hidden")
+
+result.innerHTML=`
+
+<h2>${text}</h2>
+
+<button onclick="restart()">Restart</button>
+
+`
+
+}
+
+
+function restart(){
+
+history=[]
+
+document.getElementById("result").classList.add("hidden")
+
+renderStep("start")
+
+}
+
+
+renderStep("start")
+
+</script>
+
+</body>
+</html>

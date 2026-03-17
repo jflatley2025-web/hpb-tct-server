@@ -1,0 +1,1425 @@
+{
+  "meta": {
+    "title": "HPB-TCT Trading Bot — Complete Operational Workflow Logic Map",
+    "version": "1.2",
+    "generated": "2026-03-12",
+    "updated": "2026-03-14",
+    "description": "Machine-readable hierarchical map of all decision logic in the Schematics-5B trading engine. Covers HTF→LTF market bias initialization (established at workflow start, referenced by all downstream steps), range validation with impulsive/V-shape hard invalidation and S/R alignment checks, BOS structural validity (body-close required), POI confluence gating (FVG/RTZ/OB/S&R), liquidity checks, session scaling, counter-bias protection, execution confidence, and trade management.",
+    "entry_point": "schematics_5b_trader.py → Schematics5BTrader._scan_and_trade_locked()",
+    "scoring_model": "6-tree v1 (threshold 50) or 9-phase v2 (threshold 60)",
+    "bias_init_rule": "HTF→LTF market bias MUST be established at step 2.0 before any downstream step proceeds. All steps from 3.0 onward receive htf_bias and ltf_bias as required inputs."
+  },
+
+  "constants": {
+    "ENTRY_THRESHOLD_V1": 50,
+    "ENTRY_THRESHOLD_V2": 60,
+    "MIN_RR_RATIO": 1.5,
+    "DEVIATION_LIMIT_PERCENT": 0.30,
+    "BOS_GOOD_DISTANCE_PCT": 0.002,
+    "WICK_PROXIMITY_PCT": 0.001,
+    "AUTO_SCAN_INTERVAL_SECONDS": 60,
+    "DUPLICATE_COOLDOWN_SECONDS": 300,
+    "DUPLICATE_PRICE_TOLERANCE_PCT": 0.002,
+    "HTF_BIAS_CACHE_TTL_DIRECTIONAL": 86400,
+    "HTF_BIAS_CACHE_TTL_NEUTRAL": 3600,
+    "LIQUIDITY_TOLERANCE_V2_PCT": 0.003,
+    "DEFAULT_RISK_PER_TRADE_PCT": 0.01,
+    "DEFAULT_LEVERAGE": 10,
+    "MARGIN_MODE": "ISOLATED",
+    "MTF_TIMEFRAMES": ["1d", "4h", "1h", "30m"],
+    "LTF_BOS_TIMEFRAMES": ["5m", "1m"],
+    "MAX_STALE_CANDLES": {
+      "1d": 2, "4h": 3, "1h": 3, "30m": 4, "15m": 6, "5m": 10, "1m": 30
+    },
+
+    "_annotation_msce": "MSCE = Multi-Session Confidence Engine. Multipliers are applied to the composite_score AFTER all tree scoring to produce an adjusted_confidence value. This adjusted value is what is compared against the entry threshold in step 8.4. The 1% fixed risk rule (step 8.1) is never touched by MSCE — only entry gating changes.",
+    "MSCE_SESSION_MULTIPLIERS": {
+      "_note": "UTC windows are non-overlapping. Priority order for overlap resolution: london_ny > ny > london > asia > off_hours.",
+      "asia": {
+        "utc_start": 0,
+        "utc_end": 7,
+        "multiplier": 0.85,
+        "score_additive": 3,
+        "label": "Asia session",
+        "rationale": "Low liquidity, thin order books, frequent stop-hunts with no follow-through. Setups have higher false-positive rate. Confidence reduced."
+      },
+      "london": {
+        "utc_start": 7,
+        "utc_end": 13,
+        "multiplier": 1.10,
+        "score_additive": 7,
+        "label": "London session",
+        "rationale": "European institutional participation begins. Volume ramps, FVGs fill reliably, BOS signals carry more weight. Confidence elevated."
+      },
+      "london_ny": {
+        "utc_start": 13,
+        "utc_end": 16,
+        "multiplier": 1.25,
+        "score_additive": 10,
+        "label": "London/NY overlap",
+        "rationale": "Peak global liquidity window. Both European and US institutions active simultaneously. Highest probability of clean directional moves with follow-through. Maximum confidence."
+      },
+      "ny": {
+        "utc_start": 16,
+        "utc_end": 21,
+        "multiplier": 1.15,
+        "score_additive": 7,
+        "label": "NY session",
+        "rationale": "US institutions dominate. High volume, clear price discovery. Strong momentum continuation. Confidence elevated but below overlap peak."
+      },
+      "off_hours": {
+        "utc_start": 21,
+        "utc_end": 24,
+        "multiplier": 0.90,
+        "score_additive": 2,
+        "label": "NY close / off-hours",
+        "rationale": "NY session winding down. Position squaring creates noise. Setups taken here often reverse at Asia open. Confidence slightly reduced."
+      }
+    },
+    "MSCE_ADJUSTED_THRESHOLD_V2": 60,
+    "MSCE_ADJUSTED_THRESHOLD_V1": 50,
+    "_annotation_msce_threshold": "Thresholds remain the same numeric values but are compared against adjusted_confidence = composite_score × session_multiplier, not raw composite_score. This means a 60-pt raw score in Asia (×0.85) produces adjusted_confidence=51 and FAILS the v2 threshold, while the same score in London/NY overlap (×1.25) produces 75 and passes comfortably.",
+
+    "_annotation_rig": "RIG = Range Integrity Gate. Protects against counter-bias trades entered while an HTF range is still structurally intact. A counter-bias trade is one whose direction is OPPOSITE to htf_bias while the HTF range has not been broken. The gate is bypassed when CHoCH is confirmed across 3 timeframe levels (L3→L2→L1) or when a model-flow conversion signals genuine intent change.",
+    "RIG_MIN_DURATION_HOURS": 24,
+    "_annotation_rig_duration": "A range must have been holding for at least 24 hours to be considered 'intact' for RIG purposes. Younger ranges have not had time to build structural significance.",
+    "RIG_DISPLACEMENT_THRESHOLD_PCT": 0.25,
+    "_annotation_rig_displacement": "Default: if current price has moved ≥ 25% of range size AWAY from the nearest boundary, the range is likely breaking and counter-bias entries become permitted. Session-specific overrides apply (see RIG_DISPLACEMENT_SESSION_THRESHOLDS).",
+    "RIG_DISPLACEMENT_SESSION_THRESHOLDS": {
+      "_note": "Per-session displacement thresholds for the RIG verdict (step 6.7.4). Lower value = stricter gate = harder to get a counter-bias trade approved. Asia is strictest because counter-bias moves rarely follow through in low-liquidity sessions.",
+      "asia":      0.15,
+      "london":    0.25,
+      "london_ny": 0.30,
+      "ny":        0.28,
+      "off_hours": 0.20
+    },
+    "RIG_CHOCH_LEVELS_REQUIRED": 3,
+    "_annotation_rig_choch": "Full CHoCH bypass requires BOS confirmation on all 3 levels: L3 (1D), L2 (4H), L1 (1H) in the direction of the local trade. 2-of-3 grants a partial bypass (displacement threshold halved). Fewer than 2 = no bypass.",
+    "RIG_DL2_VIOLATION_LOOKBACK_CANDLES": 3,
+    "_annotation_rig_dl2": "When checking whether a DL2 close violation was 'accepted back', look at the next N candles (default 3). If price has not returned inside DL2 within 3 candles → TRUE BREAK → range is no longer intact.",
+    "RIG_BOUNDARY_PROXIMITY_PCT": 0.005,
+    "_annotation_rig_proximity": "Price is considered 'at the range boundary' (for displacement calc) if it is within 0.5% of range_high or range_low. This prevents false high-displacement readings when price is just at the edge.",
+
+    "_annotation_exec_confidence": "Execution confidence is the single authoritative value compared against the entry threshold at step 8.4. It is derived by applying sequential multipliers to the capped composite_score: execution_confidence = min(composite_score, COMPOSITE_SCORE_MAX) × session_multiplier × rig_confidence_factor. This aggregates session context (MSCE) and counter-bias risk (RIG) into one number before the threshold gate.",
+    "COMPOSITE_SCORE_RAW_MAX": 110,
+    "_annotation_raw_max": "Theoretical maximum raw score before capping: T1(20)+T2(20)+T3(15)+T4(20)+T5(15)+T6(5)+RR_bonus(5)+session_additive(10) = 110. The cap at 100 prevents the session additive from inflating confidence above the scoring ceiling.",
+    "COMPOSITE_SCORE_MAX": 100,
+    "_annotation_score_max": "Raw composite_score is capped at 100 before any multipliers are applied. This ensures the session_multiplier and rig_confidence_factor always operate on a bounded [0, 100] input.",
+    "RIG_CONFIDENCE_PENALTIES": {
+      "_note": "Multiplied into execution_confidence at step 8.4 based on the rig_verdict_path from step 6.7.4. Lower factor = more penalty = less confidence in the trade. Aligned trades carry no penalty. Counter-bias trades carry graduated penalties based on the strength of structural justification.",
+      "aligned_trade":              { "factor": 1.00, "rationale": "With-bias trade — no counter-bias risk, no penalty" },
+      "range_boundary_broken":      { "factor": 1.00, "rationale": "HTF range already violated — structural protection lifted, trade evaluated on its own merit" },
+      "choch_bypass:model_flow":    { "factor": 0.97, "rationale": "Model conversion (M1→M2 or schematic flip) — strong structural signal but still counter-bias; small 3% confidence reduction" },
+      "choch_bypass:full_domino":   { "factor": 0.95, "rationale": "L3+L2+L1 CHoCH all confirmed — high conviction but counter-bias; 5% confidence reduction" },
+      "choch_bypass:partial_domino":{ "factor": 0.90, "rationale": "Only 2-of-3 CHoCH levels confirmed — moderate conviction; 10% confidence reduction" },
+      "displacement_sufficient":    { "factor": 0.85, "rationale": "Counter-bias trade that passed via price displacement alone — no CHoCH structural support; 15% confidence reduction (highest penalty)" }
+    },
+    "_annotation_exec_confidence_formula": "Full execution confidence chain: (1) raw_score = sum of T1-T6 + rr_bonus + session_additive + microstructure_score; (2) capped_score = min(raw_score, 100); (3) session_adjusted = capped_score × session_multiplier; (4) execution_confidence = session_adjusted × rig_confidence_factor. Gate: execution_confidence >= ENTRY_THRESHOLD (60 v2, 50 v1) → ENTER. Single check at step 8.4 — no earlier threshold pre-filter.",
+
+    "_annotation_altcoin_liquidity": "Altcoin and liquidity alignment checks are split across two areas: (1) hard gate at step 6.8 — enforces minimum volume, spread, and BTC correlation floors that cannot be scored around; (2) soft scoring tree at step 7.9 — awards 0-10 pts for market microstructure quality (funding, OI, CVD).",
+    "ALTCOIN_MIN_24H_VOLUME_USDT": 10000000,
+    "_annotation_alt_min_vol": "Minimum 24-hour trading volume in USDT for any non-major symbol. Below $10M, FVGs do not fill cleanly and SL orders risk material slippage. Hard fail at step 6.8.2.",
+    "ALTCOIN_SPREAD_MAX_PCT": 0.0015,
+    "_annotation_alt_spread": "Maximum bid-ask spread as a fraction of mid-price (0.15%). Above this, entry precision is degraded beyond acceptable tolerance for TCT setups. Hard fail at step 6.8.2.",
+    "ALTCOIN_TIER_MAJOR_VOLUME_USD": 500000000,
+    "_annotation_alt_tier_major": "Symbols with 24h volume >= $500M are classified as 'major' (BTC, ETH). Exempt from BTC correlation gate — they ARE the reference.",
+    "ALTCOIN_TIER_LARGE_CAP_VOLUME_USD": 50000000,
+    "_annotation_alt_tier_large": "Symbols with 24h volume $50M-$500M are classified as 'large_cap_alt' (SOL, BNB, XRP, etc.). BTC correlation misalignment triggers a score penalty (step 7.9) but NOT a hard fail.",
+    "ALTCOIN_TIER_SMALL_CAP_THRESHOLD_USD": 50000000,
+    "_annotation_alt_tier_small": "Symbols below $50M 24h volume are 'small_cap_alt'. Subject to stricter BTC correlation gate: double-counter (counter-BTC AND counter-htf_bias) is a HARD FAIL at step 6.8.3.",
+    "FUNDING_RATE_NEUTRAL_THRESHOLD": 0.0001,
+    "_annotation_funding_neutral": "Funding rates below 0.01%/8h (absolute value) are considered neutral. Full score awarded at step 7.9.1.",
+    "FUNDING_RATE_ELEVATED_THRESHOLD": 0.0003,
+    "_annotation_funding_elevated": "Funding rates 0.01%-0.03%/8h suggest moderate positioning imbalance. Partial score penalty at step 7.9.1 for overcrowded-side trades.",
+    "FUNDING_RATE_EXTREME_THRESHOLD": 0.0005,
+    "_annotation_funding_extreme": "Funding rates above 0.05%/8h indicate severely overcrowded positions. Score penalised to 0 at step 7.9.1 for the crowded-side trade direction.",
+    "OI_TREND_LOOKBACK_PERIODS": 6,
+    "_annotation_oi_lookback": "OI trend is measured over the last 6 × 4H candles (24h). Rising OI = institutional commitment; declining OI = unwinding.",
+    "CVD_TREND_LOOKBACK_PERIODS": 12,
+    "_annotation_cvd_lookback": "CVD trend is measured over the last 12 × 1H candles (12h). CVD trending in the trade direction confirms net buy/sell pressure alignment.",
+    "COMPOSITE_SCORE_RAW_MAX": 120,
+    "_annotation_raw_max_updated": "Updated in v1.4 from 110 to 120 to account for T9 (market microstructure, 0-10 pts). Breakdown: T1(20)+T2(20)+T3(15)+T4(20)+T5(15)+T6(5)+T7_rr(5)+T8_session(10)+T9_microstructure(10) = 120. Cap remains at 100."
+    "SR_PROXIMITY_PCT": 0.005,
+    "BOS_BODY_CLOSE_REQUIRED": true,
+    "BOS_MIN_BODY_TO_RANGE_PCT": 0.001,
+    "POI_TIER1_TYPES": ["FVG", "RTZ"],
+    "POI_TIER2_TYPES": ["OB", "SR_LEVEL"],
+    "POI_PROXIMITY_TO_TAP3_PCT": 0.01,
+    "IMPULSE_MAX_DIRECTION_CHANGE_PCT": 0.15,
+    "SR_LOOKBACK_CANDLES": 200
+  },
+
+  "workflow": [
+    {
+      "step_id": "1.0",
+      "name": "AUTO_SCAN_LOOP",
+      "module_or_function": "schematics_5b_trader.py → Schematics5BTrader._scan_and_trade_locked()",
+      "inputs": ["AUTO_SCAN_INTERVAL (60s)", "current symbol list", "exchange API connection"],
+      "decision_logic": "Polling loop that fires every 60 seconds. Acquires async lock to prevent concurrent scans. Checks if a position is already open — if yes, routes to trade management (step 8.0). If no position, proceeds to scan for new setups.",
+      "outputs": ["triggers full pipeline per symbol per MTF timeframe"],
+      "conditions": {
+        "gate_position_open": "If current_trade is not None → skip to step 8.0 (manage existing position)",
+        "gate_duplicate_cooldown": "If same symbol+price (±0.2%) was evaluated within 300s → skip",
+        "loop_interval": "Repeats every 60 seconds indefinitely"
+      },
+      "children": [
+        {
+          "step_id": "2.0",
+          "name": "HTF_TO_LTF_MARKET_BIAS_INIT",
+          "module_or_function": "decision_tree_bridge.py → detect_htf_market_structure(df)",
+          "_annotation": "MODIFIED (bias-init enforcement): Renamed from HTF_BIAS_DETERMINATION to HTF_TO_LTF_MARKET_BIAS_INIT. This step is the canonical bias initialization gate for the entire workflow. HTF bias is established first (steps 2.1–2.2), then cascaded to LTF (step 2.3). No downstream step may proceed until both htf_bias and ltf_bias are resolved. Added ltf_bias to outputs.",
+          "inputs": ["1D OHLCV candles (last 100)", "cached bias (if TTL not expired)"],
+          "decision_logic": "Determines the Higher Time Frame directional bias using 6-candle-rule pivot detection on daily candles. Identifies swing highs and swing lows, then classifies the last two of each to determine market structure direction. Structure break confirmation requires a candle CLOSE beyond the prior swing level. After HTF bias is resolved, derives the aligned LTF bias (step 2.3) before releasing control to step 3.0.",
+          "outputs": ["htf_bias: 'bullish' | 'bearish' | 'neutral'", "htf_structure_details", "ltf_bias: 'bullish' | 'bearish' | 'neutral'"],
+          "conditions": {
+            "cache_hit": "If cached bias exists and TTL not expired (24h for directional, 1h for neutral) → return cached value without recomputation",
+            "bullish_classification": "Last 2 swing highs form Higher High AND last 2 swing lows form Higher Low → 'bullish'",
+            "bearish_classification": "Last 2 swing highs form Lower High AND last 2 swing lows form Lower Low → 'bearish'",
+            "neutral_classification": "Mixed pattern (e.g., HH+LL or LH+HL) → 'neutral'",
+            "structure_break_confirmation": "Close beyond prior swing pivot confirms direction; wick-only does not confirm"
+          },
+          "children": [
+            {
+              "step_id": "2.1",
+              "name": "SIX_CANDLE_RULE_PIVOT_DETECTION",
+              "module_or_function": "market_structure.py → find_6cr_pivots(df)",
+              "inputs": ["OHLCV candle array"],
+              "decision_logic": "Scans candles for pivot highs and lows using the 6-candle rule: a pivot HIGH requires 2+ consecutive bullish candles followed by 2+ consecutive bearish candles. A pivot LOW requires the inverse. Inside bars (close == open or body < threshold) do NOT count toward the sequence but do NOT break it either.",
+              "outputs": ["swing_highs[]", "swing_lows[]", "pivot_indices"],
+              "conditions": {
+                "min_shoulder_candles": "At least 2 consecutive candles in each direction (3-candle shoulder each side)",
+                "inside_bar_handling": "Inside bars are skipped — they neither count nor reset the consecutive sequence"
+              }
+            },
+            {
+              "step_id": "2.2",
+              "name": "STRUCTURE_CLASSIFICATION",
+              "module_or_function": "market_structure.py → confirm_structure_points()",
+              "inputs": ["swing_highs[]", "swing_lows[]"],
+              "decision_logic": "Compares the last two swing highs and last two swing lows to classify as HH (Higher High), HL (Higher Low), LH (Lower High), or LL (Lower Low). These four labels determine the bias.",
+              "outputs": ["structure_label: 'HH+HL' | 'LH+LL' | mixed"],
+              "conditions": {
+                "HH": "swing_highs[-1] > swing_highs[-2]",
+                "HL": "swing_lows[-1] > swing_lows[-2]",
+                "LH": "swing_highs[-1] < swing_highs[-2]",
+                "LL": "swing_lows[-1] < swing_lows[-2]"
+              }
+            },
+            {
+              "step_id": "2.3",
+              "name": "LTF_BIAS_DERIVATION",
+              "module_or_function": "decision_tree_bridge.py → derive_ltf_bias(htf_bias, mtf_candles)",
+              "_annotation": "NEW (bias-init enforcement): Derives the Lower Time Frame directional bias by applying 6CR pivot detection on the MTF timeframes (4H, 1H, 30M) and aligning the result against the HTF bias established in steps 2.1–2.2. This step completes the HTF→LTF bias cascade and is the last step before the workflow advances to range analysis (step 3.0).",
+              "inputs": ["htf_bias from step 2.0", "MTF OHLCV candles (4H, 1H, 30M)", "cached ltf_bias (if TTL not expired)"],
+              "decision_logic": "Runs 6CR pivot detection on each MTF timeframe (4H, 1H, 30M) to determine LTF market structure. Aligns LTF structure with HTF bias: if HTF is bullish/bearish and LTF confirms the same direction, ltf_bias mirrors htf_bias. If LTF is counter-HTF, ltf_bias is set to 'counter' and downstream gating (steps 6.1, 6.7) applies counter-bias protection. If HTF is 'neutral', ltf_bias inherits 'neutral' and step 6.1 triggers a hard fail in v2.",
+              "outputs": ["ltf_bias: 'bullish' | 'bearish' | 'neutral' | 'counter'", "ltf_structure_details", "ltf_dominant_timeframe"],
+              "conditions": {
+                "aligned": "htf_bias == ltf_structure on dominant MTF → ltf_bias = htf_bias",
+                "counter": "ltf_structure opposes htf_bias → ltf_bias = 'counter' (triggers RIG gate at step 6.7)",
+                "neutral_inheritance": "htf_bias == 'neutral' → ltf_bias = 'neutral' (hard fail in v2 at step 6.1)",
+                "dominant_tf_priority": "4H takes precedence over 1H over 30M when LTF TFs disagree",
+                "cache_ttl": "Same TTL rules as htf_bias: 24h for directional, 1h for neutral"
+              }
+            }
+          ]
+        },
+
+        {
+          "step_id": "3.0",
+          "name": "RANGE_FORMATION_AND_VALIDATION",
+          "module_or_function": "tct_schematics.py → TCTSchematicDetector._find_accumulation_ranges() / _find_distribution_ranges()",
+          "_annotation": "MODIFIED (bias-init enforcement): Added htf_bias and ltf_bias from step 2.0 to inputs. Range search direction (accumulation vs. distribution) is gated on htf_bias + ltf_bias — a bullish bias targets accumulation ranges; bearish targets distribution. A 'neutral' or 'counter' ltf_bias causes this step to log a warning and proceed with reduced confidence.",
+          "inputs": ["MTF OHLCV candles (4h, 1h, 30m)", "detected swing highs/lows from step 2.1", "htf_bias from step 2.0", "ltf_bias from step 2.3"],
+          "decision_logic": "Identifies horizontal consolidation ranges by finding swing high/low boundaries. Calculates Equilibrium (EQ) and Deviation Limits (DL2). Validates that the range is genuinely horizontal (not a V-shaped impulse) and that EQ has been touched.",
+          "outputs": ["range_high", "range_low", "equilibrium (EQ)", "DL2_above", "DL2_below", "range_valid: bool", "tap1_price"],
+          "conditions": {
+            "EQ_calculation": "EQ = (range_high + range_low) / 2.0",
+            "DL2_calculation": "DL2_above = range_high + (range_size × 0.30); DL2_below = range_low - (range_size × 0.30)",
+            "EQ_touch_required": "At least one candle must close within 5% of EQ — confirms range is being respected",
+            "horizontal_validation": "At least 60% of closes must stay within range boundaries AND direction changes ≥ 15% of candle count AND EQ crossings ≥ 10% of candle count",
+            "tap1_identification": "Tap1 = first definitive touch of range low (accumulation) or range high (distribution)"
+          },
+          "children": [
+            {
+              "step_id": "3.1",
+              "name": "RANGE_QUALITY_SCORING",
+              "_annotation": "MODIFIED (range validation): V-shape rejection upgraded from a soft note to a HARD GATE. A range that fails the direction-change threshold is now immediately rejected — it does not produce a low quality score, it terminates evaluation of the current symbol+TF pair. Added impulse_ratio output to feed step 3.3.",
+              "module_or_function": "tct_schematics.py (inline logic)",
+              "inputs": ["range boundaries", "candle data within range"],
+              "decision_logic": "Scores the quality of the identified range by checking horizontal character, liquidity stacking at boundaries, and EQ interaction frequency. If the direction-change test fails, emits range_valid=False which causes step 3.0 to discard this range candidate immediately (HARD FAIL at the range level, not at the gate level).",
+              "outputs": ["range_quality_score", "is_horizontal: bool", "has_liquidity_stacking: bool", "impulse_ratio: float"],
+              "conditions": {
+                "liquidity_stacking": "2+ equal highs (within 0.1%) at range_high OR 2+ equal lows at range_low → indicates stop-loss clustering",
+                "V_shape_hard_gate": "HARD GATE — direction_change_pct < IMPULSE_MAX_DIRECTION_CHANGE_PCT (0.15) → range_valid = False → DISCARD (was previously a soft warning)",
+                "eq_crossing_check": "EQ crossings < 10% of candle count → range_valid = False → DISCARD",
+                "impulse_ratio_output": "impulse_ratio = (directional candles) / (total candles) — forwarded to step 3.3 for deeper impulse analysis"
+              }
+            },
+            {
+              "step_id": "3.2",
+              "name": "SUPPORT_RESISTANCE_ALIGNMENT",
+              "_annotation": "NEW (S/R validation): Checks that range_high and range_low are anchored to meaningful HTF support/resistance levels. Ranges that form in no-man's land (unrelated to prior structure) receive a reduced quality score. Ranges anchored to HTF S/R receive a quality bonus passed into tree 1 scoring (step 7.1).",
+              "module_or_function": "market_structure.py → check_sr_alignment(range_high, range_low, htf_pivots)",
+              "inputs": ["range_high", "range_low", "swing_highs[] from step 2.1", "swing_lows[] from step 2.1", "HTF candle data (1D, 4H)"],
+              "decision_logic": "Compares range_high and range_low against the last SR_LOOKBACK_CANDLES (200) candles of HTF data to find significant pivot clusters within SR_PROXIMITY_PCT (0.5%). An S/R level is 'significant' if 2+ prior pivots exist within that tolerance band. Checks range_high against resistance clusters and range_low against support clusters.",
+              "outputs": ["range_high_sr_aligned: bool", "range_low_sr_aligned: bool", "sr_quality_bonus: 0 | 5 | 10", "nearest_sr_levels: []"],
+              "conditions": {
+                "full_alignment": "Both range_high AND range_low align with prior HTF pivots within 0.5% → sr_quality_bonus = 10",
+                "partial_alignment": "One boundary aligned → sr_quality_bonus = 5",
+                "no_alignment": "Neither boundary near prior structure → sr_quality_bonus = 0 (NOT a hard gate — range proceeds with reduced score)",
+                "sr_definition": "An S/R level is a price band where 2+ prior swing pivots (highs or lows) cluster within SR_PROXIMITY_PCT",
+                "psychological_levels": "Round numbers (100, 1000, etc.) and prior ATH/ATL count as implicit S/R levels",
+                "htf_priority": "1D pivots weighted 2× over 4H pivots when computing sr_quality_bonus"
+              }
+            },
+            {
+              "step_id": "3.3",
+              "name": "IMPULSIVE_MOVE_INVALIDATION",
+              "_annotation": "NEW (range validation): Dedicated hard gate that invalidates any range whose internal price action is classified as impulsive rather than consolidation. An impulsive range indicates a continuation move, not an accumulation/distribution schematic. Consumes impulse_ratio from step 3.1.",
+              "module_or_function": "tct_schematics.py → validate_range_character(candles, impulse_ratio)",
+              "inputs": ["candle data within range boundaries", "impulse_ratio from step 3.1", "EQ from step 3.0"],
+              "decision_logic": "Applies a three-factor impulse test to the range. A range fails (is impulsive) if it triggers any TWO of the three impulse indicators: (1) impulse_ratio > 0.70, (2) average candle body size in directional run > 2× average body size in opposing run, (3) price spends < 20% of candle count within 10% of EQ. Any two failures → range_valid = False → HARD FAIL.",
+              "outputs": ["impulsive: bool", "impulse_reason: string[]", "range_character: 'consolidation' | 'impulse' | 'borderline'"],
+              "conditions": {
+                "HARD_GATE": "impulsive == True → range_valid = False → discard range candidate immediately",
+                "impulse_factor_1": "impulse_ratio > 0.70 (from step 3.1) → contributes to impulse classification",
+                "impulse_factor_2": "avg_body_directional / avg_body_opposing > 2.0 → strong momentum bias within range",
+                "impulse_factor_3": "EQ_dwell_pct < 0.20 — price avoided midpoint, consistent with trending rather than ranging",
+                "borderline": "Exactly ONE factor triggered → range_character = 'borderline' → proceed but record warning; quality score reduced in step 7.1",
+                "v_shape_catch": "A V-shape (steep down + steep up, or vice versa) fails factor_1 and factor_3 simultaneously → always classified as impulsive → HARD FAIL"
+              }
+            }
+          ]
+        },
+
+        {
+          "step_id": "4.0",
+          "name": "DEVIATION_AND_SCHEMATIC_DETECTION",
+          "module_or_function": "tct_schematics.py → _build_accumulation_schematic() / _build_distribution_schematic()",
+          "_annotation": "MODIFIED (bias-init enforcement): Added htf_bias and ltf_bias to inputs. Schematic direction (accumulation vs. distribution) must agree with htf_bias and ltf_bias. A schematic whose direction conflicts with htf_bias is flagged as counter-bias and forwarded to step 6.1 for hard gate evaluation.",
+          "inputs": ["validated range from step 3.0", "candle data", "range_high", "range_low", "EQ", "DL2", "htf_bias from step 2.0", "ltf_bias from step 2.3"],
+          "decision_logic": "After identifying Tap1 (first touch of range boundary), searches for Tap2 (first deviation beyond range) and Tap3 (deeper deviation or higher-low retest). Classifies as Model 1 or Model 2 based on the relationship between Tap2 and Tap3. Validates that deviations stay within DL2.",
+          "outputs": ["schematic_type: 'Model_1' | 'Model_2'", "tap2_price", "tap3_price", "direction: 'bullish' | 'bearish'", "schematic_valid: bool"],
+          "conditions": {
+            "tap2_requirement": "Tap2 = first deviation beyond range boundary that comes BACK inside the range. Must NOT close beyond DL2.",
+            "model_1_classification": "Tap3 goes LOWER than Tap2 (accumulation) or HIGHER than Tap2 (distribution) — creates a lower low / higher high outside range",
+            "model_2_classification": "Tap3 is a HIGHER LOW relative to Tap2 (accumulation) that grabs extreme liquidity (first MS low after Tap2) OR mitigates extreme demand/supply zone",
+            "DL2_gate": "If any candle CLOSES beyond DL2 AND does not get accepted back within 3 candles → TRUE BREAK → schematic INVALID",
+            "tap_spacing_requirement": "Time gap between Tap2 and Tap3 must be ≥ 30% of the gap between Tap1 and Tap2",
+            "v2_tolerance": "In v2 scoring, allow close slightly beyond DL2 if within 0.3% tolerance (softer gate)"
+          },
+          "children": [
+            {
+              "step_id": "4.1",
+              "name": "MODEL_1_DETECTION",
+              "module_or_function": "tct_schematics.py (accumulation/distribution logic)",
+              "inputs": ["tap2_low/high", "subsequent candle data"],
+              "decision_logic": "Searches for a Tap3 that creates a LOWER LOW below Tap2 (for accumulation) or HIGHER HIGH above Tap2 (for distribution). This is the classic spring/upthrust pattern.",
+              "outputs": ["model_1_valid: bool", "tap3_price", "deviation_depth"],
+              "conditions": {
+                "accumulation_model_1": "tap3_low < tap2_low AND tap3_close > range_low (accepted back)",
+                "distribution_model_1": "tap3_high > tap2_high AND tap3_close < range_high (accepted back)"
+              }
+            },
+            {
+              "step_id": "4.2",
+              "name": "MODEL_2_DETECTION",
+              "module_or_function": "tct_schematics.py (accumulation/distribution logic)",
+              "inputs": ["tap2_low/high", "subsequent candle data", "extreme liquidity zones"],
+              "decision_logic": "Searches for a Tap3 that forms a HIGHER LOW relative to Tap2 (accumulation) — does NOT make new low. Must grab either extreme liquidity (first MS low after Tap2) or mitigate extreme demand zone (S/D).",
+              "outputs": ["model_2_valid: bool", "tap3_price", "grabbed_liquidity: bool", "mitigated_sd: bool"],
+              "conditions": {
+                "higher_low_requirement": "tap3_low > tap2_low (accumulation) or tap3_high < tap2_high (distribution)",
+                "liquidity_grab_or_sd": "Must satisfy at least one: (a) price reaches extreme liquidity level, OR (b) price enters extreme S/D zone"
+              }
+            }
+          ]
+        },
+
+        {
+          "step_id": "5.0",
+          "name": "BOS_CONFIRMATION_AND_LTF_CASCADE",
+          "module_or_function": "schematics_5b_trader.py → _try_confirm_with_ltf_bos() / refine_schematic_bos_with_ltf()",
+          "_annotation": "MODIFIED (bias-init enforcement + BOS validity): Added htf_bias and ltf_bias to inputs. BOS direction is validated against htf_bias before cascade refinement begins — a BOS in the wrong direction relative to htf_bias is discarded immediately rather than being refined on LTF. BOS must now pass step 5.2 structural validity before bos_confirmed is set to True.",
+          "inputs": ["schematic from step 4.0", "MTF candle data", "LTF candle data (5m, 1m)", "htf_bias from step 2.0", "ltf_bias from step 2.3"],
+          "decision_logic": "After Tap3, searches for a Break of Structure (BOS) — a candle whose BODY CLOSES above the highest point between Tap2 and Tap3 (bullish) or below the lowest point (bearish). Wick-only closes do not qualify. Cascades through lower timeframes (5m → 1m) to find the earliest confirmation for best risk-reward. Lowest TF BOS overwrites higher TF BOS. Each BOS candidate is forwarded to step 5.2 for structural validity before being accepted.",
+          "outputs": ["bos_confirmed: bool", "bos_price", "bos_timeframe", "bos_candle_index", "refined_entry_price", "refined_stop_price"],
+          "conditions": {
+            "mtf_bos_search": "On the schematic timeframe, find first candle BODY CLOSE beyond the swing high/low between Tap2-Tap3 (wick-only closes do not qualify)",
+            "ltf_cascade": "After MTF BOS found, search 5m then 1m for earlier BOS — LOWEST TF wins (best R:R)",
+            "bos_staleness_check": "BOS must occur within MAX_STALE candles of Tap3 (varies by TF: 1d=2, 4h=3, 1h=3, 30m=4, 5m=10, 1m=30). If exceeded → STALE → REJECT",
+            "ltf_internal_structure": "Primary: search for BOS using internal structure swings between Tap2-Tap3 timestamps",
+            "ltf_fallback": "If no internal structure, use post-Tap3 swings as fallback BOS points",
+            "eq_filter_v1": "In v1 mode: BOS must be below EQ for accumulation, above EQ for distribution",
+            "hard_gate": "If no BOS found on any timeframe → HARD FAIL → cannot enter trade",
+            "structural_validity_gate": "Every BOS candidate must pass step 5.2 before bos_confirmed = True is set"
+          },
+          "children": [
+            {
+              "step_id": "5.1",
+              "name": "LTF_BOS_REFINEMENT",
+              "module_or_function": "schematics_5b_trader.py → refine_schematic_bos_with_ltf()",
+              "inputs": ["MTF BOS price/time", "5m and 1m candle data"],
+              "decision_logic": "Fetches LTF candles around the MTF BOS zone. Identifies LTF swing structure and finds first LTF BOS (body close beyond LTF swing). If found, uses LTF BOS price as entry and LTF swing extreme as stop — tighter risk, better R:R.",
+              "outputs": ["ltf_bos_price", "ltf_stop_price", "ltf_timeframe", "improved_rr"],
+              "conditions": {
+                "5m_first": "Search 5m candles first",
+                "1m_override": "If 1m BOS found, it overwrites 5m BOS (tighter = better)",
+                "no_ltf_found": "If no LTF BOS → fall back to MTF BOS levels"
+              }
+            },
+            {
+              "step_id": "5.2",
+              "name": "BOS_STRUCTURAL_VALIDITY_CHECK",
+              "_annotation": "NEW (BOS validation): Hard gate that rejects BOS candidates that are structurally weak — e.g., wick-only closes, low-body candles that barely clear the level, or BOS that occurs into a known S/R wall. Prevents false BOS entries caused by thin-market wicks or stop-hunt spikes.",
+              "module_or_function": "market_structure.py → validate_bos_structure(bos_candle, structure_level, sr_levels)",
+              "inputs": ["bos_candle OHLCV", "structure_level (swing high/low being broken)", "bos_timeframe", "sr_levels from step 3.2"],
+              "decision_logic": "Applies three checks to each BOS candidate: (1) body-close check — candle body (min(open,close)) must close beyond the structure level, not just the wick; (2) body-size check — body size must exceed BOS_MIN_BODY_TO_RANGE_PCT (0.1% of price) to filter noise; (3) S/R wall check — if a prior HTF S/R level exists within SR_PROXIMITY_PCT (0.5%) BEYOND the BOS level in the trade direction, the BOS is marked 'contested' and may be rejected unless POI is present at that S/R level.",
+              "outputs": ["bos_structurally_valid: bool", "bos_body_close: bool", "bos_contested: bool", "contesting_sr_level: float | null"],
+              "conditions": {
+                "HARD_GATE_body_close": "BOS_BODY_CLOSE_REQUIRED = True → candle body must close beyond structure_level, wick-only = REJECT",
+                "HARD_GATE_body_size": "body_size < BOS_MIN_BODY_TO_RANGE_PCT → too small to be meaningful → REJECT",
+                "contested_bos": "A valid SR wall exists within SR_PROXIMITY_PCT beyond the BOS in the trade direction → bos_contested = True; does NOT auto-reject but reduces BOS quality score in step 7.5 and requires Tier-1 POI at that level (step 6.8)",
+                "poi_at_sr_exception": "If an unmitigated FVG or RTZ exists at the contesting S/R level → bos_contested downgraded to bos_into_poi → allowed"
+              }
+            }
+          ]
+        },
+
+        {
+          "step_id": "6.0",
+          "name": "GATING_CHECKS",
+          "module_or_function": "decision_tree_bridge.py → compute_composite_score_v2() (inline gates)",
+           "_annotation": "MODIFIED (bias-init enforcement): Added ltf_bias from step 2.3 to inputs alongside existing htf_bias. Both bias values are threaded into child gate steps (6.1 and 6.7) for full HTF + LTF alignment validation.",
+
+  "inputs": [
+    "htf_bias from step 2.0",
+    "ltf_bias from step 2.3",
+    "schematic from step 4.0 (direction, model_type, tap prices)",
+    "bos_confirmed from step 5.0",
+    "calculated R:R",
+    "FVG/OB zones",
+    "htf_range_high, htf_range_low, htf_EQ, htf_DL2_above, htf_DL2_below, range_start_timestamp from step 3.0",
+    "current_price, current_timestamp",
+    "HTF candles (1D, 4H, 1H) for RIG CHoCH check",
+    "active_session from step 7.8 (for RIG session-adjusted thresholds)"
+  ],
+
+  "decision_logic": "Series of hard gates that must ALL pass before scoring proceeds. Any single hard gate failure results in immediate rejection. Gate 6.7 (RIG) is the final gate and uses session-aware displacement thresholds to block counter-bias trades while HTF ranges remain structurally intact.",
+
+  "outputs": [
+    "all_gates_passed: bool",
+    "rejection_reason: string | null",
+    "rig_details: object"
+  ],
+          "conditions": {
+            "HARD_GATES": "ALL must pass or trade is rejected",
+            "gate_order": "6.1 HTF alignment → 6.2 BOS confirmed → 6.3 R:R ≥ 1.5 → 6.4 S/D zone → 6.5 liquidity sweep → 6.6 TCT 5A validity → 6.7 RIG counter-bias protection → 6.8 altcoin/liquidity alignment"
+          },
+          "children": [
+            {
+              "step_id": "6.1",
+              "name": "HTF_LTF_ALIGNMENT_GATE",
+              "_annotation": "MODIFIED (bias-init enforcement): Renamed from HTF_ALIGNMENT_GATE to HTF_LTF_ALIGNMENT_GATE. Added ltf_bias to inputs. Gate now evaluates full HTF+LTF alignment: both biases must agree with schematic direction. A schematic that aligns with htf_bias but opposes ltf_bias is allowed only if ltf_bias == 'counter' and RIG (step 6.7) passes.",
+              "module_or_function": "decision_tree_bridge.py (inline)",
+              "inputs": ["htf_bias from step 2.0", "ltf_bias from step 2.3", "schematic.direction"],
+              "decision_logic": "Checks that the trade direction aligns with both HTF and LTF bias. Counter-bias trades (e.g., bearish setup during bullish HTF) are typically rejected.",
+              "outputs": ["htf_aligned: bool", "ltf_aligned: bool"],
+              "conditions": {
+                "full_pass": "htf_bias == schematic.direction AND ltf_bias == schematic.direction → strongest signal",
+                "htf_only_pass": "htf_bias == schematic.direction AND ltf_bias == 'counter' → allowed only if RIG gate (step 6.7) passes",
+                "fail_hard_htf": "htf_bias is OPPOSITE to schematic.direction → REJECT regardless of ltf_bias",
+                "exception_neutral": "htf_bias == 'neutral' → HARD FAIL in v2 (neutral = uncertain = no entry)",
+                "exception_trend_shift": "If CHoCH (Change of Character) detected in HTF → counter-bias entry MAY be allowed"
+              }
+            },
+            {
+              "step_id": "6.2",
+              "name": "BOS_CONFIRMATION_GATE",
+              "module_or_function": "decision_tree_bridge.py (inline)",
+              "inputs": ["bos_confirmed from step 5.0"],
+              "decision_logic": "Requires confirmed BOS. Without structural confirmation, no trade.",
+              "outputs": ["bos_gate_passed: bool"],
+              "conditions": {
+                "pass": "bos_confirmed == True",
+                "fail_hard": "bos_confirmed == False → REJECT — non-negotiable"
+              }
+            },
+            {
+              "step_id": "6.3",
+              "name": "RISK_REWARD_GATE",
+              "module_or_function": "decision_tree_bridge.py (inline)",
+              "inputs": ["entry_price", "stop_price", "target_price"],
+              "decision_logic": "Calculates live risk-to-reward ratio. Hard floor of 1.5. Trades below this threshold are never taken.",
+              "outputs": ["rr_ratio: float", "rr_gate_passed: bool"],
+              "conditions": {
+                "calculation": "live_risk = abs(entry_price - stop_price); live_reward = abs(target_price - entry_price); rr = live_reward / live_risk",
+                "pass": "rr >= 1.5",
+                "fail_hard": "rr < 1.5 → REJECT — absolute floor",
+                "bonus_trigger": "rr >= 3.0 → bonus points in scoring (step 7.0)"
+              }
+            },
+            {
+              "step_id": "6.4",
+              "name": "SUPPLY_DEMAND_AND_POI_IDENTIFICATION_GATE",
+              "_annotation": "MODIFIED (POI validation): Renamed from SUPPLY_DEMAND_VALIDATION_GATE to SUPPLY_DEMAND_AND_POI_IDENTIFICATION_GATE. Now identifies and classifies ALL active POIs (FVG, OB, RTZ) near Tap3, not just checking presence. Outputs a typed poi_list used by step 6.8 for confluence scoring. RTZ added as a valid Tier-1 POI type.",
+              "module_or_function": "decision_tree_bridge.py → _score_supply_demand_tree() + identify_poi_list()",
+              "inputs": ["FVG zones (Fair Value Gaps)", "OB zones (Order Blocks)", "RTZ zones (Reaction Trading Zones)", "tap3_price", "schematic.direction"],
+              "decision_logic": "Identifies all unmitigated supply/demand POIs within POI_PROXIMITY_TO_TAP3_PCT (1%) of Tap3. Classifies each POI by tier: Tier-1 = FVG or RTZ (strongest magnetic pull), Tier-2 = OB or S/R level (structural significance). Verifies at least one POI of any tier exists in the correct directional zone. Forwards the full poi_list to step 6.8 for confluence analysis.",
+              "outputs": ["sd_valid: bool", "fvg_present: bool", "ob_present: bool", "rtz_present: bool", "poi_list: [{type, tier, price, mitigated: bool}]"],
+              "conditions": {
+                "for_bullish": "Demand zone (FVG, RTZ, or OB) must exist BELOW or AT Tap3 level",
+                "for_bearish": "Supply zone (FVG, RTZ, or OB) must exist ABOVE or AT Tap3 level",
+                "hard_gate": "If NO POI of any tier near Tap3 → HARD FAIL",
+                "fvg_definition": "3 consecutive candles where candle[1].low > candle[0].high (bullish) or candle[1].high < candle[0].low (bearish)",
+                "rtz_definition": "A Reaction Trading Zone is a price band where at least 2 prior significant reactions occurred, regardless of whether a clean FVG or OB is present",
+                "mitigation_check": "POIs that have been fully mitigated (price has traded through them) are excluded from the valid poi_list"
+              }
+            },
+            {
+              "step_id": "6.5",
+              "name": "LIQUIDITY_SWEEP_VALIDATION_GATE",
+              "module_or_function": "decision_tree_bridge.py → _score_liquidity_tree()",
+              "inputs": ["range_low", "range_high", "DL2_above", "DL2_below", "candle data around deviations"],
+              "decision_logic": "Classifies the liquidity event as SWEEP (acceptable) or TRUE BREAK (rejection). A sweep means price went beyond range but came back. A true break means price closed beyond DL2 and stayed there.",
+              "outputs": ["sweep_type: 'swept' | 'deep_break' | 'true_break'", "liquidity_gate_passed: bool"],
+              "conditions": {
+                "swept": "Any candle low/high beyond range boundary but closes back inside → VALID sweep",
+                "deep_break": "Candle CLOSES beyond DL2 but penetration ≥ 1% of range AND accepted back within ≥ 3 candles → VALID (soft pass)",
+                "true_break": "Candle CLOSES beyond DL2 AND NOT accepted back within 3 candles → HARD FAIL",
+                "v2_tolerance": "In v2, allow close slightly beyond DL2 if within 0.3% tolerance before classifying as true break"
+              }
+            },
+            {
+              "step_id": "6.6",
+              "name": "TCT_5A_SCHEMATIC_VALIDITY_GATE",
+              "module_or_function": "decision_tree_bridge.py → _score_tct_5a_tree()",
+              "inputs": ["schematic from step 4.0"],
+              "decision_logic": "Validates that the overall TCT 5A schematic structure is intact — range found, taps identified, model type classified, deviation within limits.",
+              "outputs": ["tct_5a_valid: bool"],
+              "conditions": {
+                "pass": "schematic has valid range + valid taps + valid model type + deviation within DL2",
+                "fail_hard": "Any core schematic element missing or invalid → HARD FAIL"
+              }
+            },
+            {
+              "step_id": "6.7",
+              "name": "COUNTER_BIAS_RANGE_INTEGRITY_GATE",
+              "module_or_function": "decision_tree_bridge.py → _check_range_integrity_gate()",
+              "_annotation": "RIG v1.2 — Full implementation. Expanded from a 3-condition stub into a 4-sub-step gate. Evaluates whether the HTF range is genuinely intact, whether the local trade is counter-bias, whether CHoCH provides a structural bypass, and applies session-specific displacement thresholds for the final verdict. This is a HARD GATE — any rejection is non-negotiable and stops the pipeline immediately.",
+              "inputs": [
+                "htf_bias from step 2.0",
+                "schematic.direction from step 4.0",
+                "htf_range_high, htf_range_low, htf_EQ, htf_DL2_above, htf_DL2_below from step 3.0",
+                "range_start_timestamp from step 3.0",
+                "current_timestamp",
+                "current_price",
+                "HTF candles (1D, 4H, 1H) for CHoCH check",
+                "active_session from step 7.8",
+                "schematic_model_type from step 4.0 (for model-flow bypass)"
+              ],
+              "outputs": [
+                "rig_passed: bool",
+                "rig_rejection_reason: string | null",
+                "range_intact: bool",
+                "is_counter_bias: bool",
+                "choch_bypass_eligible: bool",
+                "effective_displacement_threshold: float"
+              ],
+              "decision_logic": "Runs four sequential sub-checks. If the trade is NOT counter-bias, the gate passes immediately without evaluating further. If counter-bias, checks whether the HTF range is intact, whether CHoCH provides a structural bypass, and applies session-adjusted thresholds to determine whether displacement is sufficient to allow entry.",
+              "conditions": {
+                "fast_pass": "htf_bias == schematic.direction OR htf_bias == 'neutral' → RIG not applicable → PASS immediately (no sub-checks needed)",
+                "hard_fail_final": "is_counter_bias AND range_intact AND current_displacement_pct < effective_displacement_threshold AND choch_bypass_eligible == False → REJECT"
+              },
+              "children": [
+                {
+                  "step_id": "6.7.1",
+                  "name": "HTF_RANGE_INTEGRITY_ASSESSMENT",
+                  "module_or_function": "decision_tree_bridge.py → _assess_htf_range_integrity()",
+                  "_annotation": "NEW in v1.2. Measures the three dimensions of range integrity: time held, boundary violation history, and current price displacement from boundary. All three feed the final RIG verdict.",
+                  "inputs": [
+                    "htf_range_high, htf_range_low",
+                    "htf_DL2_above, htf_DL2_below",
+                    "range_start_timestamp",
+                    "current_timestamp",
+                    "current_price",
+                    "HTF candles covering range lifetime"
+                  ],
+                  "decision_logic": "Computes range_duration_hours from range_start_timestamp to now. Scans all candles since range start for DL2 close violations: a violation is a candle that CLOSES beyond DL2 and is NOT accepted back within RIG_DL2_VIOLATION_LOOKBACK_CANDLES (3) candles. Computes current_displacement_pct as abs(current_price - nearest_range_boundary) / range_size. Range is 'intact' only if boundary_violation_count == 0 AND range_duration_hours >= RIG_MIN_DURATION_HOURS (24).",
+                  "outputs": [
+                    "range_intact: bool",
+                    "range_duration_hours: float",
+                    "boundary_violation_count: int",
+                    "current_displacement_pct: float",
+                    "nearest_boundary: 'high' | 'low'",
+                    "nearest_boundary_price: float"
+                  ],
+                  "conditions": {
+                    "range_intact_definition": "boundary_violation_count == 0 AND range_duration_hours >= 24",
+                    "range_too_young": "range_duration_hours < 24 → range_intact = False (range has not had time to build structural significance)",
+                    "boundary_violation_definition": "A candle CLOSES beyond DL2 (above DL2_above or below DL2_below) AND price does NOT return inside DL2 within the next 3 candles → counts as 1 violation",
+                    "boundary_accepted_back": "If a candle closes beyond DL2 but returns inside within 3 candles → NOT a violation (same logic as step 6.5 liquidity gate)",
+                    "displacement_formula": "current_displacement_pct = abs(current_price - nearest_boundary_price) / (range_high - range_low)",
+                    "nearest_boundary": "nearest_boundary = 'low' if abs(current_price - range_low) < abs(current_price - range_high), else 'high'",
+                    "proximity_edge_case": "If current_price is within RIG_BOUNDARY_PROXIMITY_PCT (0.5%) of range boundary → displacement treated as 0.0 (price is at boundary, not displaced)"
+                  }
+                },
+                {
+                  "step_id": "6.7.2",
+                  "name": "COUNTER_BIAS_DETECTION",
+                  "module_or_function": "decision_tree_bridge.py → _detect_counter_bias()",
+                  "_annotation": "NEW in v1.2. Formally classifies whether the current trade setup conflicts with the HTF bias inside an intact range. This is the predicate that determines whether the remaining RIG sub-steps need to run.",
+                  "inputs": [
+                    "htf_bias from step 2.0",
+                    "schematic.direction from step 4.0",
+                    "range_intact from step 6.7.1"
+                  ],
+                  "decision_logic": "A trade is counter-bias if its direction is opposite to HTF bias AND the HTF range is still intact. If the range is NOT intact (boundary broken), counter-bias detection is irrelevant — the range has already signaled a potential trend shift, so the trade is not protected.",
+                  "outputs": [
+                    "is_counter_bias: bool",
+                    "bias_conflict_type: 'bullish_range_bearish_trade' | 'bearish_range_bullish_trade' | 'none'"
+                  ],
+                  "conditions": {
+                    "bullish_range_bearish_trade": "htf_bias == 'bullish' AND schematic.direction == 'bearish' AND range_intact == True → is_counter_bias = True, bias_conflict_type = 'bullish_range_bearish_trade'",
+                    "bearish_range_bullish_trade": "htf_bias == 'bearish' AND schematic.direction == 'bullish' AND range_intact == True → is_counter_bias = True, bias_conflict_type = 'bearish_range_bullish_trade'",
+                    "aligned": "htf_bias == schematic.direction → is_counter_bias = False (with-bias trade, RIG does not apply)",
+                    "neutral_bias": "htf_bias == 'neutral' → is_counter_bias = False (neutral bias has no protected direction; v2 hard-fails neutral at step 6.1 before reaching RIG)",
+                    "broken_range_exception": "range_intact == False → is_counter_bias = False (range boundary has been violated, structural protection is lifted)"
+                  }
+                },
+                {
+                  "step_id": "6.7.3",
+                  "name": "CHOCH_DOMINO_BYPASS_CHECK",
+                  "module_or_function": "decision_tree_bridge.py → _check_choch_domino()",
+                  "_annotation": "NEW in v1.2. Evaluates whether a multi-timeframe Change of Character (CHoCH) domino has confirmed, which would indicate the HTF range IS in fact breaking down despite appearing intact on surface metrics. L3→L2→L1 is the required confirmation cascade. Also handles model-flow bypass.",
+                  "inputs": [
+                    "1D swing data (L3)",
+                    "4H swing data (L2)",
+                    "1H swing data (L1)",
+                    "schematic.direction (to determine which direction BOS must be)",
+                    "schematic_model_type from step 4.0",
+                    "htf_bias"
+                  ],
+                  "decision_logic": "For each timeframe level, checks whether the most recent swing structure has produced a BOS (close beyond prior swing) in the direction of the local schematic. L3 = 1D, L2 = 4H, L1 = 1H. If all 3 levels confirm → full bypass. If 2 levels confirm → partial bypass (displacement threshold halved). Fewer than 2 = no bypass. Additionally checks for model-flow conversions (Model 1→2, acc→dist or dist→acc) which independently grant full bypass.",
+                  "outputs": [
+                    "choch_bypass_eligible: bool",
+                    "choch_level_count: int (0-3)",
+                    "choch_bypass_type: 'full_domino' | 'partial_domino' | 'model_flow' | 'none'",
+                    "confirmed_levels: string[] (e.g. ['L3', 'L2'])"
+                  ],
+                  "conditions": {
+                    "L3_choch": "1D timeframe: most recent swing structure shows a CLOSE beyond the prior daily swing in schematic.direction → L3 confirmed",
+                    "L2_choch": "4H timeframe: most recent swing structure shows a CLOSE beyond the prior 4H swing in schematic.direction → L2 confirmed",
+                    "L1_choch": "1H timeframe: most recent swing structure shows a CLOSE beyond the prior 1H swing in schematic.direction → L1 confirmed",
+                    "full_domino_bypass": "choch_level_count >= 3 → choch_bypass_eligible = True, choch_bypass_type = 'full_domino' → RIG BYPASSED",
+                    "partial_domino_bypass": "choch_level_count == 2 → choch_bypass_eligible = True, choch_bypass_type = 'partial_domino' → displacement threshold halved in step 6.7.4",
+                    "no_bypass": "choch_level_count < 2 → choch_bypass_eligible = False",
+                    "model_flow_bypass_m1_to_m2": "schematic_model_type converted from Model_1 → Model_2 since last evaluation → choch_bypass_eligible = True, choch_bypass_type = 'model_flow' (Model 2 implies range is absorbing counter-bias pressure)",
+                    "model_flow_bypass_schematic_flip": "schematic previously acc, now detected as dist (or vice versa) → choch_bypass_eligible = True, choch_bypass_type = 'model_flow' (schematic flip = clear market intent reversal)",
+                    "bos_direction_requirement": "For bullish schematic: BOS = close above prior swing HIGH. For bearish schematic: BOS = close below prior swing LOW. Wick-only does NOT count."
+                  }
+                },
+                {
+                  "step_id": "6.7.4",
+                  "name": "SESSION_ADJUSTED_RIG_VERDICT",
+                  "module_or_function": "decision_tree_bridge.py → _rig_final_verdict()",
+                  "_annotation": "NEW in v1.2. Applies session-specific displacement thresholds and renders the final hard-gate decision. This is the only step that can produce a RIG_HARD_FAIL rejection. Session-aware thresholds reflect that counter-bias moves are more dangerous in low-liquidity sessions (Asia) and more forgivable near session transitions where structure shifts are real.",
+                  "inputs": [
+                    "is_counter_bias from step 6.7.2",
+                    "range_intact from step 6.7.1",
+                    "current_displacement_pct from step 6.7.1",
+                    "choch_bypass_eligible from step 6.7.3",
+                    "choch_bypass_type from step 6.7.3",
+                    "active_session from step 7.8",
+                    "range_duration_hours from step 6.7.1"
+                  ],
+                  "decision_logic": "Works through a priority-ordered decision tree. Fast passes exit immediately without computing thresholds. Only when the trade is confirmed counter-bias, the range is intact, and no CHoCH bypass is available does the gate compare current_displacement_pct against the session-adjusted threshold to reach a final verdict.",
+                  "outputs": [
+                    "rig_passed: bool",
+                    "rig_rejection_reason: string | null",
+                    "effective_displacement_threshold: float",
+                    "rig_verdict_path: string (which condition triggered the verdict)"
+                  ],
+                  "conditions": {
+                    "_evaluation_order": "Conditions are checked in order. First match wins.",
+                    "pass_1_not_counter_bias": "is_counter_bias == False → PASS immediately. rig_verdict_path = 'aligned_trade'",
+                    "pass_2_range_not_intact": "range_intact == False → PASS immediately. rig_verdict_path = 'range_boundary_broken'",
+                    "pass_3_full_choch_bypass": "choch_bypass_eligible == True AND choch_bypass_type IN ['full_domino', 'model_flow'] → PASS. rig_verdict_path = 'choch_bypass:{choch_bypass_type}'",
+                    "session_threshold_lookup": "effective_displacement_threshold = RIG_DISPLACEMENT_SESSION_THRESHOLDS[active_session]: asia=0.15, london=0.25, london_ny=0.30, ny=0.28, off_hours=0.20",
+                    "partial_choch_threshold_reduction": "If choch_bypass_type == 'partial_domino' → effective_displacement_threshold = effective_displacement_threshold × 0.50 (halved — 2-of-3 levels confirmed, make it easier to pass)",
+                    "pass_4_sufficient_displacement": "current_displacement_pct >= effective_displacement_threshold → PASS. rig_verdict_path = 'displacement_sufficient:{current_displacement_pct:.3f}>={effective_displacement_threshold:.3f}'",
+                    "fail_hard": "current_displacement_pct < effective_displacement_threshold → HARD FAIL. rig_rejection_reason = 'RIG_COUNTER_BIAS_INTACT_RANGE: {bias_conflict_type}, session={active_session}, displacement={current_displacement_pct:.3f} < threshold={effective_displacement_threshold:.3f}, range_age={range_duration_hours:.1f}h'",
+                    "session_threshold_rationale": {
+                      "asia_0.15": "Asia session: counter-bias setups almost never follow through in thin markets. Require only 15% displacement — if price is this close to the boundary it is almost certainly just noise.",
+                      "london_0.25": "London standard: 25% displacement is the baseline before a counter-bias trade is considered structurally justified.",
+                      "london_ny_0.30": "London/NY overlap: highest-volume window, structure shifts ARE real here. Allow 30% displacement — a larger displacement is meaningful when liquidity is deep.",
+                      "ny_0.28": "NY session: similar to overlap but slightly tighter — late-session moves can reverse at close.",
+                      "off_hours_0.20": "Off-hours: position squaring creates noise. Tighter than standard to reduce false signals from thin-market moves."
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "step_id": "6.8",
+              "name": "ALTCOIN_LIQUIDITY_ALIGNMENT_GATE",
+              "module_or_function": "decision_tree_bridge.py → _check_altcoin_liquidity_alignment()",
+              "_annotation": "NEW in v1.4. Hard gate added after RIG (6.7). Validates that the trading symbol has sufficient liquidity for safe execution and that altcoin setups are not structurally opposed to BTC/ETH directional flow. Runs after all prior gates to avoid wasting liquidity API calls on setups that fail earlier checks.",
+              "inputs": [
+                "symbol (e.g. 'SOLUSDT')",
+                "volume_24h_usdt from exchange ticker",
+                "current_bid, current_ask (for spread calculation)",
+                "btc_4h_bias (from BTC HTF structure, same method as step 2.0)",
+                "schematic.direction from step 4.0",
+                "htf_bias from step 2.0"
+              ],
+              "outputs": [
+                "altcoin_gate_passed: bool",
+                "symbol_tier: 'major' | 'large_cap_alt' | 'small_cap_alt'",
+                "volume_24h_usdt: float",
+                "spread_pct: float",
+                "btc_correlation_status: 'exempt' | 'aligned' | 'misaligned_soft' | 'misaligned_hard'",
+                "rejection_reason: string | null"
+              ],
+              "decision_logic": "Runs three sub-checks in order. (1) Classify the symbol tier by 24h volume. (2) Hard-check minimum volume and spread against tier-appropriate floors. (3) For altcoins, check BTC 4H directional alignment — small-cap double-counter is a hard fail; large-cap misalignment is flagged for score penalty only.",
+              "conditions": {
+                "fast_pass_major": "symbol_tier == 'major' → skip BTC correlation check (BTC/ETH ARE the reference); proceed to sub-steps 6.8.1 and 6.8.2 only",
+                "hard_fail_volume": "volume_24h_usdt < ALTCOIN_MIN_24H_VOLUME_USDT (10M) → REJECT: INSUFFICIENT_LIQUIDITY",
+                "hard_fail_spread": "spread_pct > ALTCOIN_SPREAD_MAX_PCT (0.15%) → REJECT: SPREAD_TOO_WIDE"
+              },
+              "children": [
+                {
+                  "step_id": "6.8.1",
+                  "name": "SYMBOL_TIER_CLASSIFICATION",
+                  "module_or_function": "decision_tree_bridge.py → _classify_symbol_tier()",
+                  "_annotation": "NEW in v1.4. Classifies the symbol into a liquidity tier based on 24h volume. Tier determines which subsequent checks apply and at what strictness. Tier is NOT a hard gate itself — it informs 6.8.2 and 6.8.3.",
+                  "inputs": [
+                    "symbol",
+                    "volume_24h_usdt",
+                    "current_bid, current_ask"
+                  ],
+                  "decision_logic": "Classifies by 24h volume thresholds. Computes spread_pct from current bid/ask. Outputs are passed to 6.8.2 and 6.8.3.",
+                  "outputs": [
+                    "symbol_tier: 'major' | 'large_cap_alt' | 'small_cap_alt'",
+                    "volume_24h_usdt: float",
+                    "spread_pct: float (= (ask - bid) / mid_price)"
+                  ],
+                  "conditions": {
+                    "major": "volume_24h_usdt >= ALTCOIN_TIER_MAJOR_VOLUME_USD ($500M) → symbol_tier = 'major' (e.g. BTCUSDT, ETHUSDT)",
+                    "large_cap_alt": "volume_24h_usdt >= ALTCOIN_TIER_LARGE_CAP_VOLUME_USD ($50M) AND < $500M → symbol_tier = 'large_cap_alt' (e.g. SOLUSDT, BNBUSDT, XRPUSDT)",
+                    "small_cap_alt": "volume_24h_usdt < $50M → symbol_tier = 'small_cap_alt'",
+                    "spread_formula": "spread_pct = (current_ask - current_bid) / ((current_ask + current_bid) / 2)"
+                  }
+                },
+                {
+                  "step_id": "6.8.2",
+                  "name": "VOLUME_AND_SPREAD_GATE",
+                  "module_or_function": "decision_tree_bridge.py → _check_volume_and_spread()",
+                  "_annotation": "NEW in v1.4. Hard gate on execution feasibility. Minimum volume ensures FVGs and liquidity zones are real (not sparse, easily swept by a single large order). Maximum spread ensures entry price precision is not degraded below TCT tolerance.",
+                  "inputs": [
+                    "volume_24h_usdt from step 6.8.1",
+                    "spread_pct from step 6.8.1",
+                    "symbol_tier from step 6.8.1"
+                  ],
+                  "decision_logic": "Hard fails if volume is below the minimum or spread is above the maximum. These thresholds apply to ALL tiers — even majors can fail if their spread is anomalous (e.g. during extreme volatility events).",
+                  "outputs": [
+                    "volume_gate_passed: bool",
+                    "spread_gate_passed: bool",
+                    "rejection_reason: string | null"
+                  ],
+                  "conditions": {
+                    "volume_hard_fail": "volume_24h_usdt < ALTCOIN_MIN_24H_VOLUME_USDT (10M USDT) → REJECT. rejection_reason = 'INSUFFICIENT_LIQUIDITY: {symbol} volume={volume_24h_usdt:.0f} < 10M threshold'",
+                    "spread_hard_fail": "spread_pct > ALTCOIN_SPREAD_MAX_PCT (0.15%) → REJECT. rejection_reason = 'SPREAD_TOO_WIDE: {symbol} spread={spread_pct:.4f} > 0.15% threshold'",
+                    "pass": "volume_24h_usdt >= 10M AND spread_pct <= 0.15% → PASS",
+                    "volume_rationale": "Below $10M volume, limit orders at FVG boundaries may not fill or may move price significantly. SL and TP orders cannot be relied upon to execute at stated prices.",
+                    "spread_rationale": "A 0.15% spread on a 0.2% BOS distance (step 5.0) means the setup's entry edge is nearly consumed by transaction costs before the trade begins."
+                  }
+                },
+                {
+                  "step_id": "6.8.3",
+                  "name": "BTC_CORRELATION_ALIGNMENT_GATE",
+                  "module_or_function": "decision_tree_bridge.py → _check_btc_correlation()",
+                  "_annotation": "NEW in v1.4. Altcoins are structurally correlated to BTC during most market regimes. A counter-BTC setup on an altcoin carries significantly elevated failure risk. Hard gate for small-cap double-counter (counter-BTC + counter-htf_bias). Soft penalty for large-cap misalignment (score deduction at step 7.9).",
+                  "inputs": [
+                    "symbol_tier from step 6.8.1",
+                    "btc_4h_bias: 'bullish' | 'bearish' | 'neutral' (from BTC HTF structure, same 6CR pivot method as step 2.0 applied to BTC 4H)",
+                    "schematic.direction from step 4.0",
+                    "htf_bias from step 2.0"
+                  ],
+                  "decision_logic": "Major symbols bypass this check entirely. For large_cap_alt: checks BTC 4H bias against schematic direction — misalignment flags btc_correlation_status='misaligned_soft' for penalty at step 7.9, but does NOT hard fail. For small_cap_alt: if BTC 4H bias is OPPOSITE to schematic.direction AND htf_bias is ALSO opposite (double-counter) → HARD FAIL. If only BTC is misaligned but htf_bias is aligned → soft penalty only.",
+                  "outputs": [
+                    "btc_correlation_status: 'exempt' | 'aligned' | 'misaligned_soft' | 'misaligned_hard'",
+                    "btc_4h_bias: string",
+                    "correlation_gate_passed: bool",
+                    "rejection_reason: string | null"
+                  ],
+                  "conditions": {
+                    "exempt": "symbol_tier == 'major' → btc_correlation_status = 'exempt', correlation_gate_passed = True",
+                    "aligned": "schematic.direction matches btc_4h_bias → btc_correlation_status = 'aligned', correlation_gate_passed = True",
+                    "btc_neutral_pass": "btc_4h_bias == 'neutral' → btc_correlation_status = 'aligned' (neutral BTC does not oppose any direction), correlation_gate_passed = True",
+                    "large_cap_misalignment": "symbol_tier == 'large_cap_alt' AND schematic.direction ≠ btc_4h_bias AND btc_4h_bias ≠ 'neutral' → btc_correlation_status = 'misaligned_soft', correlation_gate_passed = True (soft penalty at 7.9, NOT a hard fail)",
+                    "small_cap_soft_fail": "symbol_tier == 'small_cap_alt' AND schematic.direction ≠ btc_4h_bias AND htf_bias == schematic.direction → btc_correlation_status = 'misaligned_soft', correlation_gate_passed = True (htf aligned but BTC misaligned — score penalty only)",
+                    "small_cap_hard_fail": "symbol_tier == 'small_cap_alt' AND schematic.direction ≠ btc_4h_bias AND htf_bias ≠ schematic.direction → btc_correlation_status = 'misaligned_hard', REJECT. rejection_reason = 'SMALL_CAP_DOUBLE_COUNTER: {symbol} tier=small_cap, schematic={schematic.direction}, btc_4h={btc_4h_bias}, htf_bias={htf_bias}'",
+                    "double_counter_rationale": "Small-cap alts moving against BOTH BTC flow and their own HTF structure simultaneously have historically near-zero follow-through probability. This is the highest-risk counter-bias configuration and is non-negotiable."
+                  }
+                }
+              ]
+                "hard_fail_if": "HTF range intact (duration ≥ 24h) AND local displacement < 25% AND htf_bias ≠ session_bias → REJECT",
+                "exception_choch": "If Change of Character (CHoCH) detected via domino effect (L3→L2→L1 confirmation) → bypass RIG",
+                "exception_model_flow": "Model 1 → Model 2 conversion or schematic conversion → bypass allowed"
+              }
+            },
+            {
+              "step_id": "6.8",
+              "name": "POINT_OF_INTEREST_CONFLUENCE_GATE",
+              "_annotation": "NEW (POI validation): Hard gate that requires a qualifying Tier-1 or Tier-2 POI to be present at BOTH the Tap3 zone AND the BOS entry zone. A POI only at Tap3 but not at the entry is insufficient — the entry itself must have structural justification. Consumes poi_list from step 6.4 and BOS entry zone from step 5.0.",
+              "module_or_function": "decision_tree_bridge.py → validate_poi_confluence(poi_list, entry_zone, tap3_price)",
+              "inputs": ["poi_list from step 6.4", "refined_entry_price from step 5.0 / 5.1", "tap3_price from step 4.0", "bos_contested from step 5.2", "sr_levels from step 3.2"],
+              "decision_logic": "Checks two zones for POI presence: Zone A = Tap3 area (within POI_PROXIMITY_TO_TAP3_PCT of tap3_price) and Zone B = BOS entry area (within POI_PROXIMITY_TO_TAP3_PCT of refined_entry_price). Requires at least one unmitigated POI in Zone A AND at least one unmitigated POI in Zone B. If a contested BOS was flagged in step 5.2, the contesting S/R level must itself have a Tier-1 POI or the trade is rejected.",
+              "outputs": ["poi_tap3_valid: bool", "poi_entry_valid: bool", "poi_confluence_passed: bool", "best_poi_tier: 1 | 2 | null"],
+              "conditions": {
+                "HARD_GATE_zone_A": "No unmitigated POI in Zone A (Tap3 ± 1%) → HARD FAIL",
+                "HARD_GATE_zone_B": "No unmitigated POI in Zone B (entry ± 1%) → HARD FAIL",
+                "tier_1_bonus": "Tier-1 POI (FVG or RTZ) in Zone B → best_poi_tier = 1 → +5 pts forwarded to tree 2 scoring (step 7.2)",
+                "tier_2_only": "Only Tier-2 POI (OB or S/R level) in Zone B → best_poi_tier = 2 → no bonus; trade still valid",
+                "contested_bos_sr_requirement": "bos_contested = True → contesting S/R level MUST have a Tier-1 POI or trade is REJECTED",
+                "sr_level_as_poi": "An S/R level identified in step 3.2 within POI_PROXIMITY_TO_TAP3_PCT of the entry counts as a Tier-2 POI in Zone B"
+              }
+            }
+          ]
+        },
+
+        {
+          "step_id": "7.0",
+          "name": "COMPOSITE_SCORING",
+          "module_or_function": "decision_tree_bridge.py → compute_composite_score_v2()",
+          "_annotation": "v1.3 — composite_score is defined as the sum of all tree scores capped at COMPOSITE_SCORE_MAX (100). session_additive IS included in this sum. session_multiplier and rig_confidence_factor are NOT applied here — they are applied at step 8.4. Added htf_bias and ltf_bias inputs to provide context signals to scoring trees. Counter LTF bias applies a −5 penalty via tree 5 (TCT 5B real-world).",
+
+  "inputs": [
+    "all gate results from step 6.0",
+    "range quality from step 3.0",
+    "schematic details from step 4.0",
+    "BOS details from step 5.0",
+    "session_additive and session_multiplier from step 7.8",
+    "R:R ratio from step 6.3",
+    "htf_bias from step 2.0",
+    "ltf_bias from step 2.3"
+  ],
+
+  "decision_logic": "Sums scores from all 8 sub-steps (T1–T6 + rr_bonus + session_additive) into raw_composite_score, then caps at 100. Does NOT compare against the entry threshold — that check happens at step 8.4 after all multipliers are applied. LTF bias counter to HTF bias applies a −5 penalty within Tree 5 scoring.",
+
+  "outputs": [
+    "raw_composite_score: int (0-110, pre-cap)",
+    "composite_score: int (0-100, after cap)",
+    "tree_results: object (per-tree breakdown for diagnostics)",
+    "session_multiplier: float (passed through to step 8.4)"
+  ],
+          "_annotation": "MODIFIED (bias-init enforcement): Added htf_bias and ltf_bias to inputs. The scoring engine now receives both bias values and uses them as a context signal across all scoring trees. A fully aligned HTF+LTF bias does not add bonus points but a counter ltf_bias applies a score penalty (−5 pts) via tree 5 (TCT 5B real-world) to reflect execution risk.",
+          "inputs": ["all gate results from step 6.0", "range quality from step 3.0", "schematic details from step 4.0", "BOS details from step 5.0", "session timing", "R:R ratio", "htf_bias from step 2.0", "ltf_bias from step 2.3"],
+          "decision_logic": "If all hard gates pass, computes a composite score from 0-100 across 6 scoring trees plus R:R bonus. Each tree contributes a weighted score. The total must meet or exceed the entry threshold (60 for v2, 50 for v1) to trigger trade entry.",
+          "outputs": ["composite_score: int (0-100)", "tree_results: object", "entry_decision: bool"],
+          "conditions": {
+            "score_formula": "raw_composite_score = range_score(T1) + sd_score(T2) + liquidity_score(T3) + tct_5a_score(T4) + tct_5b_score(T5) + advanced_score(T6) + rr_bonus(T7) + session_additive(T8) + microstructure_score(T9)",
+            "score_cap": "composite_score = min(raw_composite_score, COMPOSITE_SCORE_MAX=100)",
+            "score_cap_rationale": "Session additive and microstructure score can push raw above 100. Cap at 100 ensures step 8.4 multipliers always operate on a bounded [0,100] base.",
+            "max_by_component": {
+              "T1_range_structure":       "0-20",
+              "T2_supply_demand":         "0-20",
+              "T3_liquidity":             "0-15",
+              "T4_tct_5a":               "0-20",
+              "T5_tct_5b":               "0-15",
+              "T6_advanced":             "0-5",
+              "T7_rr_bonus":             "0-5",
+              "T8_session_additive":     "2-10",
+              "T9_microstructure":       "0-10",
+              "raw_max":                 120,
+              "capped_max":              100,
+              "_note_v1_4": "T9 added in v1.4. Raw max updated from 110 to 120. Cap unchanged at 100."
+            },
+            "no_threshold_check": "Step 7.0 does NOT check against entry threshold. The sole threshold comparison is at step 8.4 after session_multiplier and rig_confidence_factor are applied."
+          },
+          "children": [
+            {
+              "step_id": "7.1",
+              "name": "TREE_1_RANGE_STRUCTURE",
+              "module_or_function": "decision_tree_bridge.py → _score_ranges_tree()",
+              "inputs": ["range quality", "horizontal validation", "EQ touches", "liquidity stacking"],
+              "decision_logic": "Scores the quality and validity of the identified consolidation range.",
+              "outputs": ["range_score: 0-20"],
+              "conditions": {
+                "full_pass": "Valid horizontal range with EQ touched and liquidity stacking → 20 pts",
+                "partial_pass": "Range found but quality concerns → 10-15 pts",
+                "soft_fail": "Range validation issues → 5 pts (does not reject, just low score)"
+              }
+            },
+            {
+              "step_id": "7.2",
+              "name": "TREE_2_SUPPLY_DEMAND",
+              "module_or_function": "decision_tree_bridge.py → _score_supply_demand_tree()",
+              "inputs": ["FVG zones", "OB zones", "proximity to Tap3"],
+              "decision_logic": "Scores the presence and quality of supply/demand zones near the entry area.",
+              "outputs": ["sd_score: 0-20"],
+              "conditions": {
+                "full_pass": "FVG present and unmitigated in correct zone → 20 pts",
+                "partial_pass": "OB only (no FVG) → 10-15 pts",
+                "hard_gate_fail": "No FVG at all → HARD FAIL (overrides score, entire trade rejected)"
+              }
+            },
+            {
+              "step_id": "7.3",
+              "name": "TREE_3_LIQUIDITY",
+              "module_or_function": "decision_tree_bridge.py → _score_liquidity_tree()",
+              "inputs": ["sweep classification from step 6.5"],
+              "decision_logic": "Scores the quality of the liquidity sweep event.",
+              "outputs": ["liquidity_score: 0-15"],
+              "conditions": {
+                "full_pass": "Clean sweep classified and accepted back → 15 pts",
+                "partial_pass": "Deep break but accepted back → 8-10 pts",
+                "soft_fail": "Unclear sweep → 5 pts"
+              }
+            },
+            {
+              "step_id": "7.4",
+              "name": "TREE_4_TCT_5A",
+              "module_or_function": "decision_tree_bridge.py → _score_tct_5a_tree()",
+              "inputs": ["schematic validity from step 6.6", "model type", "tap quality"],
+              "decision_logic": "Scores the TCT 5A schematic pattern recognition quality.",
+              "outputs": ["tct_5a_score: 0-20"],
+              "conditions": {
+                "full_pass": "All schematic elements confirmed → 20 pts",
+                "partial_pass": "Schematic with minor issues → 10-15 pts",
+                "hard_gate_fail": "Schematic INVALID → HARD FAIL"
+              }
+            },
+            {
+              "step_id": "7.5",
+              "name": "TREE_5_TCT_5B_REAL_WORLD",
+              "module_or_function": "decision_tree_bridge.py → _score_tct_5b_tree()",
+              "inputs": ["tap spacing", "BOS distance", "entry precision", "real-world chart conformance"],
+              "decision_logic": "Scores real-world execution factors — how clean the setup looks on actual charts vs theoretical patterns.",
+              "outputs": ["tct_5b_score: 0-15"],
+              "conditions": {
+                "full_pass": "Clean taps, good BOS distance (≥ 0.2%), proper spacing → 15 pts",
+                "partial_pass": "Some execution concerns → 8-10 pts",
+                "low_score": "Messy execution → 3-5 pts"
+              }
+            },
+            {
+              "step_id": "7.6",
+              "name": "TREE_6_ADVANCED_FLIP_ESCALATION",
+              "module_or_function": "decision_tree_bridge.py → _score_advanced_tree()",
+              "inputs": ["flip detection (acc→dist or dist→acc)", "escalation patterns", "multi-TF confluence"],
+              "decision_logic": "Bonus scoring for advanced pattern recognition — schematic flips, escalation setups, and multi-timeframe confluence signals.",
+              "outputs": ["advanced_score: 0-5"],
+              "conditions": {
+                "flip_detected": "Accumulation-to-distribution flip (or vice versa) → +3-5 pts",
+                "escalation": "Higher-TF schematic nesting → +2-3 pts",
+                "none": "No advanced patterns → 0 pts"
+              }
+            },
+            {
+              "step_id": "7.7",
+              "name": "RR_BONUS",
+              "module_or_function": "decision_tree_bridge.py (inline)",
+              "inputs": ["rr_ratio from step 6.3"],
+              "decision_logic": "Awards bonus points for excellent risk-to-reward ratios.",
+              "outputs": ["rr_bonus: 0-5"],
+              "conditions": {
+                "excellent_rr": "R:R >= 3.0 → +5 pts",
+                "good_rr": "R:R >= 2.5 → +3 pts",
+                "standard_rr": "R:R >= 1.5 (minimum) → +0 pts"
+              }
+            },
+            {
+              "step_id": "7.8",
+              "name": "SESSION_TIMING_ADJUSTMENT",
+              "module_or_function": "decision_tree_bridge.py → _score_session_timing()",
+              "inputs": ["current UTC hour"],
+              "decision_logic": "Determines the active trading session from the current UTC hour and returns both a session score additive (added directly to composite_score) and a session confidence multiplier (used in step 8.4). NOT a hard gate — but the multiplier in step 8.4 CAN cause a trade to fail threshold after adjustment.",
+              "outputs": ["session_score: 2-10", "active_session: string", "session_multiplier: float"],
+              "_annotation": "MSCE v1.1 — Step 7.8 now outputs both a score additive (unchanged from v1.0) and a session_multiplier. The multiplier is NOT applied here; it is passed to step 8.4 for adjusted_confidence computation. Score additives in conditions match constants.MSCE_SESSION_MULTIPLIERS[session].score_additive.",
+              "conditions": {
+                "_session_windows_note": "Windows are non-overlapping UTC ranges. london_ny is evaluated BEFORE london and ny to capture the overlap correctly.",
+                "london_ny_overlap": {
+                  "utc_range": "13:00–16:00 UTC",
+                  "score_additive": 10,
+                  "session_multiplier": 1.25,
+                  "label": "London/NY overlap — peak liquidity",
+                  "rationale": "Both European and US institutions active. Highest historical follow-through rate on BOS signals. Maximum confidence."
+                },
+                "ny_session": {
+                  "utc_range": "16:00–21:00 UTC",
+                  "score_additive": 7,
+                  "session_multiplier": 1.15,
+                  "label": "NY session — strong confidence",
+                  "rationale": "US institutional flow dominant after London close. Clean directional moves, reliable FVG fills."
+                },
+                "london_session": {
+                  "utc_range": "07:00–13:00 UTC",
+                  "score_additive": 7,
+                  "session_multiplier": 1.10,
+                  "label": "London session — elevated confidence",
+                  "rationale": "European open ramps volume. Range breakouts carry more weight than Asia. Slightly lower than NY due to frequent reversals at London close."
+                },
+                "asia_session": {
+                  "utc_range": "00:00–07:00 UTC",
+                  "score_additive": 3,
+                  "session_multiplier": 0.85,
+                  "label": "Asia session — reduced confidence",
+                  "rationale": "Low liquidity, thin books. Stop-hunt deviations are common but reversal follow-through is weak. Higher false-positive rate on BOS. Multiplier intentionally conservative."
+                },
+                "off_hours": {
+                  "utc_range": "21:00–24:00 UTC",
+                  "score_additive": 2,
+                  "session_multiplier": 0.90,
+                  "label": "NY close / off-hours — slightly reduced confidence",
+                  "rationale": "Position squaring at NY close creates noise. Setups often reverse at Asia open. Small penalty applied."
+                }
+              },
+              "msce_multiplier_table": {
+                "_note": "Reference table matching constants.MSCE_SESSION_MULTIPLIERS. Source of truth is the constants block.",
+                "asia":       { "utc": "00–07", "multiplier": 0.85, "score_additive": 3  },
+                "london":     { "utc": "07–13", "multiplier": 1.10, "score_additive": 7  },
+                "london_ny":  { "utc": "13–16", "multiplier": 1.25, "score_additive": 10 },
+                "ny":         { "utc": "16–21", "multiplier": 1.15, "score_additive": 7  },
+                "off_hours":  { "utc": "21–24", "multiplier": 0.90, "score_additive": 2  }
+              }
+            },
+            {
+              "step_id": "7.9",
+              "name": "TREE_9_MARKET_MICROSTRUCTURE",
+              "module_or_function": "decision_tree_bridge.py → _score_market_microstructure()",
+              "_annotation": "NEW in v1.4. Soft scoring tree for market microstructure quality. NOT a hard gate — low scores reduce the composite score but do not reject the trade. Contributes 0-10 pts to raw_composite_score. Inputs are exchange-sourced: funding rate (perpetual), open interest, and CVD from the 1H chart.",
+              "inputs": [
+                "current_funding_rate_per_8h (perpetual futures funding)",
+                "oi_series: open interest over last OI_TREND_LOOKBACK_PERIODS (6 × 4H candles)",
+                "cvd_series: cumulative volume delta over last CVD_TREND_LOOKBACK_PERIODS (12 × 1H candles)",
+                "schematic.direction from step 4.0",
+                "btc_correlation_status from step 6.8.3"
+              ],
+              "outputs": ["microstructure_score: 0-10"],
+              "decision_logic": "Sums three sub-scores: funding_rate_score (0-4 pts), oi_trend_score (0-3 pts), and cvd_alignment_score (0-3 pts). Returns total microstructure_score for addition to composite_score in step 7.0.",
+              "children": [
+                {
+                  "step_id": "7.9.1",
+                  "name": "FUNDING_RATE_ASSESSMENT",
+                  "module_or_function": "decision_tree_bridge.py → _score_funding_rate()",
+                  "_annotation": "NEW in v1.4. Funding rate measures whether the perpetual futures market is overcrowded in one direction. High positive funding means longs are paying shorts — longs are overcrowded, increasing reversal risk for long trades. Scoring is direction-sensitive: extreme funding AGAINST the trade direction = maximum penalty; extreme funding IN FAVOR (market paying you) = reward.",
+                  "inputs": [
+                    "current_funding_rate_per_8h",
+                    "schematic.direction"
+                  ],
+                  "outputs": ["funding_rate_score: 0-4"],
+                  "conditions": {
+                    "neutral_funding": "abs(funding_rate) < FUNDING_RATE_NEUTRAL_THRESHOLD (0.01%) → funding_rate_score = 4 (healthy, no crowd imbalance)",
+                    "elevated_against_trade_long": "funding_rate > FUNDING_RATE_ELEVATED_THRESHOLD (0.03%) AND schematic.direction == 'bullish' → funding_rate_score = 2 (longs overcrowded, elevated risk)",
+                    "elevated_against_trade_short": "funding_rate < -FUNDING_RATE_ELEVATED_THRESHOLD AND schematic.direction == 'bearish' → funding_rate_score = 2 (shorts overcrowded)",
+                    "extreme_against_trade_long": "funding_rate > FUNDING_RATE_EXTREME_THRESHOLD (0.05%) AND schematic.direction == 'bullish' → funding_rate_score = 0 (severely overcrowded longs — high reversal risk)",
+                    "extreme_against_trade_short": "funding_rate < -FUNDING_RATE_EXTREME_THRESHOLD AND schematic.direction == 'bearish' → funding_rate_score = 0 (severely overcrowded shorts)",
+                    "funding_favors_trade_long": "funding_rate < -FUNDING_RATE_ELEVATED_THRESHOLD AND schematic.direction == 'bullish' → funding_rate_score = 4 (shorts paying longs — squeeze fuel available)",
+                    "funding_favors_trade_short": "funding_rate > FUNDING_RATE_ELEVATED_THRESHOLD AND schematic.direction == 'bearish' → funding_rate_score = 4 (longs paying shorts — squeeze fuel available)",
+                    "elevated_aligned": "Elevated funding in trade direction (not extreme) → funding_rate_score = 3"
+                  }
+                },
+                {
+                  "step_id": "7.9.2",
+                  "name": "OI_TREND_ALIGNMENT",
+                  "module_or_function": "decision_tree_bridge.py → _score_oi_trend()",
+                  "_annotation": "NEW in v1.4. Open interest trend measures whether institutional smart money is entering or exiting. Rising OI in the direction of the trade indicates new positions are being built — conviction. Declining OI signals unwinding, which is hostile to continuation setups.",
+                  "inputs": [
+                    "oi_series (last 6 × 4H candles = 24h window)",
+                    "schematic.direction"
+                  ],
+                  "outputs": ["oi_trend_score: 0-3"],
+                  "conditions": {
+                    "oi_trend_formula": "oi_trend = (oi_series[-1] - oi_series[0]) / oi_series[0] (fractional change over 24h)",
+                    "rising_oi_aligned": "oi_trend > +0.02 (>2% increase) AND price is moving in schematic.direction → oi_trend_score = 3 (institutional flow entering in trade direction)",
+                    "flat_oi": "abs(oi_trend) <= 0.02 → oi_trend_score = 1 (neutral — no clear commitment signal)",
+                    "rising_oi_opposing": "oi_trend > +0.02 AND price is moving AGAINST schematic.direction → oi_trend_score = 2 (OI building but against our direction — potential stop hunt territory, still useful context)",
+                    "declining_oi": "oi_trend < -0.02 → oi_trend_score = 0 (positions being closed — hostile to continuation)",
+                    "oi_direction_proxy": "Price direction for OI alignment is inferred from the last 6 × 4H candle close sequence (same direction as schematic = aligned OI buildup)"
+                  }
+                },
+                {
+                  "step_id": "7.9.3",
+                  "name": "CVD_ALIGNMENT",
+                  "module_or_function": "decision_tree_bridge.py → _score_cvd_alignment()",
+                  "_annotation": "NEW in v1.4. CVD (Cumulative Volume Delta) measures net buying vs selling pressure. A bullish schematic with rising CVD means real buy orders are being executed at ask — confirming institutional accumulation. Divergence (price rising but CVD flat/declining) warns of low-conviction moves.",
+                  "inputs": [
+                    "cvd_series (last 12 × 1H candles = 12h window)",
+                    "schematic.direction"
+                  ],
+                  "outputs": ["cvd_alignment_score: 0-3"],
+                  "conditions": {
+                    "cvd_trend_formula": "cvd_trend_direction = 'bullish' if cvd_series[-1] > cvd_series[0] else 'bearish'",
+                    "strong_aligned_cvd": "cvd_trend_direction == schematic.direction AND abs(cvd_series[-1] - cvd_series[0]) / max(abs(cvd_series)) > 0.10 (>10% of range moved) → cvd_alignment_score = 3 (strong confirming pressure)",
+                    "weak_aligned_cvd": "cvd_trend_direction == schematic.direction AND change <= 10% → cvd_alignment_score = 2 (mild confirmation)",
+                    "flat_cvd": "CVD change < 2% of range → cvd_alignment_score = 1 (neutral — no directional pressure signal)",
+                    "diverging_cvd": "cvd_trend_direction ≠ schematic.direction → cvd_alignment_score = 0 (divergence: price moving one way, order flow the other — high reversal risk)",
+                    "btc_correlation_bonus": "If btc_correlation_status == 'misaligned_soft' (large-cap alt counter-BTC) → cvd_alignment_score = max(cvd_alignment_score - 1, 0) (apply -1 penalty to CVD score to reflect additional counter-flow risk)"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+
+        {
+          "step_id": "8.0",
+          "name": "TRADE_EXECUTION",
+          "module_or_function": "trade_execution.py → generate_execution_plan() / calculate_position_size()",
+          "_annotation": "v1.3 — Execution step no longer performs a raw composite_score threshold check. Step 8.4 (EXECUTION_CONFIDENCE_AGGREGATION) is the single authoritative gate. Added htf_bias and ltf_bias inputs so bias context is embedded in execution metadata and persisted to trade logs for post-trade analysis.",
+
+  "inputs": [
+    "composite_score from step 7.0",
+    "session_multiplier from step 7.8",
+    "entry_price",
+    "stop_price",
+    "target_price",
+    "account_balance",
+    "leverage",
+    "htf_bias from step 2.0",
+    "ltf_bias from step 2.3"
+  ],
+
+  "decision_logic": "Routes to execution sub-steps in order: 8.4 (execution_confidence aggregation + threshold gate) → 8.1 (position sizing) → 8.2 (liquidation safety check) → 8.3 (order placement). If step 8.4 rejects, the pipeline stops and the scan cycle continues. Bias values are attached to execution metadata for logging but do not affect threshold gating here.",
+
+  "outputs": [
+    "position_size (USDT)",
+    "margin_required",
+    "liquidation_price",
+    "order_type",
+    "execution_plan",
+    "execution_confidence (from step 8.4)"
+  ],
+          "conditions": {
+            "entry_route": "All trades reaching step 8.0 have passed all 7 hard gates (step 6.0). Proceed directly to step 8.4 for confidence aggregation.",
+            "sole_threshold_gate": "execution_confidence (step 8.4) >= entry_threshold → trade executes. Below threshold → NO TRADE, log confidence_components, continue scanning.",
+            "_removed_v1_3": "Pre-filter 'composite_score >= threshold' removed. Rationale: with the RIG penalty factor, a raw score above threshold may still fail after multipliers are applied, and conversely a London/NY overlap trade with a lower raw score may still pass. Pre-filtering on raw score would incorrectly reject valid setups."
+          },
+          "children": [
+            {
+              "step_id": "8.1",
+              "name": "POSITION_SIZING",
+              "module_or_function": "trade_execution.py → calculate_position_size()",
+              "inputs": ["account_balance", "risk_per_trade (1%)", "entry_price", "stop_price", "leverage"],
+              "decision_logic": "Calculates position size based on fixed 1% risk per trade. Position = (balance × risk%) / |entry - stop| × leverage. Ensures margin does not exceed available balance.",
+              "outputs": ["position_size_usd", "position_size_contracts", "margin_required"],
+              "conditions": {
+                "risk_formula": "position_size = (balance × 0.01) / abs(entry - stop) × entry",
+                "margin_check": "margin = position_size / leverage; must be ≤ available_balance",
+                "no_dynamic_scaling": "Risk is FIXED at 1% — does not adjust based on confidence, score, or MSCE session multiplier. The MSCE multiplier affects ONLY the execution confidence gate (step 8.4), never position size."
+              }
+            },
+            {
+              "step_id": "8.2",
+              "name": "LIQUIDATION_SAFETY_CHECK",
+              "module_or_function": "trade_execution.py → check_liquidation_safety()",
+              "inputs": ["entry_price", "stop_price", "leverage", "direction", "margin_mode (ISOLATED)"],
+              "decision_logic": "Calculates the estimated liquidation price and verifies it is safely OUTSIDE the stop loss. This is non-negotiable per TCT Lecture 9 — liquidation must never be hit before stop loss.",
+              "outputs": ["liquidation_price", "is_safe: bool", "safety_margin_pct"],
+              "conditions": {
+                "long_safety": "liquidation_price < stop_price → SAFE",
+                "long_danger": "liquidation_price >= stop_price → DANGER: reduce leverage or reject",
+                "short_safety": "liquidation_price > stop_price → SAFE",
+                "short_danger": "liquidation_price <= stop_price → DANGER: reduce leverage or reject",
+                "margin_mode_requirement": "ISOLATED only — never cross margin"
+              }
+            },
+            {
+              "step_id": "8.3",
+              "name": "ORDER_PLACEMENT",
+              "module_or_function": "trade_execution.py → generate_execution_plan()",
+              "inputs": ["position_size", "entry_price", "stop_price", "target_price", "direction"],
+              "decision_logic": "Generates the final order specification. Primary entry is MARKET order (95% of entries — at BOS confirmation). Limit orders used for partial take-profits.",
+              "outputs": ["order_spec: {type, side, size, price, sl, tp}", "order_submitted: bool"],
+              "conditions": {
+                "entry_order_type": "MARKET (at BOS confirmation) — 95% of trades",
+                "limit_alternative": "LIMIT at refined LTF price — 5% of trades (better entry but may miss)",
+                "stop_loss_order": "Placed simultaneously as SL order",
+                "take_profit_order": "Placed simultaneously as TP order"
+              }
+            },
+            {
+              "step_id": "8.4",
+              "name": "EXECUTION_CONFIDENCE_AGGREGATION",
+              "module_or_function": "decision_tree_bridge.py → compute_execution_confidence()",
+              "_annotation": "v1.3 — Renamed and expanded from MSCE_EXECUTION_CONFIDENCE_ADJUSTMENT. Now aggregates ALL confidence factors in a defined, sequential formula: composite_score cap → session multiplier (MSCE) → RIG confidence penalty. This is the single authoritative threshold gate. The redundant pre-check that was in step 8.0 has been removed. Position sizing (step 8.1) is never touched.",
+              "inputs": [
+                "composite_score from step 7.0 (already capped at 100)",
+                "session_multiplier from step 7.8",
+                "active_session from step 7.8",
+                "rig_verdict_path from step 6.7.4",
+                "entry_threshold (ENTRY_THRESHOLD_V2=60 or ENTRY_THRESHOLD_V1=50)"
+              ],
+              "decision_logic": "Applies the three-factor execution confidence formula in order. First caps the score (already done at step 7.0, verified here). Then applies the MSCE session multiplier. Then applies the RIG confidence factor based on how the trade cleared the Range Integrity Gate. The product is execution_confidence. This single value is compared against the entry threshold — the ONLY threshold check in the pipeline.",
+              "outputs": [
+                "execution_confidence: float",
+                "confidence_gate_passed: bool",
+                "confidence_components: object (shows each factor and intermediate value)",
+                "rejection_reason: string | null"
+              ],
+              "conditions": {
+                "_formula_chain": "Three sequential multipliers applied to produce execution_confidence:",
+                "step_1_cap": "capped_score = min(composite_score, 100)  — defense against raw scores > 100 (already applied at step 7.0; verified here)",
+                "step_2_session": "session_adjusted = capped_score × session_multiplier  — MSCE: rewards high-volume sessions, penalizes low-liquidity sessions",
+                "step_3_rig": "execution_confidence = session_adjusted × rig_confidence_factor  — RIG: penalizes counter-bias trades based on how they cleared the gate",
+                "full_formula": "execution_confidence = min(composite_score, 100) × session_multiplier × rig_confidence_factor",
+                "rig_factor_lookup": {
+                  "_source": "constants.RIG_CONFIDENCE_PENALTIES — canonical values; lookup key = rig_verdict_path prefix (before any ':' character)",
+                  "aligned_trade":               1.00,
+                  "range_boundary_broken":        1.00,
+                  "choch_bypass:model_flow":      0.97,
+                  "choch_bypass:full_domino":     0.95,
+                  "choch_bypass:partial_domino":  0.90,
+                  "displacement_sufficient":      0.85,
+                  "_fallback": "If rig_verdict_path is unrecognised → use 1.00 and log warning (fail-safe: do not penalise unknown paths)"
+                },
+                "threshold_check": "execution_confidence >= entry_threshold → PASS → proceed to order placement",
+                "threshold_fail":  "execution_confidence < entry_threshold → REJECT → log full confidence_components breakdown",
+                "rejection_log_format": "'CONFIDENCE_BELOW_THRESHOLD: composite={capped_score}, ×session({active_session})={session_multiplier}, ×rig({rig_verdict_path})={rig_confidence_factor} → execution_confidence={execution_confidence:.2f} < threshold={entry_threshold}'",
+                "no_position_size_scaling": "execution_confidence controls ONLY the entry gate. The 1% fixed risk rule (step 8.1) is invariant — position size and risk % are never adjusted by session or RIG factors.",
+                "log_always": "Always emit confidence_components regardless of pass/fail. Required for diagnostic dashboard (step 14.0) and backtesting.",
+                "session_fallback": "If active_session cannot be resolved from UTC hour → use session_multiplier=1.00 and log warning",
+                "rig_fallback": "If rig_verdict_path is absent (e.g. RIG was not reached due to fast-pass) → use rig_confidence_factor=1.00",
+                "worked_examples": {
+                  "aligned_london_ny_strong":    "composite=75, session=london_ny(×1.25), rig=aligned_trade(×1.00) → min(75,100)×1.25×1.00 = 93.75 → PASSES",
+                  "aligned_asia_borderline":     "composite=62, session=asia(×0.85), rig=aligned_trade(×1.00) → 62×0.85×1.00 = 52.7 → FAILS v2(60)",
+                  "counter_ny_full_domino":      "composite=68, session=ny(×1.15), rig=full_domino(×0.95) → 68×1.15×0.95 = 74.3 → PASSES",
+                  "counter_london_partial_choch":"composite=63, session=london(×1.10), rig=partial_domino(×0.90) → 63×1.10×0.90 = 62.4 → PASSES barely",
+                  "counter_asia_displacement":   "composite=70, session=asia(×0.85), rig=displacement_sufficient(×0.85) → 70×0.85×0.85 = 50.6 → FAILS v2(60)",
+                  "off_hours_capped_score":      "raw_score=108(capped→100), session=off_hours(×0.90), rig=aligned_trade(×1.00) → 100×0.90×1.00 = 90.0 → PASSES",
+                  "model_flow_ny_counter":       "composite=65, session=ny(×1.15), rig=model_flow(×0.97) → 65×1.15×0.97 = 72.5 → PASSES"
+                }
+              },
+              "confidence_components_schema": {
+                "_note": "Structure of the confidence_components object emitted for every evaluation.",
+                "composite_score_raw":       "int — pre-cap sum from step 7.0",
+                "composite_score_capped":    "int — min(raw, 100)",
+                "session":                   "string — active_session label",
+                "session_multiplier":        "float — from MSCE_SESSION_MULTIPLIERS",
+                "session_adjusted_score":    "float — capped_score × session_multiplier",
+                "rig_verdict_path":          "string — from step 6.7.4",
+                "rig_confidence_factor":     "float — from RIG_CONFIDENCE_PENALTIES",
+                "execution_confidence":      "float — final value",
+                "threshold":                 "int — 60 (v2) or 50 (v1)",
+                "gate_passed":               "bool"
+              }
+            }
+          ]
+        },
+
+        {
+          "step_id": "9.0",
+          "name": "TRADE_MANAGEMENT",
+          "module_or_function": "schematics_5b_trader.py → _manage_open_position()",
+          "inputs": ["current_trade state", "live price", "entry_price", "stop_price", "target_price", "tp2_price"],
+          "decision_logic": "Once a trade is open, manages it through its lifecycle: partial take-profit at midpoint, trailing stop to breakeven, and final exit at TP or SL.",
+          "outputs": ["trade_outcome: 'tp_hit' | 'sl_hit' | 'partial_tp' | 'breakeven_exit'", "realized_pnl"],
+          "conditions": {
+            "runs_every": "Checked on each 60s scan cycle while position is open"
+          },
+          "children": [
+            {
+              "step_id": "9.1",
+              "name": "PARTIAL_TAKE_PROFIT",
+              "module_or_function": "schematics_5b_trader.py (inline management)",
+              "inputs": ["live_price", "entry_price", "target_price"],
+              "decision_logic": "When price reaches the midpoint between entry and target, close 50% of the position to lock in profit.",
+              "outputs": ["partial_closed: bool", "partial_pnl"],
+              "conditions": {
+                "bullish_trigger": "live_price >= (entry_price + target_price) / 2 → close 50%",
+                "bearish_trigger": "live_price <= (entry_price + target_price) / 2 → close 50%",
+                "one_time": "Only triggers once per trade"
+              }
+            },
+            {
+              "step_id": "9.2",
+              "name": "TRAILING_STOP_TO_BREAKEVEN",
+              "module_or_function": "schematics_5b_trader.py (inline management)",
+              "inputs": ["live_price", "entry_price", "stop_price", "partial_closed status"],
+              "decision_logic": "After partial TP is taken, move the stop loss to breakeven (entry price) to eliminate risk on remaining position.",
+              "outputs": ["stop_updated: bool", "new_stop_price"],
+              "conditions": {
+                "trigger": "After partial TP is closed → move SL to entry_price",
+                "direction_long": "new_stop = entry_price (from below)",
+                "direction_short": "new_stop = entry_price (from above)"
+              }
+            },
+            {
+              "step_id": "9.3",
+              "name": "FINAL_EXIT",
+              "module_or_function": "schematics_5b_trader.py (inline management)",
+              "inputs": ["live_price", "stop_price", "target_price", "tp2_price"],
+              "decision_logic": "Remaining position exits at full target (TP), secondary target (TP2), or stop loss (SL). Trade is then logged and state is cleared for next scan.",
+              "outputs": ["trade_closed: bool", "final_pnl", "exit_reason"],
+              "conditions": {
+                "tp_hit_long": "live_price >= target_price → close remaining at profit",
+                "tp_hit_short": "live_price <= target_price → close remaining at profit",
+                "sl_hit_long": "live_price <= stop_price → close at loss (or breakeven if trailed)",
+                "sl_hit_short": "live_price >= stop_price → close at loss (or breakeven if trailed)",
+                "tp2_optional": "If tp2_price set → close last portion at tp2 instead of tp1"
+              }
+            }
+          ]
+        },
+
+        {
+          "step_id": "10.0",
+          "name": "STATE_PERSISTENCE_AND_RECOVERY",
+          "module_or_function": "schematics_5b_trader.py → _save_trade_log() / _load_trade_log()",
+          "inputs": ["current_trade", "trade_history", "balance", "mode"],
+          "decision_logic": "Persists all trade state to disk (JSON) and optionally syncs to GitHub data branch. On restart, loads persisted state, validates it, and resumes operation.",
+          "outputs": ["schematics_5b_trade_log.json", "GitHub data branch sync"],
+          "conditions": {
+            "save_triggers": "After every trade entry, partial TP, exit, and balance change",
+            "corruption_detection": "On load: if entry_price=0 OR stop_price=0 OR target_price=0 → discard trade (treat as no open position)",
+            "github_sync": "If GITHUB_TOKEN_2 env var present → push to data branch automatically"
+          }
+        }
+      ]
+    },
+
+    {
+      "step_id": "11.0",
+      "name": "HTF_UPGRADE_MECHANISM",
+      "module_or_function": "schematics_5b_trader.py → _find_htf_upgrade()",
+      "inputs": ["current schematic timeframe", "timeframe hierarchy"],
+      "decision_logic": "After finding a schematic on one timeframe, checks if a higher timeframe also shows a valid schematic at the same level. If so, upgrades the analysis to the HTF for more significant structure. Walks up the TF hierarchy: 30m → 1h → 4h → 1d.",
+      "outputs": ["upgraded_timeframe", "htf_schematic"],
+      "conditions": {
+        "upgrade_criteria": "HTF schematic found at overlapping price levels AND same direction",
+        "hierarchy": "30m < 1h < 4h < 1d — walks upward until no match"
+      }
+    },
+
+    {
+      "step_id": "12.0",
+      "name": "ALTERNATIVE_EVALUATION_MODE_JACK",
+      "module_or_function": "jack_tct_evaluator.py → JackTCTEvaluator",
+      "inputs": ["4H candle data exclusively", "schematic", "market structure"],
+      "decision_logic": "Alternative 5-tree evaluation pipeline that uses only the 4H timeframe. Scoring weights: market_structure=20, ranges=20, s/d=20, liquidity=15, tct_5a=25. Threshold = 50. Has its own set of hard gates (MS valid, FVG present, 5A confirmed).",
+      "outputs": ["jack_score: int (0-100)", "jack_tree_results"],
+      "conditions": {
+        "activation": "Selected via evaluator mode config (not default)",
+        "4h_exclusive": "Only analyzes 4H timeframe — no LTF cascade",
+        "scoring": {
+          "market_structure_tree": "0-20 pts",
+          "ranges_tree": "0-20 pts",
+          "supply_demand_tree": "0-20 pts",
+          "liquidity_tree": "0-15 pts",
+          "tct_5a_tree": "0-25 pts",
+          "threshold": 50
+        }
+      }
+    },
+
+    {
+      "step_id": "13.0",
+      "name": "PO3_SCHEMATIC_MODE",
+      "module_or_function": "po3_schematics.py → PO3SchematicDetector",
+      "inputs": ["OHLCV candles", "range detection output"],
+      "decision_logic": "Power of Three (PO3) detection from TCT Lecture 8. Identifies three-phase pattern: Range (accumulation/distribution) → Manipulation (liquidity sweep) → Expansion (breakout in intended direction). Uses RTZ quality scoring and stricter R:R minimum of 2.0.",
+      "outputs": ["po3_schematic", "rtx_quality_score", "po3_direction"],
+      "conditions": {
+        "phase_1_range": "Horizontal consolidation identified (reuses range logic from step 3.0)",
+        "phase_2_manipulation": "Aggressive breakout that stays within DL2 (false breakout / liquidity grab)",
+        "phase_3_expansion": "Directional move in intended direction after manipulation",
+        "min_rr": "R:R >= 2.0 (stricter than standard TCT minimum of 1.5)"
+      }
+    },
+
+    {
+      "step_id": "14.0",
+      "name": "NOTIFICATIONS_AND_DIAGNOSTICS",
+      "module_or_function": "schematics_5b_trader.py / server_mexc.py",
+      "inputs": ["trade events", "evaluation results"],
+      "decision_logic": "Sends notifications on key events (trade entry, partial TP, exit) via Telegram. Exposes diagnostic data via FastAPI endpoints and WebSocket for the live dashboard. Maintains last_debug state for UI rendering.",
+      "outputs": ["Telegram messages", "WebSocket updates", "REST API responses", "/schematics-5B dashboard page"],
+      "conditions": {
+        "telegram_notify_on": ["trade_entry", "partial_tp", "trade_exit", "error"],
+        "dashboard_updates": "Pushed via WebSocket or polling every scan cycle",
+        "debug_data_exposed": "tree_results, phase_results, schematic visualization, P&L"
+      }
+    }
+  ],
+
+  "data_flow_summary": {
+    "1_market_data": "Exchange API → OHLCV candles (multi-TF)",
+    "2_structure_analysis": "Candles → 6CR Pivots (1D) → Swing H/L → HTF Bias [step 2.0–2.2] → LTF Bias derived from MTF candles (4H/1H/30M) [step 2.3] → htf_bias + ltf_bias propagated to ALL downstream steps (3.0–8.0)",
+    "3_range_detection": "Candles + htf_bias + ltf_bias → Range boundaries → EQ + DL2 → [3.1] V-shape/impulse HARD GATE → [3.2] S/R alignment quality check → [3.3] Impulsive move HARD GATE",
+    "4_schematic_build": "Range + Candles → Tap1/2/3 → Model classification",
+    "MSCE_SESSION_MULTIPLIERS": {...},
+    "MSCE_ADJUSTED_THRESHOLD_V2": 60,
+    "MSCE_ADJUSTED_THRESHOLD_V1": 50,
+    "RIG_MIN_DURATION_HOURS": 24,
+    "RIG_DISPLACEMENT_THRESHOLD_PCT": 0.25,
+    "RIG_DISPLACEMENT_SESSION_THRESHOLDS": {...},
+    "RIG_CHOCH_LEVELS_REQUIRED": 3,
+    "COMPOSITE_SCORE_RAW_MAX": 120,
+    "COMPOSITE_SCORE_MAX": 100,
+    "SR_PROXIMITY_PCT": 0.005,
+    "BOS_BODY_CLOSE_REQUIRED": true,
+    "BOS_MIN_BODY_TO_RANGE_PCT": 0.001,
+    "POI_TIER1_TYPES": ["FVG","RTZ"],
+    "POI_TIER2_TYPES": ["OB","SR_LEVEL"],
+    "POI_PROXIMITY_TO_TAP3_PCT": 0.01,
+    "IMPULSE_MAX_DIRECTION_CHANGE_PCT": 0.15,
+    "SR_LOOKBACK_CANDLES": 200,
+    "9_management": "Open position → partial TP → trailing SL → final exit",
+    "10_persistence": "All state → JSON on disk + GitHub sync"
+  },
+
+  "critical_failure_modes": [
+    {
+      "id": "F1",
+      "description": "HTF bias is neutral — v2 treats this as hard fail, preventing any entries during unclear market structure",
+      "impact": "May miss valid setups during transitional periods"
+    },
+    {
+      "id": "F2",
+      "description": "No FVG found near Tap3 — hard gate rejection even if all other criteria pass",
+      "impact": "FVG detection sensitivity directly controls entry frequency"
+    },
+    {
+      "id": "F3",
+      "description": "BOS staleness exceeds MAX_STALE candles — valid schematic rejected because confirmation came too late",
+      "impact": "Time-sensitive: delayed BOS = missed opportunity"
+    },
+    {
+      "id": "F4",
+      "description": "Liquidation price inside stop loss — trade rejected at execution stage despite passing all scoring",
+      "impact": "Leverage too high for the risk distance — requires manual leverage adjustment"
+    },
+    {
+      "id": "F5",
+      "description": "Counter-bias entry blocked by RIG when trend shift IS occurring but CHoCH not yet confirmed across all 3 levels (L3→L2→L1 domino not complete)",
+      "impact": "Early trend shifts may be systematically missed. Partial bypass (2-of-3 levels) halves the displacement threshold as a mitigation, but the full RIG block remains until L3 confirms.",
+      "mitigation": "Watch for CHoCH level count in diagnostic output. If L1 and L2 are confirmed but L3 is pending, the partial bypass is active. If model-flow conversion (Model 1→2 or schematic flip) occurs, bypass is granted independently of CHoCH."
+    },
+    {
+      "id": "F6",
+      "description": "RIG fast-pass for 'range_intact == False' may let counter-bias trades through when range has TECHNICALLY been violated but is actually just re-accumulating",
+      "impact": "A single DL2 close violation that gets accepted back in ≤3 candles is classified as a sweep (not a violation) — so the range remains intact. But if 4+ candles elapse before return, it's a violation and the range loses protection. Re-accumulation patterns may be misclassified as broken ranges.",
+      "mitigation": "RIG_DL2_VIOLATION_LOOKBACK_CANDLES (default 3) controls this boundary. Tuning upward (e.g., to 5) would retain range protection longer but risks treating true breaks as sweeps."
+    },
+    {
+      "id": "F7",
+      "description": "Session threshold for Asia (0.15) may be too tight, filtering valid counter-trend entries during Asian range breakouts that precede London momentum",
+      "impact": "Pre-London momentum setups that form during Asia session (00:00–07:00 UTC) and represent genuine structure shifts will be blocked unless displacement reaches 15%. This 15% threshold was chosen conservatively and may need calibration against backtested Asia session data.",
+      "mitigation": "RIG_DISPLACEMENT_SESSION_THRESHOLDS.asia is a tunable constant. If backtesting shows valid Asia counter-bias setups being blocked, raise to 0.18–0.20."
+    },
+    {
+      "id": "F8",
+      "description": "Small-cap altcoin double-counter hard fail (step 6.8.3) may block valid setups where the small-cap is decoupling from BTC due to token-specific catalyst (listing, unlock, news)",
+      "impact": "Protocol-specific catalysts can temporarily decouple altcoins from BTC correlation. A token with genuine fundamental flow against BTC direction will be blocked as a 'double-counter' even if the structural setup is valid.",
+      "mitigation": "ALTCOIN_TIER thresholds are tunable constants. Symbols experiencing known catalyst events could be promoted to 'large_cap_alt' tier via config override to convert the hard fail to a soft penalty. No automated solution — requires operator judgment."
+    },
+    {
+      "id": "F9",
+      "description": "Volume threshold ($10M/24h) may be too high for valid setups on mid-cap alts during low-activity hours (Asia session) when volume naturally drops below the floor",
+      "impact": "A symbol that normally clears $10M/24h but happens to be evaluated during an Asia session lull where hourly run-rate would extrapolate to $8M will be rejected. The 24h snapshot is not time-normalised.",
+      "mitigation": "A time-normalised volume check (e.g. volume_current_hour × 24 >= threshold) would reduce false rejections. ALTCOIN_MIN_24H_VOLUME_USDT is a tunable constant and could be lowered to $5M for Asia-session evaluations."
+    }
+  ]
+}

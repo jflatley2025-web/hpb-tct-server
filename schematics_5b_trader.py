@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 from tct_schematics import detect_tct_schematics, TCTSchematicDetector
+from pivot_cache import PivotCache
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from trade_execution import (
     calculate_position_size,
@@ -95,6 +96,55 @@ TRADE_LOG_BACKUP_PATH = os.path.join(_DIR, "schematics_5b_trade_log_backup.json"
 # Deduplication
 DUPLICATE_COOLDOWN_SECONDS = 300
 DUPLICATE_PRICE_TOLERANCE = 0.002
+
+
+def _get_entry_session_context(base_score: float) -> Dict:
+    """Get session manipulation context for trade entry (MSCE integration)."""
+    try:
+        from session_manipulation import apply_session_multiplier
+        return apply_session_multiplier(base_score)
+    except Exception:
+        return {"session": None, "boost_applied": False, "multiplier": 1.0}
+
+
+# ================================================================
+# SHARED HELPERS
+# ================================================================
+
+def _build_range_data_for_bos(rng: Dict) -> Dict:
+    """
+    Build the range_data dict needed for BOS validation from a range/
+    schematic dict that may use either "high"/"low" or "range_high"/
+    "range_low" key conventions.
+    """
+    return {
+        "range_high": rng.get("high") or rng.get("range_high"),
+        "range_low": rng.get("low") or rng.get("range_low"),
+        "range_size": rng.get("size") or rng.get("range_size", 0),
+        "equilibrium": rng.get("equilibrium", 0),
+        "range_high_idx": rng.get("range_high_idx", 0),
+        "range_low_idx": rng.get("range_low_idx", 0),
+    }
+
+
+def _get_entry_session_context(timestamp: Optional[str] = None) -> Dict:
+    """
+    Return session context for an entry timestamp.
+
+    Attempts to import session_manipulation and apply session multiplier.
+    Falls back to a neutral default on ImportError or runtime errors.
+    """
+    default = {"session": None, "boost_applied": False, "multiplier": 1.0}
+
+    try:
+        from session_manipulation import apply_session_multiplier
+    except (ImportError, ModuleNotFoundError):
+        return default
+
+    try:
+        return apply_session_multiplier(timestamp)
+    except (TypeError, ValueError):
+        return default
 
 
 # ================================================================
@@ -525,6 +575,9 @@ def _try_confirm_with_ltf_bos(
     rng = schematic.get("range") or {}
     equilibrium = rng.get("equilibrium")
 
+    # Build range_data dict for demand-path ranking in BOS detection
+    range_data_for_bos = _build_range_data_for_bos(rng)
+
     tap2_time: Optional[pd.Timestamp] = None
     try:
         tap2_time_str = tap2.get("time", "")
@@ -560,7 +613,8 @@ def _try_confirm_with_ltf_bos(
         bos = None
         ref_high_used: Optional[float] = None
         try:
-            detector = TCTSchematicDetector(ltf_df_reset)
+            ltf_pc = PivotCache(ltf_df_reset, lookback=3)
+            detector = TCTSchematicDetector(ltf_df_reset, pivot_cache=ltf_pc)
             _ltf_highs = ltf_df_reset["high"].to_numpy()
             _ltf_lows = ltf_df_reset["low"].to_numpy()
 
@@ -592,6 +646,7 @@ def _try_confirm_with_ltf_bos(
                     tap3_ltf_pos, ref_low_used, tap3_price,
                     equilibrium=equilibrium,
                     window=ltf_window,
+                    range_data=range_data_for_bos,
                 )
                 ref_high_used = ref_low_used  # reuse field for logging
 
@@ -700,8 +755,12 @@ def refine_schematic_bos_with_ltf(
         return schematic
 
     direction = schematic.get("direction")
-    equilibrium = (schematic.get("range") or {}).get("equilibrium")
+    _rng_refine = schematic.get("range") or {}
+    equilibrium = _rng_refine.get("equilibrium")
     tap3_price = tap3.get("price")
+
+    # Build range_data for demand-path ranking in BOS detection
+    _range_data_refine = _build_range_data_for_bos(_rng_refine)
 
     # Reference prices already computed by MTF BOS detection — reuse them.
     if direction == "bullish":
@@ -759,7 +818,8 @@ def refine_schematic_bos_with_ltf(
 
         bos = None
         try:
-            detector = TCTSchematicDetector(ltf_df_reset)
+            ltf_pc = PivotCache(ltf_df_reset, lookback=3)
+            detector = TCTSchematicDetector(ltf_df_reset, pivot_cache=ltf_pc)
 
             # Pre-extract column arrays once to avoid repeated Series creation
             # inside the per-candle loops below (.iloc[i]["col"] allocates a
@@ -850,6 +910,7 @@ def refine_schematic_bos_with_ltf(
                     bos = detector._find_bearish_bos(
                         tap3_ltf_pos, ref_low, ref_high,
                         equilibrium=None, window=ltf_window,
+                        range_data=_range_data_refine,
                     )
 
         except Exception as e:
@@ -1272,7 +1333,9 @@ class Schematics5BTrader:
                     }
                     continue
                 try:
-                    det = detect_tct_schematics(df, [])
+                    # Create PivotCache per TF to eliminate pivot drift
+                    pc = PivotCache(df, lookback=3)
+                    det = detect_tct_schematics(df, [], pivot_cache=pc)
                     all_schematics_by_tf[tf] = (
                         det.get("accumulation_schematics", [])
                         + det.get("distribution_schematics", [])
@@ -1409,6 +1472,13 @@ class Schematics5BTrader:
                     })
             forming.sort(key=lambda x: (x.get("tap3") or {}).get("idx", 0), reverse=True)
 
+            # Session context (MSCE integration)
+            try:
+                from session_manipulation import get_session_info
+                session_info = get_session_info()
+            except ImportError:
+                session_info = None
+
             out.update({
                 "current_price": current_price,
                 "htf_bias": htf_bias,
@@ -1417,10 +1487,12 @@ class Schematics5BTrader:
                 "best_tf": best_tf_local,
                 "forming": forming[:5],
                 "timeframes": all_tf_results,
+                "session": session_info,
             })
             logger.info(
                 f"[5B] _scan_single_symbol done ({time.time()-_t0:.1f}s) — "
                 f"best_tf={best_tf_local}, best_score={best_score}, "
+                f"session={session_info.get('active_session', 'none')}, "
                 f"timeframes={list(all_tf_results.keys())}"
             )
 
@@ -1518,6 +1590,8 @@ class Schematics5BTrader:
             "liquidation_safe": safety["is_safe"],
             "opened_at": datetime.now(timezone.utc).isoformat(),
             "status": "open",
+            # MSCE session context
+            "session_context": _get_entry_session_context(evaluation["score"]),
         }
 
         self.state.current_trade = trade

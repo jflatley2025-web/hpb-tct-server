@@ -1,5 +1,5 @@
 # ================================================================
-# HPB–TCT v21.2 MEXC Feed + Range Detection + Gate Validation Server
+# HPB–TCT v21.2 MEXC Feed + Range Detection + Gate Validation  Server
 # ================================================================
 
 import os
@@ -12,6 +12,7 @@ import numpy as np
 from datetime import datetime
 from typing import Dict, List, Optional
 
+from range_utils import check_equilibrium_touch
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -36,6 +37,7 @@ _DT_6      = _read_dt("tct_6_advanced_schematics_decision_tree.html")
 _DT_RANGES = _read_dt("ranges_decision_tree.html")
 _DT_LIQ    = _read_dt("liquidity_decision_tree.html")
 _DT_SD     = _read_dt("supply_demand_decision_tree.html")
+_DT_MS     = _read_dt("market_structure_decision_tree.html")
 
 # ChromaDB + SentenceTransformer are initialized lazily on first use so the
 # heavy model weights (all-MiniLM-L6-v2 + torch) don't load at startup and
@@ -229,24 +231,22 @@ def resolve_symbol(symbol_param: Optional[str] = None) -> str:
             return s
     return SYMBOL
 
-# Decision tree routes
-@app.get("/decision_trees/tct_5a_schematics_decision_tree.html",    include_in_schema=False)
-def dt_5a():     return HTMLResponse(_DT_5A)
-
-@app.get("/decision_trees/tct_5b_schematics_real_examples_decision_tree.html", include_in_schema=False)
-def dt_5b():     return HTMLResponse(_DT_5B)
-
-@app.get("/decision_trees/tct_6_advanced_schematics_decision_tree.html",       include_in_schema=False)
-def dt_6():      return HTMLResponse(_DT_6)
-
-@app.get("/decision_trees/ranges_decision_tree.html",               include_in_schema=False)
-def dt_ranges(): return HTMLResponse(_DT_RANGES)
-
-@app.get("/decision_trees/liquidity_decision_tree.html",            include_in_schema=False)
-def dt_liq():    return HTMLResponse(_DT_LIQ)
-
-@app.get("/decision_trees/supply_demand_decision_tree.html",        include_in_schema=False)
-def dt_sd():     return HTMLResponse(_DT_SD)
+# Decision tree routes — registered from a single mapping to avoid repetition
+_DT_ROUTE_MAP = {
+    "/decision_trees/tct_5a_schematics_decision_tree.html":                  _DT_5A,
+    "/decision_trees/tct_5b_schematics_real_examples_decision_tree.html":    _DT_5B,
+    "/decision_trees/tct_6_advanced_schematics_decision_tree.html":          _DT_6,
+    "/decision_trees/ranges_decision_tree.html":                             _DT_RANGES,
+    "/decision_trees/liquidity_decision_tree.html":                          _DT_LIQ,
+    "/decision_trees/supply_demand_decision_tree.html":                      _DT_SD,
+    "/decision_trees/market_structure_decision_tree.html":                   _DT_MS,
+}
+for _dt_path, _dt_content in _DT_ROUTE_MAP.items():
+    def _make_dt_handler(c=_dt_content):
+        def _handler():
+            return HTMLResponse(c)
+        return _handler
+    app.get(_dt_path, include_in_schema=False)(_make_dt_handler())
 
 latest_ranges = {"LTF": [], "HTF": []}
 scan_interval_sec = 120
@@ -1289,26 +1289,13 @@ class TCTRangeDetector:
         """
         Check if price touched equilibrium after range formation.
 
-        TCT: "Move back up towards the equilibrium of the range - that's when the range is confirmed"
-        TCT: "Your range low is already confirmed the moment we have a move back up touching the equilibrium"
+        Delegates to the shared check_equilibrium_touch utility in range_utils.
+        Only checks post-range candles (20), not between pivots.
         """
-        start_idx = min(high_idx, low_idx)
-        end_idx = max(high_idx, low_idx)
-
-        # Check candles after the range formed
-        check_start = end_idx + 1
-        check_end = min(check_start + 20, len(candles))
-
-        if check_start >= len(candles):
-            return False
-
-        for i in range(check_start, check_end):
-            candle = candles.iloc[i]
-            # TCT: Check if any candle touched the equilibrium (0.5 level)
-            if candle["low"] <= equilibrium <= candle["high"]:
-                return True
-
-        return False
+        return check_equilibrium_touch(
+            candles, high_idx, low_idx, equilibrium,
+            check_between=False, post_range_candles=20,
+        )
 
     @staticmethod
     def _validate_six_candle_rule(candles: pd.DataFrame, high_idx: int, low_idx: int, trend: str) -> bool:
@@ -6190,7 +6177,12 @@ async def dashboard():
             justify-content: space-between;
             align-items: center;
             border-bottom: 1px solid #2d2d44;
+            flex-wrap: wrap;
         }
+        .page-nav{display:flex;gap:4px;flex-basis:100%;padding:4px 0 2px;border-top:1px solid #1e1e2d;margin-top:4px;flex-wrap:wrap}
+        .nav-link{font-size:.65rem;padding:2px 8px;border:1px solid #333;border-radius:3px;text-decoration:none;color:#888;white-space:nowrap}
+        .nav-link:hover{color:#e0e0e0;border-color:#555;background:#1a1a28}
+        .nav-link.active{background:rgba(0,212,255,.12);color:#00d4ff;border-color:#00d4ff;font-weight:600}
         .header h1 {
             font-size: 1.5rem;
             color: #00d4ff;
@@ -7398,6 +7390,14 @@ async def dashboard():
             </div>
             <div class="price-display" id="currentPrice">--</div>
             <button class="refresh-btn" onclick="refreshData()">Refresh</button>
+        </div>
+        <div class="page-nav">
+            <a href="/market-structure" class="nav-link">Market Structure</a>
+            <a href="/ranges" class="nav-link">Ranges</a>
+            <a href="/supply-demand" class="nav-link">Supply &amp; Demand</a>
+            <a href="/liquidity" class="nav-link">Liquidity</a>
+            <a href="/schematics-5A" class="nav-link">Schematics 5A</a>
+            <a href="/schematics-5B" class="nav-link">Schematics 5B</a>
         </div>
     </div>
 
