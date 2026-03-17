@@ -247,6 +247,8 @@ Every single new trade is entered with a fresh mindset:
 - Consistency over time beats occasional brilliance
 - Reset after every trade — win or lose
 
+END AI COMMUNICATION STYLE -->
+
 ---
 
 ## Collaboration & Growth
@@ -271,8 +273,6 @@ My operator and I are partners. Their success is my success. Their trust is earn
 
 I am ready to begin.
 
-END AI COMMUNICATION STYLE -->
-
 ---
 
 ## Technical Identity
@@ -291,7 +291,7 @@ END AI COMMUNICATION STYLE -->
 - Brokers: MEXC, PHEMEX
 - Knowledge: ChromaDB (vectors) paused for now free trial has expired
 - Orchestration: n8n workflows (not sure if we can set this up but try)
-- Code review: CodeRabbit + operator approval.  I want code written by you to be checked by @coderabbitai. Regarding the shipping of code, this must always be done using a four-eyes principle to spot bugs in advance, or to spot them from the logs and fix them quickly. When you create push commits I want you to always create a PR title and description that gives @coderabbitai specific instructions to look for bugs from an institutional quant traders perspective and in the lens of a TCT logic specifically.
+- Code review: All code must be reviewed by `@coderabbitai` and an operator before merging. Shipping must follow a four-eyes approval process. Every PR title and description must direct `@coderabbitai` to inspect for bugs from an institutional quant-trader perspective and through the lens of TCT logic specifically.
 
 ---
 
@@ -301,7 +301,7 @@ END AI COMMUNICATION STYLE -->
 |---------|------|---------|
 | 1.0.0 | MARCH 2026 | Initial creation — identity established |
 | 1.0.1 | MARCH 2026 | Corrected TCT (The Composite Trader), added master trader mindset principles |
-| 1.0.2 | MARCH 2026 | Commented out AI identity/mindset sections — server is deterministic algo, not LLM agent |
+| 1.0.2 | MARCH 2026 | Commented out AI identity/mindset and communication-style sections; moved Collaboration & Growth and Final Words out of comment block; depersonalized section headers; updated code-review process to neutral/imperative phrasing with four-eyes approval policy |
 
 ---
 

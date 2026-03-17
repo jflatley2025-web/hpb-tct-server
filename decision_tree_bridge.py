@@ -684,19 +684,23 @@ def _estimate_path_quality(df: pd.DataFrame, direction: str,
     return PathQuality.OBSTRUCTED
 
 
-def range_integrity_gate(range_high: float, range_low: float, current_price: float) -> bool:
+def range_integrity_gate(range_high: float, range_low: float, current_price: float,
+                         threshold: float = 0.20) -> bool:
     """Return False if current price is near the range equilibrium (0.5 Fib).
 
-    A range is not ready for a trade when price sits at the midpoint rather than
-    at one of the extremes. The gate passes (True) when price is in the outer
-    40% of the range (upper or lower), and fails (False) when price is inside
-    the central 20% equilibrium zone.
+    The gate passes (True) when price is in the outer region of the range, and
+    fails (False) when price is inside the equilibrium zone.
+
+    Args:
+        threshold: Fraction of range size defining the equilibrium zone.
+                   Default 0.20 (central 20%). MarketStructureEngine.range_integrity_gate
+                   uses 0.10 for a tighter gate at execution level.
     """
     if range_high <= range_low or current_price <= 0:
         return True  # Cannot determine — allow through
     rng = range_high - range_low
     eq = (range_high + range_low) / 2.0
-    eq_zone = rng * 0.20
+    eq_zone = rng * threshold
     return abs(current_price - eq) > eq_zone
 
 
@@ -1305,13 +1309,13 @@ def compute_composite_score_v2(
     phase_results: Dict = {}
     score = 0
 
-     # ── Phase 1: HTF Context ──
+    # ── Phase 1: HTF Context ──
     phase_results["htf_context"] = {"bias": htf_bias}
 
     # ============================================================
     # MARKET STRUCTURE ENGINE INIT
     # ============================================================
-    from market_structure_engine import MarketStructureEngine
+    from decision_trees.market_structure_engine import MarketStructureEngine
     mse = MarketStructureEngine()
 
     # ============================================================
@@ -1415,17 +1419,18 @@ def compute_composite_score_v2(
 
     tap_valid = True
 
+    # tap prices are guaranteed non-None by the guard above
     if model_type == "Model_1":
         if direction == "bullish":
-            tap_valid = tap3.get("price", 0) < tap2.get("price", float("inf"))
+            tap_valid = tap3["price"] < tap2["price"]
         else:
-            tap_valid = tap3.get("price", 0) > tap2.get("price", 0)
+            tap_valid = tap3["price"] > tap2["price"]
 
     elif model_type == "Model_2":
         if direction == "bullish":
-            tap_valid = tap3.get("price", 0) > tap2.get("price", 0)
+            tap_valid = tap3["price"] > tap2["price"]
         else:
-            tap_valid = tap3.get("price", 0) < tap2.get("price", 0)
+            tap_valid = tap3["price"] < tap2["price"]
 
     if not tap_valid:
         phase_results["tap_structure"] = {"passed": False}
@@ -1470,9 +1475,9 @@ def compute_composite_score_v2(
     # ── Phase 5: BOS ──
     bos = schematic.get("bos_confirmation") or {}
     bos_idx = bos.get("bos_idx")
-    tap3_idx = tap3.get("idx", 0)
+    tap3_idx = tap3.get("idx")  # No default — missing idx must be treated as a failure
 
-    if not is_confirmed or bos_idx is None or bos_idx < tap3_idx:
+    if not is_confirmed or bos_idx is None or tap3_idx is None or bos_idx < tap3_idx:
         phase_results["bos"] = {"passed": False}
         return {**fail,
                 "score": score,
