@@ -486,7 +486,12 @@ class TestDemandPathRanking:
         ranked = det._rank_ms_lows_by_path_quality(swing_lows, range_data)
         assert isinstance(ranked, list)
         assert len(ranked) == 3
-        # The highest-scoring one should be first
+        # Verify path-based ordering: candidates farther from range_low
+        # (more room to target) should rank higher
+        assert ranked[0]["price"] >= ranked[-1]["price"], (
+            f"Expected best candidate first (highest price = most room to range_low), "
+            f"got {[r['price'] for r in ranked]}"
+        )
 
 
 # ================================================================
@@ -539,8 +544,9 @@ class TestModel1DistributionFullFlow:
 
         dist = result["distribution_schematics"]
         assert isinstance(dist, list)
+        assert len(dist) > 0, "Expected at least one distribution schematic from synthetic data"
 
-        # Validate structure of any found schematics
+        # Validate required fields on each schematic
         for s in dist:
             assert "schematic_type" in s
             assert "quality_score" in s

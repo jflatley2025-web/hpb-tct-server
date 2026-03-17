@@ -558,10 +558,11 @@ class TCTSchematicDetector:
                     sweep_m1 = self._validate_distribution_sweep(
                         range_data, tap2, tap3_m1
                     )
-                    if sweep_m1["has_sweep"] and sweep_m1["classification"] == "true_break":
+                    if not sweep_m1["has_sweep"] or sweep_m1["classification"] in ("true_break", "no_sweep"):
                         logger.debug(
-                            f"Distribution M1 aborted: deviation classified as true_break "
-                            f"(swept={sweep_m1['pools_swept']})"
+                            f"Distribution M1 aborted: sweep={sweep_m1['has_sweep']}, "
+                            f"classification={sweep_m1['classification']} "
+                            f"(swept={sweep_m1.get('pools_swept')})"
                         )
                     else:
                         schematic = self._build_distribution_schematic(
@@ -576,9 +577,10 @@ class TCTSchematicDetector:
                     sweep_m2 = self._validate_distribution_sweep(
                         range_data, tap2, tap3_m2
                     )
-                    if sweep_m2["has_sweep"] and sweep_m2["classification"] == "true_break":
+                    if not sweep_m2["has_sweep"] or sweep_m2["classification"] in ("true_break", "no_sweep"):
                         logger.debug(
-                            f"Distribution M2 aborted: deviation classified as true_break"
+                            f"Distribution M2 aborted: sweep={sweep_m2['has_sweep']}, "
+                            f"classification={sweep_m2['classification']}"
                         )
                     else:
                         schematic = self._build_distribution_schematic(
@@ -1525,9 +1527,7 @@ class TCTSchematicDetector:
                 "follow_through_bias": context_follow_through.get("bias", "neutral"),
                 "enhanced_target": context_follow_through.get("enhanced_target")
             },
-            # Session manipulation context (MSCE integration)
-            "session_context": session_context,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": chosen_timestamp or datetime.utcnow().isoformat()
         }
 
     def _build_distribution_schematic(self, range_data: Dict, tap1: Dict, tap2: Dict,
@@ -1749,9 +1749,7 @@ class TCTSchematicDetector:
                 "follow_through_bias": context_follow_through.get("bias", "neutral"),
                 "enhanced_target": context_follow_through.get("enhanced_target")
             },
-            # Session manipulation context (MSCE integration)
-            "session_context": session_context,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": chosen_timestamp or datetime.utcnow().isoformat()
         }
 
     # ================================================================

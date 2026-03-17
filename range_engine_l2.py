@@ -48,10 +48,13 @@ class RangeEngineL2:
         """
         ranges = []
 
-        # Step 1: Confirm L1 trend — L1 is authoritative
+        # Step 1: Confirm L1 trend — L1 is authoritative; htf_bias must agree
         l1_result = self._ms_engine.detect_l1_structure(candles)
-        if l1_result.trend != "bullish":
-            logger.debug("L2 distribution: L1 trend not bullish, skipping")
+        if l1_result.trend != "bullish" or htf_bias != "bullish":
+            logger.debug(
+                f"L2 distribution: gate failed (l1_trend={l1_result.trend}, "
+                f"htf_bias={htf_bias}), skipping"
+            )
             return ranges
 
         # Step 2: Detect L2 counter-structure (htf_bias selects the pattern)
@@ -142,9 +145,13 @@ class RangeEngineL2:
         """
         ranges = []
 
-        # L1 trend is authoritative
+        # L1 trend is authoritative; htf_bias must agree
         l1_result = self._ms_engine.detect_l1_structure(candles)
-        if l1_result.trend != "bearish":
+        if l1_result.trend != "bearish" or htf_bias != "bearish":
+            logger.debug(
+                f"L2 accumulation: gate failed (l1_trend={l1_result.trend}, "
+                f"htf_bias={htf_bias}), skipping"
+            )
             return ranges
 
         l2_result = self._ms_engine.detect_l2_structure(candles, htf_bias)
@@ -220,7 +227,7 @@ class RangeEngineL2:
     def _find_l2_lower_highs(self, pivot_highs: List[Dict]) -> List[Dict]:
         """Find consecutive lower-high pivots (bearish counter-structure)."""
         if len(pivot_highs) < 2:
-            return pivot_highs
+            return []
 
         result = []
         for i in range(1, len(pivot_highs)):
@@ -234,7 +241,7 @@ class RangeEngineL2:
     def _find_l2_lower_lows(self, pivot_lows: List[Dict]) -> List[Dict]:
         """Find consecutive lower-low pivots (bearish counter-structure)."""
         if len(pivot_lows) < 2:
-            return pivot_lows
+            return []
 
         result = []
         for i in range(1, len(pivot_lows)):
@@ -248,7 +255,7 @@ class RangeEngineL2:
     def _find_l2_higher_lows(self, pivot_lows: List[Dict]) -> List[Dict]:
         """Find consecutive higher-low pivots (bullish counter-structure)."""
         if len(pivot_lows) < 2:
-            return pivot_lows
+            return []
 
         result = []
         for i in range(1, len(pivot_lows)):
@@ -262,7 +269,7 @@ class RangeEngineL2:
     def _find_l2_higher_highs(self, pivot_highs: List[Dict]) -> List[Dict]:
         """Find consecutive higher-high pivots (bullish counter-structure)."""
         if len(pivot_highs) < 2:
-            return pivot_highs
+            return []
 
         result = []
         for i in range(1, len(pivot_highs)):

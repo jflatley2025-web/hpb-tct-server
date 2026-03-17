@@ -98,15 +98,6 @@ DUPLICATE_COOLDOWN_SECONDS = 300
 DUPLICATE_PRICE_TOLERANCE = 0.002
 
 
-def _get_entry_session_context(base_score: float) -> Dict:
-    """Get session manipulation context for trade entry (MSCE integration)."""
-    try:
-        from session_manipulation import apply_session_multiplier
-        return apply_session_multiplier(base_score)
-    except Exception:
-        return {"session": None, "boost_applied": False, "multiplier": 1.0}
-
-
 # ================================================================
 # SHARED HELPERS
 # ================================================================
