@@ -162,9 +162,9 @@ class MarketStructureEngine:
     # L3 Execution Structure (Micro BOS)
     # ========================================================
 
-    def detect_l3_structure(self, df: pd.DataFrame, direction: str):
+    def detect_l3_structure(self, df: pd.DataFrame, direction: str) -> bool:
 
-        if len(df) < 10:
+        if df is None or len(df) < 10:
             return False
 
         recent = df.tail(10)
@@ -173,22 +173,44 @@ class MarketStructureEngine:
         lows = recent["low"].values
         closes = recent["close"].values
 
+        compression = 0
+
+        # =========================
+        # BULLISH L3 (compression → breakout up)
+        # =========================
         if direction == "bullish":
+
+            # Higher lows = compression
+            for i in range(1, len(lows)):
+                if lows[i] > lows[i - 1]:
+                    compression += 1
 
             prev_high = max(highs[:-1])
 
-            if closes[-1] > prev_high:
+            broke_structure = closes[-1] > prev_high
+
+            # Require BOTH compression + break
+            if compression >= 3 and broke_structure:
                 return True
 
+        # =========================
+        # BEARISH L3 (compression → breakdown)
+        # =========================
         else:
+
+            # Lower highs = compression
+            for i in range(1, len(highs)):
+                if highs[i] < highs[i - 1]:
+                    compression += 1
 
             prev_low = min(lows[:-1])
 
-            if closes[-1] < prev_low:
+            broke_structure = closes[-1] < prev_low
+
+            if compression >= 3 and broke_structure:
                 return True
 
         return False
-
 
     # ========================================================
     # Liquidity Pool Detection
@@ -227,10 +249,11 @@ class MarketStructureEngine:
     # Liquidity Sweep Detection
     # ========================================================
 
-    def detect_sweep(self, df: pd.DataFrame,
-                     range_high: float,
-                     range_low: float,
-                     direction: str) -> SweepResult:
+    def detect_sweep(self, df, range_high, range_low, direction):
+
+        if df is None or len(df) < 10:
+            return SweepResult(swept=False, classification="no_sweep",
+                               returned_inside=False, sweep_count=0)
 
         recent = df.tail(20)
 
@@ -241,26 +264,49 @@ class MarketStructureEngine:
         sweep_count = 0
         returned = False
 
+        # =========================
+        # BULLISH (sell-side sweep)
+        # =========================
         if direction == "bullish":
 
             for i in range(len(lows)):
                 if lows[i] < range_low:
-                    sweep_count += 1
 
-                    if i < len(closes)-1:
-                        if closes[i+1] >= range_low:
+                    sweep_count = 1
+
+                    if i < len(closes) - 1:
+                        if closes[i + 1] >= range_low:
                             returned = True
+                        else:
+                            returned = False
+                    else:
+                        returned = False
 
+                    break
+
+        # =========================
+        # BEARISH (buy-side sweep)
+        # =========================
         else:
 
             for i in range(len(highs)):
                 if highs[i] > range_high:
-                    sweep_count += 1
 
-                    if i < len(closes)-1:
-                        if closes[i+1] <= range_high:
+                    sweep_count = 1
+
+                    if i < len(closes) - 1:
+                        if closes[i + 1] <= range_high:
                             returned = True
+                        else:
+                            returned = False
+                    else:
+                        returned = False
 
+                    break
+
+        # =========================
+        # CLASSIFICATION
+        # =========================
         swept = sweep_count > 0
 
         if swept and returned:
@@ -285,15 +331,22 @@ class MarketStructureEngine:
     def range_integrity_gate(self,
                              range_high: float,
                              range_low: float,
-                             current_price: float):
+                             current_price: float,
+                             threshold: float = 0.10):
+        """Return False if current price is near the range equilibrium (0.5 Fib).
 
+        Uses a tighter 10% equilibrium zone (vs 0.20 default in the standalone
+        range_integrity_gate in decision_tree_bridge) — appropriate for
+        execution-level structure checks where price must be clearly away from
+        mid-range before confirming a setup.
+        """
         if range_high <= range_low:
             return True
 
         midpoint = (range_high + range_low) / 2
         range_size = range_high - range_low
 
-        eq_zone = range_size * 0.1
+        eq_zone = range_size * threshold
 
         if abs(current_price - midpoint) <= eq_zone:
             return False

@@ -37,6 +37,7 @@ _DT_6      = _read_dt("tct_6_advanced_schematics_decision_tree.html")
 _DT_RANGES = _read_dt("ranges_decision_tree.html")
 _DT_LIQ    = _read_dt("liquidity_decision_tree.html")
 _DT_SD     = _read_dt("supply_demand_decision_tree.html")
+_DT_MS     = _read_dt("market_structure_decision_tree.html")
 
 # ChromaDB + SentenceTransformer are initialized lazily on first use so the
 # heavy model weights (all-MiniLM-L6-v2 + torch) don't load at startup and
@@ -230,24 +231,22 @@ def resolve_symbol(symbol_param: Optional[str] = None) -> str:
             return s
     return SYMBOL
 
-# Decision tree routes
-@app.get("/decision_trees/tct_5a_schematics_decision_tree.html",    include_in_schema=False)
-def dt_5a():     return HTMLResponse(_DT_5A)
-
-@app.get("/decision_trees/tct_5b_schematics_real_examples_decision_tree.html", include_in_schema=False)
-def dt_5b():     return HTMLResponse(_DT_5B)
-
-@app.get("/decision_trees/tct_6_advanced_schematics_decision_tree.html",       include_in_schema=False)
-def dt_6():      return HTMLResponse(_DT_6)
-
-@app.get("/decision_trees/ranges_decision_tree.html",               include_in_schema=False)
-def dt_ranges(): return HTMLResponse(_DT_RANGES)
-
-@app.get("/decision_trees/liquidity_decision_tree.html",            include_in_schema=False)
-def dt_liq():    return HTMLResponse(_DT_LIQ)
-
-@app.get("/decision_trees/supply_demand_decision_tree.html",        include_in_schema=False)
-def dt_sd():     return HTMLResponse(_DT_SD)
+# Decision tree routes — registered from a single mapping to avoid repetition
+_DT_ROUTE_MAP = {
+    "/decision_trees/tct_5a_schematics_decision_tree.html":                  _DT_5A,
+    "/decision_trees/tct_5b_schematics_real_examples_decision_tree.html":    _DT_5B,
+    "/decision_trees/tct_6_advanced_schematics_decision_tree.html":          _DT_6,
+    "/decision_trees/ranges_decision_tree.html":                             _DT_RANGES,
+    "/decision_trees/liquidity_decision_tree.html":                          _DT_LIQ,
+    "/decision_trees/supply_demand_decision_tree.html":                      _DT_SD,
+    "/decision_trees/market_structure_decision_tree.html":                   _DT_MS,
+}
+for _dt_path, _dt_content in _DT_ROUTE_MAP.items():
+    def _make_dt_handler(c=_dt_content):
+        def _handler():
+            return HTMLResponse(c)
+        return _handler
+    app.get(_dt_path, include_in_schema=False)(_make_dt_handler())
 
 latest_ranges = {"LTF": [], "HTF": []}
 scan_interval_sec = 120
