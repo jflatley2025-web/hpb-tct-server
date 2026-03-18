@@ -15940,6 +15940,23 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
 .dt-meta-item{display:flex;gap:4px}.dt-meta-label{color:#555}.dt-meta-val{color:#e0e0e0;font-weight:600}
 .dt-meta-val.green{color:#00e676}.dt-meta-val.red{color:#ff4444}.dt-meta-val.yellow{color:#ffc107}.dt-meta-val.cyan{color:#00d4ff}
 
+/* ===== STRUCTURE GATES BAR ===== */
+.sg-bar{display:flex;align-items:center;gap:8px;padding:7px 14px;background:#0e0e1a;border-bottom:1px solid #1e1e2d;flex-wrap:wrap}
+.sg-label{font-size:.62rem;color:#555;text-transform:uppercase;letter-spacing:.5px;flex-shrink:0}
+.sg-gate{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:4px;border:1px solid;cursor:default;flex-shrink:0;font-size:.7rem;font-weight:700}
+.sg-gate.pass{background:rgba(0,230,118,.08);border-color:rgba(0,230,118,.3);color:#00e676}
+.sg-gate.fail{background:rgba(255,68,68,.08);border-color:rgba(255,68,68,.3);color:#ff4444}
+.sg-gate.warn{background:rgba(255,193,7,.08);border-color:rgba(255,193,7,.3);color:#ffc107}
+.sg-gate.na{background:rgba(255,255,255,.03);border-color:#2a2a3a;color:#555}
+.sg-name{font-size:.58rem;font-weight:700;letter-spacing:.5px;opacity:.65}
+.sg-sep{width:1px;height:16px;background:#1e1e2d;flex-shrink:0;margin:0 2px}
+.sg-eq{display:inline-flex;align-items:center;padding:3px 10px;border-radius:4px;border:1px solid;font-size:.7rem;font-weight:700;flex-shrink:0}
+.sg-eq.high{background:rgba(0,230,118,.1);border-color:rgba(0,230,118,.3);color:#00e676}
+.sg-eq.medium{background:rgba(0,212,255,.1);border-color:rgba(0,212,255,.3);color:#00d4ff}
+.sg-eq.low{background:rgba(255,193,7,.1);border-color:rgba(255,193,7,.3);color:#ffc107}
+.sg-eq.invalid{background:rgba(255,68,68,.1);border-color:rgba(255,68,68,.3);color:#ff4444}
+.sg-eq.unknown{background:rgba(255,255,255,.03);border-color:#2a2a3a;color:#555}
+
 /* Decision-tree category sections */
 .dt-section{margin-bottom:8px;border:1px solid #1e1e2d;border-radius:8px;overflow:hidden}
 .dt-header{display:flex;align-items:center;gap:10px;padding:8px 14px;background:#12121e;cursor:pointer;user-select:none}
@@ -16194,6 +16211,7 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
   </button>
   <div class="debug-body-wrap" id="debugBodyWrap">
     <div id="dtMeta" class="dt-meta"><span class="dt-meta-item"><span class="dt-meta-label">Status:</span><span class="dt-meta-val">Click "Manual Scan" or wait for auto-scan</span></span></div>
+    <div id="dtGates"></div>
     <div id="dtSections"></div>
   </div>
 </div>
@@ -16666,6 +16684,84 @@ async function setTradingMode(mode) {
   }
 }
 
+// ── Structure Gates bar ──────────────────────────────────────────
+// Reads d.structure (l2_blocked, l3_confirmed, rig_zone, rig_displacement,
+// rig_penalty) and d.execution_quality already emitted by the debug endpoint.
+// Called unconditionally so the bar clears correctly on "no data" state.
+function renderStructureGates(d) {
+  const el = document.getElementById('dtGates');
+  if (!el) return;
+
+  const s  = d?.structure || {};
+  const eq = d?.execution_quality ?? 'unknown';
+  const fc = d?.failure_context  || null;
+
+  // L2 — counter-structure filter
+  const l2Blocked = s.l2_blocked;
+  const l2Class   = (l2Blocked == null) ? 'na'   : l2Blocked ? 'fail' : 'pass';
+  const l2Text    = (l2Blocked == null) ? '\u2014' : l2Blocked ? 'BLOCKED' : 'PASS';
+  const l2Tip     = l2Blocked
+    ? 'L2: Counter-structure detected\nInternal reversal active — trade blocked'
+    : 'L2: No counter-structure\nStructure aligned with HTF bias';
+
+  // L3 — execution confirmation (BOS gate)
+  const l3Conf  = s.l3_confirmed;
+  const l3Class = (l3Conf == null) ? 'na' : l3Conf ? 'pass' : 'fail';
+  const l3Text  = (l3Conf == null) ? '\u2014' : l3Conf ? 'CONFIRMED' : 'MISSING';
+  const l3Tip   = l3Conf
+    ? 'L3: BOS confirmed\nExecution gate passed'
+    : 'L3: No BOS confirmation\nExecution gate failed';
+
+  // RIG — range integrity gate
+  const rig  = s.rig_zone || 'unknown';
+  const disp = (s.rig_displacement != null) ? s.rig_displacement + '%' : '\u2014';
+  const pen  = s.rig_penalty || 0;
+  const rigClassMap = {blocked:'fail', penalty:'warn', clear:'pass', undetermined:'na'};
+  const rigClass = rigClassMap[rig] || 'na';
+  const rigText  = rig === 'blocked'      ? 'HARD BLOCK'
+                 : rig === 'penalty'      ? 'PENALTY \u2212' + pen
+                 : rig === 'clear'        ? 'CLEAR'
+                 : rig === 'undetermined' ? 'UNDETERMINED'
+                 : '\u2014';
+  const rigTip   = rig === 'blocked'
+    ? 'RIG: Hard block\nWithin 10\u0025 of equilibrium\nDisplacement: ' + disp
+    : rig === 'penalty'
+    ? 'RIG: Penalty zone (10\u201320\u0025)\nDisplacement: ' + disp + '\nScore deduction: \u2212' + pen + ' pts'
+    : rig === 'clear'
+    ? 'RIG: Clear (\u003e20\u0025 from equilibrium)\nDisplacement: ' + disp
+    : 'RIG: Not yet evaluated\n(L2 early block or no scan data)';
+
+  // Execution quality
+  const eqCls   = ['high','medium','low','invalid','unknown'].includes(eq) ? eq : 'unknown';
+  const eqLabel = eqCls.toUpperCase();
+
+  // First failed gate (pipeline order)
+  let failHtml = '';
+  if (fc && fc.failed_phase) {
+    const tip = escapeHtml(fc.reason || fc.failed_phase);
+    failHtml = '<div class="sg-sep"></div>'
+      + '<span style="font-size:.63rem;color:#ff4444;white-space:nowrap" title="' + tip + '">'
+      + '\u26a0\ufe0e ' + escapeHtml(fc.failed_phase.toUpperCase()) + ' failed</span>';
+  }
+
+  el.innerHTML = '<div class="sg-bar">'
+    + '<span class="sg-label">Gates</span>'
+    + '<div class="sg-gate ' + l2Class + '" title="' + escapeHtml(l2Tip) + '">'
+    +   '<span class="sg-name">L2</span>\u00a0' + escapeHtml(l2Text)
+    + '</div>'
+    + '<div class="sg-gate ' + l3Class + '" title="' + escapeHtml(l3Tip) + '">'
+    +   '<span class="sg-name">L3</span>\u00a0' + escapeHtml(l3Text)
+    + '</div>'
+    + '<div class="sg-gate ' + rigClass + '" title="' + escapeHtml(rigTip) + '">'
+    +   '<span class="sg-name">RIG</span>\u00a0' + escapeHtml(rigText)
+    + '</div>'
+    + '<div class="sg-sep"></div>'
+    + '<span class="sg-label">Quality</span>'
+    + '<div class="sg-eq ' + eqCls + '">' + eqLabel + '</div>'
+    + failHtml
+    + '</div>';
+}
+
 function renderDecisionTrees(d) {
   const meta = document.getElementById('dtMeta');
   const sections = document.getElementById('dtSections');
@@ -16675,6 +16771,9 @@ function renderDecisionTrees(d) {
   const mode = d?.trading_mode || 'claude';
   const sel = document.getElementById('tradingModeSelect');
   if (sel && sel.value !== mode) sel.value = mode;
+
+  // Always render the gates bar — handles no-data and early-exit states.
+  renderStructureGates(d);
 
   if (!d || !d.timeframes || !Object.keys(d.timeframes).length) {
     const err = d?.state_summary?.last_error;
