@@ -749,6 +749,42 @@ def _compute_rig_payload(range_high: float, range_low: float,
         )
 
 
+def _detect_l3_structure(df: pd.DataFrame, direction: str,
+                         tap3_idx: Optional[int] = None) -> bool:
+    """Detect L3 execution structure (compression + micro-BOS), anchored to Tap3.
+
+    Wraps MarketStructureEngine.detect_l3_structure and restricts analysis to
+    candles that occur at or after tap3_idx.  This prevents an older internal
+    break — one that pre-dates the current tap sequence — from satisfying the
+    L3 confirmation gate.
+
+    Args:
+        df:        Full candle DataFrame for the evaluation timeframe.
+        direction: "bullish" or "bearish" — determines which compression pattern
+                   and structural break to look for.
+        tap3_idx:  Integer positional index of Tap3 within df (df.iloc[tap3_idx]).
+                   When None or out of range, the full DataFrame is used so that
+                   existing behaviour is preserved for callers that don't supply
+                   an anchor.
+
+    Returns:
+        True if the post-Tap3 candles show the required compression + micro-BOS.
+        False otherwise, including when fewer than 5 post-Tap3 candles exist.
+    """
+    if df is None or len(df) < 5:
+        return False
+
+    if tap3_idx is not None and isinstance(tap3_idx, int) and 0 <= tap3_idx < len(df):
+        # Slice from tap3 onward so L3 only confirms post-setup price action.
+        df_post = df.iloc[tap3_idx:].reset_index(drop=True)
+    else:
+        # No valid anchor — fall back to full df (MSE applies its own tail(10)).
+        df_post = df
+
+    from decision_trees.market_structure_engine import MarketStructureEngine
+    return MarketStructureEngine().detect_l3_structure(df_post, direction)
+
+
 # ================================================================
 # BUILDER FUNCTIONS — convert candles+schematic → decision tree inputs
 # ================================================================
@@ -1523,7 +1559,9 @@ def compute_composite_score_v2(
     reasons.append(f"Liquidity: {liq_score}/20")
 
     # ── Phase 4.5: L3 EXECUTION STRUCTURE (REAL) ──
-    l3_valid = mse.detect_l3_structure(df, direction)
+    # Pass tap3_idx so L3 is only confirmed by price action that formed after Tap3,
+    # not by an older micro-BOS that predates the current schematic.
+    l3_valid = _detect_l3_structure(df, direction, tap3.get("idx"))
 
     if not l3_valid:
         phase_results["l3"] = {"passed": False}
