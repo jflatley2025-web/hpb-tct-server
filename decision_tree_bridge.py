@@ -1329,6 +1329,8 @@ def compute_composite_score_v2(
             "reason": "L2 counter-structure (internal reversal active)",
             "data": l2
         }
+        # RIG block has not run yet — guarantee "rig" key is present for debug consumers
+        phase_results.setdefault("rig", {"zone": "unknown", "displacement_pct": 0.0, "penalty": 0})
         return {**fail,
                 "reasons": ["L2 counter-structure (internal reversal active)"],
                 "phase_results": phase_results}
