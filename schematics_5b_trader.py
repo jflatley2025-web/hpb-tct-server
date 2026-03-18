@@ -1024,6 +1024,13 @@ class Schematics5BTrader:
         self._jack_evaluator = JackTCTEvaluator()
         self.last_debug: Dict = {}
         self._lock = threading.Lock()
+        # Lifetime gate-block counters — incremented inside _scan_lock (no race).
+        self._gate_metrics: Dict[str, int] = {
+            "l2_blocks": 0,
+            "l3_failures": 0,
+            "rig_blocks": 0,
+            "passes": 0,
+        }
         # Per-symbol HTF bias cache: symbol → (bias_str, expiry_timestamp)
         self._htf_bias_cache: Dict[str, str] = {}
         self._htf_bias_expiry: Dict[str, float] = {}
@@ -1142,6 +1149,8 @@ class Schematics5BTrader:
                     "htf_cascade_active": True,
                     "forming_schematics": all_forming[:5],
                     "per_symbol": {SYMBOL: sym_result},
+                    # Lifetime gate-block counters (since process start).
+                    "gate_metrics": dict(self._gate_metrics),
                 }
 
             # 3. Enter trade on highest-scoring qualifying setup.
@@ -1410,6 +1419,16 @@ class Schematics5BTrader:
                         eval_result["htf_upgraded"] = True
 
                     tf_evals.append(eval_result)
+                    # Gate metrics — _scan_lock is held so no race condition.
+                    _fc = eval_result.get("failure_context")
+                    if _fc == "L2":
+                        self._gate_metrics["l2_blocks"] += 1
+                    elif _fc == "L3":
+                        self._gate_metrics["l3_failures"] += 1
+                    elif _fc == "RIG":
+                        self._gate_metrics["rig_blocks"] += 1
+                    if eval_result.get("pass"):
+                        self._gate_metrics["passes"] += 1
                     if eval_result["pass"] and eval_result["score"] > best_score:
                         best_score = eval_result["score"]
                         best_setup = (s, eval_result)

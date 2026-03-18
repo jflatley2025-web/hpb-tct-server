@@ -16744,6 +16744,29 @@ function renderStructureGates(d) {
       + '\u26a0\ufe0e ' + escapeHtml(fc.failed_phase.toUpperCase()) + ' failed</span>';
   }
 
+  // Gate stats row — shown only when metrics are present (after first scan)
+  const gm = d?.gate_metrics;
+  let statsHtml = '';
+  if (gm) {
+    const total = (gm.l2_blocks || 0) + (gm.l3_failures || 0) + (gm.rig_blocks || 0) + (gm.passes || 0);
+    statsHtml = '<div class="sg-bar" style="border-top:1px solid #1e1e2d;padding-top:6px;padding-bottom:6px">'
+      + '<span class="sg-label">Gate Stats</span>'
+      + '<span style="font-size:.68rem;color:#ff4444;white-space:nowrap" title="L2 counter-structure blocks (lifetime)">'
+      +   'L2 Blocks: <b>' + (gm.l2_blocks || 0) + '</b></span>'
+      + '<span style="font-size:.68rem;color:#ff7043;white-space:nowrap" title="L3 BOS confirmation failures (lifetime)">'
+      +   'L3 Failures: <b>' + (gm.l3_failures || 0) + '</b></span>'
+      + '<span style="font-size:.68rem;color:#ce93d8;white-space:nowrap" title="RIG equilibrium hard blocks (lifetime)">'
+      +   'RIG Blocks: <b>' + (gm.rig_blocks || 0) + '</b></span>'
+      + '<span style="font-size:.68rem;color:#00e676;white-space:nowrap" title="Evaluations that passed all gates (lifetime)">'
+      +   'Passes: <b>' + (gm.passes || 0) + '</b></span>'
+      + (total > 0
+        ? '<span style="font-size:.63rem;color:#555;white-space:nowrap">('
+          + Math.round(((gm.passes || 0) / total) * 100) + '% pass rate, '
+          + total + ' total evals)</span>'
+        : '')
+      + '</div>';
+  }
+
   el.innerHTML = '<div class="sg-bar">'
     + '<span class="sg-label">Gates</span>'
     + '<div class="sg-gate ' + l2Class + '" title="' + escapeHtml(l2Tip) + '">'
@@ -16759,7 +16782,8 @@ function renderStructureGates(d) {
     + '<span class="sg-label">Quality</span>'
     + '<div class="sg-eq ' + eqCls + '">' + eqLabel + '</div>'
     + failHtml
-    + '</div>';
+    + '</div>'
+    + statsHtml;
 }
 
 function renderDecisionTrees(d) {

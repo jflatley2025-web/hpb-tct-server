@@ -1303,6 +1303,9 @@ def compute_composite_score_v2(
         "score": 0, "direction": direction, "model": model, "rr": rr,
         "required_score": V2_THRESHOLD, "pass": False, "tree_results": {},
         "phase_results": {},
+        # Mutated in-place before each early return so every {**fail, ...} spread
+        # carries the correct gate label.  "unknown" is the safe default.
+        "failure_context": "unknown",
     }
 
     reasons: List[str] = []
@@ -1331,6 +1334,7 @@ def compute_composite_score_v2(
         }
         # RIG block has not run yet — guarantee "rig" key is present for debug consumers
         phase_results.setdefault("rig", {"zone": "unknown", "displacement_pct": 0.0, "penalty": 0})
+        fail["failure_context"] = "L2"
         return {**fail,
                 "reasons": ["L2 counter-structure (internal reversal active)"],
                 "phase_results": phase_results}
@@ -1366,6 +1370,7 @@ def compute_composite_score_v2(
                 "displacement_pct": round(_rig_pct * 100, 1),
                 "penalty": 0,
             }
+            fail["failure_context"] = "RIG"
             return {**fail,
                     "reasons": ["RIG: price within 10% of equilibrium (hard block)"],
                     "phase_results": phase_results}
@@ -1419,12 +1424,14 @@ def compute_composite_score_v2(
 
     if is_v_shape:
         phase_results["range"] = {**range_checks, "passed": False, "reason": "V-shape / impulsive move"}
+        fail["failure_context"] = "range"
         return {**fail,
                 "reasons": ["Phase 2: Range rejected — V-shape / impulsive move"],
                 "phase_results": phase_results}
 
     if not time_ok:
         phase_results["range"] = {**range_checks, "passed": False, "reason": "insufficient time displacement"}
+        fail["failure_context"] = "range"
         return {**fail,
                 "reasons": [f"Phase 2: Insufficient time displacement ({time_gap} candles)"],
                 "phase_results": phase_results}
@@ -1450,6 +1457,7 @@ def compute_composite_score_v2(
 
     if not tap1.get("price") or not tap2.get("price") or not tap3.get("price"):
         phase_results["tap_structure"] = {"passed": False}
+        fail["failure_context"] = "taps"
         return {**fail,
                 "score": score,
                 "reasons": reasons + ["Missing tap structure"],
@@ -1481,6 +1489,7 @@ def compute_composite_score_v2(
 
     if not tap_valid:
         phase_results["tap_structure"] = {"passed": False}
+        fail["failure_context"] = "taps"
         return {**fail,
                 "score": score,
                 "reasons": reasons + ["Invalid tap structure"],
@@ -1496,6 +1505,7 @@ def compute_composite_score_v2(
 
     if sweep_v2["classification"] == "true_break":
         phase_results["liquidity"] = {"passed": False}
+        fail["failure_context"] = "liquidity"
         return {**fail,
                 "score": score,
                 "reasons": reasons + ["True break — not a sweep"],
@@ -1512,6 +1522,7 @@ def compute_composite_score_v2(
 
     if not l3_valid:
         phase_results["l3"] = {"passed": False}
+        fail["failure_context"] = "L3"
         return {**fail,
                 "score": score,
                 "reasons": reasons + ["No L3 execution confirmation"],
@@ -1526,6 +1537,7 @@ def compute_composite_score_v2(
 
     if not is_confirmed or bos_idx is None or tap3_idx is None or bos_idx < tap3_idx:
         phase_results["bos"] = {"passed": False}
+        fail["failure_context"] = "BOS"
         return {**fail,
                 "score": score,
                 "reasons": reasons + ["Invalid BOS sequence"],
@@ -1590,6 +1602,7 @@ def compute_composite_score_v2(
     if not aligned:
         phase_results["directional"] = {"passed": False, "aligned": False,
                                          "direction": direction, "htf_bias": htf_bias}
+        fail["failure_context"] = "HTF"
         return {**fail, "score": score,
                 "reasons": reasons + [f"Phase 7: HTF bias conflict ({htf_bias} vs {direction})"],
                 "phase_results": phase_results}
@@ -1601,6 +1614,7 @@ def compute_composite_score_v2(
     # ── Phase 8: Risk Filter ──
     if rr < 1.5:
         phase_results["risk"] = {"passed": False, "rr": rr}
+        fail["failure_context"] = "RR"
         return {**fail, "score": score,
                 "reasons": reasons + [f"Phase 8: R:R too low ({rr:.1f} < 1.5)"],
                 "phase_results": phase_results}
@@ -1641,6 +1655,7 @@ def compute_composite_score_v2(
         "rr": rr,
         "required_score": V2_THRESHOLD,
         "pass": score >= V2_THRESHOLD,
+        "failure_context": None,  # pipeline completed — no gate blocked
         "reasons": reasons,
         "tree_results": {
             # Backward-compatible tree_results shape for UI
