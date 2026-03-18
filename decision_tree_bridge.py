@@ -1341,18 +1341,53 @@ def compute_composite_score_v2(
     range_low = range_info.get("low", 0)
 
     # ============================================================
-    # RIG (RANGE INTEGRITY GATE)
+    # RIG (RANGE INTEGRITY GATE — HYBRID)
+    # Hard block: price within 10% of equilibrium (no edge, engine-level precision)
+    # Penalty zone: price within 10–20% of equilibrium (-5 score, trade allowed)
+    # Outside 20%: no penalty
     # ============================================================
-    if not range_integrity_gate(range_high, range_low, current_price):
-        phase_results["rig"] = {
-            "passed": False,
-            "reason": "RIG: price at equilibrium (no edge)"
-        }
-        return {**fail,
-                "reasons": ["RIG: price at equilibrium (no edge)"],
-                "phase_results": phase_results}
+    _rig_penalty = 0
+    if range_high > range_low and current_price > 0:
+        _rig_range = range_high - range_low
+        _rig_eq = (range_high + range_low) / 2.0
+        _rig_dist = abs(current_price - _rig_eq)
+        _rig_pct = _rig_dist / _rig_range  # fraction of range displaced from midpoint
 
-    phase_results["rig"] = {"passed": True}
+        if _rig_pct <= 0.10:
+            # Hard block — price too close to equilibrium (engine threshold)
+            phase_results["rig"] = {
+                "passed": False,
+                "reason": "RIG: price within 10% of equilibrium (hard block)",
+                "displacement_pct": round(_rig_pct * 100, 1),
+            }
+            return {**fail,
+                    "reasons": ["RIG: price within 10% of equilibrium (hard block)"],
+                    "phase_results": phase_results}
+
+        elif _rig_pct <= 0.20:
+            # Penalty zone — allowed but scored down
+            _rig_penalty = -5
+            phase_results["rig"] = {
+                "passed": True,
+                "zone": "penalty",
+                "reason": "RIG: price in 10–20% equilibrium zone (-5 penalty)",
+                "displacement_pct": round(_rig_pct * 100, 1),
+                "penalty": _rig_penalty,
+            }
+        else:
+            # Clear of equilibrium — no penalty
+            phase_results["rig"] = {
+                "passed": True,
+                "zone": "clear",
+                "displacement_pct": round(_rig_pct * 100, 1),
+            }
+    else:
+        # Cannot determine (invalid range or price) — allow through, same as before
+        phase_results["rig"] = {"passed": True, "zone": "undetermined"}
+
+    if _rig_penalty:
+        score += _rig_penalty
+        reasons.append(f"RIG penalty: {_rig_penalty} (mid-zone displacement)")
 
     time_ok, time_gap = _check_time_displacement(schematic)
     liq_stack = _detect_liquidity_stacking(df, range_high, range_low)
