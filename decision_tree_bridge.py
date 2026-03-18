@@ -704,6 +704,51 @@ def range_integrity_gate(range_high: float, range_low: float, current_price: flo
     return abs(current_price - eq) > eq_zone
 
 
+def _compute_rig_payload(range_high: float, range_low: float,
+                         current_price: float) -> tuple:
+    """Full RIG assessment for the v2 pipeline — returns (payload_dict, penalty).
+
+    Thresholds (hard-coded for execution-level use):
+      ≤ 10%  displacement from midpoint → hard block  (passed=False, zone="blocked")
+      10–20% displacement               → penalty zone (passed=True, zone="penalty")
+      ≥ 20%  displacement               → clear        (passed=True, zone="clear")
+      invalid range or price            → undetermined  (passed=True, zone="undetermined")
+
+    Penalty formula: max(1, int(round((0.20 - pct) * 50)))
+    """
+    if not (range_high > range_low and current_price > 0):
+        return (
+            {"passed": True, "zone": "undetermined", "displacement_pct": 0.0, "penalty": 0},
+            0,
+        )
+    rng = range_high - range_low
+    eq  = (range_high + range_low) / 2.0
+    pct = abs(current_price - eq) / rng
+
+    if pct <= 0.10:
+        return (
+            {
+                "passed": False,
+                "zone": "blocked",
+                "reason": "RIG: price within 10% of equilibrium (hard block)",
+                "displacement_pct": round(pct * 100, 1),
+                "penalty": 0,
+            },
+            0,
+        )
+    elif pct < 0.20:
+        penalty = max(1, int(round((0.20 - pct) * 50)))
+        return (
+            {"passed": True, "zone": "penalty", "displacement_pct": round(pct * 100, 1), "penalty": penalty},
+            penalty,
+        )
+    else:
+        return (
+            {"passed": True, "zone": "clear", "displacement_pct": round(pct * 100, 1), "penalty": 0},
+            0,
+        )
+
+
 # ================================================================
 # BUILDER FUNCTIONS — convert candles+schematic → decision tree inputs
 # ================================================================
@@ -1353,58 +1398,18 @@ def compute_composite_score_v2(
     #               At 10%: 5pts  |  At 15%: 2pts  |  At ~20%: 0pts
     # Clear:        outside 20%, no penalty
     # ============================================================
-    _rig_penalty = 0
-    _rig_pct = 0.0
-    if range_high > range_low and current_price > 0:
-        _rig_range = range_high - range_low
-        _rig_eq = (range_high + range_low) / 2.0
-        _rig_dist = abs(current_price - _rig_eq)
-        _rig_pct = _rig_dist / _rig_range  # fraction of range displaced from midpoint
+    _rig_payload, _rig_penalty = _compute_rig_payload(range_high, range_low, current_price)
+    phase_results["rig"] = _rig_payload
 
-        if _rig_pct <= 0.10:
-            # Hard block — price too close to equilibrium (engine threshold)
-            phase_results["rig"] = {
-                "passed": False,
-                "zone": "blocked",
-                "reason": "RIG: price within 10% of equilibrium (hard block)",
-                "displacement_pct": round(_rig_pct * 100, 1),
-                "penalty": 0,
-            }
-            fail["failure_context"] = "RIG"
-            return {**fail,
-                    "reasons": ["RIG: price within 10% of equilibrium (hard block)"],
-                    "phase_results": phase_results}
-
-        elif _rig_pct < 0.20:
-            # Dynamic penalty: closer to equilibrium = higher deduction
-            # max(1, round): 10%→5, 12%→4, 15%→2, 19%→1; exactly 20% → clear (no penalty)
-            _rig_penalty = max(1, int(round((0.20 - _rig_pct) * 50)))
-            phase_results["rig"] = {
-                "passed": True,
-                "zone": "penalty",
-                "displacement_pct": round(_rig_pct * 100, 1),
-                "penalty": _rig_penalty,
-            }
-        else:
-            # Clear of equilibrium — no penalty
-            phase_results["rig"] = {
-                "passed": True,
-                "zone": "clear",
-                "displacement_pct": round(_rig_pct * 100, 1),
-                "penalty": 0,
-            }
-    else:
-        # Cannot determine (invalid range or price) — allow through
-        phase_results["rig"] = {
-            "passed": True,
-            "zone": "undetermined",
-            "displacement_pct": 0.0,
-            "penalty": 0,
-        }
+    if not _rig_payload["passed"]:
+        fail["failure_context"] = "RIG"
+        return {**fail,
+                "reasons": ["RIG: price within 10% of equilibrium (hard block)"],
+                "phase_results": phase_results}
 
     if _rig_penalty:
         score -= _rig_penalty
-        reasons.append(f"RIG penalty: -{_rig_penalty} (mid-zone {round(_rig_pct * 100, 1)}% displacement)")
+        reasons.append(f"RIG penalty: -{_rig_penalty} (mid-zone {_rig_payload['displacement_pct']}% displacement)")
 
     time_ok, time_gap = _check_time_displacement(schematic)
     liq_stack = _detect_liquidity_stacking(df, range_high, range_low)
@@ -1723,17 +1728,19 @@ class DecisionTreeEvaluator:
         fail = {
             "score": 0, "direction": direction, "model": model, "rr": rr,
             "required_score": V2_THRESHOLD, "pass": False, "tree_results": {},
-            "phase_results": {},
+            "phase_results": {}, "failure_context": "unknown",
         }
 
         # Pre-gate: BOS must be confirmed
         if not is_confirmed:
+            fail["failure_context"] = "no-bos"
             return {**fail, "reasons": ["No BOS confirmation"]}
 
         # Pre-gate: stale BOS check
         bos = schematic.get("bos_confirmation") or {}
         bos_idx = bos.get("bos_idx")
         if bos_idx is not None and bos_idx < total_candles - max_stale_candles:
+            fail["failure_context"] = "stale-bos"
             return {**fail, "reasons": [f"Stale BOS: {total_candles - bos_idx} candles ago (max {max_stale_candles})"]}
 
         # Run the v2 9-phase pipeline if candle data is available
@@ -1756,16 +1763,18 @@ class DecisionTreeEvaluator:
         fail = {
             "score": 0, "direction": direction, "model": model, "rr": rr,
             "required_score": V2_THRESHOLD, "pass": False, "tree_results": {},
-            "phase_results": {},
+            "phase_results": {}, "failure_context": "unknown",
         }
 
         # R:R gate
         if rr < 1.5:
+            fail["failure_context"] = "RR"
             return {**fail, "reasons": [f"R:R too low ({rr:.1f})"]}
 
         # Quality gate
         quality_score = schematic.get("quality_score", 0.0)
         if quality_score < 0.70:
+            fail["failure_context"] = "quality"
             return {**fail, "reasons": [f"Quality too low ({quality_score:.2f} < 0.70)"]}
 
         # BOS confirmed base
@@ -1791,8 +1800,10 @@ class DecisionTreeEvaluator:
             score += 20
             reasons.append("HTF bias aligned (bearish)")
         elif htf_bias == "neutral":
+            fail["failure_context"] = "HTF"
             return {**fail, "reasons": ["HTF bias neutral — no directional clarity"]}
         else:
+            fail["failure_context"] = "HTF"
             return {**fail, "reasons": [f"HTF bias conflict ({htf_bias} vs {direction})"]}
 
         # Quality bonus
@@ -1806,4 +1817,5 @@ class DecisionTreeEvaluator:
             "required_score": V2_THRESHOLD, "pass": score >= V2_THRESHOLD, "reasons": reasons,
             "tree_results": {"mode": "fallback_no_candle_data"},
             "phase_results": {"mode": "fallback"},
+            "failure_context": None,  # fallback pipeline completed
         }

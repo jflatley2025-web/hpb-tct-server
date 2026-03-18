@@ -1025,10 +1025,17 @@ class Schematics5BTrader:
         self.last_debug: Dict = {}
         self._lock = threading.Lock()
         # Lifetime gate-block counters — incremented inside _scan_lock (no race).
+        # One counter per failure_context label + "passes" for the success path.
         self._gate_metrics: Dict[str, int] = {
             "l2_blocks": 0,
             "l3_failures": 0,
             "rig_blocks": 0,
+            "range_failures": 0,
+            "tap_failures": 0,
+            "liquidity_failures": 0,
+            "bos_failures": 0,
+            "htf_failures": 0,
+            "rr_failures": 0,
             "passes": 0,
         }
         # Per-symbol HTF bias cache: symbol → (bias_str, expiry_timestamp)
@@ -1421,12 +1428,19 @@ class Schematics5BTrader:
                     tf_evals.append(eval_result)
                     # Gate metrics — _scan_lock is held so no race condition.
                     _fc = eval_result.get("failure_context")
-                    if _fc == "L2":
-                        self._gate_metrics["l2_blocks"] += 1
-                    elif _fc == "L3":
-                        self._gate_metrics["l3_failures"] += 1
-                    elif _fc == "RIG":
-                        self._gate_metrics["rig_blocks"] += 1
+                    _fc_map = {
+                        "L2":        "l2_blocks",
+                        "L3":        "l3_failures",
+                        "RIG":       "rig_blocks",
+                        "range":     "range_failures",
+                        "taps":      "tap_failures",
+                        "liquidity": "liquidity_failures",
+                        "BOS":       "bos_failures",
+                        "HTF":       "htf_failures",
+                        "RR":        "rr_failures",
+                    }
+                    if _fc in _fc_map:
+                        self._gate_metrics[_fc_map[_fc]] += 1
                     if eval_result.get("pass"):
                         self._gate_metrics["passes"] += 1
                     if eval_result["pass"] and eval_result["score"] > best_score:

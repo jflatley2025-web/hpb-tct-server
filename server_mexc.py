@@ -15644,13 +15644,16 @@ async def schematics_5b_debug():
             for _ev in _tf_data.get("evaluations", []):
                 if not isinstance(_ev, dict):
                     continue
+                _score = _ev.get("score")
+                if not isinstance(_score, (int, float)):
+                    _score = 0
                 if _ev.get("pass"):
-                    if _ev.get("score", 0) > _best_pass_score:
-                        _best_pass_score = _ev["score"]
+                    if _score > _best_pass_score:
+                        _best_pass_score = _score
                         _best_pass_ev = _ev
                 else:
-                    if _ev.get("score", 0) > _best_fail_score:
-                        _best_fail_score = _ev["score"]
+                    if _score > _best_fail_score:
+                        _best_fail_score = _score
                         _best_fail_ev = _ev
         _best_ev = _best_pass_ev if _best_pass_ev is not None else _best_fail_ev
 
@@ -15662,11 +15665,16 @@ async def schematics_5b_debug():
             _pr.setdefault("rig", {"zone": "unknown", "displacement_pct": 0.0, "penalty": 0})
             _rig_pr = _pr["rig"]
             _rig_zone = _rig_pr.get("zone", "undetermined")
-            _l3_confirmed = _pr.get("l3", {}).get("passed", False)
+            # Emit None when a phase was never evaluated (e.g. pipeline aborted earlier).
+            # The UI renders None as "—" (na class) to distinguish from a real PASS/FAIL.
+            _l2_raw = _pr.get("l2")
+            _l3_raw = _pr.get("l3")
+            _l2_blocked   = (not _l2_raw.get("passed", True)) if isinstance(_l2_raw, dict) else None
+            _l3_confirmed = _l3_raw.get("passed", False) if isinstance(_l3_raw, dict) else None
 
             # 1. Structure summary — key gate outcomes at a glance
             debug["structure"] = {
-                "l2_blocked": not _pr.get("l2", {}).get("passed", True),
+                "l2_blocked": _l2_blocked,
                 "l3_confirmed": _l3_confirmed,
                 "rig_zone": _rig_zone,
                 "rig_displacement": _rig_pr.get("displacement_pct", 0.0),
@@ -16698,19 +16706,23 @@ function renderStructureGates(d) {
 
   // L2 — counter-structure filter
   const l2Blocked = s.l2_blocked;
-  const l2Class   = (l2Blocked == null) ? 'na'   : l2Blocked ? 'fail' : 'pass';
+  const l2Class   = (l2Blocked == null) ? 'na'    : l2Blocked ? 'fail' : 'pass';
   const l2Text    = (l2Blocked == null) ? '\u2014' : l2Blocked ? 'BLOCKED' : 'PASS';
-  const l2Tip     = l2Blocked
-    ? 'L2: Counter-structure detected\nInternal reversal active — trade blocked'
-    : 'L2: No counter-structure\nStructure aligned with HTF bias';
+  const l2Tip     = (l2Blocked == null)
+    ? 'L2: Not evaluated — pipeline exited before this phase'
+    : l2Blocked
+      ? 'L2: Counter-structure detected\nInternal reversal active — trade blocked'
+      : 'L2: No counter-structure\nStructure aligned with HTF bias';
 
   // L3 — execution confirmation (BOS gate)
   const l3Conf  = s.l3_confirmed;
   const l3Class = (l3Conf == null) ? 'na' : l3Conf ? 'pass' : 'fail';
   const l3Text  = (l3Conf == null) ? '\u2014' : l3Conf ? 'CONFIRMED' : 'MISSING';
-  const l3Tip   = l3Conf
-    ? 'L3: BOS confirmed\nExecution gate passed'
-    : 'L3: No BOS confirmation\nExecution gate failed';
+  const l3Tip   = (l3Conf == null)
+    ? 'L3: Not evaluated — pipeline exited before this phase'
+    : l3Conf
+      ? 'L3: BOS confirmed\nExecution gate passed'
+      : 'L3: No BOS confirmation\nExecution gate failed';
 
   // RIG — range integrity gate
   const rig  = s.rig_zone || 'unknown';
@@ -16748,7 +16760,17 @@ function renderStructureGates(d) {
   const gm = d?.gate_metrics;
   let statsHtml = '';
   if (gm) {
-    const total = (gm.l2_blocks || 0) + (gm.l3_failures || 0) + (gm.rig_blocks || 0) + (gm.passes || 0);
+    // Sum every known terminal-outcome counter so the denominator is complete.
+    const total = (gm.l2_blocks        || 0)
+                + (gm.l3_failures      || 0)
+                + (gm.rig_blocks       || 0)
+                + (gm.range_failures   || 0)
+                + (gm.tap_failures     || 0)
+                + (gm.liquidity_failures || 0)
+                + (gm.bos_failures     || 0)
+                + (gm.htf_failures     || 0)
+                + (gm.rr_failures      || 0)
+                + (gm.passes           || 0);
     statsHtml = '<div class="sg-bar" style="border-top:1px solid #1e1e2d;padding-top:6px;padding-bottom:6px">'
       + '<span class="sg-label">Gate Stats</span>'
       + '<span style="font-size:.68rem;color:#ff4444;white-space:nowrap" title="L2 counter-structure blocks (lifetime)">'
