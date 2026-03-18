@@ -15633,16 +15633,26 @@ async def schematics_5b_debug():
         }
 
         # ── Structure summary, failure context, score breakdown, execution quality ──
-        # Find the best evaluation (highest score) across all TFs for this symbol.
-        _best_ev: Optional[Dict] = None
-        _best_ev_score = -1
+        # Prefer best passing eval; fall back to best failing eval if none passed.
+        _best_pass_ev: Optional[Dict] = None
+        _best_pass_score = -1
+        _best_fail_ev: Optional[Dict] = None
+        _best_fail_score = -1
         for _tf_key, _tf_data in primary_data.get("timeframes", {}).items():
             if not isinstance(_tf_data, dict):
                 continue
             for _ev in _tf_data.get("evaluations", []):
-                if isinstance(_ev, dict) and _ev.get("score", 0) > _best_ev_score:
-                    _best_ev_score = _ev["score"]
-                    _best_ev = _ev
+                if not isinstance(_ev, dict):
+                    continue
+                if _ev.get("pass"):
+                    if _ev.get("score", 0) > _best_pass_score:
+                        _best_pass_score = _ev["score"]
+                        _best_pass_ev = _ev
+                else:
+                    if _ev.get("score", 0) > _best_fail_score:
+                        _best_fail_score = _ev["score"]
+                        _best_fail_ev = _ev
+        _best_ev = _best_pass_ev if _best_pass_ev is not None else _best_fail_ev
 
         if _best_ev:
             _pr = _best_ev.get("phase_results", {})
@@ -15681,15 +15691,7 @@ async def schematics_5b_debug():
                     "reason": _failure_reason or f"{_failed_phase} gate failed",
                 }
 
-            # 3. Score breakdown — per-phase contribution
-            _rr_bonus = 0
-            for _r in _best_ev.get("reasons", []):
-                if "R:R bonus: +" in _r:
-                    try:
-                        _rr_bonus = int(_r.split("+")[1].split(" ")[0])
-                    except (IndexError, ValueError):
-                        pass
-                    break
+            # 3. Score breakdown — per-phase contribution (structured, no string parsing)
             debug["score_breakdown"] = {
                 "range": _pr.get("range", {}).get("score", 0),
                 "taps": _pr.get("tap_structure", {}).get("score", 0),
@@ -15697,11 +15699,13 @@ async def schematics_5b_debug():
                 "bos": _pr.get("bos", {}).get("score", 0),
                 "rig_penalty": _rig_pr.get("penalty", 0),
                 "session": _pr.get("session", {}).get("score", 0),
-                "rr_bonus": _rr_bonus,
+                "rr_bonus": _pr.get("rr_bonus", 0),
             }
 
-            # 4. Execution quality — composite classification
-            if _rig_zone == "clear" and _l3_confirmed:
+            # 4. Execution quality — invalid takes priority over structural classification
+            if not _best_ev.get("pass"):
+                _exec_quality = "invalid"
+            elif _rig_zone == "clear" and _l3_confirmed:
                 _exec_quality = "high"
             elif _rig_zone == "penalty" and _l3_confirmed:
                 _exec_quality = "medium"

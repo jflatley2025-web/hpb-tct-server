@@ -1370,8 +1370,8 @@ def compute_composite_score_v2(
 
         elif _rig_pct <= 0.20:
             # Dynamic penalty: closer to equilibrium = higher deduction
-            # int((0.20 - pct) * 50): 10%→5, 12%→4, 15%→2, 18%→1, 20%→0
-            _rig_penalty = int((0.20 - _rig_pct) * 50)
+            # max(1, round): 10%→5, 12%→4, 15%→2, 19%→1, 20%→1 (floor at 1, no dead zone)
+            _rig_penalty = max(1, int(round((0.20 - _rig_pct) * 50)))
             phase_results["rig"] = {
                 "passed": True,
                 "zone": "penalty",
@@ -1613,12 +1613,16 @@ def compute_composite_score_v2(
     phase_results["session"] = {"score": session_pts, "session": session_desc}
 
     # R:R bonus (folded into BOS quality — already scored above)
+    _rr_bonus_pts = 0
     if rr >= 3.0:
-        score += 3
-        reasons.append(f"R:R bonus: +3 ({rr:.1f})")
+        _rr_bonus_pts = 3
+        score += _rr_bonus_pts
+        reasons.append(f"R:R bonus: +{_rr_bonus_pts} ({rr:.1f})")
     elif rr >= 2.0:
-        score += 1
-        reasons.append(f"R:R bonus: +1 ({rr:.1f})")
+        _rr_bonus_pts = 1
+        score += _rr_bonus_pts
+        reasons.append(f"R:R bonus: +{_rr_bonus_pts} ({rr:.1f})")
+    phase_results["rr_bonus"] = _rr_bonus_pts
 
     # Reversal penalty — aligned trades score higher than reversals
     if is_reversal:
