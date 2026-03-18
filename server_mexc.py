@@ -15632,6 +15632,83 @@ async def schematics_5b_debug():
             "state_summary": raw.get("state_summary", {}),
         }
 
+        # ── Structure summary, failure context, score breakdown, execution quality ──
+        # Find the best evaluation (highest score) across all TFs for this symbol.
+        _best_ev: Optional[Dict] = None
+        _best_ev_score = -1
+        for _tf_key, _tf_data in primary_data.get("timeframes", {}).items():
+            if not isinstance(_tf_data, dict):
+                continue
+            for _ev in _tf_data.get("evaluations", []):
+                if isinstance(_ev, dict) and _ev.get("score", 0) > _best_ev_score:
+                    _best_ev_score = _ev["score"]
+                    _best_ev = _ev
+
+        if _best_ev:
+            _pr = _best_ev.get("phase_results", {})
+            _rig_pr = _pr.get("rig", {})
+            _rig_zone = _rig_pr.get("zone", "undetermined")
+            _l3_confirmed = _pr.get("l3", {}).get("passed", False)
+
+            # 1. Structure summary — key gate outcomes at a glance
+            debug["structure"] = {
+                "l2_blocked": not _pr.get("l2", {}).get("passed", True),
+                "l3_confirmed": _l3_confirmed,
+                "rig_zone": _rig_zone,
+                "rig_displacement": _rig_pr.get("displacement_pct", 0.0),
+                "rig_penalty": _rig_pr.get("penalty", 0),
+            }
+
+            # 2. Failure context — first hard gate that failed (pipeline order)
+            _phase_order = [
+                "l2", "rig", "range", "tap_structure",
+                "liquidity", "l3", "bos", "directional", "risk",
+            ]
+            _failed_phase = None
+            _failure_reason = None
+            for _ph in _phase_order:
+                _ph_data = _pr.get(_ph, {})
+                if isinstance(_ph_data, dict) and _ph_data.get("passed") is False:
+                    _failed_phase = _ph
+                    _failure_reason = (
+                        _ph_data.get("reason")
+                        or next(iter(_best_ev.get("reasons", [])), None)
+                    )
+                    break
+            if _failed_phase:
+                debug["failure_context"] = {
+                    "failed_phase": _failed_phase,
+                    "reason": _failure_reason or f"{_failed_phase} gate failed",
+                }
+
+            # 3. Score breakdown — per-phase contribution
+            _rr_bonus = 0
+            for _r in _best_ev.get("reasons", []):
+                if "R:R bonus: +" in _r:
+                    try:
+                        _rr_bonus = int(_r.split("+")[1].split(" ")[0])
+                    except (IndexError, ValueError):
+                        pass
+                    break
+            debug["score_breakdown"] = {
+                "range": _pr.get("range", {}).get("score", 0),
+                "taps": _pr.get("tap_structure", {}).get("score", 0),
+                "liquidity": _pr.get("liquidity", {}).get("score", 0),
+                "bos": _pr.get("bos", {}).get("score", 0),
+                "rig_penalty": _rig_pr.get("penalty", 0),
+                "session": _pr.get("session", {}).get("score", 0),
+                "rr_bonus": _rr_bonus,
+            }
+
+            # 4. Execution quality — composite classification
+            if _rig_zone == "clear" and _l3_confirmed:
+                _exec_quality = "high"
+            elif _rig_zone == "penalty" and _l3_confirmed:
+                _exec_quality = "medium"
+            else:
+                _exec_quality = "low"
+            debug["execution_quality"] = _exec_quality
+
         # Extract tree_results from the per-symbol evaluation data
         per_sym = debug.get("per_symbol", {})
         for sym, sym_data in per_sym.items():
