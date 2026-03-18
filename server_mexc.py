@@ -15655,8 +15655,10 @@ async def schematics_5b_debug():
         _best_ev = _best_pass_ev if _best_pass_ev is not None else _best_fail_ev
 
         if _best_ev:
-            _pr = _best_ev.get("phase_results", {})
-            _rig_pr = _pr.get("rig", {})
+            # Shallow copy so setdefault below does not mutate stored last_debug data.
+            _pr = dict(_best_ev.get("phase_results", {}))
+            _pr.setdefault("rig", {"zone": "unknown", "displacement_pct": 0.0, "penalty": 0})
+            _rig_pr = _pr["rig"]
             _rig_zone = _rig_pr.get("zone", "undetermined")
             _l3_confirmed = _pr.get("l3", {}).get("passed", False)
 

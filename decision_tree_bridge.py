@@ -1368,9 +1368,9 @@ def compute_composite_score_v2(
                     "reasons": ["RIG: price within 10% of equilibrium (hard block)"],
                     "phase_results": phase_results}
 
-        elif _rig_pct <= 0.20:
+        elif _rig_pct < 0.20:
             # Dynamic penalty: closer to equilibrium = higher deduction
-            # max(1, round): 10%→5, 12%→4, 15%→2, 19%→1, 20%→1 (floor at 1, no dead zone)
+            # max(1, round): 10%→5, 12%→4, 15%→2, 19%→1; exactly 20% → clear (no penalty)
             _rig_penalty = max(1, int(round((0.20 - _rig_pct) * 50)))
             phase_results["rig"] = {
                 "passed": True,
