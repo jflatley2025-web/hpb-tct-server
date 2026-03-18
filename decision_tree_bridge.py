@@ -704,6 +704,87 @@ def range_integrity_gate(range_high: float, range_low: float, current_price: flo
     return abs(current_price - eq) > eq_zone
 
 
+def _compute_rig_payload(range_high: float, range_low: float,
+                         current_price: float) -> tuple:
+    """Full RIG assessment for the v2 pipeline — returns (payload_dict, penalty).
+
+    Thresholds (hard-coded for execution-level use):
+      ≤ 10%  displacement from midpoint → hard block  (passed=False, zone="blocked")
+      10–20% displacement               → penalty zone (passed=True, zone="penalty")
+      ≥ 20%  displacement               → clear        (passed=True, zone="clear")
+      invalid range or price            → undetermined  (passed=True, zone="undetermined")
+
+    Penalty formula: max(1, int(round((0.20 - pct) * 50)))
+    """
+    if not (range_high > range_low and current_price > 0):
+        return (
+            {"passed": True, "zone": "undetermined", "displacement_pct": 0.0, "penalty": 0},
+            0,
+        )
+    rng = range_high - range_low
+    eq  = (range_high + range_low) / 2.0
+    pct = abs(current_price - eq) / rng
+
+    if pct <= 0.10:
+        return (
+            {
+                "passed": False,
+                "zone": "blocked",
+                "reason": "RIG: price within 10% of equilibrium (hard block)",
+                "displacement_pct": round(pct * 100, 1),
+                "penalty": 0,
+            },
+            0,
+        )
+    elif pct < 0.20:
+        penalty = max(1, int(round((0.20 - pct) * 50)))
+        return (
+            {"passed": True, "zone": "penalty", "displacement_pct": round(pct * 100, 1), "penalty": penalty},
+            penalty,
+        )
+    else:
+        return (
+            {"passed": True, "zone": "clear", "displacement_pct": round(pct * 100, 1), "penalty": 0},
+            0,
+        )
+
+
+def _detect_l3_structure(df: pd.DataFrame, direction: str,
+                         tap3_idx: Optional[int] = None) -> bool:
+    """Detect L3 execution structure (compression + micro-BOS), anchored to Tap3.
+
+    Wraps MarketStructureEngine.detect_l3_structure and restricts analysis to
+    candles that occur at or after tap3_idx.  This prevents an older internal
+    break — one that pre-dates the current tap sequence — from satisfying the
+    L3 confirmation gate.
+
+    Args:
+        df:        Full candle DataFrame for the evaluation timeframe.
+        direction: "bullish" or "bearish" — determines which compression pattern
+                   and structural break to look for.
+        tap3_idx:  Integer positional index of Tap3 within df (df.iloc[tap3_idx]).
+                   When None or out of range, the full DataFrame is used so that
+                   existing behaviour is preserved for callers that don't supply
+                   an anchor.
+
+    Returns:
+        True if the post-Tap3 candles show the required compression + micro-BOS.
+        False otherwise, including when fewer than 5 post-Tap3 candles exist.
+    """
+    if df is None or len(df) < 5:
+        return False
+
+    if tap3_idx is not None and isinstance(tap3_idx, int) and 0 <= tap3_idx < len(df):
+        # Slice from tap3 onward so L3 only confirms post-setup price action.
+        df_post = df.iloc[tap3_idx:].reset_index(drop=True)
+    else:
+        # No valid anchor — fall back to full df (MSE applies its own tail(10)).
+        df_post = df
+
+    from decision_trees.market_structure_engine import MarketStructureEngine
+    return MarketStructureEngine().detect_l3_structure(df_post, direction)
+
+
 # ================================================================
 # BUILDER FUNCTIONS — convert candles+schematic → decision tree inputs
 # ================================================================
@@ -1303,6 +1384,9 @@ def compute_composite_score_v2(
         "score": 0, "direction": direction, "model": model, "rr": rr,
         "required_score": V2_THRESHOLD, "pass": False, "tree_results": {},
         "phase_results": {},
+        # Mutated in-place before each early return so every {**fail, ...} spread
+        # carries the correct gate label.  "unknown" is the safe default.
+        "failure_context": "unknown",
     }
 
     reasons: List[str] = []
@@ -1329,6 +1413,9 @@ def compute_composite_score_v2(
             "reason": "L2 counter-structure (internal reversal active)",
             "data": l2
         }
+        # RIG block has not run yet — guarantee "rig" key is present for debug consumers
+        phase_results.setdefault("rig", {"zone": "unknown", "displacement_pct": 0.0, "penalty": 0})
+        fail["failure_context"] = "L2"
         return {**fail,
                 "reasons": ["L2 counter-structure (internal reversal active)"],
                 "phase_results": phase_results}
@@ -1341,18 +1428,24 @@ def compute_composite_score_v2(
     range_low = range_info.get("low", 0)
 
     # ============================================================
-    # RIG (RANGE INTEGRITY GATE)
+    # RIG (RANGE INTEGRITY GATE — HYBRID DYNAMIC)
+    # Hard block:   price within 10% of equilibrium
+    # Penalty zone: price within 10–20%, penalty = int((0.20 - dist) * 50)
+    #               At 10%: 5pts  |  At 15%: 2pts  |  At ~20%: 0pts
+    # Clear:        outside 20%, no penalty
     # ============================================================
-    if not range_integrity_gate(range_high, range_low, current_price):
-        phase_results["rig"] = {
-            "passed": False,
-            "reason": "RIG: price at equilibrium (no edge)"
-        }
+    _rig_payload, _rig_penalty = _compute_rig_payload(range_high, range_low, current_price)
+    phase_results["rig"] = _rig_payload
+
+    if not _rig_payload["passed"]:
+        fail["failure_context"] = "RIG"
         return {**fail,
-                "reasons": ["RIG: price at equilibrium (no edge)"],
+                "reasons": ["RIG: price within 10% of equilibrium (hard block)"],
                 "phase_results": phase_results}
 
-    phase_results["rig"] = {"passed": True}
+    if _rig_penalty:
+        score -= _rig_penalty
+        reasons.append(f"RIG penalty: -{_rig_penalty} (mid-zone {_rig_payload['displacement_pct']}% displacement)")
 
     time_ok, time_gap = _check_time_displacement(schematic)
     liq_stack = _detect_liquidity_stacking(df, range_high, range_low)
@@ -1372,12 +1465,14 @@ def compute_composite_score_v2(
 
     if is_v_shape:
         phase_results["range"] = {**range_checks, "passed": False, "reason": "V-shape / impulsive move"}
+        fail["failure_context"] = "range"
         return {**fail,
                 "reasons": ["Phase 2: Range rejected — V-shape / impulsive move"],
                 "phase_results": phase_results}
 
     if not time_ok:
         phase_results["range"] = {**range_checks, "passed": False, "reason": "insufficient time displacement"}
+        fail["failure_context"] = "range"
         return {**fail,
                 "reasons": [f"Phase 2: Insufficient time displacement ({time_gap} candles)"],
                 "phase_results": phase_results}
@@ -1403,6 +1498,7 @@ def compute_composite_score_v2(
 
     if not tap1.get("price") or not tap2.get("price") or not tap3.get("price"):
         phase_results["tap_structure"] = {"passed": False}
+        fail["failure_context"] = "taps"
         return {**fail,
                 "score": score,
                 "reasons": reasons + ["Missing tap structure"],
@@ -1434,6 +1530,7 @@ def compute_composite_score_v2(
 
     if not tap_valid:
         phase_results["tap_structure"] = {"passed": False}
+        fail["failure_context"] = "taps"
         return {**fail,
                 "score": score,
                 "reasons": reasons + ["Invalid tap structure"],
@@ -1449,6 +1546,7 @@ def compute_composite_score_v2(
 
     if sweep_v2["classification"] == "true_break":
         phase_results["liquidity"] = {"passed": False}
+        fail["failure_context"] = "liquidity"
         return {**fail,
                 "score": score,
                 "reasons": reasons + ["True break — not a sweep"],
@@ -1461,10 +1559,13 @@ def compute_composite_score_v2(
     reasons.append(f"Liquidity: {liq_score}/20")
 
     # ── Phase 4.5: L3 EXECUTION STRUCTURE (REAL) ──
-    l3_valid = mse.detect_l3_structure(df, direction)
+    # Pass tap3_idx so L3 is only confirmed by price action that formed after Tap3,
+    # not by an older micro-BOS that predates the current schematic.
+    l3_valid = _detect_l3_structure(df, direction, tap3.get("idx"))
 
     if not l3_valid:
         phase_results["l3"] = {"passed": False}
+        fail["failure_context"] = "L3"
         return {**fail,
                 "score": score,
                 "reasons": reasons + ["No L3 execution confirmation"],
@@ -1479,6 +1580,7 @@ def compute_composite_score_v2(
 
     if not is_confirmed or bos_idx is None or tap3_idx is None or bos_idx < tap3_idx:
         phase_results["bos"] = {"passed": False}
+        fail["failure_context"] = "BOS"
         return {**fail,
                 "score": score,
                 "reasons": reasons + ["Invalid BOS sequence"],
@@ -1543,6 +1645,7 @@ def compute_composite_score_v2(
     if not aligned:
         phase_results["directional"] = {"passed": False, "aligned": False,
                                          "direction": direction, "htf_bias": htf_bias}
+        fail["failure_context"] = "HTF"
         return {**fail, "score": score,
                 "reasons": reasons + [f"Phase 7: HTF bias conflict ({htf_bias} vs {direction})"],
                 "phase_results": phase_results}
@@ -1554,6 +1657,7 @@ def compute_composite_score_v2(
     # ── Phase 8: Risk Filter ──
     if rr < 1.5:
         phase_results["risk"] = {"passed": False, "rr": rr}
+        fail["failure_context"] = "RR"
         return {**fail, "score": score,
                 "reasons": reasons + [f"Phase 8: R:R too low ({rr:.1f} < 1.5)"],
                 "phase_results": phase_results}
@@ -1568,12 +1672,16 @@ def compute_composite_score_v2(
     phase_results["session"] = {"score": session_pts, "session": session_desc}
 
     # R:R bonus (folded into BOS quality — already scored above)
+    _rr_bonus_pts = 0
     if rr >= 3.0:
-        score += 3
-        reasons.append(f"R:R bonus: +3 ({rr:.1f})")
+        _rr_bonus_pts = 3
+        score += _rr_bonus_pts
+        reasons.append(f"R:R bonus: +{_rr_bonus_pts} ({rr:.1f})")
     elif rr >= 2.0:
-        score += 1
-        reasons.append(f"R:R bonus: +1 ({rr:.1f})")
+        _rr_bonus_pts = 1
+        score += _rr_bonus_pts
+        reasons.append(f"R:R bonus: +{_rr_bonus_pts} ({rr:.1f})")
+    phase_results["rr_bonus"] = _rr_bonus_pts
 
     # Reversal penalty — aligned trades score higher than reversals
     if is_reversal:
@@ -1590,6 +1698,7 @@ def compute_composite_score_v2(
         "rr": rr,
         "required_score": V2_THRESHOLD,
         "pass": score >= V2_THRESHOLD,
+        "failure_context": None,  # pipeline completed — no gate blocked
         "reasons": reasons,
         "tree_results": {
             # Backward-compatible tree_results shape for UI
@@ -1657,17 +1766,19 @@ class DecisionTreeEvaluator:
         fail = {
             "score": 0, "direction": direction, "model": model, "rr": rr,
             "required_score": V2_THRESHOLD, "pass": False, "tree_results": {},
-            "phase_results": {},
+            "phase_results": {}, "failure_context": "unknown",
         }
 
         # Pre-gate: BOS must be confirmed
         if not is_confirmed:
+            fail["failure_context"] = "no-bos"
             return {**fail, "reasons": ["No BOS confirmation"]}
 
         # Pre-gate: stale BOS check
         bos = schematic.get("bos_confirmation") or {}
         bos_idx = bos.get("bos_idx")
         if bos_idx is not None and bos_idx < total_candles - max_stale_candles:
+            fail["failure_context"] = "stale-bos"
             return {**fail, "reasons": [f"Stale BOS: {total_candles - bos_idx} candles ago (max {max_stale_candles})"]}
 
         # Run the v2 9-phase pipeline if candle data is available
@@ -1690,16 +1801,18 @@ class DecisionTreeEvaluator:
         fail = {
             "score": 0, "direction": direction, "model": model, "rr": rr,
             "required_score": V2_THRESHOLD, "pass": False, "tree_results": {},
-            "phase_results": {},
+            "phase_results": {}, "failure_context": "unknown",
         }
 
         # R:R gate
         if rr < 1.5:
+            fail["failure_context"] = "RR"
             return {**fail, "reasons": [f"R:R too low ({rr:.1f})"]}
 
         # Quality gate
         quality_score = schematic.get("quality_score", 0.0)
         if quality_score < 0.70:
+            fail["failure_context"] = "quality"
             return {**fail, "reasons": [f"Quality too low ({quality_score:.2f} < 0.70)"]}
 
         # BOS confirmed base
@@ -1725,8 +1838,10 @@ class DecisionTreeEvaluator:
             score += 20
             reasons.append("HTF bias aligned (bearish)")
         elif htf_bias == "neutral":
+            fail["failure_context"] = "HTF"
             return {**fail, "reasons": ["HTF bias neutral — no directional clarity"]}
         else:
+            fail["failure_context"] = "HTF"
             return {**fail, "reasons": [f"HTF bias conflict ({htf_bias} vs {direction})"]}
 
         # Quality bonus
@@ -1740,4 +1855,5 @@ class DecisionTreeEvaluator:
             "required_score": V2_THRESHOLD, "pass": score >= V2_THRESHOLD, "reasons": reasons,
             "tree_results": {"mode": "fallback_no_candle_data"},
             "phase_results": {"mode": "fallback"},
+            "failure_context": None,  # fallback pipeline completed
         }

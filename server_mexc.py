@@ -15632,6 +15632,99 @@ async def schematics_5b_debug():
             "state_summary": raw.get("state_summary", {}),
         }
 
+        # ── Structure summary, failure context, score breakdown, execution quality ──
+        # Prefer best passing eval; fall back to best failing eval if none passed.
+        _best_pass_ev: Optional[Dict] = None
+        _best_pass_score = -1
+        _best_fail_ev: Optional[Dict] = None
+        _best_fail_score = -1
+        for _tf_key, _tf_data in primary_data.get("timeframes", {}).items():
+            if not isinstance(_tf_data, dict):
+                continue
+            for _ev in _tf_data.get("evaluations", []):
+                if not isinstance(_ev, dict):
+                    continue
+                _score = _ev.get("score")
+                if not isinstance(_score, (int, float)):
+                    _score = 0
+                if _ev.get("pass"):
+                    if _score > _best_pass_score:
+                        _best_pass_score = _score
+                        _best_pass_ev = _ev
+                else:
+                    if _score > _best_fail_score:
+                        _best_fail_score = _score
+                        _best_fail_ev = _ev
+        _best_ev = _best_pass_ev if _best_pass_ev is not None else _best_fail_ev
+
+        if not _best_ev:
+            debug["execution_quality"] = "unknown"
+        else:
+            # Shallow copy so setdefault below does not mutate stored last_debug data.
+            _pr = dict(_best_ev.get("phase_results", {}))
+            _pr.setdefault("rig", {"zone": "unknown", "displacement_pct": 0.0, "penalty": 0})
+            _rig_pr = _pr["rig"]
+            _rig_zone = _rig_pr.get("zone", "undetermined")
+            # Emit None when a phase was never evaluated (e.g. pipeline aborted earlier).
+            # The UI renders None as "—" (na class) to distinguish from a real PASS/FAIL.
+            _l2_raw = _pr.get("l2")
+            _l3_raw = _pr.get("l3")
+            _l2_blocked   = (not _l2_raw.get("passed", True)) if isinstance(_l2_raw, dict) else None
+            _l3_confirmed = _l3_raw.get("passed", False) if isinstance(_l3_raw, dict) else None
+
+            # 1. Structure summary — key gate outcomes at a glance
+            debug["structure"] = {
+                "l2_blocked": _l2_blocked,
+                "l3_confirmed": _l3_confirmed,
+                "rig_zone": _rig_zone,
+                "rig_displacement": _rig_pr.get("displacement_pct", 0.0),
+                "rig_penalty": _rig_pr.get("penalty", 0),
+            }
+
+            # 2. Failure context — first hard gate that failed (pipeline order)
+            _phase_order = [
+                "l2", "rig", "range", "tap_structure",
+                "liquidity", "l3", "bos", "directional", "risk",
+            ]
+            _failed_phase = None
+            _failure_reason = None
+            for _ph in _phase_order:
+                _ph_data = _pr.get(_ph, {})
+                if isinstance(_ph_data, dict) and _ph_data.get("passed") is False:
+                    _failed_phase = _ph
+                    _failure_reason = (
+                        _ph_data.get("reason")
+                        or next(iter(_best_ev.get("reasons", [])), None)
+                    )
+                    break
+            if _failed_phase:
+                debug["failure_context"] = {
+                    "failed_phase": _failed_phase,
+                    "reason": _failure_reason or f"{_failed_phase} gate failed",
+                }
+
+            # 3. Score breakdown — per-phase contribution (structured, no string parsing)
+            debug["score_breakdown"] = {
+                "range": _pr.get("range", {}).get("score", 0),
+                "taps": _pr.get("tap_structure", {}).get("score", 0),
+                "liquidity": _pr.get("liquidity", {}).get("score", 0),
+                "bos": _pr.get("bos", {}).get("score", 0),
+                "rig_penalty": _rig_pr.get("penalty", 0),
+                "session": _pr.get("session", {}).get("score", 0),
+                "rr_bonus": _pr.get("rr_bonus", 0),
+            }
+
+            # 4. Execution quality — invalid takes priority over structural classification
+            if not _best_ev.get("pass"):
+                _exec_quality = "invalid"
+            elif _rig_zone == "clear" and _l3_confirmed:
+                _exec_quality = "high"
+            elif _rig_zone == "penalty" and _l3_confirmed:
+                _exec_quality = "medium"
+            else:
+                _exec_quality = "low"
+            debug["execution_quality"] = _exec_quality
+
         # Extract tree_results from the per-symbol evaluation data
         per_sym = debug.get("per_symbol", {})
         for sym, sym_data in per_sym.items():
@@ -15854,6 +15947,23 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
 .dt-meta{padding:8px 14px;font-size:.7rem;color:#888;border-bottom:1px solid #1e1e2d;display:flex;gap:16px;flex-wrap:wrap;background:#0d0d18;border-radius:6px 6px 0 0}
 .dt-meta-item{display:flex;gap:4px}.dt-meta-label{color:#555}.dt-meta-val{color:#e0e0e0;font-weight:600}
 .dt-meta-val.green{color:#00e676}.dt-meta-val.red{color:#ff4444}.dt-meta-val.yellow{color:#ffc107}.dt-meta-val.cyan{color:#00d4ff}
+
+/* ===== STRUCTURE GATES BAR ===== */
+.sg-bar{display:flex;align-items:center;gap:8px;padding:7px 14px;background:#0e0e1a;border-bottom:1px solid #1e1e2d;flex-wrap:wrap}
+.sg-label{font-size:.62rem;color:#555;text-transform:uppercase;letter-spacing:.5px;flex-shrink:0}
+.sg-gate{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:4px;border:1px solid;cursor:default;flex-shrink:0;font-size:.7rem;font-weight:700}
+.sg-gate.pass{background:rgba(0,230,118,.08);border-color:rgba(0,230,118,.3);color:#00e676}
+.sg-gate.fail{background:rgba(255,68,68,.08);border-color:rgba(255,68,68,.3);color:#ff4444}
+.sg-gate.warn{background:rgba(255,193,7,.08);border-color:rgba(255,193,7,.3);color:#ffc107}
+.sg-gate.na{background:rgba(255,255,255,.03);border-color:#2a2a3a;color:#555}
+.sg-name{font-size:.58rem;font-weight:700;letter-spacing:.5px;opacity:.65}
+.sg-sep{width:1px;height:16px;background:#1e1e2d;flex-shrink:0;margin:0 2px}
+.sg-eq{display:inline-flex;align-items:center;padding:3px 10px;border-radius:4px;border:1px solid;font-size:.7rem;font-weight:700;flex-shrink:0}
+.sg-eq.high{background:rgba(0,230,118,.1);border-color:rgba(0,230,118,.3);color:#00e676}
+.sg-eq.medium{background:rgba(0,212,255,.1);border-color:rgba(0,212,255,.3);color:#00d4ff}
+.sg-eq.low{background:rgba(255,193,7,.1);border-color:rgba(255,193,7,.3);color:#ffc107}
+.sg-eq.invalid{background:rgba(255,68,68,.1);border-color:rgba(255,68,68,.3);color:#ff4444}
+.sg-eq.unknown{background:rgba(255,255,255,.03);border-color:#2a2a3a;color:#555}
 
 /* Decision-tree category sections */
 .dt-section{margin-bottom:8px;border:1px solid #1e1e2d;border-radius:8px;overflow:hidden}
@@ -16109,6 +16219,7 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
   </button>
   <div class="debug-body-wrap" id="debugBodyWrap">
     <div id="dtMeta" class="dt-meta"><span class="dt-meta-item"><span class="dt-meta-label">Status:</span><span class="dt-meta-val">Click "Manual Scan" or wait for auto-scan</span></span></div>
+    <div id="dtGates"></div>
     <div id="dtSections"></div>
   </div>
 </div>
@@ -16581,6 +16692,122 @@ async function setTradingMode(mode) {
   }
 }
 
+// ── Structure Gates bar ──────────────────────────────────────────
+// Reads d.structure (l2_blocked, l3_confirmed, rig_zone, rig_displacement,
+// rig_penalty) and d.execution_quality already emitted by the debug endpoint.
+// Called unconditionally so the bar clears correctly on "no data" state.
+function renderStructureGates(d) {
+  const el = document.getElementById('dtGates');
+  if (!el) return;
+
+  const s  = d?.structure || {};
+  const eq = d?.execution_quality ?? 'unknown';
+  const fc = d?.failure_context  || null;
+
+  // L2 — counter-structure filter
+  const l2Blocked = s.l2_blocked;
+  const l2Class   = (l2Blocked == null) ? 'na'    : l2Blocked ? 'fail' : 'pass';
+  const l2Text    = (l2Blocked == null) ? '\u2014' : l2Blocked ? 'BLOCKED' : 'PASS';
+  const l2Tip     = (l2Blocked == null)
+    ? 'L2: Not evaluated — pipeline exited before this phase'
+    : l2Blocked
+      ? 'L2: Counter-structure detected\nInternal reversal active — trade blocked'
+      : 'L2: No counter-structure\nStructure aligned with HTF bias';
+
+  // L3 — execution confirmation (BOS gate)
+  const l3Conf  = s.l3_confirmed;
+  const l3Class = (l3Conf == null) ? 'na' : l3Conf ? 'pass' : 'fail';
+  const l3Text  = (l3Conf == null) ? '\u2014' : l3Conf ? 'CONFIRMED' : 'MISSING';
+  const l3Tip   = (l3Conf == null)
+    ? 'L3: Not evaluated — pipeline exited before this phase'
+    : l3Conf
+      ? 'L3: BOS confirmed\nExecution gate passed'
+      : 'L3: No BOS confirmation\nExecution gate failed';
+
+  // RIG — range integrity gate
+  const rig  = s.rig_zone || 'unknown';
+  const disp = (s.rig_displacement != null) ? s.rig_displacement + '%' : '\u2014';
+  const pen  = s.rig_penalty || 0;
+  const rigClassMap = {blocked:'fail', penalty:'warn', clear:'pass', undetermined:'na'};
+  const rigClass = rigClassMap[rig] || 'na';
+  const rigText  = rig === 'blocked'      ? 'HARD BLOCK'
+                 : rig === 'penalty'      ? 'PENALTY \u2212' + pen
+                 : rig === 'clear'        ? 'CLEAR'
+                 : rig === 'undetermined' ? 'UNDETERMINED'
+                 : '\u2014';
+  const rigTip   = rig === 'blocked'
+    ? 'RIG: Hard block\nWithin 10\u0025 of equilibrium\nDisplacement: ' + disp
+    : rig === 'penalty'
+    ? 'RIG: Penalty zone (10\u201320\u0025)\nDisplacement: ' + disp + '\nScore deduction: \u2212' + pen + ' pts'
+    : rig === 'clear'
+    ? 'RIG: Clear (\u003e20\u0025 from equilibrium)\nDisplacement: ' + disp
+    : 'RIG: Not yet evaluated\n(L2 early block or no scan data)';
+
+  // Execution quality
+  const eqCls   = ['high','medium','low','invalid','unknown'].includes(eq) ? eq : 'unknown';
+  const eqLabel = eqCls.toUpperCase();
+
+  // First failed gate (pipeline order)
+  let failHtml = '';
+  if (fc && fc.failed_phase) {
+    const tip = escapeHtml(fc.reason || fc.failed_phase);
+    failHtml = '<div class="sg-sep"></div>'
+      + '<span style="font-size:.63rem;color:#ff4444;white-space:nowrap" title="' + tip + '">'
+      + '\u26a0\ufe0e ' + escapeHtml(fc.failed_phase.toUpperCase()) + ' failed</span>';
+  }
+
+  // Gate stats row — shown only when metrics are present (after first scan)
+  const gm = d?.gate_metrics;
+  let statsHtml = '';
+  if (gm) {
+    // Sum every known terminal-outcome counter so the denominator is complete.
+    const total = (gm.l2_blocks        || 0)
+                + (gm.l3_failures      || 0)
+                + (gm.rig_blocks       || 0)
+                + (gm.range_failures   || 0)
+                + (gm.tap_failures     || 0)
+                + (gm.liquidity_failures || 0)
+                + (gm.bos_failures     || 0)
+                + (gm.htf_failures     || 0)
+                + (gm.rr_failures      || 0)
+                + (gm.passes           || 0);
+    statsHtml = '<div class="sg-bar" style="border-top:1px solid #1e1e2d;padding-top:6px;padding-bottom:6px">'
+      + '<span class="sg-label">Gate Stats</span>'
+      + '<span style="font-size:.68rem;color:#ff4444;white-space:nowrap" title="L2 counter-structure blocks (lifetime)">'
+      +   'L2 Blocks: <b>' + (gm.l2_blocks || 0) + '</b></span>'
+      + '<span style="font-size:.68rem;color:#ff7043;white-space:nowrap" title="L3 BOS confirmation failures (lifetime)">'
+      +   'L3 Failures: <b>' + (gm.l3_failures || 0) + '</b></span>'
+      + '<span style="font-size:.68rem;color:#ce93d8;white-space:nowrap" title="RIG equilibrium hard blocks (lifetime)">'
+      +   'RIG Blocks: <b>' + (gm.rig_blocks || 0) + '</b></span>'
+      + '<span style="font-size:.68rem;color:#00e676;white-space:nowrap" title="Evaluations that passed all gates (lifetime)">'
+      +   'Passes: <b>' + (gm.passes || 0) + '</b></span>'
+      + (total > 0
+        ? '<span style="font-size:.63rem;color:#555;white-space:nowrap">('
+          + Math.round(((gm.passes || 0) / total) * 100) + '% pass rate, '
+          + total + ' total evals)</span>'
+        : '')
+      + '</div>';
+  }
+
+  el.innerHTML = '<div class="sg-bar">'
+    + '<span class="sg-label">Gates</span>'
+    + '<div class="sg-gate ' + l2Class + '" title="' + escapeHtml(l2Tip) + '">'
+    +   '<span class="sg-name">L2</span>\u00a0' + escapeHtml(l2Text)
+    + '</div>'
+    + '<div class="sg-gate ' + l3Class + '" title="' + escapeHtml(l3Tip) + '">'
+    +   '<span class="sg-name">L3</span>\u00a0' + escapeHtml(l3Text)
+    + '</div>'
+    + '<div class="sg-gate ' + rigClass + '" title="' + escapeHtml(rigTip) + '">'
+    +   '<span class="sg-name">RIG</span>\u00a0' + escapeHtml(rigText)
+    + '</div>'
+    + '<div class="sg-sep"></div>'
+    + '<span class="sg-label">Quality</span>'
+    + '<div class="sg-eq ' + eqCls + '">' + eqLabel + '</div>'
+    + failHtml
+    + '</div>'
+    + statsHtml;
+}
+
 function renderDecisionTrees(d) {
   const meta = document.getElementById('dtMeta');
   const sections = document.getElementById('dtSections');
@@ -16590,6 +16817,9 @@ function renderDecisionTrees(d) {
   const mode = d?.trading_mode || 'claude';
   const sel = document.getElementById('tradingModeSelect');
   if (sel && sel.value !== mode) sel.value = mode;
+
+  // Always render the gates bar — handles no-data and early-exit states.
+  renderStructureGates(d);
 
   if (!d || !d.timeframes || !Object.keys(d.timeframes).length) {
     const err = d?.state_summary?.last_error;
