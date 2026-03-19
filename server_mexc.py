@@ -14974,6 +14974,38 @@ async def tensor_trade_scan():
     trader = get_trader()
     loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(None, trader.scan_and_trade)
+
+    # ── TCT Snapshot: capture 5A decision state ────────────────
+    try:
+        from tct_snapshot import tct_store
+        _5a_debug = trader.last_debug or {}
+        tct_store.update({
+            "source": "tensor_tct_5a",
+            "price": result.get("details", {}).get("current_price") if isinstance(result.get("details"), dict) else None,
+            "gate_1A_btc_structure": {
+                "status": "PARTIAL",
+                "trend": result.get("htf_bias"),
+                "passed": result.get("htf_bias") in ("bullish", "bearish"),
+            },
+            "gate_1B_usdt_d": {"status": "NOT_IMPLEMENTED", "passed": None},
+            "gate_1C_alt_alignment": {"status": "NOT_IMPLEMENTED", "passed": None},
+            "gate_RCM_range": {"status": "NOT_EVALUATED"},
+            "gate_RIG": {"status": "NOT_IMPLEMENTED", "passed": None},
+            "gate_MSCE": {"status": "NOT_IMPLEMENTED", "passed": None},
+            "gate_1D_execution": {
+                "status": "ACTIVE" if result.get("action") == "trade_entered" else "NO_SIGNAL",
+                "signal": result.get("action"),
+                "best_score": result.get("details", {}).get("best_score") if isinstance(result.get("details"), dict) else None,
+                "best_tf": result.get("details", {}).get("best_tf") if isinstance(result.get("details"), dict) else None,
+            },
+            "signal": "NO_TRADE" if result.get("action") != "trade_entered" else result.get("htf_bias", "NO_TRADE"),
+            "confidence": None,
+            "blocking_gate": None,
+        })
+    except Exception:
+        pass
+    # ───────────────────────────────────────────────────────────
+
     return convert_numpy_types(result)
 
 
@@ -18006,6 +18038,61 @@ async def schematics_5b_auto_scan_loop():
             # Attach MSCE context to the result for dashboard visibility
             result["msce"] = msce
 
+            # ── TCT Snapshot: capture 5B decision state ────────────────
+            try:
+                from tct_snapshot import tct_store
+                _5b_debug = trader.last_debug if hasattr(trader, "last_debug") else {}
+                _5b_snapshot = {
+                    "source": "schematics_5b",
+                    "price": _5b_debug.get("current_price"),
+
+                    "gate_1A_btc_structure": {
+                        "status": "PARTIAL",
+                        "note": "Uses HTF daily bias, not dedicated BTC macro anchor",
+                        "trend": _5b_debug.get("per_symbol", {}).get("BTCUSDT", {}).get("htf_bias"),
+                        "passed": _5b_debug.get("per_symbol", {}).get("BTCUSDT", {}).get("htf_bias") in ("bullish", "bearish"),
+                    },
+                    "gate_1B_usdt_d": {"status": "NOT_IMPLEMENTED", "trend": None, "correlation": None, "passed": None},
+                    "gate_1C_alt_alignment": {"status": "NOT_IMPLEMENTED", "aligned": None, "passed": None},
+
+                    "gate_RCM_range": {
+                        "status": "ACTIVE" if _5b_debug.get("best_score", 0) > 0 else "NOT_EVALUATED",
+                        "note": "Range detection via tct_schematics → range_engine_controller (L1/L2)",
+                    },
+
+                    "gate_RIG": {
+                        "status": "NOT_IMPLEMENTED",
+                        "note": "hpb_rig_validator.py exists but not wired",
+                        "passed": None,
+                    },
+
+                    "gate_MSCE": {
+                        "status": "ACTIVE",
+                        "session": msce.get("session"),
+                        "weight": msce.get("weight"),
+                        "valid": msce.get("valid"),
+                        "passed": True,
+                    },
+
+                    "gate_1D_execution": {
+                        "status": "ACTIVE" if action == "trade_entered" else "NO_SIGNAL",
+                        "signal": action,
+                        "best_score": _5b_debug.get("best_score"),
+                        "best_tf": _5b_debug.get("best_tf"),
+                        "trading_mode": _5b_debug.get("trading_mode"),
+                    },
+
+                    "signal": "LONG" if action == "trade_entered" and _5b_debug.get("per_symbol", {}).get("BTCUSDT", {}).get("htf_bias") == "bullish"
+                              else "SHORT" if action == "trade_entered" and _5b_debug.get("per_symbol", {}).get("BTCUSDT", {}).get("htf_bias") == "bearish"
+                              else "NO_TRADE",
+                    "confidence": None,
+                    "blocking_gate": None,
+                }
+                tct_store.update(_5b_snapshot)
+            except Exception as _snap_err:
+                logger.warning(f"[5B-TRADE] Snapshot capture failed: {_snap_err}")
+            # ───────────────────────────────────────────────────────────
+
             logger.info(f"[5B-TRADE] Auto-scan result: {action} @ {ts} (MSCE {msce['session']} w={msce['weight']})")
             consecutive_errors = 0
         except Exception as e:
@@ -18021,6 +18108,189 @@ async def schematics_5b_auto_scan_loop():
             _last_github_push = now
 
         await asyncio.sleep(AUTO_SCAN_INTERVAL)
+
+# ================================================================
+# TCT SNAPSHOT AUDIT LAYER — API + DASHBOARD
+# ================================================================
+
+@app.get("/tct-snapshot/latest")
+async def tct_snapshot_latest():
+    """Return the most recent TCT decision snapshot."""
+    from tct_snapshot import tct_store
+    latest = tct_store.get_latest()
+    if latest is None:
+        return JSONResponse(
+            content={"status": "no_data", "message": "No scan cycles have completed yet"},
+            status_code=200,
+        )
+    return JSONResponse(content=latest)
+
+
+@app.get("/tct-snapshot/history")
+async def tct_snapshot_history(limit: int = 50):
+    """Return recent TCT decision snapshots (newest first)."""
+    from tct_snapshot import tct_store
+    history = tct_store.get_history(limit=min(limit, 100))
+    return JSONResponse(content={"count": len(history), "snapshots": history})
+
+
+@app.get("/tct-dashboard", response_class=HTMLResponse)
+async def tct_dashboard_page():
+    """TCT Decision Audit Dashboard — live gate-level visibility."""
+    return HTMLResponse(content=_TCT_DASHBOARD_HTML)
+
+
+_TCT_DASHBOARD_HTML = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TCT Decision Audit Dashboard</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0d1117;color:#c9d1d9;font-family:'Segoe UI',system-ui,sans-serif;padding:16px}
+h1{font-size:1.4rem;color:#58a6ff;margin-bottom:4px}
+.subtitle{color:#8b949e;font-size:.85rem;margin-bottom:16px}
+.meta{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:16px;font-size:.85rem;color:#8b949e}
+.meta span{background:#161b22;padding:4px 10px;border-radius:6px;border:1px solid #30363d}
+.meta .live{color:#3fb950;border-color:#238636}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:12px;margin-bottom:16px}
+.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px}
+.card h2{font-size:.95rem;color:#58a6ff;margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.card h2 .badge{font-size:.7rem;padding:2px 6px;border-radius:4px;font-weight:600}
+.pass{background:#238636;color:#fff}
+.fail{background:#da3633;color:#fff}
+.na{background:#30363d;color:#8b949e}
+.partial{background:#9e6a03;color:#fff}
+.active{background:#1f6feb;color:#fff}
+.row{display:flex;justify-content:space-between;padding:3px 0;font-size:.85rem;border-bottom:1px solid #21262d}
+.row:last-child{border-bottom:none}
+.label{color:#8b949e}
+.val{color:#c9d1d9;font-weight:500;text-align:right;max-width:60%;word-break:break-all}
+.val.green{color:#3fb950}
+.val.red{color:#f85149}
+.val.yellow{color:#d29922}
+.val.blue{color:#58a6ff}
+.signal-box{text-align:center;padding:12px;border-radius:8px;font-size:1.1rem;font-weight:700;margin-bottom:12px}
+.signal-long{background:#0d2818;border:2px solid #238636;color:#3fb950}
+.signal-short{background:#2d1219;border:2px solid #da3633;color:#f85149}
+.signal-none{background:#161b22;border:2px solid #30363d;color:#8b949e}
+.footer{text-align:center;color:#484f58;font-size:.75rem;margin-top:16px}
+.no-data{text-align:center;padding:60px 20px;color:#484f58;font-size:1.1rem}
+</style>
+</head>
+<body>
+<h1>TCT Decision Audit Dashboard</h1>
+<p class="subtitle">Real-time gate-level visibility into trading decisions</p>
+
+<div class="meta" id="meta">
+  <span>Loading...</span>
+</div>
+
+<div id="content"><div class="no-data">Waiting for first scan cycle...</div></div>
+
+<div class="footer">Auto-refreshes every 5 seconds &middot; Data reflects EXACT execution values</div>
+
+<script>
+const API = '/tct-snapshot/latest';
+const REFRESH_MS = 5000;
+
+function badge(status, passed) {
+  if (status === 'NOT_IMPLEMENTED') return '<span class="badge na">N/A</span>';
+  if (status === 'NOT_EVALUATED') return '<span class="badge na">SKIP</span>';
+  if (status === 'PARTIAL') return '<span class="badge partial">PARTIAL</span>';
+  if (passed === true) return '<span class="badge pass">PASS</span>';
+  if (passed === false) return '<span class="badge fail">FAIL</span>';
+  if (status === 'ACTIVE') return '<span class="badge active">ACTIVE</span>';
+  return '<span class="badge na">—</span>';
+}
+
+function row(label, value, cls) {
+  let v = value;
+  if (v === null || v === undefined) v = '—';
+  else if (typeof v === 'number') v = Number.isInteger(v) ? v : v.toFixed(4);
+  else if (typeof v === 'boolean') v = v ? 'Yes' : 'No';
+  else if (typeof v === 'object') v = JSON.stringify(v);
+  const valClass = cls ? `val ${cls}` : 'val';
+  return `<div class="row"><span class="label">${label}</span><span class="${valClass}">${v}</span></div>`;
+}
+
+function renderGate(title, gate) {
+  if (!gate) return '';
+  const st = gate.status || '';
+  const p = gate.passed;
+  let rows = '';
+  for (const [k, v] of Object.entries(gate)) {
+    if (k === 'status' || k === 'passed') continue;
+    if (typeof v === 'object' && v !== null) {
+      for (const [sk, sv] of Object.entries(v)) {
+        rows += row(`${k}.${sk}`, sv);
+      }
+    } else {
+      rows += row(k, v);
+    }
+  }
+  return `<div class="card"><h2>${title} ${badge(st, p)}</h2>${rows || '<div class="row"><span class="label">No data</span></div>'}</div>`;
+}
+
+function render(data) {
+  if (!data || data.status === 'no_data') {
+    document.getElementById('content').innerHTML = '<div class="no-data">No scan cycles completed yet. Waiting for first scan...</div>';
+    document.getElementById('meta').innerHTML = '<span>No data</span>';
+    return;
+  }
+
+  // Signal box
+  const sig = data.signal || 'NO_TRADE';
+  let sigClass = 'signal-none';
+  if (sig === 'LONG') sigClass = 'signal-long';
+  else if (sig === 'SHORT') sigClass = 'signal-short';
+
+  // Meta bar
+  const ts = data.timestamp ? new Date(data.timestamp).toLocaleString() : '—';
+  const src = data.source || '—';
+  const price = data.price ? '$' + Number(data.price).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) : '—';
+  document.getElementById('meta').innerHTML = `
+    <span class="live">LIVE</span>
+    <span>Source: ${src}</span>
+    <span>Price: ${price}</span>
+    <span>Last: ${ts}</span>
+    <span>Gates: ${data.gates_passed ?? '—'}/${data.gates_total ?? '—'}</span>
+  `;
+
+  let html = `<div class="signal-box ${sigClass}">${sig === 'NO_TRADE' ? 'NO TRADE' : sig}${data.confidence ? ' (' + (data.confidence * 100).toFixed(0) + '%)' : ''}${data.blocking_gate ? ' — Blocked at Gate ' + data.blocking_gate : ''}</div>`;
+
+  html += '<div class="grid">';
+  html += renderGate('1A — BTC Structure / Bias', data.gate_1A_btc_structure);
+  html += renderGate('1B — USDT.D Correlation', data.gate_1B_usdt_d);
+  html += renderGate('1C — Alt Alignment', data.gate_1C_alt_alignment);
+  html += renderGate('RCM — Range Context', data.gate_RCM_range);
+  html += renderGate('RIG — Counter-Bias Filter', data.gate_RIG);
+  html += renderGate('MSCE — Session Logic', data.gate_MSCE);
+  html += renderGate('1D — Execution', data.gate_1D_execution);
+  html += '</div>';
+
+  document.getElementById('content').innerHTML = html;
+}
+
+async function refresh() {
+  try {
+    const resp = await fetch(API);
+    const data = await resp.json();
+    render(data);
+  } catch (e) {
+    console.error('Fetch error:', e);
+  }
+}
+
+refresh();
+setInterval(refresh, REFRESH_MS);
+</script>
+</body>
+</html>
+"""
+
 
 # ================================================================
 # ENTRY POINT
