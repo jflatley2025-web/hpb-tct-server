@@ -2697,10 +2697,56 @@ def validate_RCM(context: Dict) -> Dict:
         return {"valid": False, "confidence": 0.0, "error": str(e)}
 
 def validate_RIG(context: Dict) -> Dict:
-    rcm = context.get("RCM", {})
-    if rcm.get("valid"):
-        return {"passed": True}
-    return {"passed": False}
+    """
+    Range Integrity Gate — calls hpb_rig_validator to block counter-bias
+    trades inside intact HTF ranges.  Returns dict with 'passed' key
+    (False when RIG blocks) plus full RIG output for snapshot/dashboard.
+    """
+    try:
+        from hpb_rig_validator import range_integrity_validator
+
+        rcm = context.get("RCM", {})
+        msce = context.get("MSCE", {})
+        one_a = context.get("1A", {})
+        detected = context.get("detected_range", {})
+
+        rig_context = {
+            "gates": {
+                "1A": {"bias": one_a.get("bias", "neutral")},
+                "RCM": {
+                    "valid": rcm.get("valid", False),
+                    "range_duration_hours": (
+                        detected.get("duration_hours", 0)
+                        if detected else 0
+                    ),
+                },
+                "MSCE": {
+                    "session_bias": msce.get("session_bias", "neutral"),
+                    "session": msce.get("session", "Unknown"),
+                },
+                "1D": {"score": 0.0},  # 1D hasn't run yet at this point
+            },
+            "local_range_displacement": context.get("local_range_displacement", 0.0),
+        }
+
+        rig_result = range_integrity_validator(rig_context)
+
+        is_blocked = rig_result.get("status") == "BLOCK"
+
+        if is_blocked:
+            logger.info("RIG BLOCK: %s", rig_result)
+
+        return {
+            "passed": not is_blocked,
+            "status": rig_result.get("status"),
+            "reason": rig_result.get("reason"),
+            "htf_bias": rig_result.get("htf_bias"),
+            "session_bias": rig_result.get("session_bias"),
+            "confidence": rig_result.get("confidence"),
+        }
+    except Exception as e:
+        logger.error("validate_RIG error: %s", e, exc_info=True)
+        return {"passed": True, "status": "ERROR", "reason": str(e)}
 
 def validate_1D(context: Dict) -> Dict:
     try:
@@ -14996,11 +15042,34 @@ async def tensor_trade_scan():
     # ── TCT Snapshot: capture 5A decision state ────────────────
     try:
         from tct_snapshot import tct_store
+        from hpb_rig_validator import range_integrity_validator
         _safe_result = convert_numpy_types(result)
         _5a_details = _safe_result.get("details", {}) if isinstance(_safe_result.get("details"), dict) else {}
         _5a_htf_bias = _safe_result.get("htf_bias")
         _5a_action = _safe_result.get("action")
         _5a_signal = _normalize_tct_signal(_5a_htf_bias) if _5a_action == "trade_entered" else "NO_TRADE"
+
+        # ── RIG: Range Integrity Gate ──
+        _5a_rig_context = {
+            "gates": {
+                "1A": {"bias": _5a_htf_bias or "neutral"},
+                "RCM": {"valid": False, "range_duration_hours": 0},
+                "MSCE": {"session_bias": "neutral", "session": "Unknown"},
+                "1D": {"score": _5a_details.get("best_score", 0.0) or 0.0},
+            },
+            "local_range_displacement": 0.0,
+        }
+        try:
+            _5a_rig = range_integrity_validator(_5a_rig_context)
+        except Exception:
+            _5a_rig = {"status": "ERROR", "reason": "validator_failed", "confidence": 0.0,
+                       "htf_bias": _5a_htf_bias, "session_bias": "neutral"}
+
+        _5a_rig_blocked = _5a_rig.get("status") == "BLOCK"
+        if _5a_rig_blocked:
+            logger.info("RIG BLOCK (5A): %s", _5a_rig)
+            _5a_signal = "NO_TRADE"
+
         tct_store.update({
             "source": "tensor_tct_5a",
             "price": _5a_details.get("current_price"),
@@ -15012,17 +15081,24 @@ async def tensor_trade_scan():
             "gate_1B_usdt_d": {"status": "NOT_IMPLEMENTED", "passed": None},
             "gate_1C_alt_alignment": {"status": "NOT_IMPLEMENTED", "passed": None},
             "gate_RCM_range": {"status": "NOT_EVALUATED"},
-            "gate_RIG": {"status": "NOT_IMPLEMENTED", "passed": None},
+            "gate_RIG": {
+                "status": _5a_rig.get("status"),
+                "reason": _5a_rig.get("reason"),
+                "htf_bias": _5a_rig.get("htf_bias"),
+                "session_bias": _5a_rig.get("session_bias"),
+                "confidence": _5a_rig.get("confidence"),
+                "passed": not _5a_rig_blocked,
+            },
             "gate_MSCE": {"status": "NOT_IMPLEMENTED", "passed": None},
             "gate_1D_execution": {
-                "status": "ACTIVE" if _5a_action == "trade_entered" else "NO_SIGNAL",
+                "status": "ACTIVE" if _5a_action == "trade_entered" and not _5a_rig_blocked else "NO_SIGNAL",
                 "signal": _5a_action,
                 "best_score": _5a_details.get("best_score"),
                 "best_tf": _5a_details.get("best_tf"),
             },
             "signal": _5a_signal,
             "confidence": None,
-            "blocking_gate": None,
+            "blocking_gate": "RIG" if _5a_rig_blocked else None,
         })
     except Exception as exc:
         logger.warning("[5A-SNAPSHOT] TCT snapshot update failed: %s", exc)
@@ -18293,10 +18369,39 @@ async def schematics_5b_auto_scan_loop():
             # ── TCT Snapshot: capture 5B decision state ────────────────
             try:
                 from tct_snapshot import tct_store
+                from hpb_rig_validator import range_integrity_validator
                 _5b_debug_raw = trader.last_debug if hasattr(trader, "last_debug") else {}
                 _5b_debug = convert_numpy_types(_5b_debug_raw)
                 _5b_htf_bias = _5b_debug.get("per_symbol", {}).get("BTCUSDT", {}).get("htf_bias")
                 _5b_signal = _normalize_tct_signal(_5b_htf_bias) if action == "trade_entered" else "NO_TRADE"
+
+                # ── RIG: Range Integrity Gate ──
+                _5b_rig_context = {
+                    "gates": {
+                        "1A": {"bias": _5b_htf_bias or "neutral"},
+                        "RCM": {
+                            "valid": _5b_debug.get("best_score", 0) > 0,
+                            "range_duration_hours": 0,  # not available from 5B debug
+                        },
+                        "MSCE": {
+                            "session_bias": msce.get("session_bias", "neutral"),
+                            "session": msce.get("session", "Unknown"),
+                        },
+                        "1D": {"score": (_5b_debug.get("best_score", 0) or 0) / 100.0},
+                    },
+                    "local_range_displacement": 0.0,
+                }
+                try:
+                    _5b_rig = range_integrity_validator(_5b_rig_context)
+                except Exception:
+                    _5b_rig = {"status": "ERROR", "reason": "validator_failed", "confidence": 0.0,
+                               "htf_bias": _5b_htf_bias, "session_bias": "neutral"}
+
+                _5b_rig_blocked = _5b_rig.get("status") == "BLOCK"
+                if _5b_rig_blocked:
+                    logger.info("RIG BLOCK (5B): %s", _5b_rig)
+                    _5b_signal = "NO_TRADE"
+
                 _5b_snapshot = {
                     "source": "schematics_5b",
                     "price": _5b_debug.get("current_price"),
@@ -18316,9 +18421,12 @@ async def schematics_5b_auto_scan_loop():
                     },
 
                     "gate_RIG": {
-                        "status": "NOT_IMPLEMENTED",
-                        "note": "hpb_rig_validator.py exists but not wired",
-                        "passed": None,
+                        "status": _5b_rig.get("status"),
+                        "reason": _5b_rig.get("reason"),
+                        "htf_bias": _5b_rig.get("htf_bias"),
+                        "session_bias": _5b_rig.get("session_bias"),
+                        "confidence": _5b_rig.get("confidence"),
+                        "passed": not _5b_rig_blocked,
                     },
 
                     "gate_MSCE": {
@@ -18330,7 +18438,7 @@ async def schematics_5b_auto_scan_loop():
                     },
 
                     "gate_1D_execution": {
-                        "status": "ACTIVE" if action == "trade_entered" else "NO_SIGNAL",
+                        "status": "ACTIVE" if action == "trade_entered" and not _5b_rig_blocked else "NO_SIGNAL",
                         "signal": action,
                         "best_score": _5b_debug.get("best_score"),
                         "best_tf": _5b_debug.get("best_tf"),
@@ -18339,7 +18447,7 @@ async def schematics_5b_auto_scan_loop():
 
                     "signal": _5b_signal,
                     "confidence": None,
-                    "blocking_gate": None,
+                    "blocking_gate": "RIG" if _5b_rig_blocked else None,
                 }
                 tct_store.update(_5b_snapshot)
             except Exception as _snap_err:

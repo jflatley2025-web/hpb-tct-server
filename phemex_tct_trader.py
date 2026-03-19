@@ -340,22 +340,30 @@ class PhemexTCTTrader:
                     logger.error("[PHEMEX-TCT] Pipeline error: %s", exc, exc_info=True)
                     return {"action": "error", "reason": str(exc)}
 
-                self.last_signal = result.signal
+                # ── RIG: Range Integrity Gate ────────────────────────
+                rig_result = self._evaluate_rig(result, current_price)
+                rig_blocked = rig_result.get("status") == "BLOCK"
+
+                if rig_blocked:
+                    logger.info("RIG BLOCK: %s", rig_result)
+
+                self.last_signal = "NO_TRADE" if rig_blocked else result.signal
                 self.last_pipeline_result = {
-                    "signal": result.signal,
-                    "confidence": result.confidence,
+                    "signal": "NO_TRADE" if rig_blocked else result.signal,
+                    "confidence": 0.0 if rig_blocked else result.confidence,
                     "entry": result.entry,
                     "stop": result.stop,
                     "target": result.target,
                     "rr": result.rr,
-                    "blocking_gate": result.blocking_gate,
+                    "blocking_gate": "RIG" if rig_blocked else result.blocking_gate,
                     "gates": [
                         {"layer": g.layer, "name": g.name, "passed": g.passed}
                         for g in result.gate_results
                     ],
+                    "rig": rig_result,
                 }
 
-                if result.is_trade:
+                if result.is_trade and not rig_blocked:
                     self._open_trade(result)
                     action = "trade_opened"
                 else:
@@ -365,15 +373,60 @@ class PhemexTCTTrader:
                     self.save_state()
 
                 # ── TCT Snapshot: capture EXACT gate values from this scan ──
-                self._record_snapshot(result, current_price)
+                self._record_snapshot(result, current_price, rig_result)
 
         return {"action": action, "price": current_price}
+
+    # ------------------------------------------------------------------
+    # RIG — Range Integrity Gate
+    # ------------------------------------------------------------------
+
+    def _evaluate_rig(self, result: PipelineResult, current_price: float) -> dict:
+        """
+        Run the RIG validator using real pipeline gate data.
+        Returns the full RIG result dict (status, reason, htf_bias, etc.).
+        """
+        try:
+            from hpb_rig_validator import range_integrity_validator
+
+            # Extract gate data from pipeline result
+            gates_by_layer: dict[int, dict] = {}
+            for g in result.gate_results:
+                gates_by_layer[g.layer] = g.data or {}
+
+            g1_data = gates_by_layer.get(1, {})
+            g2_data = gates_by_layer.get(2, {})
+
+            htf_bias = g1_data.get("trend", "neutral")
+
+            # Build RIG context from real execution data
+            rig_context = {
+                "gates": {
+                    "1A": {"bias": htf_bias},
+                    "RCM": {
+                        "valid": g2_data.get("valid", False),
+                        "range_duration_hours": g2_data.get("range_duration_hours", 0),
+                    },
+                    "MSCE": {
+                        "session_bias": "neutral",  # MSCE not implemented in phemex pipeline
+                        "session": "Unknown",
+                    },
+                    "1D": {"score": result.confidence},
+                },
+                "local_range_displacement": g2_data.get("local_range_displacement", 0.0),
+            }
+
+            return range_integrity_validator(rig_context)
+        except Exception as exc:
+            logger.warning("[PHEMEX-TCT] RIG evaluation failed: %s", exc)
+            return {"status": "ERROR", "reason": str(exc), "confidence": 0.0,
+                    "htf_bias": "unknown", "session_bias": "unknown"}
 
     # ------------------------------------------------------------------
     # TCT Decision Snapshot
     # ------------------------------------------------------------------
 
-    def _record_snapshot(self, result: PipelineResult, current_price: float) -> None:
+    def _record_snapshot(self, result: PipelineResult, current_price: float, rig_result: dict | None = None) -> None:
         """
         Capture a TCT decision snapshot from the pipeline result.
 
@@ -448,13 +501,14 @@ class PhemexTCTTrader:
                 "passed": g2.get("passed"),
             },
 
-            # RIG — Counter-bias filter
+            # RIG — Counter-bias filter (wired to hpb_rig_validator)
             "gate_RIG": {
-                "status": "NOT_IMPLEMENTED",
-                "note": "hpb_rig_validator.py exists but is not wired into this pipeline",
-                "block_status": None,
-                "reason": None,
-                "passed": None,
+                "status": rig_result.get("status", "ERROR") if rig_result else "NOT_EVALUATED",
+                "reason": rig_result.get("reason") if rig_result else None,
+                "htf_bias": rig_result.get("htf_bias") if rig_result else None,
+                "session_bias": rig_result.get("session_bias") if rig_result else None,
+                "confidence": rig_result.get("confidence") if rig_result else None,
+                "passed": rig_result.get("status") != "BLOCK" if rig_result else None,
             },
 
             # MSCE — Session logic
@@ -495,12 +549,12 @@ class PhemexTCTTrader:
                 "bos_confirmed": g1_data.get("bos_count", 0) > 0,
             },
 
-            # Overall result
-            "signal": result.signal,
-            "confidence": result.confidence,
-            "blocking_gate": result.blocking_gate,
+            # Overall result — RIG override applied when it blocks
+            "signal": "NO_TRADE" if (rig_result and rig_result.get("status") == "BLOCK") else result.signal,
+            "confidence": 0.0 if (rig_result and rig_result.get("status") == "BLOCK") else result.confidence,
+            "blocking_gate": "RIG" if (rig_result and rig_result.get("status") == "BLOCK") else result.blocking_gate,
             "gates_passed": sum(1 for g in result.gate_results if g.passed),
-            "gates_total": len(result.gate_results),
+            "gates_total": len(result.gate_results) + 1,  # +1 for RIG gate
         }
 
         try:
