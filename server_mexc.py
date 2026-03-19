@@ -16860,7 +16860,7 @@ function renderDecisionTrees(d) {
   // Claude's mode: 7-category accordion (original)
   const DT_CATEGORIES = [
     { id: 'ranges',           icon: '↔',  title: 'Ranges',                  link: '/decision_trees/ranges_decision_tree.html' },
-    { id: 'market_structure', icon: '⬆',  title: 'Market Structure',         link: null },
+    { id: 'market_structure', icon: '⬆',  title: 'Market Structure',         link: '/decision_trees/market_structure_decision_tree.html' },
     { id: 'supply_demand',    icon: '⚖',  title: 'Supply & Demand',          link: '/decision_trees/supply_demand_decision_tree.html' },
     { id: 'liquidity',        icon: '💧', title: 'Liquidity',                link: '/decision_trees/liquidity_decision_tree.html' },
     { id: 'schematics_5a',    icon: '5A', title: '5A Schematics (TCT Model)',link: '/decision_trees/tct_5a_schematics_decision_tree.html' },
