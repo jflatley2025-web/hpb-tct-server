@@ -420,8 +420,8 @@ class PhemexTCTTrader:
             }
 
             return range_integrity_validator(rig_context)
-        except Exception as exc:
-            logger.error("[PHEMEX-TCT] RIG evaluation failed: %s", exc, exc_info=True)
+        except Exception:
+            logger.exception("[PHEMEX-TCT] RIG evaluation failed")
             return {
                 "status": "ERROR",
                 "Gate": "RIG",

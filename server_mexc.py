@@ -15127,12 +15127,14 @@ async def tensor_trade_scan():
                        "reason": "validator_failed", "confidence": 0.0,
                        "htf_bias": None, "session_bias": None, "timestamp": None}
 
-        _5a_rig_passed = _5a_rig.get("status") == "VALID"
-        _5a_rig_blocked = not _5a_rig_passed
-        if _5a_rig_blocked and _5a_rig.get("status") not in ("NOT_EVALUATED",):
+        _5a_rig_status = _5a_rig.get("status")
+        _5a_rig_passed = _5a_rig_status == "VALID"
+        # NOT_EVALUATED means inputs are missing — don't block, let signal through
+        _5a_rig_blocked = _5a_rig_status not in ("VALID", "NOT_EVALUATED", None)
+        if _5a_rig_blocked:
             logger.info("RIG BLOCK (5A): %s", _5a_rig)
-        if _5a_rig_blocked and _5a_signal != "NO_TRADE":
-            _5a_signal = "NO_TRADE"
+            if _5a_signal != "NO_TRADE":
+                _5a_signal = "NO_TRADE"
 
         tct_store.update({
             "source": "tensor_tct_5a",
@@ -18457,12 +18459,14 @@ async def schematics_5b_auto_scan_loop():
                                "reason": "validator_failed", "confidence": 0.0,
                                "htf_bias": None, "session_bias": None, "timestamp": None}
 
-                _5b_rig_passed = _5b_rig.get("status") == "VALID"
-                _5b_rig_blocked = not _5b_rig_passed
-                if _5b_rig_blocked and _5b_rig.get("status") not in ("NOT_EVALUATED",):
+                _5b_rig_status = _5b_rig.get("status")
+                _5b_rig_passed = _5b_rig_status == "VALID"
+                # NOT_EVALUATED means inputs are missing — don't block, let signal through
+                _5b_rig_blocked = _5b_rig_status not in ("VALID", "NOT_EVALUATED", None)
+                if _5b_rig_blocked:
                     logger.info("RIG BLOCK (5B): %s", _5b_rig)
-                if _5b_rig_blocked and _5b_signal != "NO_TRADE":
-                    _5b_signal = "NO_TRADE"
+                    if _5b_signal != "NO_TRADE":
+                        _5b_signal = "NO_TRADE"
 
                 _5b_snapshot = {
                     "source": "schematics_5b",
