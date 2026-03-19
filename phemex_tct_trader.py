@@ -341,8 +341,8 @@ class PhemexTCTTrader:
                     return {"action": "error", "reason": str(exc)}
 
                 # ── RIG: Range Integrity Gate ────────────────────────
-                rig_result = self._evaluate_rig(result, current_price)
-                rig_blocked = rig_result.get("status") == "BLOCK"
+                rig_result = self._evaluate_rig(result)
+                rig_blocked = rig_result.get("status") != "VALID"
 
                 if rig_blocked:
                     logger.info("RIG BLOCK: %s", rig_result)
@@ -381,11 +381,14 @@ class PhemexTCTTrader:
     # RIG — Range Integrity Gate
     # ------------------------------------------------------------------
 
-    def _evaluate_rig(self, result: PipelineResult, current_price: float) -> dict:
+    def _evaluate_rig(self, result: PipelineResult) -> dict:
         """
         Run the RIG validator using real pipeline gate data.
         Returns the full RIG result dict (status, reason, htf_bias, etc.).
+
+        Fail-closed: errors return status=ERROR which is NOT treated as VALID.
         """
+        # TODO: current_price reserved for future displacement logic
         try:
             from hpb_rig_validator import range_integrity_validator
 
@@ -418,9 +421,16 @@ class PhemexTCTTrader:
 
             return range_integrity_validator(rig_context)
         except Exception as exc:
-            logger.warning("[PHEMEX-TCT] RIG evaluation failed: %s", exc)
-            return {"status": "ERROR", "reason": str(exc), "confidence": 0.0,
-                    "htf_bias": "unknown", "session_bias": "unknown"}
+            logger.error("[PHEMEX-TCT] RIG evaluation failed: %s", exc, exc_info=True)
+            return {
+                "status": "ERROR",
+                "Gate": "RIG",
+                "reason": str(exc),
+                "confidence": 0.0,
+                "htf_bias": None,
+                "session_bias": None,
+                "timestamp": None,
+            }
 
     # ------------------------------------------------------------------
     # TCT Decision Snapshot
@@ -432,8 +442,11 @@ class PhemexTCTTrader:
 
         Uses EXACT values from the pipeline gate_results — never
         recomputed or approximated. Missing HPB components (1A BTC
-        macro, 1B USDT.D, 1C alt alignment, RIG) are set to None
+        macro, 1B USDT.D, 1C alt alignment) are set to None
         because they are not implemented in this pipeline.
+
+        When RIG blocks, ALL nested structures reflect the post-RIG
+        state — no contradictory signals anywhere in the snapshot.
         """
         # Extract gate data by layer number
         gates_by_layer: dict[int, dict] = {}
@@ -454,6 +467,72 @@ class PhemexTCTTrader:
         g1_data = g1.get("data", {})
         g2_data = g2.get("data", {})
         g6_data = g6.get("data", {})
+
+        # Single source of truth for RIG pass/block
+        rig_passed = (rig_result.get("status") == "VALID") if rig_result else False
+        rig_blocked = not rig_passed and rig_result is not None
+
+        # 1D execution — override when RIG blocks to prevent contradictory signals
+        if rig_blocked:
+            gate_1d = {
+                "status": "BLOCKED_BY_RIG",
+                "blocking_gate": "RIG",
+                "signal": "NO_TRADE",
+                "supply_demand": {
+                    "passed": g3.get("passed"),
+                    "zone": g3.get("data", {}),
+                },
+                "liquidity": {
+                    "passed": g4.get("passed"),
+                    "tap_count": g4.get("data", {}).get("tap_count"),
+                    "tap_price": g4.get("data", {}).get("tap_price"),
+                },
+                "schematics": {
+                    "passed": g5.get("passed"),
+                    "valid_count": g5.get("data", {}).get("valid_count"),
+                    "best_score": g5.get("data", {}).get("best_score"),
+                },
+                "final": {
+                    "passed": False,
+                    "signal": "NO_TRADE",
+                    "entry": g6_data.get("entry", result.entry),
+                    "stop": g6_data.get("stop", result.stop),
+                    "target": g6_data.get("target", result.target),
+                    "rr": g6_data.get("rr", result.rr),
+                    "confidence": 0.0,
+                },
+                "bos_confirmed": g1_data.get("bos_count", 0) > 0,
+            }
+        else:
+            gate_1d = {
+                "status": "ACTIVE",
+                "supply_demand": {
+                    "passed": g3.get("passed"),
+                    "zone": g3.get("data", {}),
+                },
+                "liquidity": {
+                    "passed": g4.get("passed"),
+                    "tap_count": g4.get("data", {}).get("tap_count"),
+                    "tap_price": g4.get("data", {}).get("tap_price"),
+                },
+                "schematics": {
+                    "passed": g5.get("passed"),
+                    "valid_count": g5.get("data", {}).get("valid_count"),
+                    "best_score": g5.get("data", {}).get("best_score"),
+                },
+                "final": {
+                    "passed": g6.get("passed"),
+                    "signal": g6_data.get("signal", result.signal),
+                    "entry": g6_data.get("entry", result.entry),
+                    "stop": g6_data.get("stop", result.stop),
+                    "target": g6_data.get("target", result.target),
+                    "rr": g6_data.get("rr", result.rr),
+                    "confidence": g6_data.get("confidence", result.confidence),
+                },
+                "bos_confirmed": g1_data.get("bos_count", 0) > 0,
+            }
+
+        pipeline_passed = sum(1 for g in result.gate_results if g.passed)
 
         snapshot = {
             "source": "phemex_tct",
@@ -508,7 +587,7 @@ class PhemexTCTTrader:
                 "htf_bias": rig_result.get("htf_bias") if rig_result else None,
                 "session_bias": rig_result.get("session_bias") if rig_result else None,
                 "confidence": rig_result.get("confidence") if rig_result else None,
-                "passed": rig_result.get("status") != "BLOCK" if rig_result else None,
+                "passed": rig_passed,
             },
 
             # MSCE — Session logic
@@ -520,40 +599,14 @@ class PhemexTCTTrader:
                 "passed": None,
             },
 
-            # 1D — Execution (Gates 3-6 combined)
-            "gate_1D_execution": {
-                "status": "ACTIVE",
-                "supply_demand": {
-                    "passed": g3.get("passed"),
-                    "zone": g3.get("data", {}),
-                },
-                "liquidity": {
-                    "passed": g4.get("passed"),
-                    "tap_count": g4.get("data", {}).get("tap_count"),
-                    "tap_price": g4.get("data", {}).get("tap_price"),
-                },
-                "schematics": {
-                    "passed": g5.get("passed"),
-                    "valid_count": g5.get("data", {}).get("valid_count"),
-                    "best_score": g5.get("data", {}).get("best_score"),
-                },
-                "final": {
-                    "passed": g6.get("passed"),
-                    "signal": g6_data.get("signal", result.signal),
-                    "entry": g6_data.get("entry", result.entry),
-                    "stop": g6_data.get("stop", result.stop),
-                    "target": g6_data.get("target", result.target),
-                    "rr": g6_data.get("rr", result.rr),
-                    "confidence": g6_data.get("confidence", result.confidence),
-                },
-                "bos_confirmed": g1_data.get("bos_count", 0) > 0,
-            },
+            # 1D — Execution (Gates 3-6 combined, overridden when RIG blocks)
+            "gate_1D_execution": gate_1d,
 
-            # Overall result — RIG override applied when it blocks
-            "signal": "NO_TRADE" if (rig_result and rig_result.get("status") == "BLOCK") else result.signal,
-            "confidence": 0.0 if (rig_result and rig_result.get("status") == "BLOCK") else result.confidence,
-            "blocking_gate": "RIG" if (rig_result and rig_result.get("status") == "BLOCK") else result.blocking_gate,
-            "gates_passed": sum(1 for g in result.gate_results if g.passed),
+            # Overall result — RIG override applied when it does not PASS
+            "signal": "NO_TRADE" if rig_blocked else result.signal,
+            "confidence": 0.0 if rig_blocked else result.confidence,
+            "blocking_gate": "RIG" if rig_blocked else result.blocking_gate,
+            "gates_passed": pipeline_passed + int(rig_passed),
             "gates_total": len(result.gate_results) + 1,  # +1 for RIG gate
         }
 

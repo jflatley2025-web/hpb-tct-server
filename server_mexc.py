@@ -194,6 +194,60 @@ def _normalize_tct_signal(value):
     return value
 
 
+# ---------------------------------------------------------------------------
+# RIG — Shared helpers for 5A / 5B pipelines
+# ---------------------------------------------------------------------------
+
+_RIG_NOT_EVALUATED = {
+    "status": "NOT_EVALUATED",
+    "Gate": "RIG",
+    "reason": "Missing required inputs (RCM/MSCE/displacement)",
+    "confidence": 0.0,
+    "htf_bias": None,
+    "session_bias": None,
+    "timestamp": None,
+}
+
+
+def _evaluate_rig_safe(htf_bias, rcm_valid, range_duration_hours,
+                       session_bias, session_name, exec_score,
+                       local_displacement):
+    """
+    Evaluate RIG with input validation.  Returns NOT_EVALUATED when
+    required inputs are missing, preventing fake passes from placeholder data.
+
+    Fail-closed: errors and missing inputs do NOT produce VALID.
+    """
+    from hpb_rig_validator import range_integrity_validator
+
+    # Guard: do not call the validator with placeholder / missing data
+    has_rcm = rcm_valid is not None
+    has_session = session_name is not None and session_name != "Unknown"
+    has_displacement = local_displacement is not None
+
+    if not (has_rcm and has_session and has_displacement):
+        return dict(_RIG_NOT_EVALUATED,
+                    reason=f"Missing: rcm={has_rcm} session={has_session} disp={has_displacement}")
+
+    rig_context = {
+        "gates": {
+            "1A": {"bias": htf_bias or "neutral"},
+            "RCM": {
+                "valid": bool(rcm_valid),
+                "range_duration_hours": range_duration_hours or 0,
+            },
+            "MSCE": {
+                "session_bias": session_bias or "neutral",
+                "session": session_name,
+            },
+            "1D": {"score": exec_score or 0.0},
+        },
+        "local_range_displacement": local_displacement or 0.0,
+    }
+
+    return range_integrity_validator(rig_context)
+
+
 # ================================================================
 # CONFIGURATION
 # ================================================================
@@ -2700,7 +2754,9 @@ def validate_RIG(context: Dict) -> Dict:
     """
     Range Integrity Gate — calls hpb_rig_validator to block counter-bias
     trades inside intact HTF ranges.  Returns dict with 'passed' key
-    (False when RIG blocks) plus full RIG output for snapshot/dashboard.
+    (True ONLY on explicit VALID status) plus full RIG output.
+
+    Fail-closed: errors and unknown statuses block execution.
     """
     try:
         from hpb_rig_validator import range_integrity_validator
@@ -2730,14 +2786,13 @@ def validate_RIG(context: Dict) -> Dict:
         }
 
         rig_result = range_integrity_validator(rig_context)
+        passed = rig_result.get("status") == "VALID"
 
-        is_blocked = rig_result.get("status") == "BLOCK"
-
-        if is_blocked:
+        if not passed:
             logger.info("RIG BLOCK: %s", rig_result)
 
         return {
-            "passed": not is_blocked,
+            "passed": passed,
             "status": rig_result.get("status"),
             "reason": rig_result.get("reason"),
             "htf_bias": rig_result.get("htf_bias"),
@@ -2746,7 +2801,14 @@ def validate_RIG(context: Dict) -> Dict:
         }
     except Exception as e:
         logger.error("validate_RIG error: %s", e, exc_info=True)
-        return {"passed": True, "status": "ERROR", "reason": str(e)}
+        return {
+            "passed": False,
+            "status": "ERROR",
+            "reason": str(e),
+            "htf_bias": None,
+            "session_bias": None,
+            "confidence": 0.0,
+        }
 
 def validate_1D(context: Dict) -> Dict:
     try:
@@ -15042,7 +15104,6 @@ async def tensor_trade_scan():
     # ── TCT Snapshot: capture 5A decision state ────────────────
     try:
         from tct_snapshot import tct_store
-        from hpb_rig_validator import range_integrity_validator
         _safe_result = convert_numpy_types(result)
         _5a_details = _safe_result.get("details", {}) if isinstance(_safe_result.get("details"), dict) else {}
         _5a_htf_bias = _safe_result.get("htf_bias")
@@ -15050,24 +15111,27 @@ async def tensor_trade_scan():
         _5a_signal = _normalize_tct_signal(_5a_htf_bias) if _5a_action == "trade_entered" else "NO_TRADE"
 
         # ── RIG: Range Integrity Gate ──
-        _5a_rig_context = {
-            "gates": {
-                "1A": {"bias": _5a_htf_bias or "neutral"},
-                "RCM": {"valid": False, "range_duration_hours": 0},
-                "MSCE": {"session_bias": "neutral", "session": "Unknown"},
-                "1D": {"score": _5a_details.get("best_score", 0.0) or 0.0},
-            },
-            "local_range_displacement": 0.0,
-        }
+        # 5A lacks RCM, MSCE, and displacement data → NOT_EVALUATED (no fake inputs)
         try:
-            _5a_rig = range_integrity_validator(_5a_rig_context)
+            _5a_rig = _evaluate_rig_safe(
+                htf_bias=_5a_htf_bias,
+                rcm_valid=None,            # 5A has no range context
+                range_duration_hours=None,
+                session_bias=None,          # 5A has no MSCE
+                session_name=None,
+                exec_score=_5a_details.get("best_score", 0.0) or 0.0,
+                local_displacement=None,    # 5A has no displacement
+            )
         except Exception:
-            _5a_rig = {"status": "ERROR", "reason": "validator_failed", "confidence": 0.0,
-                       "htf_bias": _5a_htf_bias, "session_bias": "neutral"}
+            _5a_rig = {"status": "ERROR", "Gate": "RIG",
+                       "reason": "validator_failed", "confidence": 0.0,
+                       "htf_bias": None, "session_bias": None, "timestamp": None}
 
-        _5a_rig_blocked = _5a_rig.get("status") == "BLOCK"
-        if _5a_rig_blocked:
+        _5a_rig_passed = _5a_rig.get("status") == "VALID"
+        _5a_rig_blocked = not _5a_rig_passed
+        if _5a_rig_blocked and _5a_rig.get("status") not in ("NOT_EVALUATED",):
             logger.info("RIG BLOCK (5A): %s", _5a_rig)
+        if _5a_rig_blocked and _5a_signal != "NO_TRADE":
             _5a_signal = "NO_TRADE"
 
         tct_store.update({
@@ -15087,12 +15151,13 @@ async def tensor_trade_scan():
                 "htf_bias": _5a_rig.get("htf_bias"),
                 "session_bias": _5a_rig.get("session_bias"),
                 "confidence": _5a_rig.get("confidence"),
-                "passed": not _5a_rig_blocked,
+                "passed": _5a_rig_passed,
             },
             "gate_MSCE": {"status": "NOT_IMPLEMENTED", "passed": None},
             "gate_1D_execution": {
-                "status": "ACTIVE" if _5a_action == "trade_entered" and not _5a_rig_blocked else "NO_SIGNAL",
-                "signal": _5a_action,
+                "status": "BLOCKED_BY_RIG" if _5a_rig_blocked and _5a_action == "trade_entered" else (
+                    "ACTIVE" if _5a_action == "trade_entered" else "NO_SIGNAL"),
+                "signal": "NO_TRADE" if _5a_rig_blocked else _5a_action,
                 "best_score": _5a_details.get("best_score"),
                 "best_tf": _5a_details.get("best_tf"),
             },
@@ -18369,37 +18434,34 @@ async def schematics_5b_auto_scan_loop():
             # ── TCT Snapshot: capture 5B decision state ────────────────
             try:
                 from tct_snapshot import tct_store
-                from hpb_rig_validator import range_integrity_validator
                 _5b_debug_raw = trader.last_debug if hasattr(trader, "last_debug") else {}
                 _5b_debug = convert_numpy_types(_5b_debug_raw)
                 _5b_htf_bias = _5b_debug.get("per_symbol", {}).get("BTCUSDT", {}).get("htf_bias")
                 _5b_signal = _normalize_tct_signal(_5b_htf_bias) if action == "trade_entered" else "NO_TRADE"
 
                 # ── RIG: Range Integrity Gate ──
-                _5b_rig_context = {
-                    "gates": {
-                        "1A": {"bias": _5b_htf_bias or "neutral"},
-                        "RCM": {
-                            "valid": _5b_debug.get("best_score", 0) > 0,
-                            "range_duration_hours": 0,  # not available from 5B debug
-                        },
-                        "MSCE": {
-                            "session_bias": msce.get("session_bias", "neutral"),
-                            "session": msce.get("session", "Unknown"),
-                        },
-                        "1D": {"score": (_5b_debug.get("best_score", 0) or 0) / 100.0},
-                    },
-                    "local_range_displacement": 0.0,
-                }
+                # 5B has MSCE but lacks displacement — use shared builder
+                _5b_rcm_valid = _5b_debug.get("best_score", 0) > 0
                 try:
-                    _5b_rig = range_integrity_validator(_5b_rig_context)
+                    _5b_rig = _evaluate_rig_safe(
+                        htf_bias=_5b_htf_bias,
+                        rcm_valid=_5b_rcm_valid,
+                        range_duration_hours=None,  # not available from 5B debug
+                        session_bias=msce.get("session_bias", "neutral"),
+                        session_name=msce.get("session"),
+                        exec_score=(_5b_debug.get("best_score", 0) or 0) / 100.0,
+                        local_displacement=None,    # not available from 5B debug
+                    )
                 except Exception:
-                    _5b_rig = {"status": "ERROR", "reason": "validator_failed", "confidence": 0.0,
-                               "htf_bias": _5b_htf_bias, "session_bias": "neutral"}
+                    _5b_rig = {"status": "ERROR", "Gate": "RIG",
+                               "reason": "validator_failed", "confidence": 0.0,
+                               "htf_bias": None, "session_bias": None, "timestamp": None}
 
-                _5b_rig_blocked = _5b_rig.get("status") == "BLOCK"
-                if _5b_rig_blocked:
+                _5b_rig_passed = _5b_rig.get("status") == "VALID"
+                _5b_rig_blocked = not _5b_rig_passed
+                if _5b_rig_blocked and _5b_rig.get("status") not in ("NOT_EVALUATED",):
                     logger.info("RIG BLOCK (5B): %s", _5b_rig)
+                if _5b_rig_blocked and _5b_signal != "NO_TRADE":
                     _5b_signal = "NO_TRADE"
 
                 _5b_snapshot = {
@@ -18416,7 +18478,7 @@ async def schematics_5b_auto_scan_loop():
                     "gate_1C_alt_alignment": {"status": "NOT_IMPLEMENTED", "aligned": None, "passed": None},
 
                     "gate_RCM_range": {
-                        "status": "ACTIVE" if _5b_debug.get("best_score", 0) > 0 else "NOT_EVALUATED",
+                        "status": "ACTIVE" if _5b_rcm_valid else "NOT_EVALUATED",
                         "note": "Range detection via tct_schematics → range_engine_controller (L1/L2)",
                     },
 
@@ -18426,7 +18488,7 @@ async def schematics_5b_auto_scan_loop():
                         "htf_bias": _5b_rig.get("htf_bias"),
                         "session_bias": _5b_rig.get("session_bias"),
                         "confidence": _5b_rig.get("confidence"),
-                        "passed": not _5b_rig_blocked,
+                        "passed": _5b_rig_passed,
                     },
 
                     "gate_MSCE": {
@@ -18438,8 +18500,9 @@ async def schematics_5b_auto_scan_loop():
                     },
 
                     "gate_1D_execution": {
-                        "status": "ACTIVE" if action == "trade_entered" and not _5b_rig_blocked else "NO_SIGNAL",
-                        "signal": action,
+                        "status": "BLOCKED_BY_RIG" if _5b_rig_blocked and action == "trade_entered" else (
+                            "ACTIVE" if action == "trade_entered" else "NO_SIGNAL"),
+                        "signal": "NO_TRADE" if _5b_rig_blocked else action,
                         "best_score": _5b_debug.get("best_score"),
                         "best_tf": _5b_debug.get("best_tf"),
                         "trading_mode": _5b_debug.get("trading_mode"),
