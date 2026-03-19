@@ -470,16 +470,16 @@ class PhemexTCTTrader:
             "gate_1D_execution": {
                 "status": "ACTIVE",
                 "supply_demand": {
-                    "passed": (g3 := gates_by_layer.get(3, {})).get("passed"),
+                    "passed": g3.get("passed"),
                     "zone": g3.get("data", {}),
                 },
                 "liquidity": {
-                    "passed": (g4 := gates_by_layer.get(4, {})).get("passed"),
+                    "passed": g4.get("passed"),
                     "tap_count": g4.get("data", {}).get("tap_count"),
                     "tap_price": g4.get("data", {}).get("tap_price"),
                 },
                 "schematics": {
-                    "passed": (g5 := gates_by_layer.get(5, {})).get("passed"),
+                    "passed": g5.get("passed"),
                     "valid_count": g5.get("data", {}).get("valid_count"),
                     "best_score": g5.get("data", {}).get("best_score"),
                 },

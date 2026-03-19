@@ -176,6 +176,24 @@ def convert_numpy_types(obj):
         return obj
 
 
+def _normalize_tct_signal(value):
+    """Normalize bias/signal vocabulary to LONG/SHORT/NO_TRADE.
+
+    Accepts "bullish"/"bearish" (from HTF bias) or "LONG"/"SHORT" and
+    returns a consistent uppercase signal string for dashboard display.
+    """
+    if value is None:
+        return None
+    v = str(value).lower()
+    if v == "bullish":
+        return "LONG"
+    if v == "bearish":
+        return "SHORT"
+    if v in ("long", "short"):
+        return v.upper()
+    return value
+
+
 # ================================================================
 # CONFIGURATION
 # ================================================================
@@ -14978,14 +14996,18 @@ async def tensor_trade_scan():
     # ── TCT Snapshot: capture 5A decision state ────────────────
     try:
         from tct_snapshot import tct_store
-        _5a_debug = trader.last_debug or {}
+        _safe_result = convert_numpy_types(result)
+        _5a_details = _safe_result.get("details", {}) if isinstance(_safe_result.get("details"), dict) else {}
+        _5a_htf_bias = _safe_result.get("htf_bias")
+        _5a_action = _safe_result.get("action")
+        _5a_signal = _normalize_tct_signal(_5a_htf_bias) if _5a_action == "trade_entered" else "NO_TRADE"
         tct_store.update({
             "source": "tensor_tct_5a",
-            "price": result.get("details", {}).get("current_price") if isinstance(result.get("details"), dict) else None,
+            "price": _5a_details.get("current_price"),
             "gate_1A_btc_structure": {
                 "status": "PARTIAL",
-                "trend": result.get("htf_bias"),
-                "passed": result.get("htf_bias") in ("bullish", "bearish"),
+                "trend": _5a_htf_bias,
+                "passed": _5a_htf_bias in ("bullish", "bearish"),
             },
             "gate_1B_usdt_d": {"status": "NOT_IMPLEMENTED", "passed": None},
             "gate_1C_alt_alignment": {"status": "NOT_IMPLEMENTED", "passed": None},
@@ -14993,17 +15015,17 @@ async def tensor_trade_scan():
             "gate_RIG": {"status": "NOT_IMPLEMENTED", "passed": None},
             "gate_MSCE": {"status": "NOT_IMPLEMENTED", "passed": None},
             "gate_1D_execution": {
-                "status": "ACTIVE" if result.get("action") == "trade_entered" else "NO_SIGNAL",
-                "signal": result.get("action"),
-                "best_score": result.get("details", {}).get("best_score") if isinstance(result.get("details"), dict) else None,
-                "best_tf": result.get("details", {}).get("best_tf") if isinstance(result.get("details"), dict) else None,
+                "status": "ACTIVE" if _5a_action == "trade_entered" else "NO_SIGNAL",
+                "signal": _5a_action,
+                "best_score": _5a_details.get("best_score"),
+                "best_tf": _5a_details.get("best_tf"),
             },
-            "signal": "NO_TRADE" if result.get("action") != "trade_entered" else result.get("htf_bias", "NO_TRADE"),
+            "signal": _5a_signal,
             "confidence": None,
             "blocking_gate": None,
         })
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("[5A-SNAPSHOT] TCT snapshot update failed: %s", exc)
     # ───────────────────────────────────────────────────────────
 
     return convert_numpy_types(result)
@@ -18041,7 +18063,10 @@ async def schematics_5b_auto_scan_loop():
             # ── TCT Snapshot: capture 5B decision state ────────────────
             try:
                 from tct_snapshot import tct_store
-                _5b_debug = trader.last_debug if hasattr(trader, "last_debug") else {}
+                _5b_debug_raw = trader.last_debug if hasattr(trader, "last_debug") else {}
+                _5b_debug = convert_numpy_types(_5b_debug_raw)
+                _5b_htf_bias = _5b_debug.get("per_symbol", {}).get("BTCUSDT", {}).get("htf_bias")
+                _5b_signal = _normalize_tct_signal(_5b_htf_bias) if action == "trade_entered" else "NO_TRADE"
                 _5b_snapshot = {
                     "source": "schematics_5b",
                     "price": _5b_debug.get("current_price"),
@@ -18049,8 +18074,8 @@ async def schematics_5b_auto_scan_loop():
                     "gate_1A_btc_structure": {
                         "status": "PARTIAL",
                         "note": "Uses HTF daily bias, not dedicated BTC macro anchor",
-                        "trend": _5b_debug.get("per_symbol", {}).get("BTCUSDT", {}).get("htf_bias"),
-                        "passed": _5b_debug.get("per_symbol", {}).get("BTCUSDT", {}).get("htf_bias") in ("bullish", "bearish"),
+                        "trend": _5b_htf_bias,
+                        "passed": _5b_htf_bias in ("bullish", "bearish"),
                     },
                     "gate_1B_usdt_d": {"status": "NOT_IMPLEMENTED", "trend": None, "correlation": None, "passed": None},
                     "gate_1C_alt_alignment": {"status": "NOT_IMPLEMENTED", "aligned": None, "passed": None},
@@ -18071,7 +18096,7 @@ async def schematics_5b_auto_scan_loop():
                         "session": msce.get("session"),
                         "weight": msce.get("weight"),
                         "valid": msce.get("valid"),
-                        "passed": True,
+                        "passed": bool(msce.get("valid")),
                     },
 
                     "gate_1D_execution": {
@@ -18082,15 +18107,13 @@ async def schematics_5b_auto_scan_loop():
                         "trading_mode": _5b_debug.get("trading_mode"),
                     },
 
-                    "signal": "LONG" if action == "trade_entered" and _5b_debug.get("per_symbol", {}).get("BTCUSDT", {}).get("htf_bias") == "bullish"
-                              else "SHORT" if action == "trade_entered" and _5b_debug.get("per_symbol", {}).get("BTCUSDT", {}).get("htf_bias") == "bearish"
-                              else "NO_TRADE",
+                    "signal": _5b_signal,
                     "confidence": None,
                     "blocking_gate": None,
                 }
                 tct_store.update(_5b_snapshot)
             except Exception as _snap_err:
-                logger.warning(f"[5B-TRADE] Snapshot capture failed: {_snap_err}")
+                logger.warning("[5B-TRADE] Snapshot capture failed: %s", _snap_err, exc_info=True)
             # ───────────────────────────────────────────────────────────
 
             logger.info(f"[5B-TRADE] Auto-scan result: {action} @ {ts} (MSCE {msce['session']} w={msce['weight']})")
@@ -18130,7 +18153,8 @@ async def tct_snapshot_latest():
 async def tct_snapshot_history(limit: int = 50):
     """Return recent TCT decision snapshots (newest first)."""
     from tct_snapshot import tct_store
-    history = tct_store.get_history(limit=min(limit, 100))
+    sanitized_limit = max(0, min(limit, 100))
+    history = tct_store.get_history(limit=sanitized_limit)
     return JSONResponse(content={"count": len(history), "snapshots": history})
 
 

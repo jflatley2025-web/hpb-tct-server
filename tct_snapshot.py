@@ -13,6 +13,7 @@ No external dependencies.
 
 from __future__ import annotations
 
+import copy
 import threading
 from collections import deque
 from datetime import datetime, timezone
@@ -27,6 +28,8 @@ class TCTSnapshotStore:
     Stores the latest TCT decision snapshot and a rolling history.
 
     Thread-safe via a simple lock. All reads and writes acquire _lock.
+    Snapshots are deep-copied on write AND read to prevent external
+    mutation of internal state.
     """
 
     def __init__(self, max_history: int = MAX_HISTORY) -> None:
@@ -38,35 +41,41 @@ class TCTSnapshotStore:
         """
         Store a new snapshot. Automatically timestamps it if not already set.
 
+        Creates a defensive deep copy so the caller's dict is never
+        mutated and internal state cannot be corrupted by external code.
+
         Args:
             snapshot: Dict containing gate-level decision data.
                       Must reflect EXACT values from execution — never
                       recomputed or duplicated logic.
         """
-        if "timestamp" not in snapshot:
-            snapshot["timestamp"] = datetime.now(timezone.utc).isoformat()
+        snapshot_copy = copy.deepcopy(snapshot)
+        if "timestamp" not in snapshot_copy:
+            snapshot_copy["timestamp"] = datetime.now(timezone.utc).isoformat()
 
         with self._lock:
-            self._latest = snapshot
-            self._history.append(snapshot)
+            self._latest = snapshot_copy
+            self._history.append(snapshot_copy)
 
     def get_latest(self) -> Optional[dict]:
-        """Return the most recent snapshot, or None if no scans have run."""
+        """Return a deep copy of the most recent snapshot, or None."""
         with self._lock:
-            return self._latest
+            if self._latest is None:
+                return None
+            return copy.deepcopy(self._latest)
 
     def get_history(self, limit: int = MAX_HISTORY) -> list[dict]:
         """
-        Return recent snapshots, newest first.
+        Return deep copies of recent snapshots, newest first.
 
         Args:
-            limit: Max number of snapshots to return.
+            limit: Max number of snapshots to return (clamped to >= 0).
         """
+        safe_limit = max(0, limit)
         with self._lock:
-            items = list(self._history)
-        # Newest first
+            items = [copy.deepcopy(s) for s in self._history]
         items.reverse()
-        return items[:limit]
+        return items[:safe_limit]
 
 
 # ---------------------------------------------------------------------------
