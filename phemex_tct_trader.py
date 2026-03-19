@@ -34,6 +34,7 @@ from typing import Optional
 from phemex_tct_algo import PipelineResult, run_pipeline
 from phemex_feed import fetch_all as feed_fetch_all, LTF_TF
 from tct_pdf_rules import load_tct_rules, TCTRuleSet
+from tct_snapshot import tct_store
 
 logger = logging.getLogger("PhemexTCTTrader")
 
@@ -363,7 +364,149 @@ class PhemexTCTTrader:
                     # for the no-trade path so last_scan_time is on disk.
                     self.save_state()
 
+                # ── TCT Snapshot: capture EXACT gate values from this scan ──
+                self._record_snapshot(result, current_price)
+
         return {"action": action, "price": current_price}
+
+    # ------------------------------------------------------------------
+    # TCT Decision Snapshot
+    # ------------------------------------------------------------------
+
+    def _record_snapshot(self, result: PipelineResult, current_price: float) -> None:
+        """
+        Capture a TCT decision snapshot from the pipeline result.
+
+        Uses EXACT values from the pipeline gate_results — never
+        recomputed or approximated. Missing HPB components (1A BTC
+        macro, 1B USDT.D, 1C alt alignment, RIG) are set to None
+        because they are not implemented in this pipeline.
+        """
+        # Extract gate data by layer number
+        gates_by_layer: dict[int, dict] = {}
+        for g in result.gate_results:
+            gates_by_layer[g.layer] = {
+                "name": g.name,
+                "passed": g.passed,
+                "data": g.data,
+            }
+
+        g1 = gates_by_layer.get(1, {})
+        g2 = gates_by_layer.get(2, {})
+        g3 = gates_by_layer.get(3, {})
+        g4 = gates_by_layer.get(4, {})
+        g5 = gates_by_layer.get(5, {})
+        g6 = gates_by_layer.get(6, {})
+
+        g1_data = g1.get("data", {})
+        g2_data = g2.get("data", {})
+        g6_data = g6.get("data", {})
+
+        snapshot = {
+            "source": "phemex_tct",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "price": current_price,
+
+            # 1A — BTC structure/bias (from Gate 1 market structure on LTF)
+            # NOTE: This is the TRADING PAIR's structure, not a separate
+            # BTC macro bias anchor. True 1A (BTC as macro context for
+            # altcoins) is NOT IMPLEMENTED in this pipeline.
+            "gate_1A_btc_structure": {
+                "status": "PARTIAL",
+                "note": "Uses trading pair structure, not dedicated BTC macro anchor",
+                "trend": g1_data.get("trend"),
+                "bos_count": g1_data.get("bos_count"),
+                "rtz_valid": (g1_data.get("rtz") or {}).get("valid"),
+                "eof": g1_data.get("eof"),
+                "passed": g1.get("passed"),
+            },
+
+            # 1B — USDT.D inverse correlation
+            "gate_1B_usdt_d": {
+                "status": "NOT_IMPLEMENTED",
+                "trend": None,
+                "correlation": None,
+                "passed": None,
+            },
+
+            # 1C — Altcoin alignment
+            "gate_1C_alt_alignment": {
+                "status": "NOT_IMPLEMENTED",
+                "aligned": None,
+                "passed": None,
+            },
+
+            # RCM — Range context (Gate 2)
+            "gate_RCM_range": {
+                "status": "ACTIVE" if g2 else "NOT_EVALUATED",
+                "valid": g2_data.get("valid"),
+                "range_high": g2_data.get("range_high"),
+                "range_low": g2_data.get("range_low"),
+                "range_size_pct": g2_data.get("range_size_pct"),
+                "high_touches": g2_data.get("high_touches"),
+                "low_touches": g2_data.get("low_touches"),
+                "passed": g2.get("passed"),
+            },
+
+            # RIG — Counter-bias filter
+            "gate_RIG": {
+                "status": "NOT_IMPLEMENTED",
+                "note": "hpb_rig_validator.py exists but is not wired into this pipeline",
+                "block_status": None,
+                "reason": None,
+                "passed": None,
+            },
+
+            # MSCE — Session logic
+            "gate_MSCE": {
+                "status": "NOT_IMPLEMENTED",
+                "note": "session_manipulation.py exists but is not called by phemex_tct_algo",
+                "session": None,
+                "multiplier": None,
+                "passed": None,
+            },
+
+            # 1D — Execution (Gates 3-6 combined)
+            "gate_1D_execution": {
+                "status": "ACTIVE",
+                "supply_demand": {
+                    "passed": g3.get("passed"),
+                    "zone": g3.get("data", {}),
+                },
+                "liquidity": {
+                    "passed": g4.get("passed"),
+                    "tap_count": g4.get("data", {}).get("tap_count"),
+                    "tap_price": g4.get("data", {}).get("tap_price"),
+                },
+                "schematics": {
+                    "passed": g5.get("passed"),
+                    "valid_count": g5.get("data", {}).get("valid_count"),
+                    "best_score": g5.get("data", {}).get("best_score"),
+                },
+                "final": {
+                    "passed": g6.get("passed"),
+                    "signal": g6_data.get("signal", result.signal),
+                    "entry": g6_data.get("entry", result.entry),
+                    "stop": g6_data.get("stop", result.stop),
+                    "target": g6_data.get("target", result.target),
+                    "rr": g6_data.get("rr", result.rr),
+                    "confidence": g6_data.get("confidence", result.confidence),
+                },
+                "bos_confirmed": g1_data.get("bos_count", 0) > 0,
+            },
+
+            # Overall result
+            "signal": result.signal,
+            "confidence": result.confidence,
+            "blocking_gate": result.blocking_gate,
+            "gates_passed": sum(1 for g in result.gate_results if g.passed),
+            "gates_total": len(result.gate_results),
+        }
+
+        try:
+            tct_store.update(snapshot)
+        except Exception as exc:
+            logger.warning("[PHEMEX-TCT] Snapshot store update failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Snapshot (read-only, for the API)
