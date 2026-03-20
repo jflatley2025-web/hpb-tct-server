@@ -86,14 +86,14 @@ class TestEvaluateRigTestStatus:
     def test_exact_boundary_0_25(self):
         """Displacement exactly 0.25 → BLOCK (boundary is inclusive for mid-range)"""
         # extremity = abs(0.25 - 0.5) * 2 = 0.5
-        # threshold check: 0.5 < 0.5 is False → VALID
-        assert evaluate_rig_test_status(0.25) == "VALID"
+        # threshold check: 0.5 <= 0.5 → BLOCK
+        assert evaluate_rig_test_status(0.25) == "BLOCK"
 
     def test_exact_boundary_0_75(self):
-        """Displacement exactly 0.75 → boundary check"""
+        """Displacement exactly 0.75 → BLOCK (boundary is inclusive for mid-range)"""
         # extremity = abs(0.75 - 0.5) * 2 = 0.5
-        # threshold check: 0.5 < 0.5 is False → VALID
-        assert evaluate_rig_test_status(0.75) == "VALID"
+        # threshold check: 0.5 <= 0.5 → BLOCK
+        assert evaluate_rig_test_status(0.75) == "BLOCK"
 
 
 @pytest.mark.unit
@@ -143,6 +143,16 @@ class TestBuildTestContext:
         )
         assert context["gates"]["1A"]["bias"] == "bearish"
         assert context["gates"]["MSCE"]["session_bias"] == "bullish"
+
+    def test_invalid_range_raises(self):
+        """Degenerate range (high == low) raises ValueError"""
+        with pytest.raises(ValueError):
+            build_test_context(70000, range_high=68000, range_low=68000)
+
+    def test_invalid_duration_raises(self):
+        """Zero duration raises ValueError"""
+        with pytest.raises(ValueError):
+            build_test_context(70000, range_duration=0)
 
 
 @pytest.mark.unit
@@ -194,6 +204,19 @@ class TestRunSingleScenario:
 
         assert "extremity" in result
         assert abs(result["extremity"] - 0.0) < 1e-10  # mid-range → extremity 0
+
+    def test_not_evaluable_displacement(self):
+        """Degenerate range produces NOT_EVALUABLE without running RIG"""
+        scenario = {"name": "invalid", "current_price": 70000}
+
+        result = run_single_scenario(
+            scenario,
+            range_high=68000,
+            range_low=68000,
+        )
+
+        assert result["displacement"] is None
+        assert result["rig_status"] == "NOT_EVALUABLE"
 
 
 @pytest.mark.unit

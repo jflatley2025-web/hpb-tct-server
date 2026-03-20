@@ -45,7 +45,7 @@ def is_test_mode_enabled():
 def compute_extremity(displacement):
     """Compute how far displacement is from mid-range (0.5).
 
-    Returns a value 0.0–1.0 where:
+    Returns a value 0.0-1.0 where:
     - 0.0 = dead center (mid-range)
     - 1.0 = at range boundary (extreme)
     """
@@ -57,13 +57,13 @@ def compute_extremity(displacement):
 def evaluate_rig_test_status(displacement):
     """Determine RIG status using mid-range BLOCK / extreme VALID rule.
 
-    Mid-range (0.25 <= disp <= 0.75): price hasn't escaped range → BLOCK
-    Extreme  (disp > 0.75 or disp < 0.25): price at range edge → VALID
+    Mid-range (inclusive): 0.25 <= disp <= 0.75 -> BLOCK
+    Extreme: disp > 0.75 or disp < 0.25 -> VALID
     """
     if displacement is None:
         return "NOT_EVALUATED"
     extremity = compute_extremity(displacement)
-    if extremity < (EXTREME_THRESHOLD * 2):  # within ±0.25 of center
+    if extremity <= (EXTREME_THRESHOLD * 2):  # within ±0.25 of center
         return "BLOCK"
     return "VALID"
 
@@ -81,6 +81,11 @@ def build_test_context(current_price, range_high=None, range_low=None,
     rl = range_low if range_low is not None else TEST_RANGE_LOW
     rd = range_duration if range_duration is not None else TEST_RANGE_DURATION
 
+    if rh <= rl:
+        raise ValueError(f"range_high ({rh}) must be greater than range_low ({rl})")
+    if rd <= 0:
+        raise ValueError(f"range_duration ({rd}) must be positive")
+
     displacement = compute_displacement(current_price, rh, rl)
 
     context = {
@@ -95,7 +100,7 @@ def build_test_context(current_price, range_high=None, range_low=None,
             "MSCE": {"session_bias": session_bias, "session": "London"},
             "1D": {"score": 0.80},
         },
-        "local_range_displacement": displacement if displacement is not None else 0.0,
+        "local_range_displacement": displacement,
     }
     return context, displacement
 
@@ -106,12 +111,34 @@ def run_single_scenario(scenario, range_high=None, range_low=None,
     current_price = scenario["current_price"]
     name = scenario["name"]
 
-    context, displacement = build_test_context(
-        current_price,
-        range_high=range_high,
-        range_low=range_low,
-        range_duration=range_duration,
-    )
+    try:
+        context, displacement = build_test_context(
+            current_price,
+            range_high=range_high,
+            range_low=range_low,
+            range_duration=range_duration,
+        )
+    except ValueError as e:
+        return {
+            "scenario": name,
+            "price": current_price,
+            "displacement": None,
+            "extremity": None,
+            "rig_status": "NOT_EVALUABLE",
+            "production_rig_status": "NOT_EVALUATED",
+            "production_reason": str(e),
+        }
+
+    if displacement is None:
+        return {
+            "scenario": name,
+            "price": current_price,
+            "displacement": None,
+            "extremity": None,
+            "rig_status": "NOT_EVALUABLE",
+            "production_rig_status": "NOT_EVALUATED",
+            "production_reason": "Invalid displacement (degenerate range or inputs)",
+        }
 
     # Run through the production RIG validator for comparison
     production_result = range_integrity_validator(context)
@@ -167,13 +194,24 @@ def run_all_scenarios(range_high=None, range_low=None, range_duration=None):
     return results
 
 
+def _is_truthy(value):
+    return str(value).lower() in {"1", "true", "yes"}
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    # Allow running directly for quick validation
-    os.environ["RIG_TEST_MODE"] = "true"
-    RIG_TEST_MODE = True  # override module-level flag for direct execution
-    results = run_all_scenarios()
-    for r in results:
-        print(f"  {r['scenario']:15s}  price={r['price']}  disp={r['displacement']:.3f}  "
-              f"extremity={r['extremity']:.3f}  status={r['rig_status']}  "
-              f"(production={r['production_rig_status']})")
+
+    env_flag = os.getenv("RIG_TEST_MODE")
+
+    if _is_truthy(env_flag) or RIG_TEST_MODE:
+        results = run_all_scenarios()
+        for r in results:
+            print(
+                f"  {r['scenario']:15s}  price={r['price']}  "
+                f"disp={r['displacement']:.3f if r['displacement'] is not None else 'None'}  "
+                f"extremity={r['extremity']:.3f if r['extremity'] is not None else 'None'}  "
+                f"status={r['rig_status']}  "
+                f"(production={r['production_rig_status']})"
+            )
+    else:
+        print("RIG test mode not enabled. Set RIG_TEST_MODE=1 to run.")
