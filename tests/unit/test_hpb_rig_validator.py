@@ -258,3 +258,142 @@ class TestRIGSessionNames:
         # Should block regardless of session name if conditions met
         assert result["status"] == "BLOCK"
         assert session_name in result["reason"]
+
+
+@pytest.mark.unit
+class TestComputeDisplacement:
+    """Tests for the compute_displacement helper function"""
+
+    def test_mid_range(self):
+        """Price at midpoint → displacement = 0.5"""
+        from hpb_rig_validator import compute_displacement
+        assert compute_displacement(105.0, 110.0, 100.0) == 0.5
+
+    def test_at_range_low(self):
+        """Price at range low → displacement = 0.0"""
+        from hpb_rig_validator import compute_displacement
+        assert compute_displacement(100.0, 110.0, 100.0) == 0.0
+
+    def test_at_range_high(self):
+        """Price at range high → displacement = 1.0"""
+        from hpb_rig_validator import compute_displacement
+        assert compute_displacement(110.0, 110.0, 100.0) == 1.0
+
+    def test_below_range_clamps_to_zero(self):
+        """Price below range → clamps to 0.0"""
+        from hpb_rig_validator import compute_displacement
+        assert compute_displacement(90.0, 110.0, 100.0) == 0.0
+
+    def test_above_range_clamps_to_one(self):
+        """Price above range → clamps to 1.0"""
+        from hpb_rig_validator import compute_displacement
+        assert compute_displacement(120.0, 110.0, 100.0) == 1.0
+
+    def test_degenerate_range_returns_none(self):
+        """range_high == range_low → None"""
+        from hpb_rig_validator import compute_displacement
+        assert compute_displacement(100.0, 100.0, 100.0) is None
+
+    def test_missing_price_returns_none(self):
+        """Missing current_price → None"""
+        from hpb_rig_validator import compute_displacement
+        assert compute_displacement(None, 110.0, 100.0) is None
+
+    def test_missing_range_high_returns_none(self):
+        """Missing range_high → None"""
+        from hpb_rig_validator import compute_displacement
+        assert compute_displacement(105.0, None, 100.0) is None
+
+    def test_missing_range_low_returns_none(self):
+        """Missing range_low → None"""
+        from hpb_rig_validator import compute_displacement
+        assert compute_displacement(105.0, 110.0, None) is None
+
+    def test_quarter_displacement(self):
+        """Price at 25% of range → displacement = 0.25"""
+        from hpb_rig_validator import compute_displacement
+        result = compute_displacement(102.5, 110.0, 100.0)
+        assert abs(result - 0.25) < 1e-10
+
+    def test_three_quarter_displacement(self):
+        """Price at 75% of range → displacement = 0.75"""
+        from hpb_rig_validator import compute_displacement
+        result = compute_displacement(107.5, 110.0, 100.0)
+        assert abs(result - 0.75) < 1e-10
+
+
+@pytest.mark.unit
+class TestRIGWithDisplacement:
+    """Integration tests: RIG evaluation with displacement scenarios"""
+
+    def test_mid_range_blocks_counter_bias(self):
+        """Mid-range (0.4-0.6) with counter-bias → BLOCK (displacement < 0.25)"""
+        context = {
+            "gates": {
+                "1A": {"bias": "bullish"},
+                "RCM": {"valid": True, "range_duration_hours": 48},
+                "MSCE": {"session_bias": "bearish", "session": "London"},
+                "1D": {"score": 0.80},
+            },
+            "local_range_displacement": 0.15,  # Below 0.25 threshold → blocks
+        }
+        result = range_integrity_validator(context)
+        assert result["status"] == "BLOCK"
+
+    def test_range_high_allows_short(self):
+        """Price at range high (>0.75) → VALID (displacement above threshold)"""
+        context = {
+            "gates": {
+                "1A": {"bias": "bullish"},
+                "RCM": {"valid": True, "range_duration_hours": 48},
+                "MSCE": {"session_bias": "bearish", "session": "London"},
+                "1D": {"score": 0.80},
+            },
+            "local_range_displacement": 0.80,  # Above 0.25 threshold
+        }
+        result = range_integrity_validator(context)
+        assert result["status"] == "VALID"
+
+    def test_range_low_allows_long(self):
+        """Price at range low (<0.25) but aligned bias → VALID"""
+        context = {
+            "gates": {
+                "1A": {"bias": "bullish"},
+                "RCM": {"valid": True, "range_duration_hours": 48},
+                "MSCE": {"session_bias": "bullish", "session": "London"},
+                "1D": {"score": 0.80},
+            },
+            "local_range_displacement": 0.10,  # Low displacement but aligned
+        }
+        result = range_integrity_validator(context)
+        assert result["status"] == "VALID"
+
+    def test_true_mid_range_allows_when_above_threshold(self):
+        """True mid-range (0.5) is above DISP_THRESHOLD → VALID (not blocked)"""
+        context = {
+            "gates": {
+                "1A": {"bias": "bullish"},
+                "RCM": {"valid": True, "range_duration_hours": 48},
+                "MSCE": {"session_bias": "bearish", "session": "London"},
+                "1D": {"score": 0.80},
+            },
+            "local_range_displacement": 0.50,  # Mid-range but above 0.25 threshold
+        }
+        result = range_integrity_validator(context)
+        # 0.50 > 0.25 threshold so RIG does NOT block
+        assert result["status"] == "VALID"
+
+
+@pytest.mark.unit
+class TestComputeDisplacementEdgeCases:
+    """Additional edge case tests for compute_displacement"""
+
+    def test_inverted_range_returns_none(self):
+        """range_high < range_low (inverted) → None"""
+        from hpb_rig_validator import compute_displacement
+        assert compute_displacement(105.0, 100.0, 110.0) is None
+
+    def test_slightly_inverted_range_returns_none(self):
+        """range_high barely below range_low → None"""
+        from hpb_rig_validator import compute_displacement
+        assert compute_displacement(100.0, 99.99, 100.0) is None

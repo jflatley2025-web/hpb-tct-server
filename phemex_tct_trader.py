@@ -59,6 +59,22 @@ except OSError as exc:
 TRADE_LOG_PATH = os.path.join(_TRADE_LOG_DIR, "phemex_trade_log.json")
 
 
+def _derive_session_bias(signal):
+    """Derive session bias from pipeline signal direction.
+
+    Returns "bullish", "bearish", or None (NOT "neutral") so that
+    RIG can detect counter-bias trades accurately.
+    """
+    if signal is None:
+        return None
+    s = str(signal).lower()
+    if s in ("long", "bullish"):
+        return "bullish"
+    if s in ("short", "bearish"):
+        return "bearish"
+    return None
+
+
 # ---------------------------------------------------------------------------
 # PhemexTCTTrader
 # ---------------------------------------------------------------------------
@@ -341,7 +357,7 @@ class PhemexTCTTrader:
                     return {"action": "error", "reason": str(exc)}
 
                 # ── RIG: Range Integrity Gate ────────────────────────
-                rig_result = self._evaluate_rig(result)
+                rig_result = self._evaluate_rig(result, current_price)
                 rig_blocked = rig_result.get("status") != "VALID"
 
                 if rig_blocked:
@@ -381,16 +397,16 @@ class PhemexTCTTrader:
     # RIG — Range Integrity Gate
     # ------------------------------------------------------------------
 
-    def _evaluate_rig(self, result: PipelineResult) -> dict:
+    def _evaluate_rig(self, result: PipelineResult, current_price: float = None) -> dict:
         """
         Run the RIG validator using real pipeline gate data.
         Returns the full RIG result dict (status, reason, htf_bias, etc.).
 
+        Computes displacement from real range data and current price.
         Fail-closed: errors return status=ERROR which is NOT treated as VALID.
         """
-        # TODO: current_price reserved for future displacement logic
         try:
-            from hpb_rig_validator import range_integrity_validator
+            from hpb_rig_validator import range_integrity_validator, compute_displacement
 
             # Extract gate data from pipeline result
             gates_by_layer: dict[int, dict] = {}
@@ -401,32 +417,62 @@ class PhemexTCTTrader:
             g2_data = gates_by_layer.get(2, {})
 
             htf_bias = g1_data.get("trend", "neutral")
+            rcm_valid = g2_data.get("valid", False)
+            range_high = g2_data.get("range_high")
+            range_low = g2_data.get("range_low")
+            range_duration = g2_data.get("range_duration_hours")
+
+            # RCM is only valid if we also have range duration
+            if range_duration is None:
+                rcm_valid = False
+
+            # Compute displacement from real range data
+            displacement = compute_displacement(current_price, range_high, range_low) if rcm_valid else None
+
+            # Do not evaluate RIG if RCM is invalid or displacement is missing
+            if not rcm_valid or displacement is None:
+                return {
+                    "status": "NOT_EVALUATED",
+                    "Gate": "RIG",
+                    "reason": f"Missing: rcm_valid={rcm_valid} displacement={displacement is not None}",
+                    "confidence": 0.0,
+                    "displacement": displacement,
+                    "htf_bias": htf_bias,
+                    "session_bias": None,
+                    "timestamp": None,
+                }
+
+            # Derive session bias from pipeline signal direction
+            session_bias = _derive_session_bias(result.signal)
 
             # Build RIG context from real execution data
             rig_context = {
                 "gates": {
                     "1A": {"bias": htf_bias},
                     "RCM": {
-                        "valid": g2_data.get("valid", False),
-                        "range_duration_hours": g2_data.get("range_duration_hours", 0),
+                        "valid": rcm_valid,
+                        "range_duration_hours": range_duration,
                     },
                     "MSCE": {
-                        "session_bias": "neutral",  # MSCE not implemented in phemex pipeline
+                        "session_bias": session_bias,
                         "session": "Unknown",
                     },
                     "1D": {"score": result.confidence},
                 },
-                "local_range_displacement": g2_data.get("local_range_displacement", 0.0),
+                "local_range_displacement": displacement,
             }
 
-            return range_integrity_validator(rig_context)
-        except Exception:
+            rig_result = range_integrity_validator(rig_context)
+            rig_result["displacement"] = displacement
+            return rig_result
+        except Exception as exc:
             logger.exception("[PHEMEX-TCT] RIG evaluation failed")
             return {
                 "status": "ERROR",
                 "Gate": "RIG",
                 "reason": str(exc),
                 "confidence": 0.0,
+                "displacement": None,
                 "htf_bias": None,
                 "session_bias": None,
                 "timestamp": None,
@@ -584,6 +630,7 @@ class PhemexTCTTrader:
             "gate_RIG": {
                 "status": rig_result.get("status", "ERROR") if rig_result else "NOT_EVALUATED",
                 "reason": rig_result.get("reason") if rig_result else None,
+                "displacement": rig_result.get("displacement") if rig_result else None,
                 "htf_bias": rig_result.get("htf_bias") if rig_result else None,
                 "session_bias": rig_result.get("session_bias") if rig_result else None,
                 "confidence": rig_result.get("confidence") if rig_result else None,

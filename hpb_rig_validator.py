@@ -1,6 +1,21 @@
 # hpb_rig_validator.py
 from datetime import datetime
 
+
+def compute_displacement(current_price, range_high, range_low):
+    """Compute local range displacement: where price sits within the HTF range.
+
+    Returns a float between 0.0 and 1.0, or None if the range is degenerate
+    (range_high == range_low) or inputs are missing.
+    """
+    if current_price is None or range_high is None or range_low is None:
+        return None
+    if range_high <= range_low:
+        return None
+    displacement = (current_price - range_low) / (range_high - range_low)
+    return max(0.0, min(1.0, displacement))
+
+
 def range_integrity_validator(context):
     """
     HPB Range Integrity Validator (RIG)
