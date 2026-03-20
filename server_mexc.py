@@ -209,16 +209,28 @@ _RIG_NOT_EVALUATED = {
 }
 
 
+from hpb_rig_validator import compute_displacement
+
+
 def _evaluate_rig_safe(htf_bias, rcm_valid, range_duration_hours,
                        session_bias, session_name, exec_score,
-                       local_displacement):
+                       local_displacement=None,
+                       range_high=None, range_low=None,
+                       current_price=None):
     """
     Evaluate RIG with input validation.  Returns NOT_EVALUATED when
     required inputs are missing, preventing fake passes from placeholder data.
 
+    If local_displacement is None but range_high/range_low/current_price are
+    provided, displacement is computed automatically.
+
     Fail-closed: errors and missing inputs do NOT produce VALID.
     """
     from hpb_rig_validator import range_integrity_validator
+
+    # Compute displacement from range data if not provided directly
+    if local_displacement is None and current_price is not None:
+        local_displacement = compute_displacement(current_price, range_high, range_low)
 
     # Guard: do not call the validator with placeholder / missing data
     has_rcm = rcm_valid is not None
@@ -226,8 +238,10 @@ def _evaluate_rig_safe(htf_bias, rcm_valid, range_duration_hours,
     has_displacement = local_displacement is not None
 
     if not (has_rcm and has_session and has_displacement):
-        return dict(_RIG_NOT_EVALUATED,
-                    reason=f"Missing: rcm={has_rcm} session={has_session} disp={has_displacement}")
+        result = dict(_RIG_NOT_EVALUATED,
+                      reason=f"Missing: rcm={has_rcm} session={has_session} disp={has_displacement}")
+        result["displacement"] = local_displacement
+        return result
 
     rig_context = {
         "gates": {
@@ -242,10 +256,12 @@ def _evaluate_rig_safe(htf_bias, rcm_valid, range_duration_hours,
             },
             "1D": {"score": exec_score or 0.0},
         },
-        "local_range_displacement": local_displacement or 0.0,
+        "local_range_displacement": local_displacement,
     }
 
-    return range_integrity_validator(rig_context)
+    result = range_integrity_validator(rig_context)
+    result["displacement"] = local_displacement
+    return result
 
 
 # ================================================================
@@ -2743,12 +2759,29 @@ def validate_RCM(context: Dict) -> Dict:
     try:
         r = context.get("detected_range")
         if not r or r["duration_hours"] < 24:
-            return {"valid": False, "confidence": 0.0}
+            return {"valid": False, "confidence": 0.0, "displacement": None,
+                    "range_high": None, "range_low": None, "range_duration": 0}
 
         conf = min(r["duration_hours"] / 34, 1.0)
-        return {"valid": conf > 0.6, "confidence": conf}
+        valid = conf > 0.6
+
+        range_high = r.get("high")
+        range_low = r.get("low")
+        current_price = context.get("current_price")
+        displacement = compute_displacement(current_price, range_high, range_low) if valid else None
+
+        return {
+            "valid": valid,
+            "confidence": conf,
+            "range_high": range_high,
+            "range_low": range_low,
+            "range_duration": r.get("duration_hours", 0),
+            "displacement": displacement,
+        }
     except Exception as e:
-        return {"valid": False, "confidence": 0.0, "error": str(e)}
+        return {"valid": False, "confidence": 0.0, "error": str(e),
+                "displacement": None, "range_high": None, "range_low": None,
+                "range_duration": 0}
 
 def validate_RIG(context: Dict) -> Dict:
     """
@@ -2757,6 +2790,7 @@ def validate_RIG(context: Dict) -> Dict:
     (True ONLY on explicit VALID status) plus full RIG output.
 
     Fail-closed: errors and unknown statuses block execution.
+    Only evaluates when RCM is valid and displacement is available.
     """
     try:
         from hpb_rig_validator import range_integrity_validator
@@ -2764,17 +2798,28 @@ def validate_RIG(context: Dict) -> Dict:
         rcm = context.get("RCM", {})
         msce = context.get("MSCE", {})
         one_a = context.get("1A", {})
-        detected = context.get("detected_range", {})
+
+        displacement = rcm.get("displacement")
+        rcm_valid = rcm.get("valid", False)
+
+        # Do not evaluate RIG if RCM is invalid or displacement is missing
+        if not rcm_valid or displacement is None:
+            return {
+                "passed": False,
+                "status": "NOT_EVALUATED",
+                "reason": f"Missing: rcm_valid={rcm_valid} displacement={displacement is not None}",
+                "displacement": displacement,
+                "htf_bias": one_a.get("bias", "neutral"),
+                "session_bias": msce.get("session_bias", "neutral"),
+                "confidence": 0.0,
+            }
 
         rig_context = {
             "gates": {
                 "1A": {"bias": one_a.get("bias", "neutral")},
                 "RCM": {
-                    "valid": rcm.get("valid", False),
-                    "range_duration_hours": (
-                        detected.get("duration_hours", 0)
-                        if detected else 0
-                    ),
+                    "valid": rcm_valid,
+                    "range_duration_hours": rcm.get("range_duration", 0),
                 },
                 "MSCE": {
                     "session_bias": msce.get("session_bias", "neutral"),
@@ -2782,7 +2827,7 @@ def validate_RIG(context: Dict) -> Dict:
                 },
                 "1D": {"score": 0.0},  # 1D hasn't run yet at this point
             },
-            "local_range_displacement": context.get("local_range_displacement", 0.0),
+            "local_range_displacement": displacement,
         }
 
         rig_result = range_integrity_validator(rig_context)
@@ -2795,6 +2840,7 @@ def validate_RIG(context: Dict) -> Dict:
             "passed": passed,
             "status": rig_result.get("status"),
             "reason": rig_result.get("reason"),
+            "displacement": displacement,
             "htf_bias": rig_result.get("htf_bias"),
             "session_bias": rig_result.get("session_bias"),
             "confidence": rig_result.get("confidence"),
@@ -2805,6 +2851,7 @@ def validate_RIG(context: Dict) -> Dict:
             "passed": False,
             "status": "ERROR",
             "reason": str(e),
+            "displacement": None,
             "htf_bias": None,
             "session_bias": None,
             "confidence": 0.0,
@@ -15150,6 +15197,7 @@ async def tensor_trade_scan():
             "gate_RIG": {
                 "status": _5a_rig.get("status"),
                 "reason": _5a_rig.get("reason"),
+                "displacement": _5a_rig.get("displacement"),
                 "htf_bias": _5a_rig.get("htf_bias"),
                 "session_bias": _5a_rig.get("session_bias"),
                 "confidence": _5a_rig.get("confidence"),
@@ -18442,21 +18490,37 @@ async def schematics_5b_auto_scan_loop():
                 _5b_signal = _normalize_tct_signal(_5b_htf_bias) if action == "trade_entered" else "NO_TRADE"
 
                 # ── RIG: Range Integrity Gate ──
-                # 5B has MSCE but lacks displacement — use shared builder
+                # 5B: extract range data from per_symbol debug for displacement
                 _5b_rcm_valid = _5b_debug.get("best_score", 0) > 0
+                _5b_sym_data = _5b_debug.get("per_symbol", {}).get("BTCUSDT", {})
+                _5b_current_price = _5b_sym_data.get("current_price") or _5b_debug.get("current_price")
+                _5b_range_high = None
+                _5b_range_low = None
+                _5b_range_duration = None
+                # Extract range from forming schematics (first available)
+                for _fs in (_5b_sym_data.get("forming") or []):
+                    _rh = _fs.get("range_high")
+                    _rl = _fs.get("range_low")
+                    if _rh is not None and _rl is not None:
+                        _5b_range_high = _rh
+                        _5b_range_low = _rl
+                        break
                 try:
                     _5b_rig = _evaluate_rig_safe(
                         htf_bias=_5b_htf_bias,
                         rcm_valid=_5b_rcm_valid,
-                        range_duration_hours=None,  # not available from 5B debug
+                        range_duration_hours=_5b_range_duration,
                         session_bias=msce.get("session_bias", "neutral"),
                         session_name=msce.get("session"),
                         exec_score=(_5b_debug.get("best_score", 0) or 0) / 100.0,
-                        local_displacement=None,    # not available from 5B debug
+                        range_high=_5b_range_high,
+                        range_low=_5b_range_low,
+                        current_price=_5b_current_price,
                     )
                 except Exception:
                     _5b_rig = {"status": "ERROR", "Gate": "RIG",
                                "reason": "validator_failed", "confidence": 0.0,
+                               "displacement": None,
                                "htf_bias": None, "session_bias": None, "timestamp": None}
 
                 _5b_rig_status = _5b_rig.get("status")
@@ -18489,6 +18553,7 @@ async def schematics_5b_auto_scan_loop():
                     "gate_RIG": {
                         "status": _5b_rig.get("status"),
                         "reason": _5b_rig.get("reason"),
+                        "displacement": _5b_rig.get("displacement"),
                         "htf_bias": _5b_rig.get("htf_bias"),
                         "session_bias": _5b_rig.get("session_bias"),
                         "confidence": _5b_rig.get("confidence"),
