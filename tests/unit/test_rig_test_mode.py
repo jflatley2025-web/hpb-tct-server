@@ -132,7 +132,7 @@ class TestBuildTestContext:
 
     def test_displacement_is_not_none(self):
         """Valid inputs must produce non-None displacement in context"""
-        context, displacement = build_test_context(70000)
+        context, _ = build_test_context(70000)
         assert context["local_range_displacement"] is not None
 
     def test_counter_bias_default(self):

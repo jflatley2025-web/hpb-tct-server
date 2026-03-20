@@ -2901,23 +2901,29 @@ def validate_gates(context: Dict) -> Dict:
         from rig_test_mode import build_test_context
 
         current_price = context.get("current_price")
+        context["debug"] = context.get("debug", {})
         if current_price is not None:
             try:
                 test_ctx, displacement = build_test_context(current_price)
                 if displacement is not None:
                     test_rcm = test_ctx["gates"]["RCM"]
-                    context["RCM"] = {
-                        "valid": test_rcm["valid"],
-                        "confidence": min(test_rcm["range_duration_hours"] / 34, 1.0),
-                        "range_high": test_rcm["range_high"],
-                        "range_low": test_rcm["range_low"],
-                        "range_duration": test_rcm["range_duration_hours"],
-                    }
+                    # Merge test overrides into existing RCM — preserves production metadata
+                    context["RCM"]["valid"] = test_rcm["valid"]
+                    context["RCM"]["range_high"] = test_rcm["range_high"]
+                    context["RCM"]["range_low"] = test_rcm["range_low"]
+                    context["RCM"]["range_duration"] = test_rcm["range_duration_hours"]
+                    context["RCM"]["confidence"] = min(test_rcm["range_duration_hours"] / 34, 1.0)
                     context["local_range_displacement"] = displacement
-                    context["debug"] = context.get("debug", {})
                     context["debug"]["rig_test_mode"] = True
+                else:
+                    context["debug"]["rig_test_mode"] = False
+                    logger.warning("RIG_TEST_MODE: displacement is None, falling through to production")
             except ValueError as e:
+                context["debug"]["rig_test_mode"] = False
                 logger.warning("RIG_TEST_MODE: invalid test params, falling through to production: %s", e)
+        else:
+            context["debug"]["rig_test_mode"] = False
+            logger.warning("RIG_TEST_MODE: current_price is None, falling through to production")
 
     context["RIG"] = validate_RIG(context)
     context["1D"] = validate_1D(context)
