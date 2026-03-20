@@ -2800,7 +2800,7 @@ def validate_RIG(context: Dict) -> Dict:
         msce = context.get("MSCE", {})
         one_a = context.get("1A", {})
 
-        displacement = rcm.get("displacement")
+        displacement = context.get("local_range_displacement")
         rcm_valid = rcm.get("valid", False)
         range_duration = rcm.get("range_duration")
 
@@ -2888,6 +2888,43 @@ def validate_gates(context: Dict) -> Dict:
     context["1C"] = validate_1C(context)
     context["RCM"] = validate_RCM(context)
     context["MSCE"] = validate_MSCE(context)
+
+    # Promote displacement from RCM result to top-level context.
+    # validate_RIG reads context["local_range_displacement"] as its single source.
+    context["local_range_displacement"] = context["RCM"].get("displacement")
+
+    # --- RIG Test Mode Injection ---
+    # When RIG_TEST_MODE is enabled, override RCM + displacement with controlled
+    # test values so RIG can be validated even when live RCM is invalid.
+    # Only overrides RCM gate and local_range_displacement; all other gates stay real.
+    if os.getenv("RIG_TEST_MODE", "false").lower() in {"1", "true", "yes"}:
+        from rig_test_mode import build_test_context
+
+        current_price = context.get("current_price")
+        context["debug"] = context.get("debug", {})
+        if current_price is not None:
+            try:
+                test_ctx, displacement = build_test_context(current_price)
+                if displacement is not None:
+                    test_rcm = test_ctx["gates"]["RCM"]
+                    # Merge test overrides into existing RCM — preserves production metadata
+                    context["RCM"]["valid"] = test_rcm["valid"]
+                    context["RCM"]["range_high"] = test_rcm["range_high"]
+                    context["RCM"]["range_low"] = test_rcm["range_low"]
+                    context["RCM"]["range_duration"] = test_rcm["range_duration_hours"]
+                    context["RCM"]["confidence"] = min(test_rcm["range_duration_hours"] / 34, 1.0)
+                    context["local_range_displacement"] = displacement
+                    context["debug"]["rig_test_mode"] = True
+                else:
+                    context["debug"]["rig_test_mode"] = False
+                    logger.warning("RIG_TEST_MODE: displacement is None, falling through to production")
+            except ValueError as e:
+                context["debug"]["rig_test_mode"] = False
+                logger.warning("RIG_TEST_MODE: invalid test params, falling through to production: %s", e)
+        else:
+            context["debug"]["rig_test_mode"] = False
+            logger.warning("RIG_TEST_MODE: current_price is None, falling through to production")
+
     context["RIG"] = validate_RIG(context)
     context["1D"] = validate_1D(context)
 
