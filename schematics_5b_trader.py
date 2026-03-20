@@ -1160,13 +1160,31 @@ class Schematics5BTrader:
                     "gate_metrics": dict(self._gate_metrics),
                 }
 
-            # 3. Enter trade on highest-scoring qualifying setup.
+            # 3. RIG check + Enter trade on highest-scoring qualifying setup.
             if best_setup:
                 schematic, evaluation = best_setup
                 entry_info = schematic.get("entry", {})
                 candidate_price = entry_info.get("price", best_current_price)
 
-                if self._is_duplicate_setup(candidate_price, evaluation["direction"]):
+                # ── RIG: Range Integrity Gate ──────────────────────────
+                rig_result = self._evaluate_rig(
+                    schematic, evaluation, best_current_price, best_htf_bias,
+                )
+                rig_blocked = rig_result.get("status") not in ("VALID", "NOT_EVALUATED", None)
+                with self._lock:
+                    self.last_debug["rig"] = rig_result
+
+                if rig_blocked:
+                    logger.info("[5B] RIG BLOCK: %s", rig_result)
+                    cycle_result["action"] = "rig_blocked"
+                    cycle_result["details"] = {
+                        "price": best_current_price,
+                        "symbol": SYMBOL,
+                        "rig_status": rig_result.get("status"),
+                        "rig_reason": rig_result.get("reason"),
+                        "displacement": rig_result.get("displacement"),
+                    }
+                elif self._is_duplicate_setup(candidate_price, evaluation["direction"]):
                     cycle_result["action"] = "duplicate_setup_skipped"
                     cycle_result["details"] = {
                         "price": best_current_price,
@@ -1540,6 +1558,94 @@ class Schematics5BTrader:
     ) -> Dict:
         """Delegate to the shared module-level helper with a 5B-specific log label."""
         return refine_schematic_bos_with_ltf(schematic, ltf_dfs, label="5B-LTF")
+
+    # ----------------------------------------------------------------
+    # RIG — Range Integrity Gate (5B)
+    # ----------------------------------------------------------------
+
+    def _evaluate_rig(self, schematic: Dict, evaluation: Dict,
+                      current_price: float, htf_bias: str) -> Dict:
+        """Evaluate RIG using real schematic range data + current price.
+
+        Returns dict with status, reason, displacement, etc.
+        NOT_EVALUATED when inputs are insufficient.
+        """
+        try:
+            from hpb_rig_validator import range_integrity_validator, compute_displacement
+
+            rng = schematic.get("range") or {}
+            range_high = rng.get("high") or rng.get("range_high")
+            range_low = rng.get("low") or rng.get("range_low")
+
+            displacement = compute_displacement(current_price, range_high, range_low)
+
+            # Derive session bias from evaluation direction
+            direction = evaluation.get("direction")
+            if direction in ("bullish", "long"):
+                session_bias = "bullish"
+            elif direction in ("bearish", "short"):
+                session_bias = "bearish"
+            else:
+                session_bias = None
+
+            # Estimate range duration from schematic candle span
+            range_duration = None
+            high_idx = rng.get("range_high_idx") or rng.get("high_idx")
+            low_idx = rng.get("range_low_idx") or rng.get("low_idx")
+            if high_idx is not None and low_idx is not None:
+                candle_span = abs(high_idx - low_idx)
+                # Assume 4h candles for HTF range (most common in 5B)
+                range_duration = candle_span * 4
+
+            # Guard: do not evaluate RIG without complete inputs
+            if displacement is None or range_duration is None or session_bias is None:
+                return {
+                    "status": "NOT_EVALUATED",
+                    "Gate": "RIG",
+                    "reason": f"Missing: disp={displacement is not None} dur={range_duration is not None} bias={session_bias is not None}",
+                    "confidence": 0.0,
+                    "displacement": displacement,
+                    "htf_bias": htf_bias,
+                    "session_bias": session_bias,
+                    "timestamp": None,
+                }
+
+            rig_context = {
+                "gates": {
+                    "1A": {"bias": htf_bias or "neutral"},
+                    "RCM": {
+                        "valid": True,
+                        "range_duration_hours": range_duration,
+                    },
+                    "MSCE": {
+                        "session_bias": session_bias,
+                        "session": "Unknown",
+                    },
+                    "1D": {"score": evaluation.get("score", 0) / 100.0},
+                },
+                "local_range_displacement": displacement,
+            }
+
+            rig_result = range_integrity_validator(rig_context)
+            rig_result["displacement"] = displacement
+            return rig_result
+
+        except Exception as exc:
+            logger.error(f"[5B] RIG evaluation failed: {exc}", exc_info=True)
+            return {
+                "status": "ERROR",
+                "Gate": "RIG",
+                "reason": str(exc),
+                "confidence": 0.0,
+                "displacement": None,
+                "htf_bias": htf_bias,
+                "session_bias": None,
+                "timestamp": None,
+            }
+
+    # ----------------------------------------------------------------
+    # TRADE ENTRY
+    # ----------------------------------------------------------------
 
     def _enter_trade(self, schematic: Dict, evaluation: Dict, current_price: float, htf_bias: str,
                      symbol: str = SYMBOL, timeframe: str = "unknown") -> Dict:

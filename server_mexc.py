@@ -233,13 +233,14 @@ def _evaluate_rig_safe(htf_bias, rcm_valid, range_duration_hours,
         local_displacement = compute_displacement(current_price, range_high, range_low)
 
     # Guard: do not call the validator with placeholder / missing data
-    has_rcm = rcm_valid is not None
+    has_rcm = bool(rcm_valid)
     has_session = session_name is not None and session_name != "Unknown"
     has_displacement = local_displacement is not None
+    has_range_duration = range_duration_hours is not None and range_duration_hours > 0
 
-    if not (has_rcm and has_session and has_displacement):
+    if not (has_rcm and has_session and has_displacement and has_range_duration):
         result = dict(_RIG_NOT_EVALUATED,
-                      reason=f"Missing: rcm={has_rcm} session={has_session} disp={has_displacement}")
+                      reason=f"Missing: rcm={has_rcm} session={has_session} disp={has_displacement} dur={has_range_duration}")
         result["displacement"] = local_displacement
         return result
 
@@ -247,11 +248,11 @@ def _evaluate_rig_safe(htf_bias, rcm_valid, range_duration_hours,
         "gates": {
             "1A": {"bias": htf_bias or "neutral"},
             "RCM": {
-                "valid": bool(rcm_valid),
-                "range_duration_hours": range_duration_hours or 0,
+                "valid": True,
+                "range_duration_hours": range_duration_hours,
             },
             "MSCE": {
-                "session_bias": session_bias or "neutral",
+                "session_bias": session_bias,
                 "session": session_name,
             },
             "1D": {"score": exec_score or 0.0},
@@ -2760,7 +2761,7 @@ def validate_RCM(context: Dict) -> Dict:
         r = context.get("detected_range")
         if not r or r["duration_hours"] < 24:
             return {"valid": False, "confidence": 0.0, "displacement": None,
-                    "range_high": None, "range_low": None, "range_duration": 0}
+                    "range_high": None, "range_low": None, "range_duration": None}
 
         conf = min(r["duration_hours"] / 34, 1.0)
         valid = conf > 0.6
@@ -2781,7 +2782,7 @@ def validate_RCM(context: Dict) -> Dict:
     except Exception as e:
         return {"valid": False, "confidence": 0.0, "error": str(e),
                 "displacement": None, "range_high": None, "range_low": None,
-                "range_duration": 0}
+                "range_duration": None}
 
 def validate_RIG(context: Dict) -> Dict:
     """
@@ -2801,16 +2802,18 @@ def validate_RIG(context: Dict) -> Dict:
 
         displacement = rcm.get("displacement")
         rcm_valid = rcm.get("valid", False)
+        range_duration = rcm.get("range_duration")
 
-        # Do not evaluate RIG if RCM is invalid or displacement is missing
-        if not rcm_valid or displacement is None:
+        # Do not evaluate RIG if RCM is invalid, displacement is missing,
+        # or range_duration is absent
+        if not rcm_valid or displacement is None or not range_duration:
             return {
                 "passed": False,
                 "status": "NOT_EVALUATED",
-                "reason": f"Missing: rcm_valid={rcm_valid} displacement={displacement is not None}",
+                "reason": f"Missing: rcm_valid={rcm_valid} displacement={displacement is not None} dur={range_duration is not None}",
                 "displacement": displacement,
                 "htf_bias": one_a.get("bias", "neutral"),
-                "session_bias": msce.get("session_bias", "neutral"),
+                "session_bias": msce.get("session_bias"),
                 "confidence": 0.0,
             }
 
@@ -2819,10 +2822,10 @@ def validate_RIG(context: Dict) -> Dict:
                 "1A": {"bias": one_a.get("bias", "neutral")},
                 "RCM": {
                     "valid": rcm_valid,
-                    "range_duration_hours": rcm.get("range_duration", 0),
+                    "range_duration_hours": range_duration,
                 },
                 "MSCE": {
-                    "session_bias": msce.get("session_bias", "neutral"),
+                    "session_bias": msce.get("session_bias"),
                     "session": msce.get("session", "Unknown"),
                 },
                 "1D": {"score": 0.0},  # 1D hasn't run yet at this point
@@ -18490,38 +18493,45 @@ async def schematics_5b_auto_scan_loop():
                 _5b_signal = _normalize_tct_signal(_5b_htf_bias) if action == "trade_entered" else "NO_TRADE"
 
                 # ── RIG: Range Integrity Gate ──
-                # 5B: extract range data from per_symbol debug for displacement
-                _5b_rcm_valid = _5b_debug.get("best_score", 0) > 0
-                _5b_sym_data = _5b_debug.get("per_symbol", {}).get("BTCUSDT", {})
-                _5b_current_price = _5b_sym_data.get("current_price") or _5b_debug.get("current_price")
-                _5b_range_high = None
-                _5b_range_low = None
-                _5b_range_duration = None
-                # Extract range from forming schematics (first available)
-                for _fs in (_5b_sym_data.get("forming") or []):
-                    _rh = _fs.get("range_high")
-                    _rl = _fs.get("range_low")
-                    if _rh is not None and _rl is not None:
-                        _5b_range_high = _rh
-                        _5b_range_low = _rl
-                        break
-                try:
-                    _5b_rig = _evaluate_rig_safe(
-                        htf_bias=_5b_htf_bias,
-                        rcm_valid=_5b_rcm_valid,
-                        range_duration_hours=_5b_range_duration,
-                        session_bias=msce.get("session_bias", "neutral"),
-                        session_name=msce.get("session"),
-                        exec_score=(_5b_debug.get("best_score", 0) or 0) / 100.0,
-                        range_high=_5b_range_high,
-                        range_low=_5b_range_low,
-                        current_price=_5b_current_price,
-                    )
-                except Exception:
-                    _5b_rig = {"status": "ERROR", "Gate": "RIG",
-                               "reason": "validator_failed", "confidence": 0.0,
-                               "displacement": None,
-                               "htf_bias": None, "session_bias": None, "timestamp": None}
+                # Prefer the trader's own RIG result (evaluated inside scan_and_trade)
+                _5b_rig = _5b_debug.get("rig")
+                if not _5b_rig or not isinstance(_5b_rig, dict):
+                    # Fallback: compute from forming schematics if trader didn't evaluate
+                    _5b_rcm_valid = _5b_debug.get("best_score", 0) > 0
+                    _5b_sym_data = _5b_debug.get("per_symbol", {}).get("BTCUSDT", {})
+                    _5b_current_price = _5b_sym_data.get("current_price") or _5b_debug.get("current_price")
+                    _5b_range_high = None
+                    _5b_range_low = None
+                    _5b_range_duration = None
+                    for _fs in (_5b_sym_data.get("forming") or []):
+                        _rh = _fs.get("range_high")
+                        _rl = _fs.get("range_low")
+                        if _rh is not None and _rl is not None:
+                            _5b_range_high = _rh
+                            _5b_range_low = _rl
+                            _5b_tf = _fs.get("tf")
+                            _5b_quality = _fs.get("quality_score", 0)
+                            if _5b_tf in ("4h", "1d", "1w") and _5b_quality > 0:
+                                _tf_hours = {"4h": 48, "1d": 168, "1w": 720}
+                                _5b_range_duration = _tf_hours.get(_5b_tf, 48)
+                            break
+                    try:
+                        _5b_rig = _evaluate_rig_safe(
+                            htf_bias=_5b_htf_bias,
+                            rcm_valid=_5b_rcm_valid,
+                            range_duration_hours=_5b_range_duration,
+                            session_bias=msce.get("session_bias"),
+                            session_name=msce.get("session"),
+                            exec_score=(_5b_debug.get("best_score", 0) or 0) / 100.0,
+                            range_high=_5b_range_high,
+                            range_low=_5b_range_low,
+                            current_price=_5b_current_price,
+                        )
+                    except Exception:
+                        _5b_rig = {"status": "ERROR", "Gate": "RIG",
+                                   "reason": "validator_failed", "confidence": 0.0,
+                                   "displacement": None,
+                                   "htf_bias": None, "session_bias": None, "timestamp": None}
 
                 _5b_rig_status = _5b_rig.get("status")
                 _5b_rig_passed = _5b_rig_status == "VALID"

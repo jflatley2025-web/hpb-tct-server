@@ -327,7 +327,7 @@ class TestRIGWithDisplacement:
     """Integration tests: RIG evaluation with displacement scenarios"""
 
     def test_mid_range_blocks_counter_bias(self):
-        """Mid-range (0.4-0.6) with counter-bias → BLOCK"""
+        """Mid-range (0.4-0.6) with counter-bias → BLOCK (displacement < 0.25)"""
         context = {
             "gates": {
                 "1A": {"bias": "bullish"},
@@ -335,7 +335,7 @@ class TestRIGWithDisplacement:
                 "MSCE": {"session_bias": "bearish", "session": "London"},
                 "1D": {"score": 0.80},
             },
-            "local_range_displacement": 0.15,  # Below 0.25 threshold
+            "local_range_displacement": 0.15,  # Below 0.25 threshold → blocks
         }
         result = range_integrity_validator(context)
         assert result["status"] == "BLOCK"
@@ -367,3 +367,33 @@ class TestRIGWithDisplacement:
         }
         result = range_integrity_validator(context)
         assert result["status"] == "VALID"
+
+    def test_true_mid_range_allows_when_above_threshold(self):
+        """True mid-range (0.5) is above DISP_THRESHOLD → VALID (not blocked)"""
+        context = {
+            "gates": {
+                "1A": {"bias": "bullish"},
+                "RCM": {"valid": True, "range_duration_hours": 48},
+                "MSCE": {"session_bias": "bearish", "session": "London"},
+                "1D": {"score": 0.80},
+            },
+            "local_range_displacement": 0.50,  # Mid-range but above 0.25 threshold
+        }
+        result = range_integrity_validator(context)
+        # 0.50 > 0.25 threshold so RIG does NOT block
+        assert result["status"] == "VALID"
+
+
+@pytest.mark.unit
+class TestComputeDisplacementEdgeCases:
+    """Additional edge case tests for compute_displacement"""
+
+    def test_inverted_range_returns_none(self):
+        """range_high < range_low (inverted) → None"""
+        from hpb_rig_validator import compute_displacement
+        assert compute_displacement(105.0, 100.0, 110.0) is None
+
+    def test_slightly_inverted_range_returns_none(self):
+        """range_high barely below range_low → None"""
+        from hpb_rig_validator import compute_displacement
+        assert compute_displacement(100.0, 99.99, 100.0) is None

@@ -59,6 +59,22 @@ except OSError as exc:
 TRADE_LOG_PATH = os.path.join(_TRADE_LOG_DIR, "phemex_trade_log.json")
 
 
+def _derive_session_bias(signal):
+    """Derive session bias from pipeline signal direction.
+
+    Returns "bullish", "bearish", or None (NOT "neutral") so that
+    RIG can detect counter-bias trades accurately.
+    """
+    if signal is None:
+        return None
+    s = str(signal).lower()
+    if s in ("long", "bullish"):
+        return "bullish"
+    if s in ("short", "bearish"):
+        return "bearish"
+    return None
+
+
 # ---------------------------------------------------------------------------
 # PhemexTCTTrader
 # ---------------------------------------------------------------------------
@@ -404,7 +420,11 @@ class PhemexTCTTrader:
             rcm_valid = g2_data.get("valid", False)
             range_high = g2_data.get("range_high")
             range_low = g2_data.get("range_low")
-            range_duration = g2_data.get("range_duration_hours", 0)
+            range_duration = g2_data.get("range_duration_hours")
+
+            # RCM is only valid if we also have range duration
+            if range_duration is None:
+                rcm_valid = False
 
             # Compute displacement from real range data
             displacement = compute_displacement(current_price, range_high, range_low) if rcm_valid else None
@@ -422,6 +442,9 @@ class PhemexTCTTrader:
                     "timestamp": None,
                 }
 
+            # Derive session bias from pipeline signal direction
+            session_bias = _derive_session_bias(result.signal)
+
             # Build RIG context from real execution data
             rig_context = {
                 "gates": {
@@ -431,7 +454,7 @@ class PhemexTCTTrader:
                         "range_duration_hours": range_duration,
                     },
                     "MSCE": {
-                        "session_bias": "neutral",  # MSCE not implemented in phemex pipeline
+                        "session_bias": session_bias,
                         "session": "Unknown",
                     },
                     "1D": {"score": result.confidence},

@@ -10,7 +10,7 @@ def compute_displacement(current_price, range_high, range_low):
     """
     if current_price is None or range_high is None or range_low is None:
         return None
-    if range_high == range_low:
+    if range_high <= range_low:
         return None
     displacement = (current_price - range_low) / (range_high - range_low)
     return max(0.0, min(1.0, displacement))
