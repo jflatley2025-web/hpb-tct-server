@@ -18898,6 +18898,77 @@ async def phemex_tct_debug():
     return get_trader().debug()
 
 
+@app.get("/debug/rig-test")
+async def debug_rig_test(
+    price: float = 70000,
+    range_high: float = 72000,
+    range_low: float = 68000,
+    range_duration: float = 48,
+    htf_bias: str = "bullish",
+    session_bias: str = "bearish",
+):
+    """Debug endpoint to test RIG displacement logic with arbitrary parameters.
+
+    Example: /debug/rig-test?price=70000&range_high=72000&range_low=68000
+    Does NOT require RIG_TEST_MODE env var — this is a read-only diagnostic tool.
+    """
+    from rig_test_mode import (
+        build_test_context,
+        compute_extremity,
+        evaluate_rig_test_status,
+        TEST_SCENARIOS,
+    )
+    from hpb_rig_validator import compute_displacement, range_integrity_validator
+
+    # --- Single-price evaluation ---
+    try:
+        context, displacement = build_test_context(
+            current_price=price,
+            range_high=range_high,
+            range_low=range_low,
+            range_duration=range_duration,
+            htf_bias=htf_bias,
+            session_bias=session_bias,
+        )
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+    rig_status = evaluate_rig_test_status(displacement)
+    extremity = compute_extremity(displacement)
+    production_result = range_integrity_validator(context)
+
+    single = {
+        "price": price,
+        "range_high": range_high,
+        "range_low": range_low,
+        "range_duration_hours": range_duration,
+        "displacement": displacement,
+        "extremity": extremity,
+        "rig_status": rig_status,
+        "production_rig_status": production_result.get("status"),
+        "production_reason": production_result.get("reason"),
+        "htf_bias": htf_bias,
+        "session_bias": session_bias,
+    }
+
+    # --- Built-in scenarios for comparison ---
+    scenarios = []
+    for sc in TEST_SCENARIOS:
+        d = compute_displacement(sc["current_price"], range_high, range_low)
+        scenarios.append({
+            "name": sc["name"],
+            "price": sc["current_price"],
+            "displacement": d,
+            "extremity": compute_extremity(d),
+            "rig_status": evaluate_rig_test_status(d),
+        })
+
+    return {
+        "query": single,
+        "scenarios": scenarios,
+    }
+
+
 @app.get("/phemex-tct", response_class=HTMLResponse)
 async def phemex_tct_page():
     """
