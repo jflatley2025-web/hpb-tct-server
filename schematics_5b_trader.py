@@ -1160,13 +1160,20 @@ class Schematics5BTrader:
                     "gate_metrics": dict(self._gate_metrics),
                 }
 
-            # 3. RIG check + Enter trade on highest-scoring qualifying setup.
+            # 3. RIG: Always evaluate range positioning for dashboard visibility
+            rig_result = self._evaluate_rig_from_forming(
+                all_forming, best_current_price, best_htf_bias,
+            )
+            with self._lock:
+                self.last_debug["rig"] = rig_result
+
+            # 4. Enter trade on highest-scoring qualifying setup.
             if best_setup:
                 schematic, evaluation = best_setup
                 entry_info = schematic.get("entry", {})
                 candidate_price = entry_info.get("price", best_current_price)
 
-                # ── RIG: Range Integrity Gate ──────────────────────────
+                # Re-evaluate RIG with the actual schematic (more precise range)
                 rig_result = self._evaluate_rig(
                     schematic, evaluation, best_current_price, best_htf_bias,
                 )
@@ -1563,6 +1570,90 @@ class Schematics5BTrader:
     # RIG — Range Integrity Gate (5B)
     # ----------------------------------------------------------------
 
+    def _evaluate_rig_from_forming(self, forming: List[Dict],
+                                    current_price: float,
+                                    htf_bias: str) -> Dict:
+        """Evaluate RIG from forming schematics — always runs, even without
+        a qualifying best_setup.  Uses the first forming schematic with valid
+        range data to compute displacement for dashboard visibility.
+
+        Returns NOT_EVALUATED only when no range data exists at all.
+        """
+        try:
+            from hpb_rig_validator import range_integrity_validator, compute_displacement
+
+            # Find the first forming schematic with range data
+            range_high = None
+            range_low = None
+            direction = None
+            for fs in (forming or []):
+                rh = fs.get("range_high")
+                rl = fs.get("range_low")
+                if rh is not None and rl is not None:
+                    range_high = rh
+                    range_low = rl
+                    direction = fs.get("direction")
+                    break
+
+            displacement = compute_displacement(current_price, range_high, range_low)
+
+            # Derive session bias from forming schematic direction
+            session_bias = None
+            if direction in ("bullish", "long"):
+                session_bias = "bullish"
+            elif direction in ("bearish", "short"):
+                session_bias = "bearish"
+
+            # Without range data, we can still report displacement=None
+            if displacement is None:
+                return {
+                    "status": "NOT_EVALUATED",
+                    "Gate": "RIG",
+                    "reason": "No range data in forming schematics",
+                    "confidence": 0.0,
+                    "displacement": None,
+                    "htf_bias": htf_bias,
+                    "session_bias": session_bias,
+                    "timestamp": None,
+                }
+
+            # Use a conservative duration estimate based on forming timeframes
+            # (forming schematics don't carry explicit duration)
+            range_duration = 48  # conservative: assume 4h range minimum
+
+            rig_context = {
+                "gates": {
+                    "1A": {"bias": htf_bias or "neutral"},
+                    "RCM": {
+                        "valid": True,
+                        "range_duration_hours": range_duration,
+                    },
+                    "MSCE": {
+                        "session_bias": session_bias or htf_bias,
+                        "session": "Unknown",
+                    },
+                    "1D": {"score": 0.0},
+                },
+                "local_range_displacement": displacement,
+            }
+
+            rig_result = range_integrity_validator(rig_context)
+            rig_result["displacement"] = displacement
+            return rig_result
+
+        except Exception as exc:
+            logger.error(f"[5B] RIG forming evaluation failed: {exc}", exc_info=True)
+            return {
+                "status": "ERROR",
+                "Gate": "RIG",
+                "reason": str(exc),
+                "confidence": 0.0,
+                "displacement": None,
+                "htf_bias": htf_bias,
+                "session_bias": None,
+                "timestamp": None,
+            }
+
     def _evaluate_rig(self, schematic: Dict, evaluation: Dict,
                       current_price: float, htf_bias: str) -> Dict:
         """Evaluate RIG using real schematic range data + current price.
@@ -1594,8 +1685,12 @@ class Schematics5BTrader:
             low_idx = rng.get("range_low_idx") or rng.get("low_idx")
             if high_idx is not None and low_idx is not None:
                 candle_span = abs(high_idx - low_idx)
-                # Assume 4h candles for HTF range (most common in 5B)
-                range_duration = candle_span * 4
+                if candle_span > 0:
+                    # Assume 4h candles for MTF range (most common in 5B)
+                    range_duration = candle_span * 4
+            # Fallback: valid confirmed schematic implies a mature range
+            if range_duration is None and rng:
+                range_duration = 48  # conservative estimate for confirmed range
 
             # Guard: do not evaluate RIG without complete inputs
             if displacement is None or range_duration is None or session_bias is None:

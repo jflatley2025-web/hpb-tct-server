@@ -18496,31 +18496,32 @@ async def schematics_5b_auto_scan_loop():
                 # Prefer the trader's own RIG result (evaluated inside scan_and_trade)
                 _5b_rig = _5b_debug.get("rig")
                 if not _5b_rig or not isinstance(_5b_rig, dict):
-                    # Fallback: compute from forming schematics if trader didn't evaluate
-                    _5b_rcm_valid = _5b_debug.get("best_score", 0) > 0
+                    # Fallback: compute from forming schematics if trader didn't provide
                     _5b_sym_data = _5b_debug.get("per_symbol", {}).get("BTCUSDT", {})
                     _5b_current_price = _5b_sym_data.get("current_price") or _5b_debug.get("current_price")
                     _5b_range_high = None
                     _5b_range_low = None
-                    _5b_range_duration = None
+                    _5b_forming_dir = None
                     for _fs in (_5b_sym_data.get("forming") or []):
                         _rh = _fs.get("range_high")
                         _rl = _fs.get("range_low")
                         if _rh is not None and _rl is not None:
                             _5b_range_high = _rh
                             _5b_range_low = _rl
-                            _5b_tf = _fs.get("tf")
-                            _5b_quality = _fs.get("quality_score", 0)
-                            if _5b_tf in ("4h", "1d", "1w") and _5b_quality > 0:
-                                _tf_hours = {"4h": 48, "1d": 168, "1w": 720}
-                                _5b_range_duration = _tf_hours.get(_5b_tf, 48)
+                            _5b_forming_dir = _fs.get("direction")
                             break
+                    # Derive session bias from forming direction (not MSCE "neutral")
+                    _5b_session_bias = None
+                    if _5b_forming_dir in ("bullish", "long"):
+                        _5b_session_bias = "bullish"
+                    elif _5b_forming_dir in ("bearish", "short"):
+                        _5b_session_bias = "bearish"
                     try:
                         _5b_rig = _evaluate_rig_safe(
                             htf_bias=_5b_htf_bias,
-                            rcm_valid=_5b_rcm_valid,
-                            range_duration_hours=_5b_range_duration,
-                            session_bias=msce.get("session_bias"),
+                            rcm_valid=bool(_5b_range_high and _5b_range_low),
+                            range_duration_hours=48,  # conservative estimate for forming range
+                            session_bias=_5b_session_bias,
                             session_name=msce.get("session"),
                             exec_score=(_5b_debug.get("best_score", 0) or 0) / 100.0,
                             range_high=_5b_range_high,
