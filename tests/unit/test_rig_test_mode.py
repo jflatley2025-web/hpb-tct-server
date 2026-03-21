@@ -102,7 +102,7 @@ class TestBuildTestContext:
 
     def test_default_range_params(self):
         """Uses TEST_RANGE_* defaults when no overrides provided"""
-        context, displacement = build_test_context(70000)
+        context, _ = build_test_context(70000)
         rcm = context["gates"]["RCM"]
         assert rcm["range_high"] == TEST_RANGE_HIGH
         assert rcm["range_low"] == TEST_RANGE_LOW
@@ -111,7 +111,7 @@ class TestBuildTestContext:
 
     def test_custom_range_params(self):
         """Uses custom range params when provided"""
-        context, displacement = build_test_context(
+        context, _ = build_test_context(
             50000, range_high=55000, range_low=45000, range_duration=72
         )
         rcm = context["gates"]["RCM"]
