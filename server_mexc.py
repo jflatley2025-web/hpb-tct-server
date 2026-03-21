@@ -18898,6 +18898,84 @@ async def phemex_tct_debug():
     return get_trader().debug()
 
 
+@app.get("/debug/rig-test")
+async def debug_rig_test(
+    price: float = 70000,
+    range_high: float = 72000,
+    range_low: float = 68000,
+    range_duration: float = 48,
+    htf_bias: str = "bullish",
+    session_bias: str = "bearish",
+):
+    """Debug endpoint to test RIG displacement logic with arbitrary parameters.
+
+    Example: /debug/rig-test?price=70000&range_high=72000&range_low=68000
+    Requires RIG_TEST_MODE env var to be enabled.
+    """
+    import math
+
+    # --- Guard: only available when RIG_TEST_MODE is enabled ---
+    if os.getenv("RIG_TEST_MODE", "false").lower() not in {"1", "true", "yes"}:
+        return JSONResponse({"error": "RIG debug endpoint disabled"}, status_code=403)
+
+    # --- Validate numeric inputs (reject NaN / Inf) ---
+    for name, value in {
+        "price": price,
+        "range_high": range_high,
+        "range_low": range_low,
+        "range_duration": range_duration,
+    }.items():
+        if value is not None and not math.isfinite(value):
+            return JSONResponse({"error": f"Invalid value for {name}: must be finite"}, status_code=400)
+
+    from rig_test_mode import (
+        compute_extremity,
+        evaluate_rig_test_status,
+        TEST_SCENARIOS,
+    )
+    from hpb_rig_validator import compute_displacement
+
+    def build_metric_snapshot(snap_price, snap_rh, snap_rl, snap_rd=None):
+        """Compute displacement metrics from price and range — single source of truth."""
+        displacement = compute_displacement(snap_price, snap_rh, snap_rl)
+        extremity = compute_extremity(displacement)
+        rig_status = evaluate_rig_test_status(displacement)
+        return {
+            "price": snap_price,
+            "range_high": snap_rh,
+            "range_low": snap_rl,
+            "range_duration_hours": snap_rd,
+            "displacement": displacement,
+            "extremity": extremity,
+            "rig_status": rig_status,
+        }
+
+    # --- Validate range params ---
+    if range_high <= range_low:
+        return JSONResponse({"error": f"range_high ({range_high}) must be greater than range_low ({range_low})"}, status_code=400)
+    if range_duration <= 0:
+        return JSONResponse({"error": f"range_duration ({range_duration}) must be positive"}, status_code=400)
+
+    # --- Single-price evaluation ---
+    result = build_metric_snapshot(price, range_high, range_low, range_duration)
+    result["htf_bias"] = htf_bias
+    result["session_bias"] = session_bias
+
+    logger.info("RIG DEBUG SNAPSHOT: %s", result)
+
+    # --- Built-in scenarios for comparison ---
+    scenarios = []
+    for sc in TEST_SCENARIOS:
+        snap = build_metric_snapshot(sc["current_price"], range_high, range_low, range_duration)
+        snap["name"] = sc["name"]
+        scenarios.append(snap)
+
+    return {
+        "query": result,
+        "scenarios": scenarios,
+    }
+
+
 @app.get("/phemex-tct", response_class=HTMLResponse)
 async def phemex_tct_page():
     """
