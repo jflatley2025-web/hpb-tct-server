@@ -18910,61 +18910,68 @@ async def debug_rig_test(
     """Debug endpoint to test RIG displacement logic with arbitrary parameters.
 
     Example: /debug/rig-test?price=70000&range_high=72000&range_low=68000
-    Does NOT require RIG_TEST_MODE env var — this is a read-only diagnostic tool.
+    Requires RIG_TEST_MODE env var to be enabled.
     """
+    import math
+
+    # --- Guard: only available when RIG_TEST_MODE is enabled ---
+    if os.getenv("RIG_TEST_MODE", "false").lower() not in {"1", "true", "yes"}:
+        return JSONResponse({"error": "RIG debug endpoint disabled"}, status_code=403)
+
+    # --- Validate numeric inputs (reject NaN / Inf) ---
+    for name, value in {
+        "price": price,
+        "range_high": range_high,
+        "range_low": range_low,
+        "range_duration": range_duration,
+    }.items():
+        if value is not None and not math.isfinite(value):
+            return JSONResponse({"error": f"Invalid value for {name}: must be finite"}, status_code=400)
+
     from rig_test_mode import (
-        build_test_context,
         compute_extremity,
         evaluate_rig_test_status,
         TEST_SCENARIOS,
     )
-    from hpb_rig_validator import compute_displacement, range_integrity_validator
+    from hpb_rig_validator import compute_displacement
+
+    def build_metric_snapshot(snap_price, snap_rh, snap_rl, snap_rd=None):
+        """Compute displacement metrics from price and range — single source of truth."""
+        displacement = compute_displacement(snap_price, snap_rh, snap_rl)
+        extremity = compute_extremity(displacement)
+        rig_status = evaluate_rig_test_status(displacement)
+        return {
+            "price": snap_price,
+            "range_high": snap_rh,
+            "range_low": snap_rl,
+            "range_duration_hours": snap_rd,
+            "displacement": displacement,
+            "extremity": extremity,
+            "rig_status": rig_status,
+        }
+
+    # --- Validate range params ---
+    if range_high <= range_low:
+        return JSONResponse({"error": f"range_high ({range_high}) must be greater than range_low ({range_low})"}, status_code=400)
+    if range_duration <= 0:
+        return JSONResponse({"error": f"range_duration ({range_duration}) must be positive"}, status_code=400)
 
     # --- Single-price evaluation ---
-    try:
-        context, displacement = build_test_context(
-            current_price=price,
-            range_high=range_high,
-            range_low=range_low,
-            range_duration=range_duration,
-            htf_bias=htf_bias,
-            session_bias=session_bias,
-        )
-    except ValueError as e:
-        return JSONResponse({"error": str(e)}, status_code=400)
+    result = build_metric_snapshot(price, range_high, range_low, range_duration)
+    result["htf_bias"] = htf_bias
+    result["session_bias"] = session_bias
 
-    rig_status = evaluate_rig_test_status(displacement)
-    extremity = compute_extremity(displacement)
-    production_result = range_integrity_validator(context)
-
-    single = {
-        "price": price,
-        "range_high": range_high,
-        "range_low": range_low,
-        "range_duration_hours": range_duration,
-        "displacement": displacement,
-        "extremity": extremity,
-        "rig_status": rig_status,
-        "production_rig_status": production_result.get("status"),
-        "production_reason": production_result.get("reason"),
-        "htf_bias": htf_bias,
-        "session_bias": session_bias,
-    }
+    logger.info("RIG DEBUG SNAPSHOT: %s", result)
 
     # --- Built-in scenarios for comparison ---
     scenarios = []
     for sc in TEST_SCENARIOS:
-        d = compute_displacement(sc["current_price"], range_high, range_low)
-        scenarios.append({
-            "name": sc["name"],
-            "price": sc["current_price"],
-            "displacement": d,
-            "extremity": compute_extremity(d),
-            "rig_status": evaluate_rig_test_status(d),
-        })
+        snap = build_metric_snapshot(sc["current_price"], range_high, range_low, range_duration)
+        snap["name"] = sc["name"]
+        scenarios.append(snap)
 
     return {
-        "query": single,
+        "query": result,
         "scenarios": scenarios,
     }
 
