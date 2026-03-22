@@ -206,6 +206,7 @@ _RIG_NOT_EVALUATED = {
     "htf_bias": None,
     "session_bias": None,
     "timestamp": None,
+    "evaluated": False,
 }
 
 
@@ -233,7 +234,7 @@ def _evaluate_rig_safe(htf_bias, rcm_valid, range_duration_hours,
         local_displacement = compute_displacement(current_price, range_high, range_low)
 
     # Guard: do not call the validator with placeholder / missing data
-    has_rcm = bool(rcm_valid)
+    has_rcm = rcm_valid is not None and rcm_valid is not False
     has_session = session_name is not None and session_name != "Unknown"
     has_displacement = local_displacement is not None
     has_range_duration = range_duration_hours is not None and range_duration_hours > 0
@@ -2815,6 +2816,7 @@ def validate_RIG(context: Dict) -> Dict:
                 "htf_bias": one_a.get("bias", "neutral"),
                 "session_bias": msce.get("session_bias"),
                 "confidence": 0.0,
+                "evaluated": False,
             }
 
         rig_context = {
@@ -2847,6 +2849,7 @@ def validate_RIG(context: Dict) -> Dict:
             "htf_bias": rig_result.get("htf_bias"),
             "session_bias": rig_result.get("session_bias"),
             "confidence": rig_result.get("confidence"),
+            "evaluated": True,
         }
     except Exception as e:
         logger.error("validate_RIG error: %s", e, exc_info=True)
@@ -2858,6 +2861,7 @@ def validate_RIG(context: Dict) -> Dict:
             "htf_bias": None,
             "session_bias": None,
             "confidence": 0.0,
+            "evaluated": False,
         }
 
 def validate_1D(context: Dict) -> Dict:
@@ -18533,31 +18537,32 @@ async def schematics_5b_auto_scan_loop():
                 # Prefer the trader's own RIG result (evaluated inside scan_and_trade)
                 _5b_rig = _5b_debug.get("rig")
                 if not _5b_rig or not isinstance(_5b_rig, dict):
-                    # Fallback: compute from forming schematics if trader didn't evaluate
-                    _5b_rcm_valid = _5b_debug.get("best_score", 0) > 0
+                    # Fallback: compute from forming schematics if trader didn't provide
                     _5b_sym_data = _5b_debug.get("per_symbol", {}).get("BTCUSDT", {})
                     _5b_current_price = _5b_sym_data.get("current_price") or _5b_debug.get("current_price")
                     _5b_range_high = None
                     _5b_range_low = None
-                    _5b_range_duration = None
+                    _5b_forming_dir = None
                     for _fs in (_5b_sym_data.get("forming") or []):
                         _rh = _fs.get("range_high")
                         _rl = _fs.get("range_low")
                         if _rh is not None and _rl is not None:
                             _5b_range_high = _rh
                             _5b_range_low = _rl
-                            _5b_tf = _fs.get("tf")
-                            _5b_quality = _fs.get("quality_score", 0)
-                            if _5b_tf in ("4h", "1d", "1w") and _5b_quality > 0:
-                                _tf_hours = {"4h": 48, "1d": 168, "1w": 720}
-                                _5b_range_duration = _tf_hours.get(_5b_tf, 48)
+                            _5b_forming_dir = _fs.get("direction")
                             break
+                    # Derive session bias from forming direction (not MSCE "neutral")
+                    _5b_session_bias = None
+                    if _5b_forming_dir in ("bullish", "long"):
+                        _5b_session_bias = "bullish"
+                    elif _5b_forming_dir in ("bearish", "short"):
+                        _5b_session_bias = "bearish"
                     try:
                         _5b_rig = _evaluate_rig_safe(
                             htf_bias=_5b_htf_bias,
-                            rcm_valid=_5b_rcm_valid,
-                            range_duration_hours=_5b_range_duration,
-                            session_bias=msce.get("session_bias"),
+                            rcm_valid=(_5b_range_high is not None and _5b_range_low is not None),
+                            range_duration_hours=48,  # conservative estimate for forming range
+                            session_bias=_5b_session_bias,
                             session_name=msce.get("session"),
                             exec_score=(_5b_debug.get("best_score", 0) or 0) / 100.0,
                             range_high=_5b_range_high,
@@ -18568,7 +18573,8 @@ async def schematics_5b_auto_scan_loop():
                         _5b_rig = {"status": "ERROR", "Gate": "RIG",
                                    "reason": "validator_failed", "confidence": 0.0,
                                    "displacement": None,
-                                   "htf_bias": None, "session_bias": None, "timestamp": None}
+                                   "htf_bias": None, "session_bias": None, "timestamp": None,
+                                   "evaluated": False}
 
                 _5b_rig_status = _5b_rig.get("status")
                 _5b_rig_passed = _5b_rig_status == "VALID"
@@ -18593,7 +18599,7 @@ async def schematics_5b_auto_scan_loop():
                     "gate_1C_alt_alignment": {"status": "NOT_IMPLEMENTED", "aligned": None, "passed": None},
 
                     "gate_RCM_range": {
-                        "status": "ACTIVE" if _5b_rcm_valid else "NOT_EVALUATED",
+                        "status": "ACTIVE" if (_5b_range_high is not None and _5b_range_low is not None) else "NOT_EVALUATED",
                         "note": "Range detection via tct_schematics → range_engine_controller (L1/L2)",
                     },
 
