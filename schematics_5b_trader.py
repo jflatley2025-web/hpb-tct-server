@@ -1161,14 +1161,35 @@ class Schematics5BTrader:
                     "gate_metrics": dict(self._gate_metrics),
                 }
 
-            # 3. RIG: Always evaluate range positioning for dashboard visibility
-            #    Uses the FULL unfiltered forming pool (all directions) so
-            #    RIG can detect counter-bias setups regardless of HTF filter.
-            rig_result = self._evaluate_rig_from_forming(
-                all_forming_ranges, best_current_price, best_htf_bias,
+            # 3. RIG: Build real MSCE context and evaluate globally.
+            #    Uses canonical rig_engine — no fake session/RCM inputs.
+            from rig_engine import evaluate_rig_global
+            from msce_engine import get_msce_context
+
+            msce = get_msce_context(best_htf_bias)
+
+            # Select dominant range from unfiltered forming pool
+            _rig_range_high = None
+            _rig_range_low = None
+            for _fs in (all_forming_ranges or []):
+                _rh = _fs.get("range_high")
+                _rl = _fs.get("range_low")
+                if _rh is not None and _rl is not None and _rh > _rl:
+                    _rig_range_high = _rh
+                    _rig_range_low = _rl
+                    break
+
+            rig_result = evaluate_rig_global(
+                htf_bias=best_htf_bias,
+                session_name=msce["session"],
+                session_bias=msce["session_bias"],
+                range_high=_rig_range_high,
+                range_low=_rig_range_low,
+                current_price=best_current_price,
             )
             with self._lock:
                 self.last_debug["rig"] = rig_result
+                self.last_debug["msce"] = msce
 
             # 4. Enter trade on highest-scoring qualifying setup.
             if best_setup:
@@ -1176,13 +1197,34 @@ class Schematics5BTrader:
                 entry_info = schematic.get("entry", {})
                 candidate_price = entry_info.get("price", best_current_price)
 
-                # Re-evaluate RIG with the actual schematic (more precise range)
-                rig_result = self._evaluate_rig(
-                    schematic, evaluation, best_current_price, best_htf_bias,
+                # Re-evaluate RIG with the actual schematic range (more precise)
+                sch_rng = schematic.get("range") or {}
+                sch_rh = sch_rng.get("high") or sch_rng.get("range_high")
+                sch_rl = sch_rng.get("low") or sch_rng.get("range_low")
+
+                # Estimate range duration from candle span if available
+                sch_duration = 48  # conservative default for confirmed schematic
+                high_idx = sch_rng.get("range_high_idx") or sch_rng.get("high_idx")
+                low_idx = sch_rng.get("range_low_idx") or sch_rng.get("low_idx")
+                if high_idx is not None and low_idx is not None:
+                    candle_span = abs(high_idx - low_idx)
+                    if candle_span > 0:
+                        sch_duration = candle_span * 4  # assume 4h candles
+
+                rig_result = evaluate_rig_global(
+                    htf_bias=best_htf_bias,
+                    session_name=msce["session"],
+                    session_bias=msce["session_bias"],
+                    range_high=sch_rh,
+                    range_low=sch_rl,
+                    current_price=best_current_price,
+                    range_duration_hours=sch_duration,
+                    exec_score=evaluation.get("score", 0) / 100.0,
                 )
-                rig_blocked = rig_result.get("status") not in ("VALID", "NOT_EVALUATED", None)
                 with self._lock:
                     self.last_debug["rig"] = rig_result
+
+                rig_blocked = rig_result.get("status") not in ("VALID", "NOT_EVALUATED", None)
 
                 if rig_blocked:
                     logger.info("[5B] RIG BLOCK: %s", rig_result)
@@ -1578,184 +1620,9 @@ class Schematics5BTrader:
     # ----------------------------------------------------------------
     # RIG — Range Integrity Gate (5B)
     # ----------------------------------------------------------------
-
-    def _evaluate_rig_from_forming(self, forming: List[Dict],
-                                    current_price: float,
-                                    htf_bias: str) -> Dict:
-        """Evaluate RIG from the full unfiltered forming pool — always runs,
-        even without a qualifying best_setup.
-
-        Iterates candidates until one yields a valid displacement. Skips
-        entries with missing/inverted ranges. Returns NOT_EVALUATED only
-        when no valid range exists at all.
-        """
-        try:
-            from hpb_rig_validator import range_integrity_validator, compute_displacement
-
-            # Iterate forming schematics until a valid candidate is found
-            displacement = None
-            direction = None
-            for fs in (forming or []):
-                rh = fs.get("range_high")
-                rl = fs.get("range_low")
-                if rh is None or rl is None:
-                    continue
-                if rh <= rl:
-                    continue
-                d = compute_displacement(current_price, rh, rl)
-                if d is None:
-                    continue
-                displacement = d
-                direction = fs.get("direction")
-                break
-
-            # Derive session bias from forming direction; fall back to htf_bias
-            session_bias = None
-            if direction in ("bullish", "long"):
-                session_bias = "bullish"
-            elif direction in ("bearish", "short"):
-                session_bias = "bearish"
-            if session_bias is None:
-                session_bias = htf_bias if htf_bias in ("bullish", "bearish") else None
-
-            # Guard: displacement must be valid before calling the validator
-            if displacement is None:
-                return {
-                    "status": "NOT_EVALUATED",
-                    "Gate": "RIG",
-                    "reason": "No valid forming range",
-                    "confidence": 0.0,
-                    "displacement": None,
-                    "evaluated": False,
-                    "htf_bias": htf_bias,
-                    "session_bias": session_bias,
-                    "timestamp": None,
-                }
-
-            # Conservative duration estimate (forming schematics lack explicit duration)
-            range_duration = 48
-
-            rig_context = {
-                "gates": {
-                    "1A": {"bias": htf_bias or "neutral"},
-                    "RCM": {
-                        "valid": True,
-                        "range_duration_hours": range_duration,
-                    },
-                    "MSCE": {
-                        "session_bias": session_bias,
-                        "session": "Unknown",
-                    },
-                    "1D": {"score": 0.0},
-                },
-                "local_range_displacement": displacement,
-            }
-
-            rig_result = range_integrity_validator(rig_context)
-            rig_result["displacement"] = displacement
-            rig_result["evaluated"] = True
-            return rig_result
-
-        except Exception as exc:
-            logger.error(f"[5B] RIG forming evaluation failed: {exc}", exc_info=True)
-            return {
-                "status": "ERROR",
-                "Gate": "RIG",
-                "reason": str(exc),
-                "confidence": 0.0,
-                "displacement": None,
-                "evaluated": False,
-                "htf_bias": htf_bias,
-                "session_bias": None,
-                "timestamp": None,
-            }
-
-    def _evaluate_rig(self, schematic: Dict, evaluation: Dict,
-                      current_price: float, htf_bias: str) -> Dict:
-        """Evaluate RIG using real schematic range data + current price.
-
-        Returns dict with status, reason, displacement, etc.
-        NOT_EVALUATED when inputs are insufficient.
-        """
-        try:
-            from hpb_rig_validator import range_integrity_validator, compute_displacement
-
-            rng = schematic.get("range") or {}
-            range_high = rng.get("high") or rng.get("range_high")
-            range_low = rng.get("low") or rng.get("range_low")
-
-            displacement = compute_displacement(current_price, range_high, range_low)
-
-            # Derive session bias from evaluation direction
-            direction = evaluation.get("direction")
-            if direction in ("bullish", "long"):
-                session_bias = "bullish"
-            elif direction in ("bearish", "short"):
-                session_bias = "bearish"
-            else:
-                session_bias = None
-
-            # Estimate range duration from schematic candle span
-            range_duration = None
-            high_idx = rng.get("range_high_idx") or rng.get("high_idx")
-            low_idx = rng.get("range_low_idx") or rng.get("low_idx")
-            if high_idx is not None and low_idx is not None:
-                candle_span = abs(high_idx - low_idx)
-                if candle_span > 0:
-                    # Assume 4h candles for MTF range (most common in 5B)
-                    range_duration = candle_span * 4
-                # candle_span == 0 means degenerate range; do NOT fallback
-            elif rng:
-                # Fallback only when indices are missing (not when span is 0)
-                range_duration = 48  # conservative estimate for confirmed range
-
-            # Guard: do not evaluate RIG without complete inputs
-            if displacement is None or range_duration is None or session_bias is None:
-                return {
-                    "status": "NOT_EVALUATED",
-                    "Gate": "RIG",
-                    "reason": f"Missing: disp={displacement is not None} dur={range_duration is not None} bias={session_bias is not None}",
-                    "confidence": 0.0,
-                    "displacement": displacement,
-                    "htf_bias": htf_bias,
-                    "session_bias": session_bias,
-                    "timestamp": None,
-                    "evaluated": False,
-                }
-
-            rig_context = {
-                "gates": {
-                    "1A": {"bias": htf_bias or "neutral"},
-                    "RCM": {
-                        "valid": True,
-                        "range_duration_hours": range_duration,
-                    },
-                    "MSCE": {
-                        "session_bias": session_bias,
-                        "session": "Unknown",
-                    },
-                    "1D": {"score": evaluation.get("score", 0) / 100.0},
-                },
-                "local_range_displacement": displacement,
-            }
-
-            rig_result = range_integrity_validator(rig_context)
-            rig_result["displacement"] = displacement
-            return rig_result
-
-        except Exception as exc:
-            logger.error(f"[5B] RIG evaluation failed: {exc}", exc_info=True)
-            return {
-                "status": "ERROR",
-                "Gate": "RIG",
-                "reason": str(exc),
-                "confidence": 0.0,
-                "displacement": None,
-                "htf_bias": htf_bias,
-                "session_bias": None,
-                "timestamp": None,
-                "evaluated": False,
-            }
+    # Canonical RIG evaluation is now in rig_engine.py (evaluate_rig_global).
+    # Called directly from _scan_and_trade_locked() with real MSCE context.
+    # No per-class RIG methods needed.
 
     # ----------------------------------------------------------------
     # TRADE ENTRY

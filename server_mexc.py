@@ -198,72 +198,8 @@ def _normalize_tct_signal(value):
 # RIG — Shared helpers for 5A / 5B pipelines
 # ---------------------------------------------------------------------------
 
-_RIG_NOT_EVALUATED = {
-    "status": "NOT_EVALUATED",
-    "Gate": "RIG",
-    "reason": "Missing required inputs (RCM/MSCE/displacement)",
-    "confidence": 0.0,
-    "htf_bias": None,
-    "session_bias": None,
-    "timestamp": None,
-    "evaluated": False,
-}
-
-
-from hpb_rig_validator import compute_displacement
-
-
-def _evaluate_rig_safe(htf_bias, rcm_valid, range_duration_hours,
-                       session_bias, session_name, exec_score,
-                       local_displacement=None,
-                       range_high=None, range_low=None,
-                       current_price=None):
-    """
-    Evaluate RIG with input validation.  Returns NOT_EVALUATED when
-    required inputs are missing, preventing fake passes from placeholder data.
-
-    If local_displacement is None but range_high/range_low/current_price are
-    provided, displacement is computed automatically.
-
-    Fail-closed: errors and missing inputs do NOT produce VALID.
-    """
-    from hpb_rig_validator import range_integrity_validator
-
-    # Compute displacement from range data if not provided directly
-    if local_displacement is None and current_price is not None:
-        local_displacement = compute_displacement(current_price, range_high, range_low)
-
-    # Guard: do not call the validator with placeholder / missing data
-    has_rcm = rcm_valid is not None and rcm_valid is not False
-    has_session = session_name is not None and session_name != "Unknown"
-    has_displacement = local_displacement is not None
-    has_range_duration = range_duration_hours is not None and range_duration_hours > 0
-
-    if not (has_rcm and has_session and has_displacement and has_range_duration):
-        result = dict(_RIG_NOT_EVALUATED,
-                      reason=f"Missing: rcm={has_rcm} session={has_session} disp={has_displacement} dur={has_range_duration}")
-        result["displacement"] = local_displacement
-        return result
-
-    rig_context = {
-        "gates": {
-            "1A": {"bias": htf_bias or "neutral"},
-            "RCM": {
-                "valid": True,
-                "range_duration_hours": range_duration_hours,
-            },
-            "MSCE": {
-                "session_bias": session_bias,
-                "session": session_name,
-            },
-            "1D": {"score": exec_score or 0.0},
-        },
-        "local_range_displacement": local_displacement,
-    }
-
-    result = range_integrity_validator(rig_context)
-    result["displacement"] = local_displacement
-    return result
+# RIG evaluation now uses rig_engine.evaluate_rig_global() — canonical single path.
+# _evaluate_rig_safe() and _RIG_NOT_EVALUATED removed.
 
 
 # ================================================================
@@ -15165,21 +15101,17 @@ async def tensor_trade_scan():
         _5a_signal = _normalize_tct_signal(_5a_htf_bias) if _5a_action == "trade_entered" else "NO_TRADE"
 
         # ── RIG: Range Integrity Gate ──
-        # 5A lacks RCM, MSCE, and displacement data → NOT_EVALUATED (no fake inputs)
-        try:
-            _5a_rig = _evaluate_rig_safe(
-                htf_bias=_5a_htf_bias,
-                rcm_valid=None,            # 5A has no range context
-                range_duration_hours=None,
-                session_bias=None,          # 5A has no MSCE
-                session_name=None,
-                exec_score=_5a_details.get("best_score", 0.0) or 0.0,
-                local_displacement=None,    # 5A has no displacement
-            )
-        except Exception:
-            _5a_rig = {"status": "ERROR", "Gate": "RIG",
-                       "reason": "validator_failed", "confidence": 0.0,
-                       "htf_bias": None, "session_bias": None, "timestamp": None}
+        # 5A lacks RCM, MSCE, and displacement data → NOT_EVALUATED
+        _5a_rig = {
+            "status": "NOT_EVALUATED",
+            "Gate": "RIG",
+            "reason": "5A pipeline lacks range context (no RCM/MSCE)",
+            "confidence": 0.0,
+            "evaluated": True,
+            "displacement": None,
+            "htf_bias": _5a_htf_bias,
+            "session_bias": None,
+        }
 
         _5a_rig_status = _5a_rig.get("status")
         _5a_rig_passed = _5a_rig_status == "VALID"
@@ -18496,48 +18428,25 @@ async def schematics_5b_auto_scan_loop():
                 _5b_htf_bias = _5b_debug.get("per_symbol", {}).get("BTCUSDT", {}).get("htf_bias")
                 _5b_signal = _normalize_tct_signal(_5b_htf_bias) if action == "trade_entered" else "NO_TRADE"
 
+                # ── MSCE: Multi-Session Context Engine ──
+                # Now evaluated inside scan_and_trade via msce_engine.
+                _5b_msce = _5b_debug.get("msce") or {}
+
                 # ── RIG: Range Integrity Gate ──
-                # Prefer the trader's own RIG result (evaluated inside scan_and_trade)
+                # RIG is now always evaluated inside scan_and_trade via rig_engine.
+                # No fallback needed — just read the result.
                 _5b_rig = _5b_debug.get("rig")
                 if not _5b_rig or not isinstance(_5b_rig, dict):
-                    # Fallback: compute from forming schematics if trader didn't provide
-                    _5b_sym_data = _5b_debug.get("per_symbol", {}).get("BTCUSDT", {})
-                    _5b_current_price = _5b_sym_data.get("current_price") or _5b_debug.get("current_price")
-                    _5b_range_high = None
-                    _5b_range_low = None
-                    _5b_forming_dir = None
-                    for _fs in (_5b_sym_data.get("forming") or []):
-                        _rh = _fs.get("range_high")
-                        _rl = _fs.get("range_low")
-                        if _rh is not None and _rl is not None:
-                            _5b_range_high = _rh
-                            _5b_range_low = _rl
-                            _5b_forming_dir = _fs.get("direction")
-                            break
-                    # Derive session bias from forming direction (not MSCE "neutral")
-                    _5b_session_bias = None
-                    if _5b_forming_dir in ("bullish", "long"):
-                        _5b_session_bias = "bullish"
-                    elif _5b_forming_dir in ("bearish", "short"):
-                        _5b_session_bias = "bearish"
-                    try:
-                        _5b_rig = _evaluate_rig_safe(
-                            htf_bias=_5b_htf_bias,
-                            rcm_valid=(_5b_range_high is not None and _5b_range_low is not None),
-                            range_duration_hours=48,  # conservative estimate for forming range
-                            session_bias=_5b_session_bias,
-                            session_name=msce.get("session"),
-                            exec_score=(_5b_debug.get("best_score", 0) or 0) / 100.0,
-                            range_high=_5b_range_high,
-                            range_low=_5b_range_low,
-                            current_price=_5b_current_price,
-                        )
-                    except Exception:
-                        _5b_rig = {"status": "ERROR", "Gate": "RIG",
-                                   "reason": "validator_failed", "confidence": 0.0,
-                                   "displacement": None,
-                                   "htf_bias": None, "session_bias": None, "timestamp": None,
-                                   "evaluated": False}
+                    _5b_rig = {
+                        "status": "NOT_EVALUATED",
+                        "Gate": "RIG",
+                        "reason": "RIG missing from pipeline",
+                        "confidence": 0.0,
+                        "evaluated": False,
+                        "displacement": None,
+                        "htf_bias": _5b_htf_bias,
+                        "session_bias": None,
+                    }
 
                 _5b_rig_status = _5b_rig.get("status")
                 _5b_rig_passed = _5b_rig_status == "VALID"
@@ -18562,7 +18471,7 @@ async def schematics_5b_auto_scan_loop():
                     "gate_1C_alt_alignment": {"status": "NOT_IMPLEMENTED", "aligned": None, "passed": None},
 
                     "gate_RCM_range": {
-                        "status": "ACTIVE" if (_5b_range_high is not None and _5b_range_low is not None) else "NOT_EVALUATED",
+                        "status": "ACTIVE" if _5b_rig.get("displacement") is not None else "NOT_EVALUATED",
                         "note": "Range detection via tct_schematics → range_engine_controller (L1/L2)",
                     },
 
@@ -18573,15 +18482,17 @@ async def schematics_5b_auto_scan_loop():
                         "htf_bias": _5b_rig.get("htf_bias"),
                         "session_bias": _5b_rig.get("session_bias"),
                         "confidence": _5b_rig.get("confidence"),
+                        "evaluated": _5b_rig.get("evaluated"),
                         "passed": _5b_rig_passed,
                     },
 
                     "gate_MSCE": {
-                        "status": "ACTIVE",
-                        "session": msce.get("session"),
-                        "weight": msce.get("weight"),
-                        "valid": msce.get("valid"),
-                        "passed": bool(msce.get("valid")),
+                        "status": "ACTIVE" if _5b_msce.get("session") else "NOT_EVALUATED",
+                        "session": _5b_msce.get("session"),
+                        "session_bias": _5b_msce.get("session_bias"),
+                        "session_type": _5b_msce.get("session_type"),
+                        "is_manipulation_window": _5b_msce.get("is_manipulation_window"),
+                        "passed": _5b_msce.get("session_bias") is not None,
                     },
 
                     "gate_1D_execution": {
