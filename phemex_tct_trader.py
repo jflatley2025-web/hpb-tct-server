@@ -440,6 +440,7 @@ class PhemexTCTTrader:
                     "htf_bias": htf_bias,
                     "session_bias": None,
                     "timestamp": None,
+                    "evaluated": False,
                 }
 
             # Derive session bias from pipeline signal direction
@@ -476,6 +477,7 @@ class PhemexTCTTrader:
                 "htf_bias": None,
                 "session_bias": None,
                 "timestamp": None,
+                "evaluated": False,
             }
 
     # ------------------------------------------------------------------

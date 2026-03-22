@@ -21,6 +21,7 @@ class TestRangeIntegrityValidator:
         assert result["confidence"] > 0.0
         assert result["htf_bias"] == "bullish"
         assert result["session_bias"] == "bullish"
+        assert result["evaluated"] is True
 
     def test_rig_blocks_counter_bias(self, mock_context_counter_bias):
         """Test RIG blocks trade when session bias counters HTF bias"""
@@ -33,6 +34,7 @@ class TestRangeIntegrityValidator:
         assert result["confidence"] == 0.0
         assert result["htf_bias"] == "bullish"
         assert result["session_bias"] == "bearish"
+        assert result["evaluated"] is True
 
     def test_rig_allows_invalid_range(self, mock_context_invalid_range):
         """Test RIG allows trade when range is already broken"""
@@ -114,6 +116,8 @@ class TestRangeIntegrityValidator:
         assert "confidence" in result
         assert "htf_bias" in result
         assert "session_bias" in result
+        assert "evaluated" in result
+        assert result["evaluated"] is True
 
         # Validate timestamp format
         try:

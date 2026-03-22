@@ -52,7 +52,8 @@ def range_integrity_validator(context):
                 "reason": f"Counter-bias {session_name} session during intact HTF range.",
                 "confidence": 0.0,
                 "htf_bias": htf_bias,
-                "session_bias": session_bias
+                "session_bias": session_bias,
+                "evaluated": True,
             }
 
     # Otherwise, range structure is safe to continue
@@ -63,5 +64,6 @@ def range_integrity_validator(context):
         "reason": None,
         "confidence": exec_conf,
         "htf_bias": htf_bias,
-        "session_bias": session_bias
+        "session_bias": session_bias,
+        "evaluated": True,
     }
