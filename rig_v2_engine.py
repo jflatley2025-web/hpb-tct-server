@@ -78,8 +78,8 @@ def evaluate_rig_v2(context: dict, ranges: list, current_price: float) -> dict:
         "mtf_conflict": False,
     }
 
-    # --- Guard: no ranges at all ---
-    if not ranges:
+    # --- Guard: no ranges at all or wrong type ---
+    if not isinstance(ranges, list) or not ranges:
         return _not_evaluated_v2(base, "No ranges provided")
 
     # --- Partition into HTF and MTF ---
