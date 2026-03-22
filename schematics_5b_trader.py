@@ -1143,6 +1143,7 @@ class Schematics5BTrader:
             best_current_price = sym_result.get("current_price", 0.0)
             best_htf_bias = sym_result.get("htf_bias", "neutral")
             all_forming = sym_result.get("forming", [])
+            all_forming_ranges = sym_result.get("forming_all_ranges", [])
 
             with self._lock:
                 self.last_debug = {
@@ -1161,8 +1162,10 @@ class Schematics5BTrader:
                 }
 
             # 3. RIG: Always evaluate range positioning for dashboard visibility
+            #    Uses the FULL unfiltered forming pool (all directions) so
+            #    RIG can detect counter-bias setups regardless of HTF filter.
             rig_result = self._evaluate_rig_from_forming(
-                all_forming, best_current_price, best_htf_bias,
+                all_forming_ranges, best_current_price, best_htf_bias,
             )
             with self._lock:
                 self.last_debug["rig"] = rig_result
@@ -1500,21 +1503,18 @@ class Schematics5BTrader:
 
             # Collect forming (unconfirmed, all 3 taps present) schematics for display
             forming: List[Dict] = []
+            forming_all_ranges: List[Dict] = []
             for _ftf, _fsch_list in all_schematics_by_tf.items():
                 for _fs in _fsch_list:
                     if not isinstance(_fs, dict) or _fs.get("is_confirmed", False):
                         continue
                     _fdir = _fs.get("direction", "unknown")
-                    if htf_bias == "bullish" and _fdir == "bearish":
-                        continue
-                    if htf_bias == "bearish" and _fdir == "bullish":
-                        continue
                     if not (_fs.get("tap1") and _fs.get("tap2") and _fs.get("tap3")):
                         continue
                     _range = _fs.get("range") or {}
                     _sl = _fs.get("stop_loss")
                     _tgt = _fs.get("target")
-                    forming.append({
+                    _forming_entry = {
                         "symbol": symbol,
                         "tf": _ftf,
                         "direction": _fdir,
@@ -1527,7 +1527,15 @@ class Schematics5BTrader:
                         "target": _tgt.get("price") if isinstance(_tgt, dict) else _tgt,
                         "stop_loss": _sl.get("price") if isinstance(_sl, dict) else _sl,
                         "quality_score": _fs.get("quality_score", 0),
-                    })
+                    }
+                    # Unfiltered list for RIG (all directions, all ranges)
+                    forming_all_ranges.append(_forming_entry)
+                    # Display list: filtered by HTF bias alignment
+                    if htf_bias == "bullish" and _fdir == "bearish":
+                        continue
+                    if htf_bias == "bearish" and _fdir == "bullish":
+                        continue
+                    forming.append(_forming_entry)
             forming.sort(key=lambda x: (x.get("tap3") or {}).get("idx", 0), reverse=True)
 
             # Session context (MSCE integration)
@@ -1544,6 +1552,7 @@ class Schematics5BTrader:
                 "best_score": best_score,
                 "best_tf": best_tf_local,
                 "forming": forming[:5],
+                "forming_all_ranges": forming_all_ranges,
                 "timeframes": all_tf_results,
                 "session": session_info,
             })
@@ -1573,53 +1582,58 @@ class Schematics5BTrader:
     def _evaluate_rig_from_forming(self, forming: List[Dict],
                                     current_price: float,
                                     htf_bias: str) -> Dict:
-        """Evaluate RIG from forming schematics — always runs, even without
-        a qualifying best_setup.  Uses the first forming schematic with valid
-        range data to compute displacement for dashboard visibility.
+        """Evaluate RIG from the full unfiltered forming pool — always runs,
+        even without a qualifying best_setup.
 
-        Returns NOT_EVALUATED only when no range data exists at all.
+        Iterates candidates until one yields a valid displacement. Skips
+        entries with missing/inverted ranges. Returns NOT_EVALUATED only
+        when no valid range exists at all.
         """
         try:
             from hpb_rig_validator import range_integrity_validator, compute_displacement
 
-            # Find the first forming schematic with range data
-            range_high = None
-            range_low = None
+            # Iterate forming schematics until a valid candidate is found
+            displacement = None
             direction = None
             for fs in (forming or []):
                 rh = fs.get("range_high")
                 rl = fs.get("range_low")
-                if rh is not None and rl is not None:
-                    range_high = rh
-                    range_low = rl
-                    direction = fs.get("direction")
-                    break
+                if rh is None or rl is None:
+                    continue
+                if rh <= rl:
+                    continue
+                d = compute_displacement(current_price, rh, rl)
+                if d is None:
+                    continue
+                displacement = d
+                direction = fs.get("direction")
+                break
 
-            displacement = compute_displacement(current_price, range_high, range_low)
-
-            # Derive session bias from forming schematic direction
+            # Derive session bias from forming direction; fall back to htf_bias
             session_bias = None
             if direction in ("bullish", "long"):
                 session_bias = "bullish"
             elif direction in ("bearish", "short"):
                 session_bias = "bearish"
+            if session_bias is None:
+                session_bias = htf_bias if htf_bias in ("bullish", "bearish") else None
 
-            # Without range data, we can still report displacement=None
+            # Guard: displacement must be valid before calling the validator
             if displacement is None:
                 return {
                     "status": "NOT_EVALUATED",
                     "Gate": "RIG",
-                    "reason": "No range data in forming schematics",
+                    "reason": "No valid forming range",
                     "confidence": 0.0,
                     "displacement": None,
+                    "evaluated": False,
                     "htf_bias": htf_bias,
                     "session_bias": session_bias,
                     "timestamp": None,
                 }
 
-            # Use a conservative duration estimate based on forming timeframes
-            # (forming schematics don't carry explicit duration)
-            range_duration = 48  # conservative: assume 4h range minimum
+            # Conservative duration estimate (forming schematics lack explicit duration)
+            range_duration = 48
 
             rig_context = {
                 "gates": {
@@ -1629,7 +1643,7 @@ class Schematics5BTrader:
                         "range_duration_hours": range_duration,
                     },
                     "MSCE": {
-                        "session_bias": session_bias or htf_bias,
+                        "session_bias": session_bias,
                         "session": "Unknown",
                     },
                     "1D": {"score": 0.0},
@@ -1639,6 +1653,7 @@ class Schematics5BTrader:
 
             rig_result = range_integrity_validator(rig_context)
             rig_result["displacement"] = displacement
+            rig_result["evaluated"] = True
             return rig_result
 
         except Exception as exc:
@@ -1649,6 +1664,7 @@ class Schematics5BTrader:
                 "reason": str(exc),
                 "confidence": 0.0,
                 "displacement": None,
+                "evaluated": False,
                 "htf_bias": htf_bias,
                 "session_bias": None,
                 "timestamp": None,
@@ -1688,8 +1704,9 @@ class Schematics5BTrader:
                 if candle_span > 0:
                     # Assume 4h candles for MTF range (most common in 5B)
                     range_duration = candle_span * 4
-            # Fallback: valid confirmed schematic implies a mature range
-            if range_duration is None and rng:
+                # candle_span == 0 means degenerate range; do NOT fallback
+            elif rng:
+                # Fallback only when indices are missing (not when span is 0)
                 range_duration = 48  # conservative estimate for confirmed range
 
             # Guard: do not evaluate RIG without complete inputs
@@ -1703,6 +1720,7 @@ class Schematics5BTrader:
                     "htf_bias": htf_bias,
                     "session_bias": session_bias,
                     "timestamp": None,
+                    "evaluated": False,
                 }
 
             rig_context = {
@@ -1736,6 +1754,7 @@ class Schematics5BTrader:
                 "htf_bias": htf_bias,
                 "session_bias": None,
                 "timestamp": None,
+                "evaluated": False,
             }
 
     # ----------------------------------------------------------------
