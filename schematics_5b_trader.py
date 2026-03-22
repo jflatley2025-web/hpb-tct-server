@@ -1168,16 +1168,34 @@ class Schematics5BTrader:
 
             msce = get_msce_context(best_htf_bias)
 
-            # Select dominant range from unfiltered forming pool
-            _rig_range_high = None
-            _rig_range_low = None
+            # Select dominant range from unfiltered forming pool.
+            # Rank by range span (widest = most significant structural range),
+            # then use conservative (min) displacement across all valid ranges.
+            from hpb_rig_validator import compute_displacement as _cd
+
+            _valid_ranges = []
             for _fs in (all_forming_ranges or []):
                 _rh = _fs.get("range_high")
                 _rl = _fs.get("range_low")
                 if _rh is not None and _rl is not None and _rh > _rl:
-                    _rig_range_high = _rh
-                    _rig_range_low = _rl
-                    break
+                    _valid_ranges.append((_rh, _rl, _rh - _rl))
+
+            # Primary range: widest span (most significant structural range)
+            _rig_range_high = None
+            _rig_range_low = None
+            if _valid_ranges:
+                _valid_ranges.sort(key=lambda x: x[2], reverse=True)
+                _rig_range_high = _valid_ranges[0][0]
+                _rig_range_low = _valid_ranges[0][1]
+
+            # Conservative displacement: minimum across ALL valid ranges.
+            # If price is trapped in ANY range, RIG should know.
+            _all_displacements = [
+                _cd(best_current_price, rh, rl)
+                for rh, rl, _ in _valid_ranges
+            ]
+            _all_displacements = [d for d in _all_displacements if d is not None]
+            _conservative_disp = min(_all_displacements) if _all_displacements else None
 
             rig_result = evaluate_rig_global(
                 htf_bias=best_htf_bias,
@@ -1186,6 +1204,7 @@ class Schematics5BTrader:
                 range_high=_rig_range_high,
                 range_low=_rig_range_low,
                 current_price=best_current_price,
+                displacement_override=_conservative_disp,
             )
             with self._lock:
                 self.last_debug["rig"] = rig_result

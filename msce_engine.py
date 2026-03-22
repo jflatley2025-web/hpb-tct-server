@@ -101,14 +101,20 @@ def _derive_session_bias(session_type: str, htf_bias: str) -> Optional[str]:
       - distribution (New York): opposes HTF → reversal/counter
       - unknown:                 aligns with HTF (conservative default)
 
-    Returns "bullish", "bearish", or None (when HTF is neutral/unknown).
+    Returns "bullish", "bearish", or None (when HTF is neutral/unknown
+    or session conviction is too low).
     """
     if htf_bias not in ("bullish", "bearish"):
+        return None
+
+    if session_type == "accumulation":
+        # Asia accumulation = low conviction, range-building
+        # No directional bias → increases NOT_EVALUATED frequency (correct)
         return None
 
     if session_type == "distribution":
         # NY distribution opposes HTF structure
         return "bearish" if htf_bias == "bullish" else "bullish"
 
-    # accumulation + expansion align with HTF
+    # expansion aligns with HTF
     return htf_bias

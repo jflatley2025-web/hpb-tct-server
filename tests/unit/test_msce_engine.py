@@ -12,12 +12,12 @@ class TestDeriveSessionBias:
     """Test time-based session bias derivation."""
 
     def test_accumulation_bullish(self):
-        """Asia accumulation aligns with bullish HTF."""
-        assert _derive_session_bias("accumulation", "bullish") == "bullish"
+        """Asia accumulation → None (low conviction, no directional bias)."""
+        assert _derive_session_bias("accumulation", "bullish") is None
 
     def test_accumulation_bearish(self):
-        """Asia accumulation aligns with bearish HTF."""
-        assert _derive_session_bias("accumulation", "bearish") == "bearish"
+        """Asia accumulation → None (low conviction, no directional bias)."""
+        assert _derive_session_bias("accumulation", "bearish") is None
 
     def test_expansion_bullish(self):
         """London expansion aligns with bullish HTF."""
@@ -111,9 +111,17 @@ class TestGetMSCEContext:
     @patch("msce_engine._detect_session")
     def test_context_structure(self, mock_detect):
         """All required fields present."""
-        mock_detect.return_value = ("Asia", "accumulation", False)
+        mock_detect.return_value = ("London", "expansion", False)
         ctx = get_msce_context("bearish")
         assert "session" in ctx
         assert "session_bias" in ctx
         assert "session_type" in ctx
         assert "is_manipulation_window" in ctx
+
+    @patch("msce_engine._detect_session")
+    def test_asia_bullish_returns_none(self, mock_detect):
+        """Asia accumulation + bullish HTF → None (low conviction)."""
+        mock_detect.return_value = ("Asia", "accumulation", False)
+        ctx = get_msce_context("bullish")
+        assert ctx["session"] == "Asia"
+        assert ctx["session_bias"] is None

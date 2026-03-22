@@ -139,19 +139,33 @@ class TestEvaluateRigGlobal:
         assert "confidence" in result
         assert "timestamp" in result
 
-    def test_custom_range_duration(self):
-        """range_duration_hours parameter is respected."""
-        # Short duration (< 24h) → should allow even counter-bias
+    def test_short_range_duration_not_evaluated(self):
+        """Duration below MIN_RANGE_DURATION (24h) → NOT_EVALUATED."""
         result = evaluate_rig_global(
             htf_bias="bullish",
             session_name="New York",
             session_bias="bearish",
             range_high=110.0,
             range_low=100.0,
-            current_price=101.0,  # low displacement
-            range_duration_hours=12,  # below MIN_DURATION=24
+            current_price=101.0,
+            range_duration_hours=12,  # below 24h minimum
         )
-        assert result["status"] == "VALID"  # short range → no block
+        assert result["status"] == "NOT_EVALUATED"
+        assert result["evaluated"] is True
+        assert "duration" in result["reason"].lower()
+
+    def test_sufficient_range_duration_allows_block(self):
+        """Duration >= 24h allows normal RIG evaluation (BLOCK possible)."""
+        result = evaluate_rig_global(
+            htf_bias="bullish",
+            session_name="New York",
+            session_bias="bearish",
+            range_high=110.0,
+            range_low=100.0,
+            current_price=101.0,
+            range_duration_hours=24,
+        )
+        assert result["status"] == "BLOCK"
 
     def test_exec_score_passthrough(self):
         """exec_score is passed to validator and reflected in confidence on VALID."""
@@ -166,3 +180,43 @@ class TestEvaluateRigGlobal:
         )
         assert result["status"] == "VALID"
         assert result["confidence"] == pytest.approx(0.85)
+
+    def test_displacement_override(self):
+        """displacement_override takes precedence over computed displacement."""
+        # Without override: displacement = 0.8 (high) → VALID
+        result_no_override = evaluate_rig_global(
+            htf_bias="bullish",
+            session_name="New York",
+            session_bias="bearish",
+            range_high=110.0,
+            range_low=100.0,
+            current_price=108.0,
+        )
+        assert result_no_override["status"] == "VALID"
+
+        # With override: force low displacement → BLOCK
+        result_override = evaluate_rig_global(
+            htf_bias="bullish",
+            session_name="New York",
+            session_bias="bearish",
+            range_high=110.0,
+            range_low=100.0,
+            current_price=108.0,
+            displacement_override=0.1,  # conservative min from another range
+        )
+        assert result_override["status"] == "BLOCK"
+        assert result_override["displacement"] == pytest.approx(0.1)
+
+    def test_block_always_zero_confidence(self):
+        """BLOCK status always has confidence=0.0 regardless of exec_score."""
+        result = evaluate_rig_global(
+            htf_bias="bullish",
+            session_name="New York",
+            session_bias="bearish",
+            range_high=110.0,
+            range_low=100.0,
+            current_price=101.0,
+            exec_score=0.95,  # high score should be overridden
+        )
+        assert result["status"] == "BLOCK"
+        assert result["confidence"] == 0.0
