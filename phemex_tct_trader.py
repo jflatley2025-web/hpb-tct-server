@@ -446,7 +446,7 @@ class PhemexTCTTrader:
                 "htf_bias": None,
                 "session_bias": None,
                 "timestamp": None,
-                "evaluated": False,
+                "evaluated": True,  # RIG ran but errored — still "evaluated"
             }
 
     # ------------------------------------------------------------------

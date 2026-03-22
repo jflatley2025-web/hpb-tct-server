@@ -1221,14 +1221,19 @@ class Schematics5BTrader:
                 sch_rh = sch_rng.get("high") or sch_rng.get("range_high")
                 sch_rl = sch_rng.get("low") or sch_rng.get("range_low")
 
-                # Estimate range duration from candle span if available
+                # Estimate range duration from candle span + timeframe
+                _TF_TO_HOURS = {
+                    "1d": 24, "4h": 4, "1h": 1,
+                    "30m": 0.5, "15m": 0.25,
+                }
                 sch_duration = 48  # conservative default for confirmed schematic
                 high_idx = sch_rng.get("range_high_idx") or sch_rng.get("high_idx")
                 low_idx = sch_rng.get("range_low_idx") or sch_rng.get("low_idx")
                 if high_idx is not None and low_idx is not None:
                     candle_span = abs(high_idx - low_idx)
                     if candle_span > 0:
-                        sch_duration = candle_span * 4  # assume 4h candles
+                        hours_per_candle = _TF_TO_HOURS.get(best_tf, 1)
+                        sch_duration = candle_span * hours_per_candle
 
                 rig_result = evaluate_rig_global(
                     htf_bias=best_htf_bias,

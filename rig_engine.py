@@ -64,22 +64,18 @@ def evaluate_rig_global(
         displacement = compute_displacement(current_price, range_high, range_low)
 
     if displacement is None:
-        return {
-            "status": "NOT_EVALUATED",
-            "Gate": "RIG",
-            "reason": _missing_reason(
+        return _not_evaluated_response(
+            reason=_missing_reason(
                 displacement=False,
                 session=session_name is not None,
                 bias=session_bias is not None,
                 duration=range_duration_hours is not None,
             ),
-            "confidence": 0.0,
-            "evaluated": True,
-            "displacement": None,
-            "htf_bias": htf_bias,
-            "session_bias": session_bias,
-            "timestamp": ts,
-        }
+            displacement=None,
+            htf_bias=htf_bias,
+            session_bias=session_bias,
+            timestamp=ts,
+        )
 
     # --- Validate required gate inputs ---
     has_session = session_name is not None
@@ -87,36 +83,28 @@ def evaluate_rig_global(
     has_duration = range_duration_hours is not None and range_duration_hours > 0
 
     if not (has_session and has_bias and has_duration):
-        return {
-            "status": "NOT_EVALUATED",
-            "Gate": "RIG",
-            "reason": _missing_reason(
+        return _not_evaluated_response(
+            reason=_missing_reason(
                 displacement=True,
                 session=has_session,
                 bias=has_bias,
                 duration=has_duration,
             ),
-            "confidence": 0.0,
-            "evaluated": True,
-            "displacement": displacement,
-            "htf_bias": htf_bias,
-            "session_bias": session_bias,
-            "timestamp": ts,
-        }
+            displacement=displacement,
+            htf_bias=htf_bias,
+            session_bias=session_bias,
+            timestamp=ts,
+        )
 
     # --- Guard: range must meet minimum duration ---
     if range_duration_hours < MIN_RANGE_DURATION:
-        return {
-            "status": "NOT_EVALUATED",
-            "Gate": "RIG",
-            "reason": f"Range duration {range_duration_hours}h below minimum {MIN_RANGE_DURATION}h",
-            "confidence": 0.0,
-            "evaluated": True,
-            "displacement": displacement,
-            "htf_bias": htf_bias,
-            "session_bias": session_bias,
-            "timestamp": ts,
-        }
+        return _not_evaluated_response(
+            reason=f"Range duration {range_duration_hours}h below minimum {MIN_RANGE_DURATION}h",
+            displacement=displacement,
+            htf_bias=htf_bias,
+            session_bias=session_bias,
+            timestamp=ts,
+        )
 
     # --- Build validator context (NO FAKE DATA) ---
     rig_context = {
@@ -148,7 +136,30 @@ def evaluate_rig_global(
     return result
 
 
-def _missing_reason(displacement: bool, session: bool,
+def _not_evaluated_response(
+    *,
+    reason: str,
+    displacement=None,
+    confidence: float = 0.0,
+    htf_bias=None,
+    session_bias=None,
+    timestamp=None,
+) -> dict:
+    """Build a canonical NOT_EVALUATED response dict."""
+    return {
+        "status": "NOT_EVALUATED",
+        "Gate": "RIG",
+        "reason": reason,
+        "confidence": confidence,
+        "evaluated": True,
+        "displacement": displacement,
+        "htf_bias": htf_bias,
+        "session_bias": session_bias,
+        "timestamp": timestamp,
+    }
+
+
+def _missing_reason(*, displacement: bool, session: bool,
                     bias: bool, duration: bool) -> str:
     """Build a diagnostic reason string for NOT_EVALUATED."""
     parts = []

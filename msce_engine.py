@@ -7,14 +7,14 @@ Uses session_manipulation.py for session detection, then derives
 directional session_bias from session timing + HTF structure.
 
 Session model (TCT spec):
-  - Asia (accumulation):    bias aligns with HTF (range-building)
-  - London (expansion):     bias aligns with HTF (breakout phase)
+  - Asia (accumulation):     low conviction / range-building → neutral (None)
+  - London (expansion):      bias aligns with HTF (breakout phase)
   - New York (distribution): bias opposes HTF (reversal/distribution)
-  - Off-session:            bias aligns with HTF (default)
+  - Off-session:             bias aligns with HTF (default)
 """
 
 import logging
-from typing import Optional, Tuple
+from typing import Optional
 
 logger = logging.getLogger("MSCEEngine")
 
@@ -55,7 +55,7 @@ def get_msce_context(htf_bias: str) -> dict:
     }
 
 
-def _detect_session() -> Tuple[str, str, bool]:
+def _detect_session() -> tuple[str, str, bool]:
     """
     Detect current session name, type, and whether we're in a
     manipulation window.
@@ -96,7 +96,7 @@ def _derive_session_bias(session_type: str, htf_bias: str) -> Optional[str]:
     Derive directional session bias from session type + HTF structure.
 
     TCT model:
-      - accumulation (Asia):     aligns with HTF → same direction
+      - accumulation (Asia):     low conviction / range-building → None
       - expansion (London):      aligns with HTF → same direction
       - distribution (New York): opposes HTF → reversal/counter
       - unknown:                 aligns with HTF (conservative default)

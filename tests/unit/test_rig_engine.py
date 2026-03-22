@@ -220,3 +220,31 @@ class TestEvaluateRigGlobal:
         )
         assert result["status"] == "BLOCK"
         assert result["confidence"] == 0.0
+
+    def test_zero_duration_not_evaluated(self):
+        """range_duration_hours=0 → NOT_EVALUATED (not a valid range)."""
+        result = evaluate_rig_global(
+            htf_bias="bullish",
+            session_name="London",
+            session_bias="bullish",
+            range_high=110.0,
+            range_low=100.0,
+            current_price=105.0,
+            range_duration_hours=0,
+        )
+        assert result["status"] == "NOT_EVALUATED"
+        assert result["evaluated"] is True
+
+    def test_negative_duration_not_evaluated(self):
+        """Negative duration → NOT_EVALUATED."""
+        result = evaluate_rig_global(
+            htf_bias="bullish",
+            session_name="London",
+            session_bias="bullish",
+            range_high=110.0,
+            range_low=100.0,
+            current_price=105.0,
+            range_duration_hours=-5,
+        )
+        assert result["status"] == "NOT_EVALUATED"
+        assert result["evaluated"] is True

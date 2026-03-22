@@ -289,3 +289,90 @@ class TestOutputStructure:
         """Evaluated is True even on NOT_EVALUATED status."""
         result = evaluate_rig_v2(_ctx(), [], 100.0)
         assert result["evaluated"] is True
+
+
+# --- Malformed input robustness ---
+
+class TestMalformedInputs:
+
+    def test_non_dict_ranges_skipped(self):
+        """Non-dict items in ranges list are silently skipped."""
+        ranges = [None, 123, "bad", _range(110, 100, duration=48)]
+        result = evaluate_rig_v2(
+            _ctx(session_bias="bullish"), ranges, 105.0
+        )
+        # The one valid range should be found
+        assert result["htf_range"] is not None
+        assert result["status"] != "NOT_EVALUATED"
+
+    def test_all_non_dict_ranges_not_evaluated(self):
+        """All non-dict items → no valid ranges → NOT_EVALUATED."""
+        ranges = [None, 123, "bad", True]
+        result = evaluate_rig_v2(_ctx(), ranges, 105.0)
+        assert result["status"] == "NOT_EVALUATED"
+        assert result["evaluated"] is True
+
+    def test_bad_numeric_duration(self):
+        """Non-numeric range_duration_hours treated as 0 (MTF)."""
+        ranges = [
+            {"range_high": 110, "range_low": 100, "range_duration_hours": "abc"},
+        ]
+        result = evaluate_rig_v2(_ctx(), ranges, 105.0)
+        # "abc" → 0.0 → MTF, no HTF → NOT_EVALUATED
+        assert result["status"] == "NOT_EVALUATED"
+
+    def test_bad_numeric_range_high(self):
+        """Non-numeric range_high → range skipped."""
+        ranges = [
+            {"range_high": "bad", "range_low": 100, "range_duration_hours": 48},
+        ]
+        result = evaluate_rig_v2(_ctx(), ranges, 105.0)
+        assert result["status"] == "NOT_EVALUATED"
+
+    def test_bad_numeric_range_low(self):
+        """Non-numeric range_low → range skipped."""
+        ranges = [
+            {"range_high": 110, "range_low": None, "range_duration_hours": 48},
+        ]
+        result = evaluate_rig_v2(_ctx(), ranges, 105.0)
+        assert result["status"] == "NOT_EVALUATED"
+
+    def test_mixed_valid_and_invalid(self):
+        """Mix of valid and invalid ranges — valid ones used, invalid skipped."""
+        ranges = [
+            None,                                    # non-dict
+            {"range_high": "x", "range_low": 100},   # bad high
+            _range(100, 110, duration=48),            # inverted
+            _range(110, 100, duration=48),            # valid HTF
+            {"range_duration_hours": 48},             # missing high/low
+        ]
+        result = evaluate_rig_v2(
+            _ctx(session_bias="bullish"), ranges, 105.0
+        )
+        assert result["htf_range"]["range_high"] == 110
+        assert result["status"] != "NOT_EVALUATED"
+
+    def test_bad_liquidity_score_does_not_crash(self):
+        """Non-numeric liquidity_score → safe fallback in ranking."""
+        ranges = [
+            {"range_high": 110, "range_low": 100, "range_duration_hours": 48,
+             "liquidity_score": "bad"},
+            _range(115, 105, duration=48, liquidity=0.5),
+        ]
+        result = evaluate_rig_v2(
+            _ctx(session_bias="bullish"), ranges, 110.0
+        )
+        # "bad" → 0.0, so the 0.5 range wins the tiebreak
+        assert result["htf_range"]["liquidity_score"] == 0.5
+
+    def test_non_dict_context_safe(self):
+        """Non-dict context doesn't crash."""
+        ranges = [_range(110, 100, duration=48)]
+        result = evaluate_rig_v2("not_a_dict", ranges, 105.0)
+        assert result["evaluated"] is True
+
+    def test_none_context_safe(self):
+        """None context doesn't crash."""
+        ranges = [_range(110, 100, duration=48)]
+        result = evaluate_rig_v2(None, ranges, 105.0)
+        assert result["evaluated"] is True

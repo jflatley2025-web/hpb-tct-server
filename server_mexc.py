@@ -330,6 +330,11 @@ def validate_MSCE(context):
     else:
         session = "NY"
         weight = 1.15
+    # MSCE gate fields:
+    #   valid = session was detected (always True here; structural, not directional)
+    #   session_bias = directional bias derived from session type
+    # These can diverge: valid=True but session_bias="neutral" means
+    # we know the session but have no directional conviction.
     context["MSCE"] = {
         "session": session,
         "session_bias": bias,
@@ -15101,7 +15106,9 @@ async def tensor_trade_scan():
         _5a_signal = _normalize_tct_signal(_5a_htf_bias) if _5a_action == "trade_entered" else "NO_TRADE"
 
         # ── RIG: Range Integrity Gate ──
-        # 5A lacks RCM, MSCE, and displacement data → NOT_EVALUATED
+        # 5A lacks RCM, MSCE, and displacement data → NOT_EVALUATED.
+        # evaluated=True means "RIG ran and determined it cannot evaluate"
+        # (intentionally not applicable), NOT "RIG was actually executed."
         _5a_rig = {
             "status": "NOT_EVALUATED",
             "Gate": "RIG",
