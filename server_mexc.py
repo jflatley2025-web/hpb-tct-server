@@ -2650,6 +2650,19 @@ class LiquidityVoidDetector:
 # GATES
 # ================================================================
 
+def placeholder_gate_payload():
+    """Canonical NOT_EVALUATED gate payload for placeholder gates.
+    Single source of truth — prevents schema drift across snapshot locations.
+    """
+    return {
+        "status": "NOT_EVALUATED",
+        "passed": False,
+        "confidence": 0.0,
+        "reason": "Not yet implemented",
+        "evaluated": False,
+    }
+
+
 def validate_1A(context: Dict) -> Dict:
     try:
         htf = context.get("htf_candles")
@@ -15194,6 +15207,13 @@ async def tensor_trade_scan():
                 "best_score": _5a_details.get("best_score"),
                 "best_tf": _5a_details.get("best_tf"),
             },
+            # ── Placeholder gates — 5A pipeline lacks bridge evaluation ──
+            "gate_LIQUIDITY": {**placeholder_gate_payload(),
+                               "reason": "5A pipeline does not run decision tree bridge"},
+            "gate_MARKET_STRUCTURE": placeholder_gate_payload(),
+            "gate_RANGE": placeholder_gate_payload(),
+            "gate_SUPPLY_DEMAND": placeholder_gate_payload(),
+
             "signal": _5a_signal,
             "confidence": None,
             "blocking_gate": "RIG" if _5a_rig_blocked else None,
@@ -18472,6 +18492,17 @@ async def schematics_5b_auto_scan_loop():
                 _5b_htf_bias = _5b_debug.get("per_symbol", {}).get("BTCUSDT", {}).get("htf_bias")
                 _5b_signal = _normalize_tct_signal(_5b_htf_bias) if action == "trade_entered" else "NO_TRADE"
 
+                # ── Liquidity: extract from best_setup evaluation ──
+                _5b_sym = _5b_debug.get("per_symbol", {}).get("BTCUSDT", {})
+                _5b_best_setup = _5b_sym.get("best_setup")
+                _5b_liq = None
+                if _5b_best_setup and isinstance(_5b_best_setup, (list, tuple)) and len(_5b_best_setup) >= 2:
+                    _5b_eval = _5b_best_setup[1] if isinstance(_5b_best_setup[1], dict) else {}
+                    # v2 pipeline stores in phase_results, v1 in tree_results
+                    _5b_liq = (_5b_eval.get("phase_results") or {}).get("liquidity")
+                    if not _5b_liq:
+                        _5b_liq = (_5b_eval.get("tree_results") or {}).get("liquidity")
+
                 # ── MSCE: Multi-Session Context Engine ──
                 # Now evaluated inside scan_and_trade via msce_engine.
                 _5b_msce = _5b_debug.get("msce") or {}
@@ -18547,6 +18578,24 @@ async def schematics_5b_auto_scan_loop():
                         "best_tf": _5b_debug.get("best_tf"),
                         "trading_mode": _5b_debug.get("trading_mode"),
                     },
+
+                    # ── Liquidity gate — wired from decision tree bridge ──
+                    "gate_LIQUIDITY": (lambda lq: {
+                        "status": "ACTIVE",
+                        "passed": bool(lq.get("liquidity_valid", False)),
+                        # Confidence only meaningful when gate passed — prevent leakage
+                        "confidence": float(lq.get("path_score", 0.0)) if lq.get("liquidity_valid") else 0.0,
+                        "reason": lq.get("failed_at") or lq.get("conviction") or "No evaluation data",
+                        "evaluated": True,
+                        "failed_at": lq.get("failed_at"),
+                        "sweep_class": lq.get("sweep_class"),
+                        "entry_ready": bool(lq.get("entry_ready", False)),
+                        "trade_bias": lq.get("trade_bias"),
+                    })(_5b_liq) if _5b_liq else placeholder_gate_payload(),
+                    # ── Remaining placeholder gates ──
+                    "gate_MARKET_STRUCTURE": placeholder_gate_payload(),
+                    "gate_RANGE": placeholder_gate_payload(),
+                    "gate_SUPPLY_DEMAND": placeholder_gate_payload(),
 
                     "signal": _5b_signal,
                     "confidence": None,
@@ -18734,6 +18783,10 @@ function render(data) {
   html += renderGate('RIG — Counter-Bias Filter', data.gate_RIG);
   html += renderGate('MSCE — Session Logic', data.gate_MSCE);
   html += renderGate('1D — Execution', data.gate_1D_execution);
+  html += renderGate('LIQUIDITY — Sweep Validation', data.gate_LIQUIDITY);
+  html += renderGate('MARKET STRUCTURE — Structure Engine', data.gate_MARKET_STRUCTURE);
+  html += renderGate('RANGE — Range Validation', data.gate_RANGE);
+  html += renderGate('SUPPLY/DEMAND — Zone Validation', data.gate_SUPPLY_DEMAND);
   html += '</div>';
 
   document.getElementById('content').innerHTML = html;

@@ -907,6 +907,17 @@ def build_liquidity_inputs(df: pd.DataFrame, schematic: Dict,
     target_price = (schematic.get("target") or {}).get("price", 0)
     path_q = _estimate_path_quality(df, direction, entry_price, target_price)
 
+    # Structural confirmation via market_structure_engine L1/L2
+    struct_confirmed = None
+    try:
+        from decision_trees.market_structure_engine import MarketStructureEngine
+        mse = MarketStructureEngine()
+        sweep_side_str = "sell_side" if direction == "bullish" else "buy_side"
+        acceptance = mse.confirm_structure_after_sweep(df, sweep_side_str)
+        struct_confirmed = acceptance.confirmed
+    except Exception:
+        struct_confirmed = None  # Unavailable — Phase 5 will handle gracefully
+
     return LiquidityInputs(
         pool_type=pool_type,
         sweep_side=sweep_side,
@@ -921,6 +932,7 @@ def build_liquidity_inputs(df: pd.DataFrame, schematic: Dict,
         path_quality=path_q,
         retail_trapped_in_wrong_direction=False,  # Conservative default
         tct_schematic_confirmed=schematic.get("is_confirmed", False),
+        structure_confirmed_after_sweep=struct_confirmed,
     )
 
 
@@ -1208,6 +1220,10 @@ def compute_composite_score(
             "sweep_class": liq_eval.sweep_classification.value,
             "path_quality": liq_eval.path_quality.value if liq_eval.path_quality else None,
             "conviction": liq_eval.conviction_level,
+            "liquidity_valid": liq_eval.liquidity_valid,
+            "path_score": liq_eval.path_score,
+            "entry_ready": liq_eval.entry_ready,
+            "trade_bias": liq_eval.trade_bias.value if liq_eval.trade_bias else None,
         }
         if tree_passed:
             score += 15
@@ -1545,7 +1561,11 @@ def compute_composite_score_v2(
     sweep_v2 = _detect_liquidity_sweep_v2(df, range_high, range_low, direction)
 
     if sweep_v2["classification"] == "true_break":
-        phase_results["liquidity"] = {"passed": False}
+        phase_results["liquidity"] = {"passed": False, "liquidity_valid": False,
+                                       "sweep_class": "true_break", "path_score": 0.0,
+                                       "entry_ready": False, "trade_bias": "Wait — conditions not yet met",
+                                       "conviction": "INVALID — TRUE BREAK",
+                                       "failed_at": "Phase 4: TRUE RANGE BREAK — candle closed beyond DL2"}
         fail["failure_context"] = "liquidity"
         return {**fail,
                 "score": score,
@@ -1554,7 +1574,29 @@ def compute_composite_score_v2(
 
     liq_score = 20 if sweep_v2["swept"] else 5
 
-    phase_results["liquidity"] = {**sweep_v2, "passed": True, "score": liq_score}
+    # Run full liquidity decision tree for audit dashboard fields
+    _liq_eval_data = {"liquidity_valid": False, "path_score": 0.0,
+                      "entry_ready": False, "trade_bias": None,
+                      "conviction": "", "sweep_class": sweep_v2["classification"]}
+    try:
+        from decision_trees.ranges_decision_tree import RangeEvaluation as _RE
+        _range_eval = _RE()
+        _liq_inputs = build_liquidity_inputs(df, schematic, _range_eval)
+        _liq_eval = evaluate_liquidity_setup(_liq_inputs)
+        _liq_eval_data = {
+            "liquidity_valid": _liq_eval.liquidity_valid,
+            "path_score": _liq_eval.path_score,
+            "entry_ready": _liq_eval.entry_ready,
+            "trade_bias": _liq_eval.trade_bias.value if _liq_eval.trade_bias else None,
+            "conviction": _liq_eval.conviction_level,
+            "sweep_class": _liq_eval.sweep_classification.value,
+            "failed_at": _liq_eval.failed_at_phase,
+        }
+    except Exception as _e:
+        logger.warning(f"[BRIDGE] v2 liquidity tree evaluation: {_e}")
+
+    phase_results["liquidity"] = {**sweep_v2, "passed": True, "score": liq_score,
+                                   **_liq_eval_data}
     score += liq_score
     reasons.append(f"Liquidity: {liq_score}/20")
 
@@ -1709,7 +1751,9 @@ def compute_composite_score_v2(
             "supply_demand": {"passed": poi_score > 0, "fvg_valid": fvg_found,
                               "ob_found": ob_info.get("found", False)},
             "liquidity": {"passed": sweep_v2["classification"] != "true_break",
-                          "sweep_class": sweep_v2["classification"]},
+                          "sweep_class": sweep_v2["classification"],
+                          **{k: _liq_eval_data.get(k) for k in
+                             ("liquidity_valid", "path_score", "entry_ready", "trade_bias", "conviction")}},
             "schematics_5a": {"passed": tap_valid and is_confirmed,
                               "model_type": model_type, "status": "VALID_ENTRY" if tap_valid else "INVALID"},
             "schematics_5b": {"passed": bos_score > 0,

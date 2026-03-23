@@ -18,7 +18,7 @@ columns required: open, high, low, close
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Optional
 import numpy as np
 import pandas as pd
 
@@ -44,6 +44,14 @@ class SweepResult:
     sweep_count: int
 
 
+@dataclass
+class StructuralAcceptance:
+    """Result of post-sweep structural confirmation via L1/L2."""
+    confirmed: Optional[bool]   # True=confirmed, False=rejected, None=unavailable
+    reason: str
+    l1_trend: Optional[str] = None
+
+
 # ============================================================
 # Main Engine
 # ============================================================
@@ -59,13 +67,13 @@ class MarketStructureEngine:
 
     def detect_pivots(
         self, df: pd.DataFrame, window: int = 3
-    ) -> Tuple[List[Tuple[int, float]], List[Tuple[int, float]]]:
+    ) -> tuple[list[tuple[int, float]], list[tuple[int, float]]]:
 
         highs = df["high"].values
         lows = df["low"].values
 
-        pivot_highs: List[Tuple[int, float]] = []
-        pivot_lows: List[Tuple[int, float]] = []
+        pivot_highs: list[tuple[int, float]] = []
+        pivot_lows: list[tuple[int, float]] = []
 
         for i in range(window, len(df) - window):
 
@@ -216,7 +224,7 @@ class MarketStructureEngine:
     # Liquidity Pool Detection
     # ========================================================
 
-    def detect_liquidity_pools(self, df: pd.DataFrame) -> Dict[str, List[float]]:
+    def detect_liquidity_pools(self, df: pd.DataFrame) -> dict[str, list[float]]:
 
         highs = df["high"].values
         lows = df["low"].values
@@ -323,6 +331,71 @@ class MarketStructureEngine:
             sweep_count=sweep_count
         )
 
+
+    # ========================================================
+    # Post-Sweep Structural Acceptance (L1/L2)
+    # ========================================================
+
+    def confirm_structure_after_sweep(
+        self,
+        df: Optional[pd.DataFrame],
+        sweep_side: str,
+        htf_bias: Optional[str] = None,
+    ) -> StructuralAcceptance:
+        """Validate acceptance back inside range via L1 structure after a sweep.
+
+        Args:
+            df: OHLC DataFrame for structure detection (None → unavailable)
+            sweep_side: "buy_side" or "sell_side" — which side was swept
+            htf_bias: optional HTF bias for L2 counter-structure check
+
+        Returns:
+            StructuralAcceptance with confirmed=True/False/None
+        """
+        # TODO: htf_bias reserved for future L2 counter-structure validation.
+        # Planned use: verify that post-sweep structure aligns or conflicts
+        # with HTF directional bias (e.g., confirming reversal vs continuation).
+
+        if df is None or len(df) < 10:
+            return StructuralAcceptance(
+                confirmed=None,
+                reason="Insufficient data for structural confirmation",
+            )
+
+        l1 = self.detect_l1_structure(df)
+
+        # Buy-side swept → expect bearish structure (LH+LL) for short acceptance
+        # Sell-side swept → expect bullish structure (HH+HL) for long acceptance
+        if sweep_side == "buy_side":
+            confirmed = l1.trend == "bearish"
+            expected = "bearish"
+        elif sweep_side == "sell_side":
+            confirmed = l1.trend == "bullish"
+            expected = "bullish"
+        else:
+            return StructuralAcceptance(
+                confirmed=None,
+                reason=f"Unknown sweep_side: {sweep_side}",
+                l1_trend=l1.trend,
+            )
+
+        if confirmed:
+            reason = f"L1 {l1.trend} structure confirms {expected} acceptance"
+        elif l1.trend == "neutral":
+            # Neutral is not confirmation — treat as unavailable (pending)
+            return StructuralAcceptance(
+                confirmed=None,
+                reason=f"L1 neutral — structural confirmation pending (expected {expected})",
+                l1_trend=l1.trend,
+            )
+        else:
+            reason = f"L1 {l1.trend} contradicts expected {expected} acceptance"
+
+        return StructuralAcceptance(
+            confirmed=confirmed,
+            reason=reason,
+            l1_trend=l1.trend,
+        )
 
     # ========================================================
     # Range Integrity Gate
