@@ -18671,7 +18671,8 @@ h1{font-size:1.4rem;color:#58a6ff;margin-bottom:4px}
 .meta .live{color:#3fb950;border-color:#238636}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:12px;margin-bottom:16px}
 .card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px}
-.card h2{font-size:.95rem;color:#58a6ff;margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.card h2{font-size:.95rem;color:#58a6ff;margin-bottom:4px;display:flex;align-items:center;gap:6px}
+.gate-source{font-size:.7rem;color:#6e7681;font-family:monospace;margin-bottom:8px;padding:2px 6px;background:#0d1117;border-radius:4px;border:1px solid #21262d}
 .card h2 .badge{font-size:.7rem;padding:2px 6px;border-radius:4px;font-weight:600}
 .pass{background:#238636;color:#fff}
 .fail{background:#da3633;color:#fff}
@@ -18730,7 +18731,7 @@ function row(label, value, cls) {
   return `<div class="row"><span class="label">${label}</span><span class="${valClass}">${v}</span></div>`;
 }
 
-function renderGate(title, gate) {
+function renderGate(title, gate, sourceFile) {
   if (!gate) return '';
   const st = gate.status || '';
   const p = gate.passed;
@@ -18745,7 +18746,8 @@ function renderGate(title, gate) {
       rows += row(k, v);
     }
   }
-  return `<div class="card"><h2>${title} ${badge(st, p)}</h2>${rows || '<div class="row"><span class="label">No data</span></div>'}</div>`;
+  const srcTag = sourceFile ? `<div class="gate-source">${sourceFile}</div>` : '';
+  return `<div class="card"><h2>${title} ${badge(st, p)}</h2>${srcTag}${rows || '<div class="row"><span class="label">No data</span></div>'}</div>`;
 }
 
 function render(data) {
@@ -18776,17 +18778,17 @@ function render(data) {
   let html = `<div class="signal-box ${sigClass}">${sig === 'NO_TRADE' ? 'NO TRADE' : sig}${data.confidence ? ' (' + (data.confidence * 100).toFixed(0) + '%)' : ''}${data.blocking_gate ? ' — Blocked at Gate ' + data.blocking_gate : ''}</div>`;
 
   html += '<div class="grid">';
-  html += renderGate('1A — BTC Structure / Bias', data.gate_1A_btc_structure);
-  html += renderGate('1B — USDT.D Correlation', data.gate_1B_usdt_d);
-  html += renderGate('1C — Alt Alignment', data.gate_1C_alt_alignment);
-  html += renderGate('RCM — Range Context', data.gate_RCM_range);
-  html += renderGate('RIG — Counter-Bias Filter', data.gate_RIG);
-  html += renderGate('MSCE — Session Logic', data.gate_MSCE);
-  html += renderGate('1D — Execution', data.gate_1D_execution);
-  html += renderGate('LIQUIDITY — Sweep Validation', data.gate_LIQUIDITY);
-  html += renderGate('MARKET STRUCTURE — Structure Engine', data.gate_MARKET_STRUCTURE);
-  html += renderGate('RANGE — Range Validation', data.gate_RANGE);
-  html += renderGate('SUPPLY/DEMAND — Zone Validation', data.gate_SUPPLY_DEMAND);
+  html += renderGate('1A — BTC Structure / Bias', data.gate_1A_btc_structure, 'server_mexc.py → validate_1A()');
+  html += renderGate('1B — USDT.D Correlation', data.gate_1B_usdt_d, 'server_mexc.py → validate_1B()');
+  html += renderGate('1C — Alt Alignment', data.gate_1C_alt_alignment, 'server_mexc.py → validate_1C()');
+  html += renderGate('RCM — Range Context', data.gate_RCM_range, 'server_mexc.py → validate_RCM()');
+  html += renderGate('RIG — Counter-Bias Filter', data.gate_RIG, 'server_mexc.py → validate_RIG() · hpb_rig_validator.py');
+  html += renderGate('MSCE — Session Logic', data.gate_MSCE, 'server_mexc.py → validate_MSCE()');
+  html += renderGate('1D — Execution', data.gate_1D_execution, 'server_mexc.py → validate_1D()');
+  html += renderGate('LIQUIDITY — Sweep Validation', data.gate_LIQUIDITY, 'decision_trees/liquidity_decision_tree.py');
+  html += renderGate('MARKET STRUCTURE — Structure Engine', data.gate_MARKET_STRUCTURE, 'decision_trees/market_structure_engine.py [placeholder]');
+  html += renderGate('RANGE — Range Validation', data.gate_RANGE, 'decision_trees/ranges_decision_tree.py [placeholder]');
+  html += renderGate('SUPPLY/DEMAND — Zone Validation', data.gate_SUPPLY_DEMAND, 'decision_trees/supply_demand_decision_tree.py [placeholder]');
   html += '</div>';
 
   document.getElementById('content').innerHTML = html;
