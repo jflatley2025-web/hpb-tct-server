@@ -3,7 +3,7 @@
   "starting_balance": 5000.0,
   "current_trade": null,
   "trade_history": [],
-  "last_scan_time": 1774283189.909011,
+  "last_scan_time": 1774293747.9520025,
   "last_signal": "NO_TRADE",
   "last_pipeline_result": {
     "signal": "NO_TRADE",
@@ -12,25 +12,30 @@
     "stop": 0.0,
     "target": 0.0,
     "rr": 0.0,
-    "blocking_gate": "RIG",
+    "blocking_gate": 2,
     "gates": [
       {
         "layer": 1,
         "name": "Market Structure",
+        "passed": true
+      },
+      {
+        "layer": 2,
+        "name": "Ranges",
         "passed": false
       }
     ],
     "rig": {
-      "status": "NOT_EVALUATED",
+      "timestamp": "2026-03-23 19:22:28",
+      "status": "VALID",
       "Gate": "RIG",
-      "reason": "Missing: displacement, session_bias",
+      "reason": null,
       "confidence": 0.0,
+      "htf_bias": "bearish",
+      "session_bias": "bullish",
       "evaluated": true,
-      "displacement": null,
-      "htf_bias": "ranging",
-      "session_bias": null,
-      "timestamp": "2026-03-23 16:26:30"
+      "displacement": 0.4190996024149271
     }
   },
-  "last_updated": "2026-03-23T16:26:30.304828+00:00"
+  "last_updated": "2026-03-23T19:22:28.927783+00:00"
 }
