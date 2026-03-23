@@ -91,6 +91,9 @@ class LiquidityInputs:
     # Phase 8 — Entry trigger
     tct_schematic_confirmed: bool           # TCT Model 1 or Model 2 confirmation received
 
+    # Phase 5 — Structural confirmation (optional, from market_structure_engine)
+    structure_confirmed_after_sweep: Optional[bool] = None  # True=confirmed, False=rejected, None=unavailable
+
 
 @dataclass
 class LiquidityEvaluation:
@@ -200,9 +203,8 @@ def phase4_classify_sweep(inputs: LiquidityInputs, result: LiquidityEvaluation) 
 
 
 def phase5_acceptance(inputs: LiquidityInputs, result: LiquidityEvaluation) -> bool:
-    """Phase 5: Confirm price accepted back inside the range."""
-    # TODO: Replace with structural confirmation from market_structure_engine
-    # accepted_back_inside_range is currently binary — needs L1/L2 structure validation
+    """Phase 5: Confirm acceptance via structural validation (L1/L2)."""
+    # Gate 1: Price must have returned inside range first
     if not inputs.accepted_back_inside_range:
         result.failed_at_phase = (
             "Phase 5: No acceptance back inside range yet. "
@@ -210,6 +212,20 @@ def phase5_acceptance(inputs: LiquidityInputs, result: LiquidityEvaluation) -> b
         )
         return False
 
+    # Gate 2: Structural confirmation from market_structure_engine
+    struct = inputs.structure_confirmed_after_sweep
+    if struct is None:
+        # Engine has no data or hasn't run yet — cannot proceed
+        result.failed_at_phase = "Phase 5: Structural validation pending"
+        return False
+    if struct is False:
+        # L1/L2 contradicts the expected post-sweep structure
+        result.failed_at_phase = (
+            "Phase 5: Structural rejection — no valid L1/L2 confirmation"
+        )
+        return False
+
+    # struct is True — L1/L2 confirms acceptance
     result.accepted_back_inside = True
 
     # Assign directional bias based on which side was swept
@@ -217,14 +233,14 @@ def phase5_acceptance(inputs: LiquidityInputs, result: LiquidityEvaluation) -> b
         result.trade_bias = TradeBias.SHORT
         result.primary_target = "Range Low (sell-side liquidity)"
         result.passed_phases.append(
-            "Phase 5: Accepted back inside — BUY-SIDE swept + accepted. "
+            "Phase 5: Structural acceptance confirmed — BUY-SIDE swept + L1/L2 bearish. "
             "Market maker filled SHORT positions. Bias: SHORT. Target: Range Low."
         )
     else:
         result.trade_bias = TradeBias.LONG
         result.primary_target = "Range High (buy-side liquidity)"
         result.passed_phases.append(
-            "Phase 5: Accepted back inside — SELL-SIDE swept + accepted. "
+            "Phase 5: Structural acceptance confirmed — SELL-SIDE swept + L1/L2 bullish. "
             "Market maker filled LONG positions. Bias: LONG. Target: Range High."
         )
 
@@ -416,6 +432,7 @@ if __name__ == "__main__":
         any_candle_closed_beyond_dl2=False,
         wick_only_beyond_dl2=True,
         accepted_back_inside_range=True,
+        structure_confirmed_after_sweep=True,
         path_quality=PathQuality.CLEAN,
         retail_trapped_in_wrong_direction=True,
         tct_schematic_confirmed=True,
@@ -434,6 +451,7 @@ if __name__ == "__main__":
         any_candle_closed_beyond_dl2=False,
         wick_only_beyond_dl2=False,
         accepted_back_inside_range=True,
+        structure_confirmed_after_sweep=True,
         path_quality=PathQuality.OBSTRUCTED,
         retail_trapped_in_wrong_direction=False,
         tct_schematic_confirmed=False,
@@ -470,6 +488,7 @@ if __name__ == "__main__":
         any_candle_closed_beyond_dl2=False,
         wick_only_beyond_dl2=False,
         accepted_back_inside_range=True,
+        structure_confirmed_after_sweep=True,
         path_quality=PathQuality.CLEAN,
         retail_trapped_in_wrong_direction=False,
         tct_schematic_confirmed=False,

@@ -2650,6 +2650,19 @@ class LiquidityVoidDetector:
 # GATES
 # ================================================================
 
+def placeholder_gate_payload():
+    """Canonical NOT_EVALUATED gate payload for placeholder gates.
+    Single source of truth — prevents schema drift across snapshot locations.
+    """
+    return {
+        "status": "NOT_EVALUATED",
+        "passed": False,
+        "confidence": 0.0,
+        "reason": "Not yet implemented",
+        "evaluated": False,
+    }
+
+
 def validate_1A(context: Dict) -> Dict:
     try:
         htf = context.get("htf_candles")
@@ -15195,34 +15208,10 @@ async def tensor_trade_scan():
                 "best_tf": _5a_details.get("best_tf"),
             },
             # ── Placeholder gates — wiring exposed for audit dashboard ──
-            "gate_LIQUIDITY": {
-                "status": "NOT_EVALUATED",
-                "passed": False,
-                "confidence": 0.0,
-                "reason": "Not yet implemented",
-                "evaluated": False,
-            },
-            "gate_MARKET_STRUCTURE": {
-                "status": "NOT_EVALUATED",
-                "passed": False,
-                "confidence": 0.0,
-                "reason": "Not yet implemented",
-                "evaluated": False,
-            },
-            "gate_RANGE": {
-                "status": "NOT_EVALUATED",
-                "passed": False,
-                "confidence": 0.0,
-                "reason": "Not yet implemented",
-                "evaluated": False,
-            },
-            "gate_SUPPLY_DEMAND": {
-                "status": "NOT_EVALUATED",
-                "passed": False,
-                "confidence": 0.0,
-                "reason": "Not yet implemented",
-                "evaluated": False,
-            },
+            "gate_LIQUIDITY": placeholder_gate_payload(),
+            "gate_MARKET_STRUCTURE": placeholder_gate_payload(),
+            "gate_RANGE": placeholder_gate_payload(),
+            "gate_SUPPLY_DEMAND": placeholder_gate_payload(),
 
             "signal": _5a_signal,
             "confidence": None,
@@ -18579,34 +18568,10 @@ async def schematics_5b_auto_scan_loop():
                     },
 
                     # ── Placeholder gates — wiring exposed for audit dashboard ──
-                    "gate_LIQUIDITY": {
-                        "status": "NOT_EVALUATED",
-                        "passed": False,
-                        "confidence": 0.0,
-                        "reason": "Not yet implemented",
-                        "evaluated": False,
-                    },
-                    "gate_MARKET_STRUCTURE": {
-                        "status": "NOT_EVALUATED",
-                        "passed": False,
-                        "confidence": 0.0,
-                        "reason": "Not yet implemented",
-                        "evaluated": False,
-                    },
-                    "gate_RANGE": {
-                        "status": "NOT_EVALUATED",
-                        "passed": False,
-                        "confidence": 0.0,
-                        "reason": "Not yet implemented",
-                        "evaluated": False,
-                    },
-                    "gate_SUPPLY_DEMAND": {
-                        "status": "NOT_EVALUATED",
-                        "passed": False,
-                        "confidence": 0.0,
-                        "reason": "Not yet implemented",
-                        "evaluated": False,
-                    },
+                    "gate_LIQUIDITY": placeholder_gate_payload(),
+                    "gate_MARKET_STRUCTURE": placeholder_gate_payload(),
+                    "gate_RANGE": placeholder_gate_payload(),
+                    "gate_SUPPLY_DEMAND": placeholder_gate_payload(),
 
                     "signal": _5b_signal,
                     "confidence": None,
