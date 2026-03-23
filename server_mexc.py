@@ -2676,6 +2676,53 @@ def _valid_gate(g):
     return isinstance(g, dict) and "passed" in g
 
 
+def _build_gate_rcm_payload(rng, rig):
+    """Assemble gate_RCM_range snapshot from phase_results['range'] and RIG data.
+
+    All RCM fields are direct passthroughs from rng — no recomputation.
+    When rng is None (no pipeline data), all fields default to None.
+    """
+    if rng is None:
+        return {
+            "status": "ACTIVE" if rig.get("displacement") is not None else "NOT_EVALUATED",
+            "passed": None,
+            "confidence": None,
+            "evaluated": False,
+            "reason": None,
+            "score": None,
+            "rcm_score": None,
+            "horizontal": None,
+            "six_candle_rule": None,
+            "v_shape_rejected": None,
+            "time_displacement_ok": None,
+            "range_high": None,
+            "range_low": None,
+            "range_mid": None,
+            "duration_hours": None,
+            "displacement": None,
+            "note": "range_engine_controller (L1/L2) → decision_tree_bridge",
+        }
+    return {
+        "status": rng.get("rcm_status"),
+        "passed": rng.get("passed"),
+        "confidence": float(rng["rcm_score"]) if rng.get("rcm_score") is not None else None,
+        "evaluated": True,
+        "reason": rng.get("reason"),
+        "score": rng.get("score"),
+        "rcm_score": rng.get("rcm_score"),
+        "horizontal": rng.get("horizontal"),
+        "six_candle_rule": rng.get("six_candle_rule"),
+        "v_shape_rejected": rng.get("v_shape_rejected"),
+        "time_displacement_ok": rng.get("time_displacement_ok"),
+        "range_high": rng.get("range_high"),
+        "range_low": rng.get("range_low"),
+        "range_mid": rng.get("range_mid"),
+        "duration_hours": rng.get("duration_hours"),
+        "displacement": rng.get("displacement"),
+        "note": "range_engine_controller (L1/L2) → decision_tree_bridge",
+    }
+
+
 def validate_1A(context: Dict) -> Dict:
     try:
         htf = context.get("htf_candles")
@@ -18568,23 +18615,7 @@ async def schematics_5b_auto_scan_loop():
                     "gate_1B_usdt_d": {"status": "NOT_IMPLEMENTED", "trend": None, "correlation": None, "passed": None},
                     "gate_1C_alt_alignment": {"status": "NOT_IMPLEMENTED", "aligned": None, "passed": None},
 
-                    "gate_RCM_range": (lambda rng, rig: {
-                        "status": rng.get("rcm_status", "PASS" if rng.get("passed") else "FAIL") if rng else (
-                            "ACTIVE" if rig.get("displacement") is not None else "NOT_EVALUATED"),
-                        "passed": bool(rng.get("passed", False)) if rng else None,
-                        "confidence": float(rng.get("rcm_score", 0.0)) if rng else 0.0,
-                        "evaluated": rng is not None,
-                        "reason": rng.get("reason", "Range validated") if rng and rng.get("passed") else (
-                            rng.get("reason", "Range validation failed") if rng else "No range data from pipeline"),
-                        "score": rng.get("score") if rng else None,
-                        "rcm_score": float(rng.get("rcm_score", 0.0)) if rng else None,
-                        "horizontal": rng.get("horizontal") if rng else None,
-                        "six_candle_rule": rng.get("six_candle_rule") if rng else None,
-                        "v_shape_rejected": rng.get("v_shape_rejected") if rng else None,
-                        "time_displacement_ok": rng.get("time_displacement_ok") if rng else None,
-                        "displacement": rig.get("displacement"),
-                        "note": "range_engine_controller (L1/L2) → decision_tree_bridge",
-                    })(_5b_ranges, _5b_rig),
+                    "gate_RCM_range": _build_gate_rcm_payload(_5b_ranges, _5b_rig),
 
                     "gate_RIG": {
                         "status": _5b_rig.get("status"),
