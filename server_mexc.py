@@ -2663,6 +2663,19 @@ def placeholder_gate_payload():
     }
 
 
+def five_a_fallback_payload():
+    """5A pipeline fallback — decision tree bridge is not run in 5A."""
+    return {
+        **placeholder_gate_payload(),
+        "reason": "5A pipeline does not run decision tree bridge",
+    }
+
+
+def _valid_gate(g):
+    """Check that a gate result is a dict containing the required 'passed' key."""
+    return isinstance(g, dict) and "passed" in g
+
+
 def validate_1A(context: Dict) -> Dict:
     try:
         htf = context.get("htf_candles")
@@ -15207,12 +15220,11 @@ async def tensor_trade_scan():
                 "best_score": _5a_details.get("best_score"),
                 "best_tf": _5a_details.get("best_tf"),
             },
-            # ── Placeholder gates — 5A pipeline lacks bridge evaluation ──
-            "gate_LIQUIDITY": {**placeholder_gate_payload(),
-                               "reason": "5A pipeline does not run decision tree bridge"},
-            "gate_MARKET_STRUCTURE": placeholder_gate_payload(),
-            "gate_RANGE": placeholder_gate_payload(),
-            "gate_SUPPLY_DEMAND": placeholder_gate_payload(),
+            # ── 5A pipeline lacks bridge evaluation — gates show source context ──
+            "gate_LIQUIDITY": five_a_fallback_payload(),
+            "gate_MARKET_STRUCTURE": {**five_a_fallback_payload(), "bias": _5a_htf_bias},
+            "gate_RANGE": five_a_fallback_payload(),
+            "gate_SUPPLY_DEMAND": five_a_fallback_payload(),
 
             "signal": _5a_signal,
             "confidence": None,
@@ -18492,16 +18504,27 @@ async def schematics_5b_auto_scan_loop():
                 _5b_htf_bias = _5b_debug.get("per_symbol", {}).get("BTCUSDT", {}).get("htf_bias")
                 _5b_signal = _normalize_tct_signal(_5b_htf_bias) if action == "trade_entered" else "NO_TRADE"
 
-                # ── Liquidity: extract from best_setup evaluation ──
+                # ── Extract gate data from best_setup evaluation ──
                 _5b_sym = _5b_debug.get("per_symbol", {}).get("BTCUSDT", {})
                 _5b_best_setup = _5b_sym.get("best_setup")
                 _5b_liq = None
+                _5b_mkt_struct = None
+                _5b_ranges = None
+                _5b_sd = None
                 if _5b_best_setup and isinstance(_5b_best_setup, (list, tuple)) and len(_5b_best_setup) >= 2:
                     _5b_eval = _5b_best_setup[1] if isinstance(_5b_best_setup[1], dict) else {}
+                    _5b_phase = _5b_eval.get("phase_results") or {}
+                    _5b_tree = _5b_eval.get("tree_results") or {}
                     # v2 pipeline stores in phase_results, v1 in tree_results
-                    _5b_liq = (_5b_eval.get("phase_results") or {}).get("liquidity")
-                    if not _5b_liq:
-                        _5b_liq = (_5b_eval.get("tree_results") or {}).get("liquidity")
+                    _5b_liq = _5b_phase.get("liquidity") or _5b_tree.get("liquidity")
+                    _5b_ranges = _5b_phase.get("range") or _5b_tree.get("ranges")
+                    # market_structure & supply_demand: prefer phase_results only if valid
+                    _5b_mkt_struct = _5b_phase.get("market_structure")
+                    if not _valid_gate(_5b_mkt_struct):
+                        _5b_mkt_struct = _5b_tree.get("market_structure")
+                    _5b_sd = _5b_phase.get("supply_demand")
+                    if not _valid_gate(_5b_sd):
+                        _5b_sd = _5b_tree.get("supply_demand")
 
                 # ── MSCE: Multi-Session Context Engine ──
                 # Now evaluated inside scan_and_trade via msce_engine.
@@ -18592,10 +18615,38 @@ async def schematics_5b_auto_scan_loop():
                         "entry_ready": bool(lq.get("entry_ready", False)),
                         "trade_bias": lq.get("trade_bias"),
                     })(_5b_liq) if _5b_liq else placeholder_gate_payload(),
-                    # ── Remaining placeholder gates ──
-                    "gate_MARKET_STRUCTURE": placeholder_gate_payload(),
-                    "gate_RANGE": placeholder_gate_payload(),
-                    "gate_SUPPLY_DEMAND": placeholder_gate_payload(),
+                    # ── Market Structure gate — wired from decision tree bridge ──
+                    "gate_MARKET_STRUCTURE": (lambda ms: {
+                        "status": "ACTIVE",
+                        "passed": bool(ms.get("passed", False)),
+                        "confidence": 1.0 if ms.get("passed") else 0.0,
+                        "reason": ms.get("reason") or f"HTF bias: {ms.get('bias', 'unknown')}",
+                        "evaluated": True,
+                        "bias": ms.get("bias"),
+                    })(_5b_mkt_struct) if _5b_mkt_struct else placeholder_gate_payload(),
+                    # ── Ranges gate — wired from decision tree bridge ──
+                    "gate_RANGE": (lambda rng: {
+                        "status": "ACTIVE",
+                        "passed": bool(rng.get("passed", False)),
+                        "confidence": min(1.0, rng.get("score", 0) / 20.0) if rng.get("score") is not None else (1.0 if rng.get("passed") else 0.0),
+                        "reason": rng.get("reason") or ("Range confirmed" if rng.get("passed") else "Range validation failed"),
+                        "evaluated": True,
+                        "score": rng.get("score"),
+                        "horizontal": rng.get("horizontal"),
+                        "six_candle_rule": rng.get("six_candle_rule"),
+                        "v_shape_rejected": rng.get("v_shape_rejected"),
+                    })(_5b_ranges) if _5b_ranges else placeholder_gate_payload(),
+                    # ── Supply/Demand gate — wired from decision tree bridge ──
+                    "gate_SUPPLY_DEMAND": (lambda sd: {
+                        "status": "ACTIVE",
+                        "passed": bool(sd.get("passed", False)),
+                        "confidence": 1.0 if sd.get("passed") else 0.0,
+                        "reason": f"FVG={'YES' if sd.get('fvg_valid') else 'NO'}, OB={'YES' if sd.get('ob_found') else 'NO'}" if sd.get("passed") else (sd.get("failed_at") or "S/D validation failed"),
+                        "evaluated": True,
+                        "fvg_valid": sd.get("fvg_valid"),
+                        "ob_found": sd.get("ob_found"),
+                        "priority": sd.get("priority"),
+                    })(_5b_sd) if _5b_sd else placeholder_gate_payload(),
 
                     "signal": _5b_signal,
                     "confidence": None,
@@ -18671,7 +18722,8 @@ h1{font-size:1.4rem;color:#58a6ff;margin-bottom:4px}
 .meta .live{color:#3fb950;border-color:#238636}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:12px;margin-bottom:16px}
 .card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px}
-.card h2{font-size:.95rem;color:#58a6ff;margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.card h2{font-size:.95rem;color:#58a6ff;margin-bottom:4px;display:flex;align-items:center;gap:6px}
+.gate-source{font-size:.7rem;color:#6e7681;font-family:monospace;margin-bottom:8px;padding:2px 6px;background:#0d1117;border-radius:4px;border:1px solid #21262d}
 .card h2 .badge{font-size:.7rem;padding:2px 6px;border-radius:4px;font-weight:600}
 .pass{background:#238636;color:#fff}
 .fail{background:#da3633;color:#fff}
@@ -18730,7 +18782,7 @@ function row(label, value, cls) {
   return `<div class="row"><span class="label">${label}</span><span class="${valClass}">${v}</span></div>`;
 }
 
-function renderGate(title, gate) {
+function renderGate(title, gate, sourceFile) {
   if (!gate) return '';
   const st = gate.status || '';
   const p = gate.passed;
@@ -18745,7 +18797,8 @@ function renderGate(title, gate) {
       rows += row(k, v);
     }
   }
-  return `<div class="card"><h2>${title} ${badge(st, p)}</h2>${rows || '<div class="row"><span class="label">No data</span></div>'}</div>`;
+  const srcTag = sourceFile ? `<div class="gate-source">${sourceFile}</div>` : '';
+  return `<div class="card"><h2>${title} ${badge(st, p)}</h2>${srcTag}${rows || '<div class="row"><span class="label">No data</span></div>'}</div>`;
 }
 
 function render(data) {
@@ -18776,17 +18829,17 @@ function render(data) {
   let html = `<div class="signal-box ${sigClass}">${sig === 'NO_TRADE' ? 'NO TRADE' : sig}${data.confidence ? ' (' + (data.confidence * 100).toFixed(0) + '%)' : ''}${data.blocking_gate ? ' — Blocked at Gate ' + data.blocking_gate : ''}</div>`;
 
   html += '<div class="grid">';
-  html += renderGate('1A — BTC Structure / Bias', data.gate_1A_btc_structure);
-  html += renderGate('1B — USDT.D Correlation', data.gate_1B_usdt_d);
-  html += renderGate('1C — Alt Alignment', data.gate_1C_alt_alignment);
-  html += renderGate('RCM — Range Context', data.gate_RCM_range);
-  html += renderGate('RIG — Counter-Bias Filter', data.gate_RIG);
-  html += renderGate('MSCE — Session Logic', data.gate_MSCE);
-  html += renderGate('1D — Execution', data.gate_1D_execution);
-  html += renderGate('LIQUIDITY — Sweep Validation', data.gate_LIQUIDITY);
-  html += renderGate('MARKET STRUCTURE — Structure Engine', data.gate_MARKET_STRUCTURE);
-  html += renderGate('RANGE — Range Validation', data.gate_RANGE);
-  html += renderGate('SUPPLY/DEMAND — Zone Validation', data.gate_SUPPLY_DEMAND);
+  html += renderGate('1A — BTC Structure / Bias', data.gate_1A_btc_structure, 'server_mexc.py → validate_1A()');
+  html += renderGate('1B — USDT.D Correlation', data.gate_1B_usdt_d, 'server_mexc.py → validate_1B()');
+  html += renderGate('1C — Alt Alignment', data.gate_1C_alt_alignment, 'server_mexc.py → validate_1C()');
+  html += renderGate('RCM — Range Context', data.gate_RCM_range, 'server_mexc.py → validate_RCM()');
+  html += renderGate('RIG — Counter-Bias Filter', data.gate_RIG, 'server_mexc.py → validate_RIG() · hpb_rig_validator.py');
+  html += renderGate('MSCE — Session Logic', data.gate_MSCE, 'msce_engine.py · server_mexc.py → validate_MSCE()');
+  html += renderGate('1D — Execution', data.gate_1D_execution, 'server_mexc.py → validate_1D()');
+  html += renderGate('LIQUIDITY — Sweep Validation', data.gate_LIQUIDITY, 'decision_trees/liquidity_decision_tree.py');
+  html += renderGate('MARKET STRUCTURE — Structure Engine', data.gate_MARKET_STRUCTURE, 'decision_trees/market_structure_engine.py · decision_tree_bridge.py');
+  html += renderGate('RANGE — Range Validation', data.gate_RANGE, 'decision_trees/ranges_decision_tree.py · decision_tree_bridge.py');
+  html += renderGate('SUPPLY/DEMAND — Zone Validation', data.gate_SUPPLY_DEMAND, 'decision_trees/supply_demand_decision_tree.py · decision_tree_bridge.py');
   html += '</div>';
 
   document.getElementById('content').innerHTML = html;
