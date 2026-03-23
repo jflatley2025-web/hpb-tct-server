@@ -15194,6 +15194,36 @@ async def tensor_trade_scan():
                 "best_score": _5a_details.get("best_score"),
                 "best_tf": _5a_details.get("best_tf"),
             },
+            # ── Placeholder gates — wiring exposed for audit dashboard ──
+            "gate_LIQUIDITY": {
+                "status": "NOT_EVALUATED",
+                "passed": False,
+                "confidence": 0.0,
+                "reason": "Not yet implemented",
+                "evaluated": False,
+            },
+            "gate_MARKET_STRUCTURE": {
+                "status": "NOT_EVALUATED",
+                "passed": False,
+                "confidence": 0.0,
+                "reason": "Not yet implemented",
+                "evaluated": False,
+            },
+            "gate_RANGE": {
+                "status": "NOT_EVALUATED",
+                "passed": False,
+                "confidence": 0.0,
+                "reason": "Not yet implemented",
+                "evaluated": False,
+            },
+            "gate_SUPPLY_DEMAND": {
+                "status": "NOT_EVALUATED",
+                "passed": False,
+                "confidence": 0.0,
+                "reason": "Not yet implemented",
+                "evaluated": False,
+            },
+
             "signal": _5a_signal,
             "confidence": None,
             "blocking_gate": "RIG" if _5a_rig_blocked else None,
@@ -18548,6 +18578,36 @@ async def schematics_5b_auto_scan_loop():
                         "trading_mode": _5b_debug.get("trading_mode"),
                     },
 
+                    # ── Placeholder gates — wiring exposed for audit dashboard ──
+                    "gate_LIQUIDITY": {
+                        "status": "NOT_EVALUATED",
+                        "passed": False,
+                        "confidence": 0.0,
+                        "reason": "Not yet implemented",
+                        "evaluated": False,
+                    },
+                    "gate_MARKET_STRUCTURE": {
+                        "status": "NOT_EVALUATED",
+                        "passed": False,
+                        "confidence": 0.0,
+                        "reason": "Not yet implemented",
+                        "evaluated": False,
+                    },
+                    "gate_RANGE": {
+                        "status": "NOT_EVALUATED",
+                        "passed": False,
+                        "confidence": 0.0,
+                        "reason": "Not yet implemented",
+                        "evaluated": False,
+                    },
+                    "gate_SUPPLY_DEMAND": {
+                        "status": "NOT_EVALUATED",
+                        "passed": False,
+                        "confidence": 0.0,
+                        "reason": "Not yet implemented",
+                        "evaluated": False,
+                    },
+
                     "signal": _5b_signal,
                     "confidence": None,
                     "blocking_gate": "RIG" if _5b_rig_blocked else None,
@@ -18734,6 +18794,10 @@ function render(data) {
   html += renderGate('RIG — Counter-Bias Filter', data.gate_RIG);
   html += renderGate('MSCE — Session Logic', data.gate_MSCE);
   html += renderGate('1D — Execution', data.gate_1D_execution);
+  html += renderGate('LIQUIDITY — Sweep Validation', data.gate_LIQUIDITY);
+  html += renderGate('MARKET STRUCTURE — Structure Engine', data.gate_MARKET_STRUCTURE);
+  html += renderGate('RANGE — Range Validation', data.gate_RANGE);
+  html += renderGate('SUPPLY/DEMAND — Zone Validation', data.gate_SUPPLY_DEMAND);
   html += '</div>';
 
   document.getElementById('content').innerHTML = html;

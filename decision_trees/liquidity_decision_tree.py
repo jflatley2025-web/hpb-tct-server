@@ -105,6 +105,9 @@ class LiquidityEvaluation:
     primary_target: str = ""
     conviction_level: str = ""
     entry_note: str = ""
+    path_score: float = 0.0                     # Numeric path quality: CLEAN=1.0, PARTIAL=0.65, OBSTRUCTED=0.3
+    entry_ready: bool = False                     # True only when all pre-execution phases pass
+    liquidity_valid: bool = False                 # True if Phase 2 + Phase 4 + Phase 5 all passed (audit/5B gating)
     warnings: list = field(default_factory=list)
     passed_phases: list = field(default_factory=list)
     failed_at_phase: Optional[str] = None
@@ -172,6 +175,9 @@ def phase4_classify_sweep(inputs: LiquidityInputs, result: LiquidityEvaluation) 
 
     if inputs.any_candle_closed_beyond_dl2:
         result.sweep_classification = SweepClassification.TRUE_BREAK
+        # Hard invalidate: downstream systems must not misinterpret partial result
+        result.trade_bias = TradeBias.WAIT
+        result.conviction_level = "INVALID — TRUE BREAK"
         result.failed_at_phase = (
             "Phase 4: TRUE RANGE BREAK — candle closed beyond DL2. "
             "Do not apply reversal logic. Reassess macro trend direction."
@@ -195,6 +201,8 @@ def phase4_classify_sweep(inputs: LiquidityInputs, result: LiquidityEvaluation) 
 
 def phase5_acceptance(inputs: LiquidityInputs, result: LiquidityEvaluation) -> bool:
     """Phase 5: Confirm price accepted back inside the range."""
+    # TODO: Replace with structural confirmation from market_structure_engine
+    # accepted_back_inside_range is currently binary — needs L1/L2 structure validation
     if not inputs.accepted_back_inside_range:
         result.failed_at_phase = (
             "Phase 5: No acceptance back inside range yet. "
@@ -226,6 +234,10 @@ def phase5_acceptance(inputs: LiquidityInputs, result: LiquidityEvaluation) -> b
 def phase6_path_quality(inputs: LiquidityInputs, result: LiquidityEvaluation):
     """Phase 6: Evaluate the path between entry and target."""
     result.path_quality = inputs.path_quality
+
+    # Numeric path score for downstream 1D scoring integration
+    _PATH_SCORE_MAP = {PathQuality.CLEAN: 1.0, PathQuality.PARTIAL: 0.65, PathQuality.OBSTRUCTED: 0.3}
+    result.path_score = _PATH_SCORE_MAP.get(inputs.path_quality, 0.0)
 
     if inputs.path_quality == PathQuality.CLEAN:
         result.conviction_level = "HIGH — cascade / snowball effect expected"
@@ -275,31 +287,35 @@ def phase7_retail_trap(inputs: LiquidityInputs, result: LiquidityEvaluation):
 
 
 def phase8_entry(inputs: LiquidityInputs, result: LiquidityEvaluation):
-    """Phase 8: Wait for TCT schematic confirmation before entering."""
-    if not inputs.tct_schematic_confirmed:
-        result.failed_at_phase = (
-            "Phase 8: TCT schematic confirmation not yet received. "
-            "Do NOT enter on liquidity analysis alone. "
-            "Wait for TCT Model 1 or Model 2 confirmation inside the zone."
-        )
-        result.trade_bias = TradeBias.WAIT
-        return
-
-    # Build conviction string
+    """Phase 8: Prepare entry — liquidity feeds INTO 1D, not blocked by TCT confirmation."""
+    # Build conviction string — include sweep asymmetry impact (Phase 3 fix)
     conviction_parts = [result.conviction_level]
+    if inputs.times_this_side_swept >= 3 and inputs.other_side_untouched:
+        conviction_parts.append("sweep asymmetry confirmed")
+    elif inputs.times_this_side_swept >= 2:
+        conviction_parts.append(f"sweep #{inputs.times_this_side_swept} — moderate asymmetry")
     if result.retail_compounding:
         conviction_parts.append("retail trap adds fuel")
-    if inputs.times_this_side_swept >= 2:
-        conviction_parts.append(f"sweep #{inputs.times_this_side_swept} — position exhausting")
 
-    result.entry_note = (
-        f"{result.trade_bias.value}. "
-        f"Target: {result.primary_target}. "
-        f"Conviction: {', '.join(conviction_parts)}."
-    )
-    result.passed_phases.append(
-        f"Phase 8: Entry confirmed — {result.trade_bias.value}"
-    )
+    if not inputs.tct_schematic_confirmed:
+        # Keep bias from Phase 5 — do NOT reset to WAIT
+        result.entry_ready = False
+        result.entry_note = "Awaiting TCT confirmation"
+        result.passed_phases.append(
+            "Phase 8: Liquidity validated — awaiting TCT schematic for entry trigger"
+        )
+    else:
+        result.entry_ready = True
+        result.entry_note = (
+            f"{result.trade_bias.value}. "
+            f"Target: {result.primary_target}. "
+            f"Conviction: {', '.join(conviction_parts)}."
+        )
+        result.passed_phases.append(
+            f"Phase 8: Entry confirmed — {result.trade_bias.value}"
+        )
+
+    result.conviction_level = ", ".join(conviction_parts)
 
 
 # ──────────────────────────────────────────────────────────
@@ -334,6 +350,9 @@ def evaluate_liquidity_setup(inputs: LiquidityInputs) -> LiquidityEvaluation:
     # Phase 5 — Acceptance back inside range
     if not phase5_acceptance(inputs, result):
         return result
+
+    # Phases 2, 4, 5 all passed — mark liquidity as structurally valid for audit/5B gating
+    result.liquidity_valid = True
 
     # Phase 6 — Path quality
     phase6_path_quality(inputs, result)
