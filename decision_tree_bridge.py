@@ -1480,14 +1480,18 @@ def compute_composite_score_v2(
     }
 
     if is_v_shape:
-        phase_results["range"] = {**range_checks, "passed": False, "reason": "V-shape / impulsive move"}
+        phase_results["range"] = {**range_checks, "passed": False, "score": 0,
+                                   "rcm_score": 0.0, "rcm_status": "FAIL",
+                                   "reason": "V-shape / impulsive move"}
         fail["failure_context"] = "range"
         return {**fail,
                 "reasons": ["Phase 2: Range rejected — V-shape / impulsive move"],
                 "phase_results": phase_results}
 
     if not time_ok:
-        phase_results["range"] = {**range_checks, "passed": False, "reason": "insufficient time displacement"}
+        phase_results["range"] = {**range_checks, "passed": False, "score": 0,
+                                   "rcm_score": 0.0, "rcm_status": "FAIL",
+                                   "reason": "insufficient time displacement"}
         fail["failure_context"] = "range"
         return {**fail,
                 "reasons": [f"Phase 2: Insufficient time displacement ({time_gap} candles)"],
@@ -1503,7 +1507,10 @@ def compute_composite_score_v2(
     if liq_stack["has_stacking"]:
         range_score = min(20, range_score + 3)
 
-    phase_results["range"] = {**range_checks, "passed": True, "score": range_score}
+    _rcm_score = min(1.0, range_score / 20.0)
+    phase_results["range"] = {**range_checks, "passed": True, "score": range_score,
+                               "rcm_score": _rcm_score,
+                               "rcm_status": "PASS" if _rcm_score >= 0.6 else "FAIL"}
     score += range_score
     reasons.append(f"Range: {range_score}/20")
 
@@ -1563,6 +1570,7 @@ def compute_composite_score_v2(
     if sweep_v2["classification"] == "true_break":
         phase_results["liquidity"] = {"passed": False, "liquidity_valid": False,
                                        "sweep_class": "true_break", "path_score": 0.0,
+                                       "sweep_strength": 0.0,
                                        "entry_ready": False, "trade_bias": "Wait — conditions not yet met",
                                        "conviction": "INVALID — TRUE BREAK",
                                        "failed_at": "Phase 4: TRUE RANGE BREAK — candle closed beyond DL2"}
@@ -1595,7 +1603,13 @@ def compute_composite_score_v2(
     except Exception as _e:
         logger.warning(f"[BRIDGE] v2 liquidity tree evaluation: {_e}")
 
+    # sweep_strength: continuous metric derived from existing signals (HPM v19)
+    _sweep_strength = min(1.0,
+                          sweep_v2.get("sweep_count", 0) * 0.3
+                          + (0.4 if sweep_v2.get("accepted_back") else 0.0)
+                          + _liq_eval_data.get("path_score", 0.0) * 0.3)
     phase_results["liquidity"] = {**sweep_v2, "passed": True, "score": liq_score,
+                                   "sweep_strength": _sweep_strength,
                                    **_liq_eval_data}
     score += liq_score
     reasons.append(f"Liquidity: {liq_score}/20")

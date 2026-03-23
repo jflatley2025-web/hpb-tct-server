@@ -18568,10 +18568,23 @@ async def schematics_5b_auto_scan_loop():
                     "gate_1B_usdt_d": {"status": "NOT_IMPLEMENTED", "trend": None, "correlation": None, "passed": None},
                     "gate_1C_alt_alignment": {"status": "NOT_IMPLEMENTED", "aligned": None, "passed": None},
 
-                    "gate_RCM_range": {
-                        "status": "ACTIVE" if _5b_rig.get("displacement") is not None else "NOT_EVALUATED",
-                        "note": "Range detection via tct_schematics → range_engine_controller (L1/L2)",
-                    },
+                    "gate_RCM_range": (lambda rng, rig: {
+                        "status": rng.get("rcm_status", "PASS" if rng.get("passed") else "FAIL") if rng else (
+                            "ACTIVE" if rig.get("displacement") is not None else "NOT_EVALUATED"),
+                        "passed": bool(rng.get("passed", False)) if rng else None,
+                        "confidence": float(rng.get("rcm_score", 0.0)) if rng else 0.0,
+                        "evaluated": rng is not None,
+                        "reason": rng.get("reason", "Range validated") if rng and rng.get("passed") else (
+                            rng.get("reason", "Range validation failed") if rng else "No range data from pipeline"),
+                        "score": rng.get("score") if rng else None,
+                        "rcm_score": float(rng.get("rcm_score", 0.0)) if rng else None,
+                        "horizontal": rng.get("horizontal") if rng else None,
+                        "six_candle_rule": rng.get("six_candle_rule") if rng else None,
+                        "v_shape_rejected": rng.get("v_shape_rejected") if rng else None,
+                        "time_displacement_ok": rng.get("time_displacement_ok") if rng else None,
+                        "displacement": rig.get("displacement"),
+                        "note": "range_engine_controller (L1/L2) → decision_tree_bridge",
+                    })(_5b_ranges, _5b_rig),
 
                     "gate_RIG": {
                         "status": _5b_rig.get("status"),
