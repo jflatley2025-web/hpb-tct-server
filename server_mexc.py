@@ -15207,8 +15207,9 @@ async def tensor_trade_scan():
                 "best_score": _5a_details.get("best_score"),
                 "best_tf": _5a_details.get("best_tf"),
             },
-            # ── Placeholder gates — wiring exposed for audit dashboard ──
-            "gate_LIQUIDITY": placeholder_gate_payload(),
+            # ── Placeholder gates — 5A pipeline lacks bridge evaluation ──
+            "gate_LIQUIDITY": {**placeholder_gate_payload(),
+                               "reason": "5A pipeline does not run decision tree bridge"},
             "gate_MARKET_STRUCTURE": placeholder_gate_payload(),
             "gate_RANGE": placeholder_gate_payload(),
             "gate_SUPPLY_DEMAND": placeholder_gate_payload(),
@@ -18491,6 +18492,17 @@ async def schematics_5b_auto_scan_loop():
                 _5b_htf_bias = _5b_debug.get("per_symbol", {}).get("BTCUSDT", {}).get("htf_bias")
                 _5b_signal = _normalize_tct_signal(_5b_htf_bias) if action == "trade_entered" else "NO_TRADE"
 
+                # ── Liquidity: extract from best_setup evaluation ──
+                _5b_sym = _5b_debug.get("per_symbol", {}).get("BTCUSDT", {})
+                _5b_best_setup = _5b_sym.get("best_setup")
+                _5b_liq = None
+                if _5b_best_setup and isinstance(_5b_best_setup, (list, tuple)) and len(_5b_best_setup) >= 2:
+                    _5b_eval = _5b_best_setup[1] if isinstance(_5b_best_setup[1], dict) else {}
+                    # v2 pipeline stores in phase_results, v1 in tree_results
+                    _5b_liq = (_5b_eval.get("phase_results") or {}).get("liquidity")
+                    if not _5b_liq:
+                        _5b_liq = (_5b_eval.get("tree_results") or {}).get("liquidity")
+
                 # ── MSCE: Multi-Session Context Engine ──
                 # Now evaluated inside scan_and_trade via msce_engine.
                 _5b_msce = _5b_debug.get("msce") or {}
@@ -18567,8 +18579,18 @@ async def schematics_5b_auto_scan_loop():
                         "trading_mode": _5b_debug.get("trading_mode"),
                     },
 
-                    # ── Placeholder gates — wiring exposed for audit dashboard ──
-                    "gate_LIQUIDITY": placeholder_gate_payload(),
+                    # ── Liquidity gate — wired from decision tree bridge ──
+                    "gate_LIQUIDITY": {
+                        "status": "ACTIVE" if _5b_liq else "NOT_EVALUATED",
+                        "passed": bool((_5b_liq or {}).get("liquidity_valid", False)),
+                        "confidence": float((_5b_liq or {}).get("path_score", 0.0)),
+                        "reason": (_5b_liq or {}).get("failed_at") or (_5b_liq or {}).get("conviction") or "No evaluation data",
+                        "evaluated": _5b_liq is not None,
+                        "sweep_class": (_5b_liq or {}).get("sweep_class"),
+                        "entry_ready": bool((_5b_liq or {}).get("entry_ready", False)),
+                        "trade_bias": (_5b_liq or {}).get("trade_bias"),
+                    } if _5b_liq else placeholder_gate_payload(),
+                    # ── Remaining placeholder gates ──
                     "gate_MARKET_STRUCTURE": placeholder_gate_payload(),
                     "gate_RANGE": placeholder_gate_payload(),
                     "gate_SUPPLY_DEMAND": placeholder_gate_payload(),
