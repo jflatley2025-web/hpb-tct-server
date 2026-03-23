@@ -18832,13 +18832,13 @@ function render(data) {
   html += renderGate('1A — BTC Structure / Bias', data.gate_1A_btc_structure, 'server_mexc.py → validate_1A()');
   html += renderGate('1B — USDT.D Correlation', data.gate_1B_usdt_d, 'server_mexc.py → validate_1B()');
   html += renderGate('1C — Alt Alignment', data.gate_1C_alt_alignment, 'server_mexc.py → validate_1C()');
-  html += renderGate('RCM — Range Context', data.gate_RCM_range, 'server_mexc.py → validate_RCM()');
-  html += renderGate('RIG — Counter-Bias Filter', data.gate_RIG, 'server_mexc.py → validate_RIG() · hpb_rig_validator.py');
+  html += renderGate('RCM — Range Context', data.gate_RCM_range, 'range_engine_controller.py · range_engine_l1.py · range_engine_l2.py');
+  html += renderGate('RIG — Counter-Bias Filter', data.gate_RIG, 'rig_engine.py · rig_v2_engine.py · hpb_rig_validator.py');
   html += renderGate('MSCE — Session Logic', data.gate_MSCE, 'msce_engine.py · server_mexc.py → validate_MSCE()');
   html += renderGate('1D — Execution', data.gate_1D_execution, 'server_mexc.py → validate_1D()');
   html += renderGate('LIQUIDITY — Sweep Validation', data.gate_LIQUIDITY, 'decision_trees/liquidity_decision_tree.py');
   html += renderGate('MARKET STRUCTURE — Structure Engine', data.gate_MARKET_STRUCTURE, 'decision_trees/market_structure_engine.py · decision_tree_bridge.py');
-  html += renderGate('RANGE — Range Validation', data.gate_RANGE, 'decision_trees/ranges_decision_tree.py · decision_tree_bridge.py');
+  html += renderGate('RANGE — Range Validation', data.gate_RANGE, 'range_engine_controller.py · range_engine_l1.py · range_engine_l2.py · range_comparison_logger.py');
   html += renderGate('SUPPLY/DEMAND — Zone Validation', data.gate_SUPPLY_DEMAND, 'decision_trees/supply_demand_decision_tree.py · decision_tree_bridge.py');
   html += '</div>';
 
