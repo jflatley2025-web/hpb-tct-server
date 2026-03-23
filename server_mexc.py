@@ -18580,16 +18580,18 @@ async def schematics_5b_auto_scan_loop():
                     },
 
                     # ── Liquidity gate — wired from decision tree bridge ──
-                    "gate_LIQUIDITY": {
-                        "status": "ACTIVE" if _5b_liq else "NOT_EVALUATED",
-                        "passed": bool((_5b_liq or {}).get("liquidity_valid", False)),
-                        "confidence": float((_5b_liq or {}).get("path_score", 0.0)),
-                        "reason": (_5b_liq or {}).get("failed_at") or (_5b_liq or {}).get("conviction") or "No evaluation data",
-                        "evaluated": _5b_liq is not None,
-                        "sweep_class": (_5b_liq or {}).get("sweep_class"),
-                        "entry_ready": bool((_5b_liq or {}).get("entry_ready", False)),
-                        "trade_bias": (_5b_liq or {}).get("trade_bias"),
-                    } if _5b_liq else placeholder_gate_payload(),
+                    "gate_LIQUIDITY": (lambda lq: {
+                        "status": "ACTIVE",
+                        "passed": bool(lq.get("liquidity_valid", False)),
+                        # Confidence only meaningful when gate passed — prevent leakage
+                        "confidence": float(lq.get("path_score", 0.0)) if lq.get("liquidity_valid") else 0.0,
+                        "reason": lq.get("failed_at") or lq.get("conviction") or "No evaluation data",
+                        "evaluated": True,
+                        "failed_at": lq.get("failed_at"),
+                        "sweep_class": lq.get("sweep_class"),
+                        "entry_ready": bool(lq.get("entry_ready", False)),
+                        "trade_bias": lq.get("trade_bias"),
+                    })(_5b_liq) if _5b_liq else placeholder_gate_payload(),
                     # ── Remaining placeholder gates ──
                     "gate_MARKET_STRUCTURE": placeholder_gate_payload(),
                     "gate_RANGE": placeholder_gate_payload(),

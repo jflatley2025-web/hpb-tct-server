@@ -1562,7 +1562,10 @@ def compute_composite_score_v2(
 
     if sweep_v2["classification"] == "true_break":
         phase_results["liquidity"] = {"passed": False, "liquidity_valid": False,
-                                       "sweep_class": "true_break"}
+                                       "sweep_class": "true_break", "path_score": 0.0,
+                                       "entry_ready": False, "trade_bias": "Wait — conditions not yet met",
+                                       "conviction": "INVALID — TRUE BREAK",
+                                       "failed_at": "Phase 4: TRUE RANGE BREAK — candle closed beyond DL2"}
         fail["failure_context"] = "liquidity"
         return {**fail,
                 "score": score,
