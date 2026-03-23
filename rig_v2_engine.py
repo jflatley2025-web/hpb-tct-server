@@ -32,6 +32,22 @@ def _safe_number(value, default: float = 0.0) -> float:
         return default
 
 
+def _range_sort_key(r: dict) -> tuple:
+    """Deterministic sort key for HTF range selection.
+
+    Uses only intrinsic structural data so the result is stable
+    regardless of input ordering.  Priority: duration > liquidity >
+    range_size > midpoint.
+    """
+    duration = _safe_number(r.get("range_duration_hours"))
+    liquidity = _safe_number(r.get("liquidity_score"))
+    high = _safe_number(r.get("range_high"))
+    low = _safe_number(r.get("range_low"))
+    range_size = high - low
+    midpoint = (high + low) / 2 if high > low else 0.0
+    return (duration, liquidity, range_size, midpoint)
+
+
 def _not_evaluated_v2(base: dict, reason: str, displacement=None,
                       confidence: float = 0.0, htf_range=None) -> dict:
     """Build a canonical NOT_EVALUATED response for RIG v2."""
@@ -104,14 +120,8 @@ def evaluate_rig_v2(context: dict, ranges: list, current_price: float) -> dict:
     if not htf_ranges:
         return _not_evaluated_v2(base, "No valid HTF ranges (duration >= 24h)")
 
-    # --- Select dominant HTF range: longest duration, then highest liquidity ---
-    dominant = max(
-        htf_ranges,
-        key=lambda r: (
-            _safe_number(r.get("range_duration_hours")),
-            _safe_number(r.get("liquidity_score")),
-        ),
-    )
+    # --- Select dominant HTF range (deterministic, order-independent) ---
+    dominant = max(htf_ranges, key=_range_sort_key)
 
     dom_high = dominant["range_high"]
     dom_low = dominant["range_low"]
