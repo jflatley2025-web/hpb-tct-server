@@ -37,7 +37,10 @@ def _range_sort_key(r: dict) -> tuple:
 
     Uses only intrinsic structural data so the result is stable
     regardless of input ordering.  Priority: duration > liquidity >
-    range_size > midpoint.
+    range_size > midpoint > exact bounds.
+
+    Two ranges can only tie if they are structurally identical,
+    at which point ordering is irrelevant.
     """
     duration = _safe_number(r.get("range_duration_hours"))
     liquidity = _safe_number(r.get("liquidity_score"))
@@ -45,7 +48,8 @@ def _range_sort_key(r: dict) -> tuple:
     low = _safe_number(r.get("range_low"))
     range_size = high - low
     midpoint = (high + low) / 2 if high > low else 0.0
-    return (duration, liquidity, range_size, midpoint)
+    bounds_tuple = (high, low)
+    return (duration, liquidity, range_size, midpoint, bounds_tuple)
 
 
 def _not_evaluated_v2(base: dict, reason: str, displacement=None,
