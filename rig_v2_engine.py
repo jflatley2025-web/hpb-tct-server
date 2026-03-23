@@ -183,6 +183,71 @@ def evaluate_rig_v2(context: dict, ranges: list, current_price: float) -> dict:
     if status == "BLOCK":
         confidence = 0.0
 
+    # --- Liquidity integration (L4 confidence modifier) ---
+    liq = context.get("liquidity") or {}
+    liq_debug = {}
+
+    if liq:
+        liq_valid = liq.get("liquidity_valid", False)
+        liq_bias = liq.get("trade_bias")
+        path_score = _safe_number(liq.get("path_score"), default=0.0)
+        entry_ready = liq.get("entry_ready", False)
+        sweep_class = liq.get("sweep_classification") or liq.get("sweep_class")
+
+        # 1. HARD BLOCK: true_break invalidates everything
+        if not liq_valid and sweep_class == "true_break":
+            return {
+                "status": "INVALID",
+                "Gate": "RIG_v2",
+                "reason": "RIG_v2: TRUE_BREAK — invalid liquidity context",
+                "confidence": 0.0,
+                "evaluated": True,
+                "displacement": htf_disp,
+                "htf_bias": htf_bias,
+                "session_bias": session_bias,
+                "htf_range": dominant,
+                "mtf_conflict": mtf_conflict,
+                "liquidity": {
+                    "valid": False,
+                    "bias": liq_bias,
+                    "path_score": 0.0,
+                    "entry_ready": False,
+                },
+            }
+
+        # 2. Bias alignment boost/penalty
+        if liq_bias and liq_bias not in ("WAIT", "Wait — conditions not yet met"):
+            if liq_bias.upper() == htf_bias.upper():
+                confidence += 0.10
+            else:
+                confidence -= 0.15
+
+        # 3. Path quality weight (multiplicative)
+        if path_score > 0:
+            confidence *= path_score
+
+        # 4. Entry ready boost
+        if entry_ready:
+            confidence += 0.05
+
+        liq_debug = {
+            "valid": liq_valid,
+            "bias": liq_bias,
+            "path_score": path_score,
+            "entry_ready": entry_ready,
+        }
+    else:
+        # No liquidity data — safe fallback, no modification
+        liq_debug = {"valid": None, "bias": None, "path_score": 0.0,
+                     "entry_ready": False}
+        if reason:
+            reason = f"{reason}; liquidity: unavailable"
+        else:
+            reason = "liquidity: unavailable"
+
+    # 6. Confidence clamp
+    confidence = max(0.0, min(confidence, 1.0))
+
     return {
         "status": status,
         "Gate": "RIG_v2",
@@ -194,4 +259,5 @@ def evaluate_rig_v2(context: dict, ranges: list, current_price: float) -> dict:
         "session_bias": session_bias,
         "htf_range": dominant,
         "mtf_conflict": mtf_conflict,
+        "liquidity": liq_debug,
     }

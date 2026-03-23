@@ -376,3 +376,213 @@ class TestMalformedInputs:
         ranges = [_range(110, 100, duration=48)]
         result = evaluate_rig_v2(None, ranges, 105.0)
         assert result["evaluated"] is True
+
+
+# --- Liquidity integration ---
+
+def _ctx_with_liq(liq_data, htf_bias="bullish", session_bias="bullish"):
+    """Build context with liquidity data."""
+    ctx = _ctx(htf_bias=htf_bias, session_bias=session_bias)
+    ctx["liquidity"] = liq_data
+    return ctx
+
+
+class TestLiquidityTrueBreakBlock:
+
+    def test_true_break_returns_invalid(self):
+        """TRUE_BREAK + liquidity_valid=False → INVALID, confidence=0."""
+        liq = {"liquidity_valid": False, "sweep_class": "true_break",
+               "path_score": 0.0, "trade_bias": "WAIT", "entry_ready": False}
+        ranges = [_range(110, 100, duration=48)]
+        result = evaluate_rig_v2(_ctx_with_liq(liq), ranges, 108.0)
+        assert result["status"] == "INVALID"
+        assert result["confidence"] == 0.0
+        assert "TRUE_BREAK" in result["reason"]
+        assert result["liquidity"]["valid"] is False
+
+    def test_true_break_with_sweep_classification_key(self):
+        """sweep_classification (alternate key) also triggers block."""
+        liq = {"liquidity_valid": False, "sweep_classification": "true_break",
+               "path_score": 0.0, "trade_bias": "WAIT", "entry_ready": False}
+        ranges = [_range(110, 100, duration=48)]
+        result = evaluate_rig_v2(_ctx_with_liq(liq), ranges, 108.0)
+        assert result["status"] == "INVALID"
+
+    def test_true_break_valid_liq_does_not_block(self):
+        """liquidity_valid=True + true_break → no block (contradictory but safe)."""
+        liq = {"liquidity_valid": True, "sweep_class": "true_break",
+               "path_score": 1.0, "trade_bias": "LONG", "entry_ready": True}
+        ranges = [_range(110, 100, duration=48)]
+        result = evaluate_rig_v2(
+            _ctx_with_liq(liq, htf_bias="bullish"), ranges, 108.0
+        )
+        assert result["status"] != "INVALID"
+
+
+class TestLiquidityBiasAlignment:
+
+    def test_aligned_bias_boosts_confidence(self):
+        """Aligned liquidity bias adds +0.10."""
+        liq = {"liquidity_valid": True, "trade_bias": "BULLISH",
+               "path_score": 1.0, "entry_ready": False}
+        ranges = [_range(110, 100, duration=48)]
+        result_with = evaluate_rig_v2(
+            _ctx_with_liq(liq, htf_bias="bullish"), ranges, 108.0
+        )
+        result_without = evaluate_rig_v2(
+            _ctx(htf_bias="bullish", session_bias="bullish"), ranges, 108.0
+        )
+        # With liquidity: confidence * 1.0 + 0.10
+        assert result_with["confidence"] > result_without["confidence"]
+
+    def test_opposing_bias_penalizes_confidence(self):
+        """Opposing liquidity bias subtracts -0.15 vs aligned +0.10."""
+        liq_opposing = {"liquidity_valid": True, "trade_bias": "BEARISH",
+                        "path_score": 1.0, "entry_ready": False}
+        liq_aligned = {"liquidity_valid": True, "trade_bias": "BULLISH",
+                       "path_score": 1.0, "entry_ready": False}
+        ranges = [_range(110, 100, duration=48)]
+        result_opposing = evaluate_rig_v2(
+            _ctx_with_liq(liq_opposing, htf_bias="bullish"), ranges, 108.0
+        )
+        result_aligned = evaluate_rig_v2(
+            _ctx_with_liq(liq_aligned, htf_bias="bullish"), ranges, 108.0
+        )
+        # Opposing must be strictly less than aligned
+        assert result_opposing["confidence"] < result_aligned["confidence"]
+
+    def test_wait_bias_no_change(self):
+        """trade_bias=WAIT leaves confidence unchanged (before path_score)."""
+        liq = {"liquidity_valid": True, "trade_bias": "WAIT",
+               "path_score": 1.0, "entry_ready": False}
+        ranges = [_range(110, 100, duration=48)]
+        result = evaluate_rig_v2(
+            _ctx_with_liq(liq, htf_bias="bullish"), ranges, 108.0
+        )
+        result_without = evaluate_rig_v2(
+            _ctx(htf_bias="bullish", session_bias="bullish"), ranges, 108.0
+        )
+        # path_score=1.0 → no multiplicative change, no bias change
+        assert result["confidence"] == pytest.approx(result_without["confidence"])
+
+
+class TestLiquidityPathScore:
+
+    def test_partial_path_reduces_confidence(self):
+        """path_score=0.65 multiplies confidence down."""
+        liq = {"liquidity_valid": True, "trade_bias": "WAIT",
+               "path_score": 0.65, "entry_ready": False}
+        ranges = [_range(110, 100, duration=48)]
+        result = evaluate_rig_v2(
+            _ctx_with_liq(liq, htf_bias="bullish"), ranges, 108.0
+        )
+        result_without = evaluate_rig_v2(
+            _ctx(htf_bias="bullish", session_bias="bullish"), ranges, 108.0
+        )
+        # 0.65x multiplier
+        expected = result_without["confidence"] * 0.65
+        assert result["confidence"] == pytest.approx(expected, abs=0.01)
+
+    def test_zero_path_score_no_multiplication(self):
+        """path_score=0 skips multiplication (guard: if path_score > 0)."""
+        liq = {"liquidity_valid": True, "trade_bias": "WAIT",
+               "path_score": 0.0, "entry_ready": False}
+        ranges = [_range(110, 100, duration=48)]
+        result = evaluate_rig_v2(
+            _ctx_with_liq(liq, htf_bias="bullish"), ranges, 108.0
+        )
+        result_without = evaluate_rig_v2(
+            _ctx(htf_bias="bullish", session_bias="bullish"), ranges, 108.0
+        )
+        assert result["confidence"] == pytest.approx(result_without["confidence"])
+
+
+class TestLiquidityEntryReady:
+
+    def test_entry_ready_adds_boost(self):
+        """entry_ready=True adds +0.05."""
+        liq_ready = {"liquidity_valid": True, "trade_bias": "WAIT",
+                     "path_score": 1.0, "entry_ready": True}
+        liq_not = {"liquidity_valid": True, "trade_bias": "WAIT",
+                   "path_score": 1.0, "entry_ready": False}
+        ranges = [_range(110, 100, duration=48)]
+        result_ready = evaluate_rig_v2(
+            _ctx_with_liq(liq_ready, htf_bias="bullish"), ranges, 108.0
+        )
+        result_not = evaluate_rig_v2(
+            _ctx_with_liq(liq_not, htf_bias="bullish"), ranges, 108.0
+        )
+        assert result_ready["confidence"] == pytest.approx(
+            result_not["confidence"] + 0.05, abs=0.001
+        )
+
+
+class TestLiquidityMissing:
+
+    def test_no_liquidity_data_safe(self):
+        """Missing liquidity → no crash, confidence unchanged, reason appended."""
+        ranges = [_range(110, 100, duration=48)]
+        result = evaluate_rig_v2(
+            _ctx(htf_bias="bullish", session_bias="bullish"), ranges, 108.0
+        )
+        assert "liquidity" in result
+        assert result["liquidity"]["valid"] is None
+        assert "unavailable" in result["reason"]
+
+    def test_none_liquidity_safe(self):
+        """Explicit None liquidity → safe fallback."""
+        ctx = _ctx(htf_bias="bullish", session_bias="bullish")
+        ctx["liquidity"] = None
+        ranges = [_range(110, 100, duration=48)]
+        result = evaluate_rig_v2(ctx, ranges, 108.0)
+        assert result["liquidity"]["valid"] is None
+
+    def test_empty_liquidity_dict_safe(self):
+        """Empty liquidity dict → treated as missing."""
+        ctx = _ctx(htf_bias="bullish", session_bias="bullish")
+        ctx["liquidity"] = {}
+        ranges = [_range(110, 100, duration=48)]
+        result = evaluate_rig_v2(ctx, ranges, 108.0)
+        assert result["liquidity"]["valid"] is None
+
+
+class TestLiquidityConfidenceClamp:
+
+    def test_confidence_clamped_to_one(self):
+        """Multiple boosts can't exceed 1.0."""
+        liq = {"liquidity_valid": True, "trade_bias": "BULLISH",
+               "path_score": 1.0, "entry_ready": True}
+        ranges = [_range(110, 100, duration=48)]
+        result = evaluate_rig_v2(
+            _ctx_with_liq(liq, htf_bias="bullish"), ranges, 108.0
+        )
+        assert result["confidence"] <= 1.0
+
+    def test_confidence_clamped_to_zero(self):
+        """Heavy penalty can't go below 0.0."""
+        liq = {"liquidity_valid": True, "trade_bias": "BEARISH",
+               "path_score": 0.3, "entry_ready": False}
+        ranges = [_range(110, 100, duration=48)]
+        # Use counter-bias session to get low base confidence
+        result = evaluate_rig_v2(
+            _ctx_with_liq(liq, htf_bias="bullish", session_bias="bearish"),
+            ranges, 103.0
+        )
+        assert result["confidence"] >= 0.0
+
+
+class TestLiquidityDebugOutput:
+
+    def test_liquidity_debug_fields(self):
+        """Output includes liquidity debug with all expected fields."""
+        liq = {"liquidity_valid": True, "trade_bias": "LONG",
+               "path_score": 0.65, "entry_ready": True}
+        ranges = [_range(110, 100, duration=48)]
+        result = evaluate_rig_v2(
+            _ctx_with_liq(liq, htf_bias="bullish"), ranges, 108.0
+        )
+        liq_out = result["liquidity"]
+        assert liq_out["valid"] is True
+        assert liq_out["bias"] == "LONG"
+        assert liq_out["path_score"] == pytest.approx(0.65)
+        assert liq_out["entry_ready"] is True
