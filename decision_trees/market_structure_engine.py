@@ -18,7 +18,7 @@ columns required: open, high, low, close
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
 import numpy as np
 import pandas as pd
 
@@ -67,13 +67,13 @@ class MarketStructureEngine:
 
     def detect_pivots(
         self, df: pd.DataFrame, window: int = 3
-    ) -> Tuple[List[Tuple[int, float]], List[Tuple[int, float]]]:
+    ) -> tuple[list[tuple[int, float]], list[tuple[int, float]]]:
 
         highs = df["high"].values
         lows = df["low"].values
 
-        pivot_highs: List[Tuple[int, float]] = []
-        pivot_lows: List[Tuple[int, float]] = []
+        pivot_highs: list[tuple[int, float]] = []
+        pivot_lows: list[tuple[int, float]] = []
 
         for i in range(window, len(df) - window):
 
@@ -224,7 +224,7 @@ class MarketStructureEngine:
     # Liquidity Pool Detection
     # ========================================================
 
-    def detect_liquidity_pools(self, df: pd.DataFrame) -> Dict[str, List[float]]:
+    def detect_liquidity_pools(self, df: pd.DataFrame) -> dict[str, list[float]]:
 
         highs = df["high"].values
         lows = df["low"].values
@@ -352,6 +352,10 @@ class MarketStructureEngine:
         Returns:
             StructuralAcceptance with confirmed=True/False/None
         """
+        # TODO: htf_bias reserved for future L2 counter-structure validation.
+        # Planned use: verify that post-sweep structure aligns or conflicts
+        # with HTF directional bias (e.g., confirming reversal vs continuation).
+
         if df is None or len(df) < 10:
             return StructuralAcceptance(
                 confirmed=None,

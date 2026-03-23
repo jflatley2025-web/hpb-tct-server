@@ -92,6 +92,8 @@ class LiquidityInputs:
     tct_schematic_confirmed: bool           # TCT Model 1 or Model 2 confirmation received
 
     # Phase 5 — Structural confirmation (optional, from market_structure_engine)
+    # Logically grouped with Phase 5 (accepted_back_inside_range) but placed here
+    # because Python dataclasses require default fields after non-default fields.
     structure_confirmed_after_sweep: Optional[bool] = None  # True=confirmed, False=rejected, None=unavailable
 
 
