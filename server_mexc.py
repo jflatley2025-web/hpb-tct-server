@@ -2663,6 +2663,19 @@ def placeholder_gate_payload():
     }
 
 
+def five_a_fallback_payload():
+    """5A pipeline fallback — decision tree bridge is not run in 5A."""
+    return {
+        **placeholder_gate_payload(),
+        "reason": "5A pipeline does not run decision tree bridge",
+    }
+
+
+def _valid_gate(g):
+    """Check that a gate result is a dict containing the required 'passed' key."""
+    return isinstance(g, dict) and "passed" in g
+
+
 def validate_1A(context: Dict) -> Dict:
     try:
         htf = context.get("htf_candles")
@@ -15208,15 +15221,10 @@ async def tensor_trade_scan():
                 "best_tf": _5a_details.get("best_tf"),
             },
             # ── 5A pipeline lacks bridge evaluation — gates show source context ──
-            "gate_LIQUIDITY": {**placeholder_gate_payload(),
-                               "reason": "5A pipeline does not run decision tree bridge"},
-            "gate_MARKET_STRUCTURE": {**placeholder_gate_payload(),
-                                      "reason": "5A pipeline does not run decision tree bridge",
-                                      "bias": _5a_htf_bias},
-            "gate_RANGE": {**placeholder_gate_payload(),
-                           "reason": "5A pipeline does not run decision tree bridge"},
-            "gate_SUPPLY_DEMAND": {**placeholder_gate_payload(),
-                                   "reason": "5A pipeline does not run decision tree bridge"},
+            "gate_LIQUIDITY": five_a_fallback_payload(),
+            "gate_MARKET_STRUCTURE": {**five_a_fallback_payload(), "bias": _5a_htf_bias},
+            "gate_RANGE": five_a_fallback_payload(),
+            "gate_SUPPLY_DEMAND": five_a_fallback_payload(),
 
             "signal": _5a_signal,
             "confidence": None,
@@ -18509,9 +18517,14 @@ async def schematics_5b_auto_scan_loop():
                     _5b_tree = _5b_eval.get("tree_results") or {}
                     # v2 pipeline stores in phase_results, v1 in tree_results
                     _5b_liq = _5b_phase.get("liquidity") or _5b_tree.get("liquidity")
-                    _5b_mkt_struct = _5b_tree.get("market_structure")
                     _5b_ranges = _5b_phase.get("range") or _5b_tree.get("ranges")
-                    _5b_sd = _5b_tree.get("supply_demand")
+                    # market_structure & supply_demand: prefer phase_results only if valid
+                    _5b_mkt_struct = _5b_phase.get("market_structure")
+                    if not _valid_gate(_5b_mkt_struct):
+                        _5b_mkt_struct = _5b_tree.get("market_structure")
+                    _5b_sd = _5b_phase.get("supply_demand")
+                    if not _valid_gate(_5b_sd):
+                        _5b_sd = _5b_tree.get("supply_demand")
 
                 # ── MSCE: Multi-Session Context Engine ──
                 # Now evaluated inside scan_and_trade via msce_engine.
@@ -18607,7 +18620,7 @@ async def schematics_5b_auto_scan_loop():
                         "status": "ACTIVE",
                         "passed": bool(ms.get("passed", False)),
                         "confidence": 1.0 if ms.get("passed") else 0.0,
-                        "reason": f"HTF bias: {ms.get('bias', 'unknown')}",
+                        "reason": ms.get("reason") or f"HTF bias: {ms.get('bias', 'unknown')}",
                         "evaluated": True,
                         "bias": ms.get("bias"),
                     })(_5b_mkt_struct) if _5b_mkt_struct else placeholder_gate_payload(),
