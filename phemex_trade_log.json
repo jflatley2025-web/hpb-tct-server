@@ -3,7 +3,7 @@
   "starting_balance": 5000.0,
   "current_trade": null,
   "trade_history": [],
-  "last_scan_time": 1774264447.4971278,
+  "last_scan_time": 1774267513.9396837,
   "last_signal": "NO_TRADE",
   "last_pipeline_result": {
     "signal": "NO_TRADE",
@@ -23,14 +23,14 @@
     "rig": {
       "status": "NOT_EVALUATED",
       "Gate": "RIG",
-      "reason": "Missing: displacement",
+      "reason": "Missing: displacement, session_bias",
       "confidence": 0.0,
       "evaluated": true,
       "displacement": null,
-      "htf_bias": "bearish",
-      "session_bias": "bearish",
-      "timestamp": "2026-03-23 11:14:07"
+      "htf_bias": "ranging",
+      "session_bias": null,
+      "timestamp": "2026-03-23 12:05:14"
     }
   },
-  "last_updated": "2026-03-23T11:14:07.758090+00:00"
+  "last_updated": "2026-03-23T12:05:14.650787+00:00"
 }
