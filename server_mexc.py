@@ -176,6 +176,32 @@ def convert_numpy_types(obj):
         return obj
 
 
+def _normalize_tct_signal(value):
+    """Normalize bias/signal vocabulary to LONG/SHORT/NO_TRADE.
+
+    Accepts "bullish"/"bearish" (from HTF bias) or "LONG"/"SHORT" and
+    returns a consistent uppercase signal string for dashboard display.
+    """
+    if value is None:
+        return None
+    v = str(value).lower()
+    if v == "bullish":
+        return "LONG"
+    if v == "bearish":
+        return "SHORT"
+    if v in ("long", "short"):
+        return v.upper()
+    return value
+
+
+# ---------------------------------------------------------------------------
+# RIG — Shared helpers for 5A / 5B pipelines
+# ---------------------------------------------------------------------------
+
+# RIG evaluation now uses rig_engine.evaluate_rig_global() — canonical single path.
+# _evaluate_rig_safe() and _RIG_NOT_EVALUATED removed.
+
+
 # ================================================================
 # CONFIGURATION
 # ================================================================
@@ -304,6 +330,11 @@ def validate_MSCE(context):
     else:
         session = "NY"
         weight = 1.15
+    # MSCE gate fields:
+    #   valid = session was detected (always True here; structural, not directional)
+    #   session_bias = directional bias derived from session type
+    # These can diverge: valid=True but session_bias="neutral" means
+    # we know the session but have no directional conviction.
     context["MSCE"] = {
         "session": session,
         "session_bias": bias,
@@ -2619,6 +2650,79 @@ class LiquidityVoidDetector:
 # GATES
 # ================================================================
 
+def placeholder_gate_payload():
+    """Canonical NOT_EVALUATED gate payload for placeholder gates.
+    Single source of truth — prevents schema drift across snapshot locations.
+    """
+    return {
+        "status": "NOT_EVALUATED",
+        "passed": False,
+        "confidence": 0.0,
+        "reason": "Not yet implemented",
+        "evaluated": False,
+    }
+
+
+def five_a_fallback_payload():
+    """5A pipeline fallback — decision tree bridge is not run in 5A."""
+    return {
+        **placeholder_gate_payload(),
+        "reason": "5A pipeline does not run decision tree bridge",
+    }
+
+
+def _valid_gate(g):
+    """Check that a gate result is a dict containing the required 'passed' key."""
+    return isinstance(g, dict) and "passed" in g
+
+
+def _build_gate_rcm_payload(rng, rig):
+    """Assemble gate_RCM_range snapshot from phase_results['range'] and RIG data.
+
+    All RCM fields are direct passthroughs from rng — no recomputation.
+    When rng is None (no pipeline data), all fields default to None.
+    """
+    if rng is None:
+        return {
+            "status": "ACTIVE" if rig.get("displacement") is not None else "NOT_EVALUATED",
+            "passed": None,
+            "confidence": None,
+            "evaluated": False,
+            "reason": None,
+            "score": None,
+            "rcm_score": None,
+            "horizontal": None,
+            "six_candle_rule": None,
+            "v_shape_rejected": None,
+            "time_displacement_ok": None,
+            "range_high": None,
+            "range_low": None,
+            "range_mid": None,
+            "duration_hours": None,
+            "displacement": None,
+            "note": "range_engine_controller (L1/L2) → decision_tree_bridge",
+        }
+    return {
+        "status": rng.get("rcm_status"),
+        "passed": rng.get("passed"),
+        "confidence": float(rng["rcm_score"]) if rng.get("rcm_score") is not None else None,
+        "evaluated": True,
+        "reason": rng.get("reason"),
+        "score": rng.get("score"),
+        "rcm_score": rng.get("rcm_score"),
+        "horizontal": rng.get("horizontal"),
+        "six_candle_rule": rng.get("six_candle_rule"),
+        "v_shape_rejected": rng.get("v_shape_rejected"),
+        "time_displacement_ok": rng.get("time_displacement_ok"),
+        "range_high": rng.get("range_high"),
+        "range_low": rng.get("range_low"),
+        "range_mid": rng.get("range_mid"),
+        "duration_hours": rng.get("duration_hours"),
+        "displacement": rng.get("displacement"),
+        "note": "range_engine_controller (L1/L2) → decision_tree_bridge",
+    }
+
+
 def validate_1A(context: Dict) -> Dict:
     try:
         htf = context.get("htf_candles")
@@ -2671,18 +2775,108 @@ def validate_RCM(context: Dict) -> Dict:
     try:
         r = context.get("detected_range")
         if not r or r["duration_hours"] < 24:
-            return {"valid": False, "confidence": 0.0}
+            return {"valid": False, "confidence": 0.0, "displacement": None,
+                    "range_high": None, "range_low": None, "range_duration": None}
 
         conf = min(r["duration_hours"] / 34, 1.0)
-        return {"valid": conf > 0.6, "confidence": conf}
+        valid = conf > 0.6
+
+        range_high = r.get("high")
+        range_low = r.get("low")
+        current_price = context.get("current_price")
+        displacement = compute_displacement(current_price, range_high, range_low) if valid else None
+
+        return {
+            "valid": valid,
+            "confidence": conf,
+            "range_high": range_high,
+            "range_low": range_low,
+            "range_duration": r.get("duration_hours", 0),
+            "displacement": displacement,
+        }
     except Exception as e:
-        return {"valid": False, "confidence": 0.0, "error": str(e)}
+        return {"valid": False, "confidence": 0.0, "error": str(e),
+                "displacement": None, "range_high": None, "range_low": None,
+                "range_duration": None}
 
 def validate_RIG(context: Dict) -> Dict:
-    rcm = context.get("RCM", {})
-    if rcm.get("valid"):
-        return {"passed": True}
-    return {"passed": False}
+    """
+    Range Integrity Gate — calls hpb_rig_validator to block counter-bias
+    trades inside intact HTF ranges.  Returns dict with 'passed' key
+    (True ONLY on explicit VALID status) plus full RIG output.
+
+    Fail-closed: errors and unknown statuses block execution.
+    Only evaluates when RCM is valid and displacement is available.
+    """
+    try:
+        from hpb_rig_validator import range_integrity_validator
+
+        rcm = context.get("RCM", {})
+        msce = context.get("MSCE", {})
+        one_a = context.get("1A", {})
+
+        displacement = context.get("local_range_displacement")
+        rcm_valid = rcm.get("valid", False)
+        range_duration = rcm.get("range_duration")
+
+        # Do not evaluate RIG if RCM is invalid, displacement is missing,
+        # or range_duration is absent
+        if not rcm_valid or displacement is None or not range_duration:
+            return {
+                "passed": False,
+                "status": "NOT_EVALUATED",
+                "reason": f"Missing: rcm_valid={rcm_valid} displacement={displacement is not None} dur={range_duration is not None}",
+                "displacement": displacement,
+                "htf_bias": one_a.get("bias", "neutral"),
+                "session_bias": msce.get("session_bias"),
+                "confidence": 0.0,
+                "evaluated": False,
+            }
+
+        rig_context = {
+            "gates": {
+                "1A": {"bias": one_a.get("bias", "neutral")},
+                "RCM": {
+                    "valid": rcm_valid,
+                    "range_duration_hours": range_duration,
+                },
+                "MSCE": {
+                    "session_bias": msce.get("session_bias"),
+                    "session": msce.get("session", "Unknown"),
+                },
+                "1D": {"score": 0.0},  # 1D hasn't run yet at this point
+            },
+            "local_range_displacement": displacement,
+        }
+
+        rig_result = range_integrity_validator(rig_context)
+        passed = rig_result.get("status") == "VALID"
+
+        if not passed:
+            logger.info("RIG BLOCK: %s", rig_result)
+
+        return {
+            "passed": passed,
+            "status": rig_result.get("status"),
+            "reason": rig_result.get("reason"),
+            "displacement": displacement,
+            "htf_bias": rig_result.get("htf_bias"),
+            "session_bias": rig_result.get("session_bias"),
+            "confidence": rig_result.get("confidence"),
+            "evaluated": True,
+        }
+    except Exception as e:
+        logger.error("validate_RIG error: %s", e, exc_info=True)
+        return {
+            "passed": False,
+            "status": "ERROR",
+            "reason": str(e),
+            "displacement": None,
+            "htf_bias": None,
+            "session_bias": None,
+            "confidence": 0.0,
+            "evaluated": False,
+        }
 
 def validate_1D(context: Dict) -> Dict:
     try:
@@ -2712,6 +2906,43 @@ def validate_gates(context: Dict) -> Dict:
     context["1C"] = validate_1C(context)
     context["RCM"] = validate_RCM(context)
     context["MSCE"] = validate_MSCE(context)
+
+    # Promote displacement from RCM result to top-level context.
+    # validate_RIG reads context["local_range_displacement"] as its single source.
+    context["local_range_displacement"] = context["RCM"].get("displacement")
+
+    # --- RIG Test Mode Injection ---
+    # When RIG_TEST_MODE is enabled, override RCM + displacement with controlled
+    # test values so RIG can be validated even when live RCM is invalid.
+    # Only overrides RCM gate and local_range_displacement; all other gates stay real.
+    if os.getenv("RIG_TEST_MODE", "false").lower() in {"1", "true", "yes"}:
+        from rig_test_mode import build_test_context
+
+        current_price = context.get("current_price")
+        context["debug"] = context.get("debug", {})
+        if current_price is not None:
+            try:
+                test_ctx, displacement = build_test_context(current_price)
+                if displacement is not None:
+                    test_rcm = test_ctx["gates"]["RCM"]
+                    # Merge test overrides into existing RCM — preserves production metadata
+                    context["RCM"]["valid"] = test_rcm["valid"]
+                    context["RCM"]["range_high"] = test_rcm["range_high"]
+                    context["RCM"]["range_low"] = test_rcm["range_low"]
+                    context["RCM"]["range_duration"] = test_rcm["range_duration_hours"]
+                    context["RCM"]["confidence"] = min(test_rcm["range_duration_hours"] / 34, 1.0)
+                    context["local_range_displacement"] = displacement
+                    context["debug"]["rig_test_mode"] = True
+                else:
+                    context["debug"]["rig_test_mode"] = False
+                    logger.warning("RIG_TEST_MODE: displacement is None, falling through to production")
+            except ValueError as e:
+                context["debug"]["rig_test_mode"] = False
+                logger.warning("RIG_TEST_MODE: invalid test params, falling through to production: %s", e)
+        else:
+            context["debug"]["rig_test_mode"] = False
+            logger.warning("RIG_TEST_MODE: current_price is None, falling through to production")
+
     context["RIG"] = validate_RIG(context)
     context["1D"] = validate_1D(context)
 
@@ -14974,6 +15205,82 @@ async def tensor_trade_scan():
     trader = get_trader()
     loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(None, trader.scan_and_trade)
+
+    # ── TCT Snapshot: capture 5A decision state ────────────────
+    try:
+        from tct_snapshot import tct_store
+        _safe_result = convert_numpy_types(result)
+        _5a_details = _safe_result.get("details", {}) if isinstance(_safe_result.get("details"), dict) else {}
+        _5a_htf_bias = _safe_result.get("htf_bias")
+        _5a_action = _safe_result.get("action")
+        _5a_signal = _normalize_tct_signal(_5a_htf_bias) if _5a_action == "trade_entered" else "NO_TRADE"
+
+        # ── RIG: Range Integrity Gate ──
+        # 5A lacks RCM, MSCE, and displacement data → NOT_EVALUATED.
+        # evaluated=True means "RIG ran and determined it cannot evaluate"
+        # (intentionally not applicable), NOT "RIG was actually executed."
+        _5a_rig = {
+            "status": "NOT_EVALUATED",
+            "Gate": "RIG",
+            "reason": "5A pipeline lacks range context (no RCM/MSCE)",
+            "confidence": 0.0,
+            "evaluated": True,
+            "displacement": None,
+            "htf_bias": _5a_htf_bias,
+            "session_bias": None,
+        }
+
+        _5a_rig_status = _5a_rig.get("status")
+        _5a_rig_passed = _5a_rig_status == "VALID"
+        # NOT_EVALUATED means inputs are missing — don't block, let signal through
+        _5a_rig_blocked = _5a_rig_status not in ("VALID", "NOT_EVALUATED", None)
+        if _5a_rig_blocked:
+            logger.info("RIG BLOCK (5A): %s", _5a_rig)
+            if _5a_signal != "NO_TRADE":
+                _5a_signal = "NO_TRADE"
+
+        tct_store.update({
+            "source": "tensor_tct_5a",
+            "price": _5a_details.get("current_price"),
+            "gate_1A_btc_structure": {
+                "status": "PARTIAL",
+                "trend": _5a_htf_bias,
+                "passed": _5a_htf_bias in ("bullish", "bearish"),
+            },
+            "gate_1B_usdt_d": {"status": "NOT_IMPLEMENTED", "passed": None},
+            "gate_1C_alt_alignment": {"status": "NOT_IMPLEMENTED", "passed": None},
+            "gate_RCM_range": {"status": "NOT_EVALUATED"},
+            "gate_RIG": {
+                "status": _5a_rig.get("status"),
+                "reason": _5a_rig.get("reason"),
+                "displacement": _5a_rig.get("displacement"),
+                "htf_bias": _5a_rig.get("htf_bias"),
+                "session_bias": _5a_rig.get("session_bias"),
+                "confidence": _5a_rig.get("confidence"),
+                "passed": _5a_rig_passed,
+            },
+            "gate_MSCE": {"status": "NOT_IMPLEMENTED", "passed": None},
+            "gate_1D_execution": {
+                "status": "BLOCKED_BY_RIG" if _5a_rig_blocked and _5a_action == "trade_entered" else (
+                    "ACTIVE" if _5a_action == "trade_entered" else "NO_SIGNAL"),
+                "signal": "NO_TRADE" if _5a_rig_blocked else _5a_action,
+                "best_score": _5a_details.get("best_score"),
+                "best_tf": _5a_details.get("best_tf"),
+            },
+            # ── 5A pipeline lacks bridge evaluation — gates show source context ──
+            "gate_LIQUIDITY": five_a_fallback_payload(),
+            "gate_MARKET_STRUCTURE": {**five_a_fallback_payload(), "bias": _5a_htf_bias},
+            "gate_RANGE": five_a_fallback_payload(),
+            "gate_SUPPLY_DEMAND": five_a_fallback_payload(),
+
+            "signal": _5a_signal,
+            "confidence": None,
+            "blocking_gate": "RIG" if _5a_rig_blocked else None,
+        })
+    except Exception as exc:
+        logger.warning("[5A-SNAPSHOT] TCT snapshot update failed: %s", exc)
+    # ───────────────────────────────────────────────────────────
+
     return convert_numpy_types(result)
 
 
@@ -15632,6 +15939,99 @@ async def schematics_5b_debug():
             "state_summary": raw.get("state_summary", {}),
         }
 
+        # ── Structure summary, failure context, score breakdown, execution quality ──
+        # Prefer best passing eval; fall back to best failing eval if none passed.
+        _best_pass_ev: Optional[Dict] = None
+        _best_pass_score = -1
+        _best_fail_ev: Optional[Dict] = None
+        _best_fail_score = -1
+        for _tf_key, _tf_data in primary_data.get("timeframes", {}).items():
+            if not isinstance(_tf_data, dict):
+                continue
+            for _ev in _tf_data.get("evaluations", []):
+                if not isinstance(_ev, dict):
+                    continue
+                _score = _ev.get("score")
+                if not isinstance(_score, (int, float)):
+                    _score = 0
+                if _ev.get("pass"):
+                    if _score > _best_pass_score:
+                        _best_pass_score = _score
+                        _best_pass_ev = _ev
+                else:
+                    if _score > _best_fail_score:
+                        _best_fail_score = _score
+                        _best_fail_ev = _ev
+        _best_ev = _best_pass_ev if _best_pass_ev is not None else _best_fail_ev
+
+        if not _best_ev:
+            debug["execution_quality"] = "unknown"
+        else:
+            # Shallow copy so setdefault below does not mutate stored last_debug data.
+            _pr = dict(_best_ev.get("phase_results", {}))
+            _pr.setdefault("rig", {"zone": "unknown", "displacement_pct": 0.0, "penalty": 0})
+            _rig_pr = _pr["rig"]
+            _rig_zone = _rig_pr.get("zone", "undetermined")
+            # Emit None when a phase was never evaluated (e.g. pipeline aborted earlier).
+            # The UI renders None as "—" (na class) to distinguish from a real PASS/FAIL.
+            _l2_raw = _pr.get("l2")
+            _l3_raw = _pr.get("l3")
+            _l2_blocked   = (not _l2_raw.get("passed", True)) if isinstance(_l2_raw, dict) else None
+            _l3_confirmed = _l3_raw.get("passed", False) if isinstance(_l3_raw, dict) else None
+
+            # 1. Structure summary — key gate outcomes at a glance
+            debug["structure"] = {
+                "l2_blocked": _l2_blocked,
+                "l3_confirmed": _l3_confirmed,
+                "rig_zone": _rig_zone,
+                "rig_displacement": _rig_pr.get("displacement_pct", 0.0),
+                "rig_penalty": _rig_pr.get("penalty", 0),
+            }
+
+            # 2. Failure context — first hard gate that failed (pipeline order)
+            _phase_order = [
+                "l2", "rig", "range", "tap_structure",
+                "liquidity", "l3", "bos", "directional", "risk",
+            ]
+            _failed_phase = None
+            _failure_reason = None
+            for _ph in _phase_order:
+                _ph_data = _pr.get(_ph, {})
+                if isinstance(_ph_data, dict) and _ph_data.get("passed") is False:
+                    _failed_phase = _ph
+                    _failure_reason = (
+                        _ph_data.get("reason")
+                        or next(iter(_best_ev.get("reasons", [])), None)
+                    )
+                    break
+            if _failed_phase:
+                debug["failure_context"] = {
+                    "failed_phase": _failed_phase,
+                    "reason": _failure_reason or f"{_failed_phase} gate failed",
+                }
+
+            # 3. Score breakdown — per-phase contribution (structured, no string parsing)
+            debug["score_breakdown"] = {
+                "range": _pr.get("range", {}).get("score", 0),
+                "taps": _pr.get("tap_structure", {}).get("score", 0),
+                "liquidity": _pr.get("liquidity", {}).get("score", 0),
+                "bos": _pr.get("bos", {}).get("score", 0),
+                "rig_penalty": _rig_pr.get("penalty", 0),
+                "session": _pr.get("session", {}).get("score", 0),
+                "rr_bonus": _pr.get("rr_bonus", 0),
+            }
+
+            # 4. Execution quality — invalid takes priority over structural classification
+            if not _best_ev.get("pass"):
+                _exec_quality = "invalid"
+            elif _rig_zone == "clear" and _l3_confirmed:
+                _exec_quality = "high"
+            elif _rig_zone == "penalty" and _l3_confirmed:
+                _exec_quality = "medium"
+            else:
+                _exec_quality = "low"
+            debug["execution_quality"] = _exec_quality
+
         # Extract tree_results from the per-symbol evaluation data
         per_sym = debug.get("per_symbol", {})
         for sym, sym_data in per_sym.items():
@@ -15854,6 +16254,23 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
 .dt-meta{padding:8px 14px;font-size:.7rem;color:#888;border-bottom:1px solid #1e1e2d;display:flex;gap:16px;flex-wrap:wrap;background:#0d0d18;border-radius:6px 6px 0 0}
 .dt-meta-item{display:flex;gap:4px}.dt-meta-label{color:#555}.dt-meta-val{color:#e0e0e0;font-weight:600}
 .dt-meta-val.green{color:#00e676}.dt-meta-val.red{color:#ff4444}.dt-meta-val.yellow{color:#ffc107}.dt-meta-val.cyan{color:#00d4ff}
+
+/* ===== STRUCTURE GATES BAR ===== */
+.sg-bar{display:flex;align-items:center;gap:8px;padding:7px 14px;background:#0e0e1a;border-bottom:1px solid #1e1e2d;flex-wrap:wrap}
+.sg-label{font-size:.62rem;color:#555;text-transform:uppercase;letter-spacing:.5px;flex-shrink:0}
+.sg-gate{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:4px;border:1px solid;cursor:default;flex-shrink:0;font-size:.7rem;font-weight:700}
+.sg-gate.pass{background:rgba(0,230,118,.08);border-color:rgba(0,230,118,.3);color:#00e676}
+.sg-gate.fail{background:rgba(255,68,68,.08);border-color:rgba(255,68,68,.3);color:#ff4444}
+.sg-gate.warn{background:rgba(255,193,7,.08);border-color:rgba(255,193,7,.3);color:#ffc107}
+.sg-gate.na{background:rgba(255,255,255,.03);border-color:#2a2a3a;color:#555}
+.sg-name{font-size:.58rem;font-weight:700;letter-spacing:.5px;opacity:.65}
+.sg-sep{width:1px;height:16px;background:#1e1e2d;flex-shrink:0;margin:0 2px}
+.sg-eq{display:inline-flex;align-items:center;padding:3px 10px;border-radius:4px;border:1px solid;font-size:.7rem;font-weight:700;flex-shrink:0}
+.sg-eq.high{background:rgba(0,230,118,.1);border-color:rgba(0,230,118,.3);color:#00e676}
+.sg-eq.medium{background:rgba(0,212,255,.1);border-color:rgba(0,212,255,.3);color:#00d4ff}
+.sg-eq.low{background:rgba(255,193,7,.1);border-color:rgba(255,193,7,.3);color:#ffc107}
+.sg-eq.invalid{background:rgba(255,68,68,.1);border-color:rgba(255,68,68,.3);color:#ff4444}
+.sg-eq.unknown{background:rgba(255,255,255,.03);border-color:#2a2a3a;color:#555}
 
 /* Decision-tree category sections */
 .dt-section{margin-bottom:8px;border:1px solid #1e1e2d;border-radius:8px;overflow:hidden}
@@ -16109,6 +16526,7 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
   </button>
   <div class="debug-body-wrap" id="debugBodyWrap">
     <div id="dtMeta" class="dt-meta"><span class="dt-meta-item"><span class="dt-meta-label">Status:</span><span class="dt-meta-val">Click "Manual Scan" or wait for auto-scan</span></span></div>
+    <div id="dtGates"></div>
     <div id="dtSections"></div>
   </div>
 </div>
@@ -16581,6 +16999,122 @@ async function setTradingMode(mode) {
   }
 }
 
+// ── Structure Gates bar ──────────────────────────────────────────
+// Reads d.structure (l2_blocked, l3_confirmed, rig_zone, rig_displacement,
+// rig_penalty) and d.execution_quality already emitted by the debug endpoint.
+// Called unconditionally so the bar clears correctly on "no data" state.
+function renderStructureGates(d) {
+  const el = document.getElementById('dtGates');
+  if (!el) return;
+
+  const s  = d?.structure || {};
+  const eq = d?.execution_quality ?? 'unknown';
+  const fc = d?.failure_context  || null;
+
+  // L2 — counter-structure filter
+  const l2Blocked = s.l2_blocked;
+  const l2Class   = (l2Blocked == null) ? 'na'    : l2Blocked ? 'fail' : 'pass';
+  const l2Text    = (l2Blocked == null) ? '\u2014' : l2Blocked ? 'BLOCKED' : 'PASS';
+  const l2Tip     = (l2Blocked == null)
+    ? 'L2: Not evaluated — pipeline exited before this phase'
+    : l2Blocked
+      ? 'L2: Counter-structure detected\nInternal reversal active — trade blocked'
+      : 'L2: No counter-structure\nStructure aligned with HTF bias';
+
+  // L3 — execution confirmation (BOS gate)
+  const l3Conf  = s.l3_confirmed;
+  const l3Class = (l3Conf == null) ? 'na' : l3Conf ? 'pass' : 'fail';
+  const l3Text  = (l3Conf == null) ? '\u2014' : l3Conf ? 'CONFIRMED' : 'MISSING';
+  const l3Tip   = (l3Conf == null)
+    ? 'L3: Not evaluated — pipeline exited before this phase'
+    : l3Conf
+      ? 'L3: BOS confirmed\nExecution gate passed'
+      : 'L3: No BOS confirmation\nExecution gate failed';
+
+  // RIG — range integrity gate
+  const rig  = s.rig_zone || 'unknown';
+  const disp = (s.rig_displacement != null) ? s.rig_displacement + '%' : '\u2014';
+  const pen  = s.rig_penalty || 0;
+  const rigClassMap = {blocked:'fail', penalty:'warn', clear:'pass', undetermined:'na'};
+  const rigClass = rigClassMap[rig] || 'na';
+  const rigText  = rig === 'blocked'      ? 'HARD BLOCK'
+                 : rig === 'penalty'      ? 'PENALTY \u2212' + pen
+                 : rig === 'clear'        ? 'CLEAR'
+                 : rig === 'undetermined' ? 'UNDETERMINED'
+                 : '\u2014';
+  const rigTip   = rig === 'blocked'
+    ? 'RIG: Hard block\nWithin 10\u0025 of equilibrium\nDisplacement: ' + disp
+    : rig === 'penalty'
+    ? 'RIG: Penalty zone (10\u201320\u0025)\nDisplacement: ' + disp + '\nScore deduction: \u2212' + pen + ' pts'
+    : rig === 'clear'
+    ? 'RIG: Clear (\u003e20\u0025 from equilibrium)\nDisplacement: ' + disp
+    : 'RIG: Not yet evaluated\n(L2 early block or no scan data)';
+
+  // Execution quality
+  const eqCls   = ['high','medium','low','invalid','unknown'].includes(eq) ? eq : 'unknown';
+  const eqLabel = eqCls.toUpperCase();
+
+  // First failed gate (pipeline order)
+  let failHtml = '';
+  if (fc && fc.failed_phase) {
+    const tip = escapeHtml(fc.reason || fc.failed_phase);
+    failHtml = '<div class="sg-sep"></div>'
+      + '<span style="font-size:.63rem;color:#ff4444;white-space:nowrap" title="' + tip + '">'
+      + '\u26a0\ufe0e ' + escapeHtml(fc.failed_phase.toUpperCase()) + ' failed</span>';
+  }
+
+  // Gate stats row — shown only when metrics are present (after first scan)
+  const gm = d?.gate_metrics;
+  let statsHtml = '';
+  if (gm) {
+    // Sum every known terminal-outcome counter so the denominator is complete.
+    const total = (gm.l2_blocks        || 0)
+                + (gm.l3_failures      || 0)
+                + (gm.rig_blocks       || 0)
+                + (gm.range_failures   || 0)
+                + (gm.tap_failures     || 0)
+                + (gm.liquidity_failures || 0)
+                + (gm.bos_failures     || 0)
+                + (gm.htf_failures     || 0)
+                + (gm.rr_failures      || 0)
+                + (gm.passes           || 0);
+    statsHtml = '<div class="sg-bar" style="border-top:1px solid #1e1e2d;padding-top:6px;padding-bottom:6px">'
+      + '<span class="sg-label">Gate Stats</span>'
+      + '<span style="font-size:.68rem;color:#ff4444;white-space:nowrap" title="L2 counter-structure blocks (lifetime)">'
+      +   'L2 Blocks: <b>' + (gm.l2_blocks || 0) + '</b></span>'
+      + '<span style="font-size:.68rem;color:#ff7043;white-space:nowrap" title="L3 BOS confirmation failures (lifetime)">'
+      +   'L3 Failures: <b>' + (gm.l3_failures || 0) + '</b></span>'
+      + '<span style="font-size:.68rem;color:#ce93d8;white-space:nowrap" title="RIG equilibrium hard blocks (lifetime)">'
+      +   'RIG Blocks: <b>' + (gm.rig_blocks || 0) + '</b></span>'
+      + '<span style="font-size:.68rem;color:#00e676;white-space:nowrap" title="Evaluations that passed all gates (lifetime)">'
+      +   'Passes: <b>' + (gm.passes || 0) + '</b></span>'
+      + (total > 0
+        ? '<span style="font-size:.63rem;color:#555;white-space:nowrap">('
+          + Math.round(((gm.passes || 0) / total) * 100) + '% pass rate, '
+          + total + ' total evals)</span>'
+        : '')
+      + '</div>';
+  }
+
+  el.innerHTML = '<div class="sg-bar">'
+    + '<span class="sg-label">Gates</span>'
+    + '<div class="sg-gate ' + l2Class + '" title="' + escapeHtml(l2Tip) + '">'
+    +   '<span class="sg-name">L2</span>\u00a0' + escapeHtml(l2Text)
+    + '</div>'
+    + '<div class="sg-gate ' + l3Class + '" title="' + escapeHtml(l3Tip) + '">'
+    +   '<span class="sg-name">L3</span>\u00a0' + escapeHtml(l3Text)
+    + '</div>'
+    + '<div class="sg-gate ' + rigClass + '" title="' + escapeHtml(rigTip) + '">'
+    +   '<span class="sg-name">RIG</span>\u00a0' + escapeHtml(rigText)
+    + '</div>'
+    + '<div class="sg-sep"></div>'
+    + '<span class="sg-label">Quality</span>'
+    + '<div class="sg-eq ' + eqCls + '">' + eqLabel + '</div>'
+    + failHtml
+    + '</div>'
+    + statsHtml;
+}
+
 function renderDecisionTrees(d) {
   const meta = document.getElementById('dtMeta');
   const sections = document.getElementById('dtSections');
@@ -16590,6 +17124,9 @@ function renderDecisionTrees(d) {
   const mode = d?.trading_mode || 'claude';
   const sel = document.getElementById('tradingModeSelect');
   if (sel && sel.value !== mode) sel.value = mode;
+
+  // Always render the gates bar — handles no-data and early-exit states.
+  renderStructureGates(d);
 
   if (!d || !d.timeframes || !Object.keys(d.timeframes).length) {
     const err = d?.state_summary?.last_error;
@@ -16630,7 +17167,7 @@ function renderDecisionTrees(d) {
   // Claude's mode: 7-category accordion (original)
   const DT_CATEGORIES = [
     { id: 'ranges',           icon: '↔',  title: 'Ranges',                  link: '/decision_trees/ranges_decision_tree.html' },
-    { id: 'market_structure', icon: '⬆',  title: 'Market Structure',         link: null },
+    { id: 'market_structure', icon: '⬆',  title: 'Market Structure',         link: '/decision_trees/market_structure_decision_tree.html' },
     { id: 'supply_demand',    icon: '⚖',  title: 'Supply & Demand',          link: '/decision_trees/supply_demand_decision_tree.html' },
     { id: 'liquidity',        icon: '💧', title: 'Liquidity',                link: '/decision_trees/liquidity_decision_tree.html' },
     { id: 'schematics_5a',    icon: '5A', title: '5A Schematics (TCT Model)',link: '/decision_trees/tct_5a_schematics_decision_tree.html' },
@@ -18006,6 +18543,164 @@ async def schematics_5b_auto_scan_loop():
             # Attach MSCE context to the result for dashboard visibility
             result["msce"] = msce
 
+            # ── TCT Snapshot: capture 5B decision state ────────────────
+            try:
+                from tct_snapshot import tct_store
+                _5b_debug_raw = trader.last_debug if hasattr(trader, "last_debug") else {}
+                _5b_debug = convert_numpy_types(_5b_debug_raw)
+                _5b_htf_bias = _5b_debug.get("per_symbol", {}).get("BTCUSDT", {}).get("htf_bias")
+                _5b_signal = _normalize_tct_signal(_5b_htf_bias) if action == "trade_entered" else "NO_TRADE"
+
+                # ── Extract gate data from best_setup evaluation ──
+                _5b_sym = _5b_debug.get("per_symbol", {}).get("BTCUSDT", {})
+                _5b_best_setup = _5b_sym.get("best_setup")
+                _5b_liq = None
+                _5b_mkt_struct = None
+                _5b_ranges = None
+                _5b_sd = None
+                if _5b_best_setup and isinstance(_5b_best_setup, (list, tuple)) and len(_5b_best_setup) >= 2:
+                    _5b_eval = _5b_best_setup[1] if isinstance(_5b_best_setup[1], dict) else {}
+                    _5b_phase = _5b_eval.get("phase_results") or {}
+                    _5b_tree = _5b_eval.get("tree_results") or {}
+                    # v2 pipeline stores in phase_results, v1 in tree_results
+                    _5b_liq = _5b_phase.get("liquidity") or _5b_tree.get("liquidity")
+                    _5b_ranges = _5b_phase.get("range") or _5b_tree.get("ranges")
+                    # market_structure & supply_demand: prefer phase_results only if valid
+                    _5b_mkt_struct = _5b_phase.get("market_structure")
+                    if not _valid_gate(_5b_mkt_struct):
+                        _5b_mkt_struct = _5b_tree.get("market_structure")
+                    _5b_sd = _5b_phase.get("supply_demand")
+                    if not _valid_gate(_5b_sd):
+                        _5b_sd = _5b_tree.get("supply_demand")
+
+                # ── MSCE: Multi-Session Context Engine ──
+                # Now evaluated inside scan_and_trade via msce_engine.
+                _5b_msce = _5b_debug.get("msce") or {}
+
+                # ── RIG: Range Integrity Gate ──
+                # RIG is now always evaluated inside scan_and_trade via rig_engine.
+                # No fallback needed — just read the result.
+                _5b_rig = _5b_debug.get("rig")
+                if not _5b_rig or not isinstance(_5b_rig, dict):
+                    _5b_rig = {
+                        "status": "NOT_EVALUATED",
+                        "Gate": "RIG",
+                        "reason": "RIG missing from pipeline",
+                        "confidence": 0.0,
+                        "evaluated": False,
+                        "displacement": None,
+                        "htf_bias": _5b_htf_bias,
+                        "session_bias": None,
+                    }
+
+                _5b_rig_status = _5b_rig.get("status")
+                _5b_rig_passed = _5b_rig_status == "VALID"
+                # NOT_EVALUATED means inputs are missing — don't block, let signal through
+                _5b_rig_blocked = _5b_rig_status not in ("VALID", "NOT_EVALUATED", None)
+                if _5b_rig_blocked:
+                    logger.info("RIG BLOCK (5B): %s", _5b_rig)
+                    if _5b_signal != "NO_TRADE":
+                        _5b_signal = "NO_TRADE"
+
+                _5b_snapshot = {
+                    "source": "schematics_5b",
+                    "price": _5b_debug.get("current_price"),
+
+                    "gate_1A_btc_structure": {
+                        "status": "PARTIAL",
+                        "note": "Uses HTF daily bias, not dedicated BTC macro anchor",
+                        "trend": _5b_htf_bias,
+                        "passed": _5b_htf_bias in ("bullish", "bearish"),
+                    },
+                    "gate_1B_usdt_d": {"status": "NOT_IMPLEMENTED", "trend": None, "correlation": None, "passed": None},
+                    "gate_1C_alt_alignment": {"status": "NOT_IMPLEMENTED", "aligned": None, "passed": None},
+
+                    "gate_RCM_range": _build_gate_rcm_payload(_5b_ranges, _5b_rig),
+
+                    "gate_RIG": {
+                        "status": _5b_rig.get("status"),
+                        "reason": _5b_rig.get("reason"),
+                        "displacement": _5b_rig.get("displacement"),
+                        "htf_bias": _5b_rig.get("htf_bias"),
+                        "session_bias": _5b_rig.get("session_bias"),
+                        "confidence": _5b_rig.get("confidence"),
+                        "evaluated": _5b_rig.get("evaluated"),
+                        "passed": _5b_rig_passed,
+                    },
+
+                    "gate_MSCE": {
+                        "status": "ACTIVE" if _5b_msce.get("session") else "NOT_EVALUATED",
+                        "session": _5b_msce.get("session"),
+                        "session_bias": _5b_msce.get("session_bias"),
+                        "session_type": _5b_msce.get("session_type"),
+                        "is_manipulation_window": _5b_msce.get("is_manipulation_window"),
+                        "passed": _5b_msce.get("session_bias") is not None,
+                    },
+
+                    "gate_1D_execution": {
+                        "status": "BLOCKED_BY_RIG" if _5b_rig_blocked and action == "trade_entered" else (
+                            "ACTIVE" if action == "trade_entered" else "NO_SIGNAL"),
+                        "signal": "NO_TRADE" if _5b_rig_blocked else action,
+                        "best_score": _5b_debug.get("best_score"),
+                        "best_tf": _5b_debug.get("best_tf"),
+                        "trading_mode": _5b_debug.get("trading_mode"),
+                    },
+
+                    # ── Liquidity gate — wired from decision tree bridge ──
+                    "gate_LIQUIDITY": (lambda lq: {
+                        "status": "ACTIVE",
+                        "passed": bool(lq.get("liquidity_valid", False)),
+                        # Confidence only meaningful when gate passed — prevent leakage
+                        "confidence": float(lq.get("path_score", 0.0)) if lq.get("liquidity_valid") else 0.0,
+                        "reason": lq.get("failed_at") or lq.get("conviction") or "No evaluation data",
+                        "evaluated": True,
+                        "failed_at": lq.get("failed_at"),
+                        "sweep_class": lq.get("sweep_class"),
+                        "entry_ready": bool(lq.get("entry_ready", False)),
+                        "trade_bias": lq.get("trade_bias"),
+                    })(_5b_liq) if _5b_liq else placeholder_gate_payload(),
+                    # ── Market Structure gate — wired from decision tree bridge ──
+                    "gate_MARKET_STRUCTURE": (lambda ms: {
+                        "status": "ACTIVE",
+                        "passed": bool(ms.get("passed", False)),
+                        "confidence": 1.0 if ms.get("passed") else 0.0,
+                        "reason": ms.get("reason") or f"HTF bias: {ms.get('bias', 'unknown')}",
+                        "evaluated": True,
+                        "bias": ms.get("bias"),
+                    })(_5b_mkt_struct) if _5b_mkt_struct else placeholder_gate_payload(),
+                    # ── Ranges gate — wired from decision tree bridge ──
+                    "gate_RANGE": (lambda rng: {
+                        "status": "ACTIVE",
+                        "passed": bool(rng.get("passed", False)),
+                        "confidence": min(1.0, rng.get("score", 0) / 20.0) if rng.get("score") is not None else (1.0 if rng.get("passed") else 0.0),
+                        "reason": rng.get("reason") or ("Range confirmed" if rng.get("passed") else "Range validation failed"),
+                        "evaluated": True,
+                        "score": rng.get("score"),
+                        "horizontal": rng.get("horizontal"),
+                        "six_candle_rule": rng.get("six_candle_rule"),
+                        "v_shape_rejected": rng.get("v_shape_rejected"),
+                    })(_5b_ranges) if _5b_ranges else placeholder_gate_payload(),
+                    # ── Supply/Demand gate — wired from decision tree bridge ──
+                    "gate_SUPPLY_DEMAND": (lambda sd: {
+                        "status": "ACTIVE",
+                        "passed": bool(sd.get("passed", False)),
+                        "confidence": 1.0 if sd.get("passed") else 0.0,
+                        "reason": f"FVG={'YES' if sd.get('fvg_valid') else 'NO'}, OB={'YES' if sd.get('ob_found') else 'NO'}" if sd.get("passed") else (sd.get("failed_at") or "S/D validation failed"),
+                        "evaluated": True,
+                        "fvg_valid": sd.get("fvg_valid"),
+                        "ob_found": sd.get("ob_found"),
+                        "priority": sd.get("priority"),
+                    })(_5b_sd) if _5b_sd else placeholder_gate_payload(),
+
+                    "signal": _5b_signal,
+                    "confidence": None,
+                    "blocking_gate": "RIG" if _5b_rig_blocked else None,
+                }
+                tct_store.update(_5b_snapshot)
+            except Exception as _snap_err:
+                logger.warning("[5B-TRADE] Snapshot capture failed: %s", _snap_err, exc_info=True)
+            # ───────────────────────────────────────────────────────────
+
             logger.info(f"[5B-TRADE] Auto-scan result: {action} @ {ts} (MSCE {msce['session']} w={msce['weight']})")
             consecutive_errors = 0
         except Exception as e:
@@ -18021,6 +18716,196 @@ async def schematics_5b_auto_scan_loop():
             _last_github_push = now
 
         await asyncio.sleep(AUTO_SCAN_INTERVAL)
+
+# ================================================================
+# TCT SNAPSHOT AUDIT LAYER — API + DASHBOARD
+# ================================================================
+
+@app.get("/tct-snapshot/latest")
+async def tct_snapshot_latest():
+    """Return the most recent TCT decision snapshot."""
+    from tct_snapshot import tct_store
+    latest = tct_store.get_latest()
+    if latest is None:
+        return JSONResponse(
+            content={"status": "no_data", "message": "No scan cycles have completed yet"},
+            status_code=200,
+        )
+    return JSONResponse(content=latest)
+
+
+@app.get("/tct-snapshot/history")
+async def tct_snapshot_history(limit: int = 50):
+    """Return recent TCT decision snapshots (newest first)."""
+    from tct_snapshot import tct_store
+    sanitized_limit = max(0, min(limit, 100))
+    history = tct_store.get_history(limit=sanitized_limit)
+    return JSONResponse(content={"count": len(history), "snapshots": history})
+
+
+@app.get("/tct-dashboard", response_class=HTMLResponse)
+async def tct_dashboard_page():
+    """TCT Decision Audit Dashboard — live gate-level visibility."""
+    return HTMLResponse(content=_TCT_DASHBOARD_HTML)
+
+
+_TCT_DASHBOARD_HTML = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TCT Decision Audit Dashboard</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0d1117;color:#c9d1d9;font-family:'Segoe UI',system-ui,sans-serif;padding:16px}
+h1{font-size:1.4rem;color:#58a6ff;margin-bottom:4px}
+.subtitle{color:#8b949e;font-size:.85rem;margin-bottom:16px}
+.meta{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:16px;font-size:.85rem;color:#8b949e}
+.meta span{background:#161b22;padding:4px 10px;border-radius:6px;border:1px solid #30363d}
+.meta .live{color:#3fb950;border-color:#238636}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:12px;margin-bottom:16px}
+.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px}
+.card h2{font-size:.95rem;color:#58a6ff;margin-bottom:4px;display:flex;align-items:center;gap:6px}
+.gate-source{font-size:.7rem;color:#6e7681;font-family:monospace;margin-bottom:8px;padding:2px 6px;background:#0d1117;border-radius:4px;border:1px solid #21262d}
+.card h2 .badge{font-size:.7rem;padding:2px 6px;border-radius:4px;font-weight:600}
+.pass{background:#238636;color:#fff}
+.fail{background:#da3633;color:#fff}
+.na{background:#30363d;color:#8b949e}
+.partial{background:#9e6a03;color:#fff}
+.active{background:#1f6feb;color:#fff}
+.row{display:flex;justify-content:space-between;padding:3px 0;font-size:.85rem;border-bottom:1px solid #21262d}
+.row:last-child{border-bottom:none}
+.label{color:#8b949e}
+.val{color:#c9d1d9;font-weight:500;text-align:right;max-width:60%;word-break:break-all}
+.val.green{color:#3fb950}
+.val.red{color:#f85149}
+.val.yellow{color:#d29922}
+.val.blue{color:#58a6ff}
+.signal-box{text-align:center;padding:12px;border-radius:8px;font-size:1.1rem;font-weight:700;margin-bottom:12px}
+.signal-long{background:#0d2818;border:2px solid #238636;color:#3fb950}
+.signal-short{background:#2d1219;border:2px solid #da3633;color:#f85149}
+.signal-none{background:#161b22;border:2px solid #30363d;color:#8b949e}
+.footer{text-align:center;color:#484f58;font-size:.75rem;margin-top:16px}
+.no-data{text-align:center;padding:60px 20px;color:#484f58;font-size:1.1rem}
+</style>
+</head>
+<body>
+<h1>TCT Decision Audit Dashboard</h1>
+<p class="subtitle">Real-time gate-level visibility into trading decisions</p>
+
+<div class="meta" id="meta">
+  <span>Loading...</span>
+</div>
+
+<div id="content"><div class="no-data">Waiting for first scan cycle...</div></div>
+
+<div class="footer">Auto-refreshes every 5 seconds &middot; Data reflects EXACT execution values</div>
+
+<script>
+const API = '/tct-snapshot/latest';
+const REFRESH_MS = 5000;
+
+function badge(status, passed) {
+  if (status === 'NOT_IMPLEMENTED') return '<span class="badge na">N/A</span>';
+  if (status === 'NOT_EVALUATED') return '<span class="badge na">SKIP</span>';
+  if (status === 'PARTIAL') return '<span class="badge partial">PARTIAL</span>';
+  if (passed === true) return '<span class="badge pass">PASS</span>';
+  if (passed === false) return '<span class="badge fail">FAIL</span>';
+  if (status === 'ACTIVE') return '<span class="badge active">ACTIVE</span>';
+  return '<span class="badge na">—</span>';
+}
+
+function row(label, value, cls) {
+  let v = value;
+  if (v === null || v === undefined) v = '—';
+  else if (typeof v === 'number') v = Number.isInteger(v) ? v : v.toFixed(4);
+  else if (typeof v === 'boolean') v = v ? 'Yes' : 'No';
+  else if (typeof v === 'object') v = JSON.stringify(v);
+  const valClass = cls ? `val ${cls}` : 'val';
+  return `<div class="row"><span class="label">${label}</span><span class="${valClass}">${v}</span></div>`;
+}
+
+function renderGate(title, gate, sourceFile) {
+  if (!gate) return '';
+  const st = gate.status || '';
+  const p = gate.passed;
+  let rows = '';
+  for (const [k, v] of Object.entries(gate)) {
+    if (k === 'status' || k === 'passed') continue;
+    if (typeof v === 'object' && v !== null) {
+      for (const [sk, sv] of Object.entries(v)) {
+        rows += row(`${k}.${sk}`, sv);
+      }
+    } else {
+      rows += row(k, v);
+    }
+  }
+  const srcTag = sourceFile ? `<div class="gate-source">${sourceFile}</div>` : '';
+  return `<div class="card"><h2>${title} ${badge(st, p)}</h2>${srcTag}${rows || '<div class="row"><span class="label">No data</span></div>'}</div>`;
+}
+
+function render(data) {
+  if (!data || data.status === 'no_data') {
+    document.getElementById('content').innerHTML = '<div class="no-data">No scan cycles completed yet. Waiting for first scan...</div>';
+    document.getElementById('meta').innerHTML = '<span>No data</span>';
+    return;
+  }
+
+  // Signal box
+  const sig = data.signal || 'NO_TRADE';
+  let sigClass = 'signal-none';
+  if (sig === 'LONG') sigClass = 'signal-long';
+  else if (sig === 'SHORT') sigClass = 'signal-short';
+
+  // Meta bar
+  const ts = data.timestamp ? new Date(data.timestamp).toLocaleString() : '—';
+  const src = data.source || '—';
+  const price = data.price ? '$' + Number(data.price).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) : '—';
+  document.getElementById('meta').innerHTML = `
+    <span class="live">LIVE</span>
+    <span>Source: ${src}</span>
+    <span>Price: ${price}</span>
+    <span>Last: ${ts}</span>
+    <span>Gates: ${data.gates_passed ?? '—'}/${data.gates_total ?? '—'}</span>
+  `;
+
+  let html = `<div class="signal-box ${sigClass}">${sig === 'NO_TRADE' ? 'NO TRADE' : sig}${data.confidence ? ' (' + (data.confidence * 100).toFixed(0) + '%)' : ''}${data.blocking_gate ? ' — Blocked at Gate ' + data.blocking_gate : ''}</div>`;
+
+  html += '<div class="grid">';
+  html += renderGate('1A — BTC Structure / Bias', data.gate_1A_btc_structure, 'server_mexc.py → validate_1A()');
+  html += renderGate('1B — USDT.D Correlation', data.gate_1B_usdt_d, 'server_mexc.py → validate_1B()');
+  html += renderGate('1C — Alt Alignment', data.gate_1C_alt_alignment, 'server_mexc.py → validate_1C()');
+  html += renderGate('RCM — Range Context', data.gate_RCM_range, 'range_engine_controller.py · range_engine_l1.py · range_engine_l2.py');
+  html += renderGate('RIG — Counter-Bias Filter', data.gate_RIG, 'rig_engine.py · rig_v2_engine.py · hpb_rig_validator.py');
+  html += renderGate('MSCE — Session Logic', data.gate_MSCE, 'msce_engine.py · server_mexc.py → validate_MSCE()');
+  html += renderGate('1D — Execution', data.gate_1D_execution, 'server_mexc.py → validate_1D()');
+  html += renderGate('LIQUIDITY — Sweep Validation', data.gate_LIQUIDITY, 'decision_trees/liquidity_decision_tree.py');
+  html += renderGate('MARKET STRUCTURE — Structure Engine', data.gate_MARKET_STRUCTURE, 'decision_trees/market_structure_engine.py · decision_tree_bridge.py');
+  html += renderGate('RANGE — Range Validation', data.gate_RANGE, 'range_engine_controller.py · range_engine_l1.py · range_engine_l2.py · range_comparison_logger.py');
+  html += renderGate('SUPPLY/DEMAND — Zone Validation', data.gate_SUPPLY_DEMAND, 'decision_trees/supply_demand_decision_tree.py · decision_tree_bridge.py');
+  html += '</div>';
+
+  document.getElementById('content').innerHTML = html;
+}
+
+async function refresh() {
+  try {
+    const resp = await fetch(API);
+    const data = await resp.json();
+    render(data);
+  } catch (e) {
+    console.error('Fetch error:', e);
+  }
+}
+
+refresh();
+setInterval(refresh, REFRESH_MS);
+</script>
+</body>
+</html>
+"""
+
 
 # ================================================================
 # ENTRY POINT
@@ -18085,6 +18970,84 @@ async def phemex_tct_debug():
     """Return last pipeline gate results for debugging."""
     from phemex_tct_trader import get_trader
     return get_trader().debug()
+
+
+@app.get("/debug/rig-test")
+async def debug_rig_test(
+    price: float = 70000,
+    range_high: float = 72000,
+    range_low: float = 68000,
+    range_duration: float = 48,
+    htf_bias: str = "bullish",
+    session_bias: str = "bearish",
+):
+    """Debug endpoint to test RIG displacement logic with arbitrary parameters.
+
+    Example: /debug/rig-test?price=70000&range_high=72000&range_low=68000
+    Requires RIG_TEST_MODE env var to be enabled.
+    """
+    import math
+
+    # --- Guard: only available when RIG_TEST_MODE is enabled ---
+    if os.getenv("RIG_TEST_MODE", "false").lower() not in {"1", "true", "yes"}:
+        return JSONResponse({"error": "RIG debug endpoint disabled"}, status_code=403)
+
+    # --- Validate numeric inputs (reject NaN / Inf) ---
+    for name, value in {
+        "price": price,
+        "range_high": range_high,
+        "range_low": range_low,
+        "range_duration": range_duration,
+    }.items():
+        if value is not None and not math.isfinite(value):
+            return JSONResponse({"error": f"Invalid value for {name}: must be finite"}, status_code=400)
+
+    from rig_test_mode import (
+        compute_extremity,
+        evaluate_rig_test_status,
+        TEST_SCENARIOS,
+    )
+    from hpb_rig_validator import compute_displacement
+
+    def build_metric_snapshot(snap_price, snap_rh, snap_rl, snap_rd=None):
+        """Compute displacement metrics from price and range — single source of truth."""
+        displacement = compute_displacement(snap_price, snap_rh, snap_rl)
+        extremity = compute_extremity(displacement)
+        rig_status = evaluate_rig_test_status(displacement)
+        return {
+            "price": snap_price,
+            "range_high": snap_rh,
+            "range_low": snap_rl,
+            "range_duration_hours": snap_rd,
+            "displacement": displacement,
+            "extremity": extremity,
+            "rig_status": rig_status,
+        }
+
+    # --- Validate range params ---
+    if range_high <= range_low:
+        return JSONResponse({"error": f"range_high ({range_high}) must be greater than range_low ({range_low})"}, status_code=400)
+    if range_duration <= 0:
+        return JSONResponse({"error": f"range_duration ({range_duration}) must be positive"}, status_code=400)
+
+    # --- Single-price evaluation ---
+    result = build_metric_snapshot(price, range_high, range_low, range_duration)
+    result["htf_bias"] = htf_bias
+    result["session_bias"] = session_bias
+
+    logger.info("RIG DEBUG SNAPSHOT: %s", result)
+
+    # --- Built-in scenarios for comparison ---
+    scenarios = []
+    for sc in TEST_SCENARIOS:
+        snap = build_metric_snapshot(sc["current_price"], range_high, range_low, range_duration)
+        snap["name"] = sc["name"]
+        scenarios.append(snap)
+
+    return {
+        "query": result,
+        "scenarios": scenarios,
+    }
 
 
 @app.get("/phemex-tct", response_class=HTMLResponse)
