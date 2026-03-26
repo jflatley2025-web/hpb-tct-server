@@ -9,23 +9,36 @@ import os
 import requests
 import logging
 import threading
-from typing import Dict, Optional
+from typing import Optional
 
 logger = logging.getLogger("TelegramNotify")
-logger.setLevel(logging.DEBUG)
-logger.addHandler(logging.StreamHandler())
+logger.setLevel(os.getenv("TELEGRAM_LOG_LEVEL", "INFO").upper())
+logger.propagate = False
+if not logger.handlers:
+    logger.addHandler(logging.StreamHandler())
 
 TELEGRAM_API = "https://api.telegram.org"
 
-# Test notification
-def send_test_notification():
-    url = "https://api.telegram.org"
-    response = requests.get(url)
-    logger.debug(f"Response status code: {response.status_code}")
-    if response.status_code == 200:
-        send_message("Test Notification")
-    else:
-        logger.error(f"Failed to access Telegram API: {response.status_code}")
+
+def send_test_notification() -> bool:
+    """Verify Telegram connectivity via getMe, then send a test message."""
+    token, _ = _get_credentials()
+    if not token:
+        logger.error("Cannot test: TELEGRAM_BOT_TOKEN not set")
+        return False
+    try:
+        url = f"{TELEGRAM_API}/bot{token}/getMe"
+        resp = requests.get(url, timeout=5)
+        logger.debug("getMe status: %s", resp.status_code)
+        if resp.status_code == 200:
+            send_message("Test Notification")
+            return True
+        else:
+            logger.error("Telegram getMe failed: HTTP %s", resp.status_code)
+            return False
+    except requests.RequestException as err:
+        logger.error("Telegram connectivity check failed: %s", err)
+        return False
 
 
 
@@ -83,7 +96,7 @@ def send_message(text: str, parse_mode: str = "HTML") -> bool:
 # Trade Notification Formatters
 # ────────────────────────────────────────────────
 
-def notify_trade_entered(trade: Dict) -> bool:
+def notify_trade_entered(trade: dict) -> bool:
     """Send simple alert when a new trade is entered."""
     direction = trade.get("direction", "?")
     arrow = "BUY" if direction == "bullish" else "SELL"
@@ -98,7 +111,7 @@ def notify_trade_entered(trade: Dict) -> bool:
     return send_message(text)
 
 
-def notify_trade_closed(closed_trade: Dict) -> bool:
+def notify_trade_closed(closed_trade: dict) -> bool:
     """Send simple alert when a trade is closed (TP or SL hit)."""
     is_win = closed_trade.get("is_win", False)
     result = "WIN" if is_win else "LOSS"
@@ -118,7 +131,7 @@ def notify_trade_closed(closed_trade: Dict) -> bool:
     return send_message(text)
 
 
-def notify_half_tp_taken(trade: Dict, exit_price: float, pnl_dollars: float) -> bool:
+def notify_half_tp_taken(trade: dict, exit_price: float, pnl_dollars: float) -> bool:
     """Send alert when the half take profit is triggered and stop moved to break even."""
     direction = trade.get("direction", "?")
     arrow = "BUY" if direction == "bullish" else "SELL"
@@ -136,7 +149,7 @@ def notify_half_tp_taken(trade: Dict, exit_price: float, pnl_dollars: float) -> 
     return send_message(text)
 
 
-def notify_trade_force_closed(closed_trade: Dict) -> bool:
+def notify_trade_force_closed(closed_trade: dict) -> bool:
     """Send simple alert when a trade is force-closed."""
     pnl_pct = closed_trade.get("pnl_pct", 0)
     pnl_dollars = closed_trade.get("pnl_dollars", 0)

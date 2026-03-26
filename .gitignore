@@ -23,6 +23,7 @@ coverage.xml
 # Environment
 .env
 .env.*
+!.env.example
 .venv
 venv/
 ENV/

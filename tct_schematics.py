@@ -659,12 +659,10 @@ class TCTSchematicDetector:
         re_acc_ranges = self._find_continuation_ranges("bullish")
         for range_data in re_acc_ranges:
             try:
-                # Tap1 = range low (support test in uptrend pullback)
                 tap1 = self._create_tab(range_data, "range_low", "tap1_acc")
                 if not tap1:
                     continue
 
-                # Tap2 = first deviation below range low
                 tap2 = self._find_accumulation_tap2(range_data, tap1)
                 if not tap2:
                     continue
@@ -672,9 +670,7 @@ class TCTSchematicDetector:
                 if not self._validate_deviation_came_back_inside(tap2, range_data, "low"):
                     continue
 
-                # Try Model 1 Tap3 (lower than Tap2)
                 tap3_m1 = self._find_accumulation_tap3_model1(range_data, tap1, tap2)
-                # Try Model 2 Tap3 (higher low)
                 tap3_m2 = self._find_accumulation_tap3_model2(range_data, tap1, tap2)
 
                 for tap3, sub in [(tap3_m1, "a"), (tap3_m2, "b")]:
@@ -700,12 +696,10 @@ class TCTSchematicDetector:
         re_dist_ranges = self._find_continuation_ranges("bearish")
         for range_data in re_dist_ranges:
             try:
-                # Tap1 = range high (resistance test in downtrend pullback)
                 tap1 = self._create_tab(range_data, "range_high", "tap1_dist")
                 if not tap1:
                     continue
 
-                # Tap2 = first deviation above range high
                 tap2 = self._find_distribution_tap2(range_data, tap1)
                 if not tap2:
                     continue
@@ -713,19 +707,28 @@ class TCTSchematicDetector:
                 if not self._validate_deviation_came_back_inside(tap2, range_data, "high"):
                     continue
 
-                # Try Model 1 Tap3 (higher than Tap2)
                 tap3_m1 = self._find_distribution_tap3_model1(range_data, tap1, tap2)
-                # Try Model 2 Tap3 (lower high)
                 tap3_m2 = self._find_distribution_tap3_model2(range_data, tap1, tap2)
 
                 for tap3, sub in [(tap3_m1, "a"), (tap3_m2, "b")]:
                     if tap3 is None:
+                        continue
+                    # Sweep gate: reject true breaks (same as Model_1/2 distribution)
+                    sweep = self._validate_distribution_sweep(
+                        range_data, tap2, tap3
+                    )
+                    if sweep["has_sweep"] and sweep["classification"] == "true_break":
+                        logger.debug(
+                            "Model_3 re-distribution aborted: true_break "
+                            "(swept=%s)", sweep.get("pools_swept")
+                        )
                         continue
                     schematic = self._build_distribution_schematic(
                         range_data, tap1, tap2, tap3,
                         model_type="Model_3"
                     )
                     if schematic:
+                        schematic["sweep_validation"] = sweep
                         schematic["continuation_context"] = {
                             "type": "re_distribution",
                             "impulse_direction": "bearish",
@@ -737,11 +740,13 @@ class TCTSchematicDetector:
                 logger.debug(f"Model 3 re-distribution error: {e}")
                 continue
 
-        schematics.sort(
-            key=lambda x: (x.get("quality_score", 0), x.get("tap3", {}).get("idx", 0)),
-            reverse=True,
-        )
-        return schematics[:10]
+        # Partition by direction, sort/cap each side independently
+        sort_key = lambda x: (x.get("quality_score", 0), x.get("tap3", {}).get("idx", 0))
+        bullish = sorted([s for s in schematics if s.get("direction") == "bullish"],
+                         key=sort_key, reverse=True)[:10]
+        bearish = sorted([s for s in schematics if s.get("direction") != "bullish"],
+                         key=sort_key, reverse=True)[:10]
+        return bullish + bearish
 
     def _find_continuation_ranges(self, impulse_direction: str) -> List[Dict]:
         """
@@ -757,6 +762,7 @@ class TCTSchematicDetector:
         _find_distribution_ranges so they can be processed identically.
         """
         ranges = []
+        seen_pairs = set()
         candles = self.candles
         n = len(candles)
 
@@ -832,6 +838,11 @@ class TCTSchematicDetector:
                     if not self._check_equilibrium_touch(best_high_idx, j, equilibrium):
                         continue
 
+                    pair = (best_high_idx, j)
+                    if pair in seen_pairs:
+                        continue
+                    seen_pairs.add(pair)
+
                     ranges.append({
                         "range_high": range_high,
                         "range_low": range_low,
@@ -877,6 +888,11 @@ class TCTSchematicDetector:
 
                     if not self._check_equilibrium_touch(best_low_idx, j, equilibrium):
                         continue
+
+                    pair = (j, best_low_idx)
+                    if pair in seen_pairs:
+                        continue
+                    seen_pairs.add(pair)
 
                     ranges.append({
                         "range_high": range_high,

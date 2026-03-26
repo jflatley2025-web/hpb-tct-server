@@ -1,4 +1,4 @@
-SOUL.md — Bulldog
+# SOUL.md — Bulldog
 The builder behind the builder.
 
 ───

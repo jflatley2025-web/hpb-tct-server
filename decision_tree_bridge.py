@@ -356,6 +356,7 @@ def _reject_v_shape(df: pd.DataFrame, range_high: float, range_low: float) -> bo
 # ================================================================
 
 def _check_wick_rejection(highs, lows, closes, direction: str,
+                          opens=None,
                           lookback: int = 5, ratio: float = 1.5) -> bool:
     """Check if recent candles show wick rejection of a price break.
 
@@ -368,6 +369,7 @@ def _check_wick_rejection(highs, lows, closes, direction: str,
     Args:
         highs, lows, closes: numpy arrays of recent candle data
         direction: "bullish" or "bearish"
+        opens: numpy array of open prices (if None, falls back to close-based approx)
         lookback: number of recent candles to check
         ratio: minimum wick-to-body ratio to qualify as rejection
 
@@ -383,24 +385,23 @@ def _check_wick_rejection(highs, lows, closes, direction: str,
         h = float(highs[i])
         l = float(lows[i])
         c = float(closes[i])
-        body = abs(c - (highs[i-1] if abs(i) < len(closes) else c))  # approximate open
+        o = float(opens[i]) if opens is not None else c  # fallback if no opens
+        body = abs(c - o)
         candle_range = h - l
         if candle_range <= 0:
             continue
 
         if direction == "bullish":
             # Sell-side sweep: look for long lower wicks (rejection of downside)
-            lower_wick = c - l if c > l else 0
-            upper_portion = h - c if h > c else 0
-            if lower_wick > 0 and upper_portion > 0:
-                if lower_wick > upper_portion * ratio:
+            lower_wick = min(c, o) - l
+            if lower_wick > 0 and body > 0:
+                if lower_wick > body * ratio:
                     rejection_count += 1
         else:
             # Buy-side sweep: look for long upper wicks (rejection of upside)
-            upper_wick = h - c if h > c else 0
-            lower_portion = c - l if c > l else 0
-            if upper_wick > 0 and lower_portion > 0:
-                if upper_wick > lower_portion * ratio:
+            upper_wick = h - max(c, o)
+            if upper_wick > 0 and body > 0:
+                if upper_wick > body * ratio:
                     rejection_count += 1
 
     # Require at least 1 rejection candle in last N candles
@@ -431,6 +432,7 @@ def _detect_liquidity_sweep_v2(df: pd.DataFrame, range_high: float, range_low: f
     highs = recent["high"].values
     lows = recent["low"].values
     closes = recent["close"].values
+    opens = recent["open"].values
 
     # Sustained acceptance threshold: if the deepest close beyond DL2 was
     # significant (> 1% of range), require multiple candles back inside the
@@ -458,7 +460,7 @@ def _detect_liquidity_sweep_v2(df: pd.DataFrame, range_high: float, range_low: f
         if close_beyond_dl2 and not accepted:
             # Wick rejection check: if recent candles show strong rejection wicks
             # (long lower wicks relative to body), price is rejecting the break
-            wick_rejection = _check_wick_rejection(highs, lows, closes, direction)
+            wick_rejection = _check_wick_rejection(highs, lows, closes, direction, opens=opens)
             if wick_rejection:
                 classification = "sweep_with_rejection"
             else:
@@ -496,7 +498,7 @@ def _detect_liquidity_sweep_v2(df: pd.DataFrame, range_high: float, range_low: f
         if close_beyond_dl2 and not accepted:
             # Wick rejection check: if recent candles show strong rejection wicks
             # (long upper wicks relative to body), price is rejecting the break
-            wick_rejection = _check_wick_rejection(highs, lows, closes, direction)
+            wick_rejection = _check_wick_rejection(highs, lows, closes, direction, opens=opens)
             if wick_rejection:
                 classification = "sweep_with_rejection"
             else:
@@ -681,6 +683,7 @@ def _detect_liquidity_sweep(df: pd.DataFrame, range_high: float, range_low: floa
     highs = recent["high"].values
     lows = recent["low"].values
     closes = recent["close"].values
+    opens = recent["open"].values
 
     if direction == "bullish":
         # Sell-side swept (below range low)
