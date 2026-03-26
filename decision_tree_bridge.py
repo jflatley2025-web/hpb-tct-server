@@ -355,6 +355,59 @@ def _reject_v_shape(df: pd.DataFrame, range_high: float, range_low: float) -> bo
 # PHASE 4 — LIQUIDITY TOLERANCE (v2 pipeline)
 # ================================================================
 
+def _check_wick_rejection(highs, lows, closes, direction: str,
+                          opens=None,
+                          lookback: int = 5, ratio: float = 1.5) -> bool:
+    """Check if recent candles show wick rejection of a price break.
+
+    For bullish (sell-side sweep): look for long lower wicks (rejection of downside)
+    For bearish (buy-side sweep): look for long upper wicks (rejection of upside)
+
+    A wick rejection suggests the market is rejecting the break — the move beyond
+    the boundary is being faded, not sustained.
+
+    Args:
+        highs, lows, closes: numpy arrays of recent candle data
+        direction: "bullish" or "bearish"
+        opens: numpy array of open prices (if None, falls back to close-based approx)
+        lookback: number of recent candles to check
+        ratio: minimum wick-to-body ratio to qualify as rejection
+
+    Returns:
+        True if wick rejection pattern found in recent candles.
+    """
+    n = min(lookback, len(closes))
+    if n < 2:
+        return False
+
+    rejection_count = 0
+    for i in range(-n, 0):
+        h = float(highs[i])
+        l = float(lows[i])
+        c = float(closes[i])
+        o = float(opens[i]) if opens is not None else c  # fallback if no opens
+        body = abs(c - o)
+        candle_range = h - l
+        if candle_range <= 0:
+            continue
+
+        if direction == "bullish":
+            # Sell-side sweep: look for long lower wicks (rejection of downside)
+            lower_wick = min(c, o) - l
+            if lower_wick > 0 and body > 0:
+                if lower_wick > body * ratio:
+                    rejection_count += 1
+        else:
+            # Buy-side sweep: look for long upper wicks (rejection of upside)
+            upper_wick = h - max(c, o)
+            if upper_wick > 0 and body > 0:
+                if upper_wick > body * ratio:
+                    rejection_count += 1
+
+    # Require at least 1 rejection candle in last N candles
+    return rejection_count >= 1
+
+
 def _detect_liquidity_sweep_v2(df: pd.DataFrame, range_high: float, range_low: float,
                                 direction: str) -> Dict:
     """Detect liquidity sweep with tolerance for slight closes beyond boundary.
@@ -379,6 +432,7 @@ def _detect_liquidity_sweep_v2(df: pd.DataFrame, range_high: float, range_low: f
     highs = recent["high"].values
     lows = recent["low"].values
     closes = recent["close"].values
+    opens = recent["open"].values
 
     # Sustained acceptance threshold: if the deepest close beyond DL2 was
     # significant (> 1% of range), require multiple candles back inside the
@@ -404,7 +458,13 @@ def _detect_liquidity_sweep_v2(df: pd.DataFrame, range_high: float, range_low: f
         sweep_count = sum(1 for l in lows if l < range_low)
 
         if close_beyond_dl2 and not accepted:
-            classification = "true_break"
+            # Wick rejection check: if recent candles show strong rejection wicks
+            # (long lower wicks relative to body), price is rejecting the break
+            wick_rejection = _check_wick_rejection(highs, lows, closes, direction, opens=opens)
+            if wick_rejection:
+                classification = "sweep_with_rejection"
+            else:
+                classification = "true_break"
         elif exceeded:
             classification = "sweep"
         else:
@@ -436,7 +496,13 @@ def _detect_liquidity_sweep_v2(df: pd.DataFrame, range_high: float, range_low: f
         sweep_count = sum(1 for h in highs if h > range_high)
 
         if close_beyond_dl2 and not accepted:
-            classification = "true_break"
+            # Wick rejection check: if recent candles show strong rejection wicks
+            # (long upper wicks relative to body), price is rejecting the break
+            wick_rejection = _check_wick_rejection(highs, lows, closes, direction, opens=opens)
+            if wick_rejection:
+                classification = "sweep_with_rejection"
+            else:
+                classification = "true_break"
         elif exceeded:
             classification = "sweep"
         else:
@@ -617,6 +683,7 @@ def _detect_liquidity_sweep(df: pd.DataFrame, range_high: float, range_low: floa
     highs = recent["high"].values
     lows = recent["low"].values
     closes = recent["close"].values
+    opens = recent["open"].values
 
     if direction == "bullish":
         # Sell-side swept (below range low)
@@ -948,7 +1015,11 @@ def build_5a_inputs(schematic: Dict, range_eval: RangeEvaluation) -> TCTSchemati
     sch_dir = Dir5A.ACCUMULATION if is_acc else Dir5A.DISTRIBUTION
 
     # Determine model type
-    if "Model_1" in model:
+    if "Model_3" in model:
+        # Model 3 (continuation) uses same tap structure — map to MODEL_1
+        # for the 5A decision tree which only knows MODEL_1/MODEL_2.
+        model_type = MT5A.MODEL_1
+    elif "Model_1" in model:
         model_type = MT5A.MODEL_1
     elif "Model_2" in model:
         model_type = MT5A.MODEL_2
@@ -1009,7 +1080,9 @@ def build_5b_inputs(schematic: Dict, eval_5a: TCTSchematicEvaluation,
     is_acc = direction == "bullish"
     sch_dir = Dir5B.ACCUMULATION if is_acc else Dir5B.DISTRIBUTION
 
-    if "Model_1" in model:
+    if "Model_3" in model:
+        model_type = MT5B.MODEL_1  # Model 3 uses same structure as MODEL_1
+    elif "Model_1" in model:
         model_type = MT5B.MODEL_1
     elif "Model_2" in model:
         model_type = MT5B.MODEL_2
@@ -1529,7 +1602,9 @@ def compute_composite_score_v2(
 
     model_str = schematic.get("model", "")
 
-    if "Model_1" in model_str:
+    if "Model_3" in model_str:
+        model_type = "Model_3"
+    elif "Model_1" in model_str:
         model_type = "Model_1"
     elif "Model_2" in model_str:
         model_type = "Model_2"
@@ -1550,6 +1625,12 @@ def compute_composite_score_v2(
             tap_valid = tap3["price"] > tap2["price"]
         else:
             tap_valid = tap3["price"] < tap2["price"]
+
+    elif model_type == "Model_3":
+        # Model 3 uses same tap structure as Model 1 or 2 —
+        # already validated by _build_accumulation/distribution_schematic.
+        # Accept both deviation patterns (M1-style lower/higher OR M2-style HL/LH).
+        tap_valid = True
 
     if not tap_valid:
         phase_results["tap_structure"] = {"passed": False}
