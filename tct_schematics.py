@@ -149,6 +149,14 @@ class TCTSchematicDetector:
         accumulation_schematics = self._detect_accumulation_schematics(detected_ranges)
         distribution_schematics = self._detect_distribution_schematics(detected_ranges)
 
+        # Model 3: Continuation schematics (re-accumulation / re-distribution)
+        continuation_schematics = self._detect_continuation_schematics()
+        for s in continuation_schematics:
+            if s.get("direction") == "bullish":
+                accumulation_schematics.append(s)
+            else:
+                distribution_schematics.append(s)
+
         return {
             "accumulation_schematics": accumulation_schematics,
             "distribution_schematics": distribution_schematics,
@@ -615,6 +623,277 @@ class TCTSchematicDetector:
         # Sort by quality and recency
         schematics.sort(key=lambda x: (x.get("quality_score", 0), x.get("tap3", {}).get("idx", 0)), reverse=True)
         return schematics[:10]
+
+    # ================================================================
+    # MODEL 3: CONTINUATION SCHEMATIC DETECTION
+    # Re-accumulation (bullish trend -> consolidation -> break UP)
+    # Re-distribution (bearish trend -> consolidation -> break DOWN)
+    # ================================================================
+
+    # Continuation ranges are typically tighter and shorter-lived than
+    # reversal ranges.  We relax the lookback window slightly so we
+    # don't miss valid pullback consolidations within a strong trend.
+    CONTINUATION_IMPULSE_MIN_CANDLES = 10   # min candles for impulse leg
+    CONTINUATION_IMPULSE_MIN_PCT = 0.02     # 2% min impulse move
+    CONTINUATION_RANGE_MAX_CANDLES = 40     # max range duration (candles)
+
+    def _detect_continuation_schematics(self) -> List[Dict]:
+        """
+        Detect Model 3 continuation schematics.
+
+        Re-accumulation: bullish impulse -> consolidation range ->
+                         deviation of range low (demand test) ->
+                         break UP (continuation)
+
+        Re-distribution: bearish impulse -> consolidation range ->
+                         deviation of range high (supply test) ->
+                         break DOWN (continuation)
+
+        Uses the SAME tap structure, BOS confirmation, quality scoring,
+        and schematic output format as Model 1/2.  The only difference
+        is the required pre-range impulse direction.
+        """
+        schematics = []
+
+        # --- Re-accumulation (bullish continuation) ---
+        re_acc_ranges = self._find_continuation_ranges("bullish")
+        for range_data in re_acc_ranges:
+            try:
+                # Tap1 = range low (support test in uptrend pullback)
+                tap1 = self._create_tab(range_data, "range_low", "tap1_acc")
+                if not tap1:
+                    continue
+
+                # Tap2 = first deviation below range low
+                tap2 = self._find_accumulation_tap2(range_data, tap1)
+                if not tap2:
+                    continue
+
+                if not self._validate_deviation_came_back_inside(tap2, range_data, "low"):
+                    continue
+
+                # Try Model 1 Tap3 (lower than Tap2)
+                tap3_m1 = self._find_accumulation_tap3_model1(range_data, tap1, tap2)
+                # Try Model 2 Tap3 (higher low)
+                tap3_m2 = self._find_accumulation_tap3_model2(range_data, tap1, tap2)
+
+                for tap3, sub in [(tap3_m1, "a"), (tap3_m2, "b")]:
+                    if tap3 is None:
+                        continue
+                    schematic = self._build_accumulation_schematic(
+                        range_data, tap1, tap2, tap3,
+                        model_type="Model_3"
+                    )
+                    if schematic:
+                        schematic["continuation_context"] = {
+                            "type": "re_accumulation",
+                            "impulse_direction": "bullish",
+                            "impulse_pct": range_data.get("impulse_pct", 0),
+                        }
+                        schematics.append(schematic)
+
+            except Exception as e:
+                logger.debug(f"Model 3 re-accumulation error: {e}")
+                continue
+
+        # --- Re-distribution (bearish continuation) ---
+        re_dist_ranges = self._find_continuation_ranges("bearish")
+        for range_data in re_dist_ranges:
+            try:
+                # Tap1 = range high (resistance test in downtrend pullback)
+                tap1 = self._create_tab(range_data, "range_high", "tap1_dist")
+                if not tap1:
+                    continue
+
+                # Tap2 = first deviation above range high
+                tap2 = self._find_distribution_tap2(range_data, tap1)
+                if not tap2:
+                    continue
+
+                if not self._validate_deviation_came_back_inside(tap2, range_data, "high"):
+                    continue
+
+                # Try Model 1 Tap3 (higher than Tap2)
+                tap3_m1 = self._find_distribution_tap3_model1(range_data, tap1, tap2)
+                # Try Model 2 Tap3 (lower high)
+                tap3_m2 = self._find_distribution_tap3_model2(range_data, tap1, tap2)
+
+                for tap3, sub in [(tap3_m1, "a"), (tap3_m2, "b")]:
+                    if tap3 is None:
+                        continue
+                    schematic = self._build_distribution_schematic(
+                        range_data, tap1, tap2, tap3,
+                        model_type="Model_3"
+                    )
+                    if schematic:
+                        schematic["continuation_context"] = {
+                            "type": "re_distribution",
+                            "impulse_direction": "bearish",
+                            "impulse_pct": range_data.get("impulse_pct", 0),
+                        }
+                        schematics.append(schematic)
+
+            except Exception as e:
+                logger.debug(f"Model 3 re-distribution error: {e}")
+                continue
+
+        schematics.sort(
+            key=lambda x: (x.get("quality_score", 0), x.get("tap3", {}).get("idx", 0)),
+            reverse=True,
+        )
+        return schematics[:10]
+
+    def _find_continuation_ranges(self, impulse_direction: str) -> List[Dict]:
+        """
+        Find consolidation ranges that form AFTER an impulse move.
+
+        For bullish continuation: find ranges preceded by a bullish impulse
+        (price moved UP significantly before the range formed).
+
+        For bearish continuation: find ranges preceded by a bearish impulse
+        (price moved DOWN significantly before the range formed).
+
+        Returns ranges in the same format as _find_accumulation_ranges /
+        _find_distribution_ranges so they can be processed identically.
+        """
+        ranges = []
+        candles = self.candles
+        n = len(candles)
+
+        if n < self.CONTINUATION_IMPULSE_MIN_CANDLES + 20:
+            return ranges
+
+        for i in range(self.CONTINUATION_IMPULSE_MIN_CANDLES + 5, n - 8):
+            # --- 1. Detect impulse leg ending near index i ---
+            # Look back CONTINUATION_IMPULSE_MIN_CANDLES candles for a
+            # directional move of at least CONTINUATION_IMPULSE_MIN_PCT.
+            impulse_start = max(0, i - self.CONTINUATION_IMPULSE_MIN_CANDLES - 10)
+            impulse_end = i
+
+            if impulse_direction == "bullish":
+                low_before = float(candles.iloc[impulse_start:impulse_end]["low"].min())
+                high_at = float(candles.iloc[impulse_end]["high"])
+                impulse_pct = (high_at - low_before) / low_before if low_before > 0 else 0
+
+                if impulse_pct < self.CONTINUATION_IMPULSE_MIN_PCT:
+                    continue
+
+                # Confirm impulse: closes should trend up
+                closes = candles.iloc[impulse_start:impulse_end]["close"].values
+                if len(closes) >= 4 and float(closes[-1]) <= float(closes[0]):
+                    continue
+            else:
+                high_before = float(candles.iloc[impulse_start:impulse_end]["high"].max())
+                low_at = float(candles.iloc[impulse_end]["low"])
+                impulse_pct = (high_before - low_at) / high_before if high_before > 0 else 0
+
+                if impulse_pct < self.CONTINUATION_IMPULSE_MIN_PCT:
+                    continue
+
+                closes = candles.iloc[impulse_start:impulse_end]["close"].values
+                if len(closes) >= 4 and float(closes[-1]) >= float(closes[0]):
+                    continue
+
+            # --- 2. Find consolidation range starting near impulse end ---
+            # The range should form right after the impulse (within a few candles)
+            range_search_start = i
+            range_search_end = min(i + self.CONTINUATION_RANGE_MAX_CANDLES, n - 5)
+
+            # For bullish continuation: range forms at the top of the impulse
+            # Look for swing high then swing low (range high -> range low)
+            if impulse_direction == "bullish":
+                # Find range high (near impulse top)
+                best_high_idx = None
+                best_high = 0
+                for j in range(range_search_start, min(range_search_start + 10, range_search_end)):
+                    if self._is_swing_high(j):
+                        h = float(candles.iloc[j]["high"])
+                        if h > best_high:
+                            best_high = h
+                            best_high_idx = j
+
+                if best_high_idx is None:
+                    continue
+
+                # Find range low after the high
+                for j in range(best_high_idx + 3, range_search_end):
+                    if not self._is_swing_low(j):
+                        continue
+
+                    range_low = float(candles.iloc[j]["low"])
+                    range_high = best_high
+                    if range_high <= range_low * 1.003:
+                        continue
+
+                    range_size = range_high - range_low
+                    equilibrium = (range_high + range_low) / 2
+
+                    # Check equilibrium touch
+                    if not self._check_equilibrium_touch(best_high_idx, j, equilibrium):
+                        continue
+
+                    ranges.append({
+                        "range_high": range_high,
+                        "range_low": range_low,
+                        "range_high_idx": best_high_idx,
+                        "range_low_idx": j,
+                        "equilibrium": equilibrium,
+                        "range_size": range_size,
+                        "dl_high": range_high + (range_size * self.DEVIATION_LIMIT_PERCENT),
+                        "dl_low": range_low - (range_size * self.DEVIATION_LIMIT_PERCENT),
+                        "direction": "accumulation",
+                        "impulse_pct": impulse_pct,
+                        "is_continuation": True,
+                    })
+                    break  # one range per impulse
+
+            else:
+                # bearish: range forms at the bottom of the impulse
+                # Find range low (near impulse bottom)
+                best_low_idx = None
+                best_low = float("inf")
+                for j in range(range_search_start, min(range_search_start + 10, range_search_end)):
+                    if self._is_swing_low(j):
+                        lo = float(candles.iloc[j]["low"])
+                        if lo < best_low:
+                            best_low = lo
+                            best_low_idx = j
+
+                if best_low_idx is None:
+                    continue
+
+                # Find range high after the low
+                for j in range(best_low_idx + 3, range_search_end):
+                    if not self._is_swing_high(j):
+                        continue
+
+                    range_high = float(candles.iloc[j]["high"])
+                    range_low = best_low
+                    if range_high <= range_low * 1.003:
+                        continue
+
+                    range_size = range_high - range_low
+                    equilibrium = (range_high + range_low) / 2
+
+                    if not self._check_equilibrium_touch(best_low_idx, j, equilibrium):
+                        continue
+
+                    ranges.append({
+                        "range_high": range_high,
+                        "range_low": range_low,
+                        "range_high_idx": j,
+                        "range_low_idx": best_low_idx,
+                        "equilibrium": equilibrium,
+                        "range_size": range_size,
+                        "dl_high": range_high + (range_size * self.DEVIATION_LIMIT_PERCENT),
+                        "dl_low": range_low - (range_size * self.DEVIATION_LIMIT_PERCENT),
+                        "direction": "distribution",
+                        "impulse_pct": impulse_pct,
+                        "is_continuation": True,
+                    })
+                    break
+
+        return ranges
 
     def _find_distribution_ranges(self) -> List[Dict]:
         """

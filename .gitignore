@@ -35,6 +35,21 @@ ENV/
 # Runtime data
 tensor_trade_log.json
 tensor_trade_log_backup.json
+schematics_5b_trade_log.json
+schematics_5b_trade_log_backup.json
+ai_context.json
+
+# Local infrastructure
+postgres-data/
+redis-data/
+redis/
+redis-cli
+
+# Claude Code
+.claude/
+
+# Dev snapshots
+dev_environment.md
 
 # Logs
 logs/

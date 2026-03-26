@@ -6,14 +6,28 @@
 # ================================================================
 
 import os
+import requests
 import logging
 import threading
-import requests
 from typing import Dict, Optional
 
 logger = logging.getLogger("TelegramNotify")
+logger.setLevel(logging.DEBUG)
+logger.addHandler(logging.StreamHandler())
 
 TELEGRAM_API = "https://api.telegram.org"
+
+# Test notification
+def send_test_notification():
+    url = "https://api.telegram.org"
+    response = requests.get(url)
+    logger.debug(f"Response status code: {response.status_code}")
+    if response.status_code == 200:
+        send_message("Test Notification")
+    else:
+        logger.error(f"Failed to access Telegram API: {response.status_code}")
+
+
 
 
 def _get_credentials():
