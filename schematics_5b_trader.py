@@ -39,7 +39,38 @@ from decision_tree_bridge import DecisionTreeEvaluator
 from jack_tct_evaluator import JackTCTEvaluator
 
 # Reuse MEXC fetch helpers from tensor trader (no duplication)
-from tensor_tct_trader import fetch_candles_sync, fetch_live_price
+from tensor_tct_trader import (
+    fetch_candles_sync as _mexc_fetch_candles,
+    fetch_live_price as _mexc_fetch_live_price,
+)
+import moondev_feed as _moondev
+
+
+def fetch_candles_sync(symbol: str, tf: str, limit: int = 300):
+    """
+    Fetch OHLCV candles — routes to MoonDev when MOONDEV_PAPER_TRADING=true,
+    falling back to MEXC on any failure.  Signature is identical to the MEXC
+    version so all existing call sites work without change.
+    """
+    if _moondev.is_enabled():
+        df = _moondev.fetch_candles(symbol, tf, limit)
+        if df is not None and len(df) > 0:
+            return df
+        logger.warning("[5B] MoonDev candle fetch failed for %s/%s — falling back to MEXC", symbol, tf)
+    return _mexc_fetch_candles(symbol, tf, limit)
+
+
+def fetch_live_price(symbol: str = "BTCUSDT"):
+    """
+    Fetch the current price — routes to MoonDev when MOONDEV_PAPER_TRADING=true,
+    falling back to MEXC on any failure.
+    """
+    if _moondev.is_enabled():
+        price = _moondev.fetch_live_price(symbol)
+        if price is not None:
+            return price
+        logger.warning("[5B] MoonDev live price fetch failed for %s — falling back to MEXC", symbol)
+    return _mexc_fetch_live_price(symbol)
 
 logger = logging.getLogger("Schematics5B")
 
@@ -1046,6 +1077,15 @@ class Schematics5BTrader:
         # timed-out scan keeps running while the loop dispatches a new one.
         # This lock ensures only one thread mutates state at a time.
         self._scan_lock = threading.Lock()
+
+        # Log the active data source so it's visible in server logs at startup.
+        if _moondev.is_enabled():
+            logger.info(
+                "[5B] MoonDev paper trading ENABLED — using MoonDev API for price/candle data "
+                "(MEXC is fallback). Simulated order execution unchanged."
+            )
+        else:
+            logger.info("[5B] MoonDev paper trading DISABLED — using MEXC for price/candle data.")
 
     def get_mode(self) -> str:
         """Return the current trading mode: 'claude' or 'jack'."""
