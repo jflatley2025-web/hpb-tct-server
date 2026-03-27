@@ -657,6 +657,7 @@ class TCTSchematicDetector:
 
         # --- Re-accumulation (bullish continuation) ---
         re_acc_ranges = self._find_continuation_ranges("bullish")
+        logger.debug("[M3] bullish continuation: %d candidate ranges found", len(re_acc_ranges))
         for range_data in re_acc_ranges:
             try:
                 tap1 = self._create_tab(range_data, "range_low", "tap1_acc")
@@ -681,6 +682,11 @@ class TCTSchematicDetector:
                         model_type="Model_3"
                     )
                     if schematic:
+                        bos_info = schematic.get("bos_confirmation") or {}
+                        logger.debug(
+                            "[M3] re_acc schematic built: bos_idx=%s, confirmed=%s, n=%d",
+                            bos_info.get("bos_idx"), schematic.get("is_confirmed"), len(self.candles)
+                        )
                         schematic["continuation_context"] = {
                             "type": "re_accumulation",
                             "impulse_direction": "bullish",
@@ -694,6 +700,7 @@ class TCTSchematicDetector:
 
         # --- Re-distribution (bearish continuation) ---
         re_dist_ranges = self._find_continuation_ranges("bearish")
+        logger.debug("[M3] bearish continuation: %d candidate ranges found", len(re_dist_ranges))
         for range_data in re_dist_ranges:
             try:
                 tap1 = self._create_tab(range_data, "range_high", "tap1_dist")
@@ -728,6 +735,11 @@ class TCTSchematicDetector:
                         model_type="Model_3"
                     )
                     if schematic:
+                        bos_info = schematic.get("bos_confirmation") or {}
+                        logger.debug(
+                            "[M3] re_dist schematic built: bos_idx=%s, confirmed=%s, n=%d",
+                            bos_info.get("bos_idx"), schematic.get("is_confirmed"), len(self.candles)
+                        )
                         schematic["sweep_validation"] = sweep
                         schematic["continuation_context"] = {
                             "type": "re_distribution",
@@ -748,7 +760,8 @@ class TCTSchematicDetector:
                          key=sort_key, reverse=True)[:10]
         return bullish + bearish
 
-    def _find_continuation_ranges(self, impulse_direction: str) -> List[Dict]:
+    def _find_continuation_ranges(self, impulse_direction: str,
+                                   lookback_limit: int = 80) -> List[Dict]:
         """
         Find consolidation ranges that form AFTER an impulse move.
 
@@ -760,6 +773,9 @@ class TCTSchematicDetector:
 
         Returns ranges in the same format as _find_accumulation_ranges /
         _find_distribution_ranges so they can be processed identically.
+
+        lookback_limit: only scan the most recent N candles to avoid
+        detecting stale ranges deep in the history window.
         """
         ranges = []
         seen_pairs = set()
@@ -769,7 +785,16 @@ class TCTSchematicDetector:
         if n < self.CONTINUATION_IMPULSE_MIN_CANDLES + 20:
             return ranges
 
-        for i in range(self.CONTINUATION_IMPULSE_MIN_CANDLES + 5, n - 8):
+        # TASK 1: restrict search to recent candles only
+        # 200-candle window is ~8 days on 1h — too wide for continuation.
+        # 80 candles = ~3.3 days — aligns with active schematic formation.
+        scan_start = max(self.CONTINUATION_IMPULSE_MIN_CANDLES + 5,
+                         n - lookback_limit)
+
+        # TASK 2: range must complete recently (last 20 candles)
+        recent_threshold = n - 20
+
+        for i in range(scan_start, n - 8):
             # --- 1. Detect impulse leg ending near index i ---
             # Look back CONTINUATION_IMPULSE_MIN_CANDLES candles for a
             # directional move of at least CONTINUATION_IMPULSE_MIN_PCT.
@@ -838,11 +863,17 @@ class TCTSchematicDetector:
                     if not self._check_equilibrium_touch(best_high_idx, j, equilibrium):
                         continue
 
+                    # TASK 2: range must complete recently
+                    if j < recent_threshold:
+                        logger.debug("[M3] rejected bullish range: range_low_idx=%d < threshold=%d", j, recent_threshold)
+                        continue
+
                     pair = (best_high_idx, j)
                     if pair in seen_pairs:
                         continue
                     seen_pairs.add(pair)
 
+                    logger.debug("[M3] accepted bullish range: high_idx=%d, low_idx=%d, n=%d", best_high_idx, j, n)
                     ranges.append({
                         "range_high": range_high,
                         "range_low": range_low,
@@ -889,11 +920,17 @@ class TCTSchematicDetector:
                     if not self._check_equilibrium_touch(best_low_idx, j, equilibrium):
                         continue
 
+                    # TASK 2: range must complete recently
+                    if j < recent_threshold:
+                        logger.debug("[M3] rejected bearish range: range_high_idx=%d < threshold=%d", j, recent_threshold)
+                        continue
+
                     pair = (j, best_low_idx)
                     if pair in seen_pairs:
                         continue
                     seen_pairs.add(pair)
 
+                    logger.debug("[M3] accepted bearish range: low_idx=%d, high_idx=%d, n=%d", best_low_idx, j, n)
                     ranges.append({
                         "range_high": range_high,
                         "range_low": range_low,
