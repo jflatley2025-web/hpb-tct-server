@@ -47,6 +47,9 @@ redis-data/
 redis/
 redis-cli
 
+# Local infrastructure (DB data dirs stay local, compose + backtest committed)
+# postgres-data/ and redis-data/ are already excluded above
+
 # Claude Code
 .claude/
 

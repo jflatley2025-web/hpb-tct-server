@@ -110,8 +110,9 @@ class BacktestState:
     losses: int = 0
     # HPB state
     last_htf_bias: str = "neutral"
-    active_range_context: Optional[dict] = None
-    range_first_seen: Optional[datetime] = None  # when current range was first detected
+    # Range context keyed by timeframe to prevent leaking range age across TFs
+    active_range_context: dict = field(default_factory=dict)   # tf -> range dict
+    range_first_seen: dict = field(default_factory=dict)       # tf -> datetime
     last_signal_time: Optional[datetime] = None
     last_trade_close_step: int = 0  # step index of last trade close
     current_step: int = 0
@@ -198,6 +199,17 @@ def check_trade_exit(
     - After TP1: activate trailing stop at 50% of (target - entry) distance
     - Final exit: target_hit (remaining 50%) or stop_hit (breakeven/trailing)
     """
+    # ── Pre-check: SL takes precedence over TP1 on same candle ────────
+    # Compute SL hit BEFORE any state mutation. If both SL and TP1 are
+    # reachable on this candle, the conservative assumption is SL hit first.
+    if not trade.tp1_hit and trade.tp1_price is not None:
+        if trade.direction == "bullish":
+            original_sl_hit = low <= trade.stop_price
+        else:
+            original_sl_hit = high >= trade.stop_price
+        if original_sl_hit:
+            return "stop_hit", trade.stop_price
+
     # ── Step 1: Check TP1 trigger (if not already hit) ──────────────
     if not trade.tp1_hit and trade.tp1_price is not None:
         tp1_triggered = False
@@ -531,22 +543,22 @@ def run_gate_pipeline(
                             local_displacement = (r_high - current_price) / range_size
                         local_displacement = max(0.0, min(1.0, local_displacement))
 
-            # Range persistence lock + duration tracking
-            if state.active_range_context and rcm_valid:
+            # Range persistence lock + duration tracking (keyed by TF to avoid cross-TF leakage)
+            if state.active_range_context.get(tf) and rcm_valid:
                 # Reuse existing range — compute duration from first detection
-                if state.range_first_seen:
-                    range_duration_hours = (current_time - state.range_first_seen).total_seconds() / 3600
+                if state.range_first_seen.get(tf):
+                    range_duration_hours = (current_time - state.range_first_seen[tf]).total_seconds() / 3600
             elif rcm_valid:
                 # New range detected — record first-seen time
-                state.range_first_seen = current_time
-                state.active_range_context = {
+                state.range_first_seen[tf] = current_time
+                state.active_range_context[tf] = {
                     "score": rcm_score,
                     "duration_hours": range_duration_hours,
                 }
             else:
-                # Range invalidated — reset
-                state.active_range_context = None
-                state.range_first_seen = None
+                # Range invalidated — reset for this TF only
+                state.active_range_context.pop(tf, None)
+                state.range_first_seen.pop(tf, None)
 
             # ── RIG (Range Integrity Gate) ────────────────────────
             previous_htf_bias = state.last_htf_bias
@@ -643,10 +655,14 @@ def run_gate_pipeline(
                 failure_code = "FAIL_1D_SCORE"
             else:
                 # BOS fingerprint check: don't re-enter the same schematic
-                # until a genuinely new BOS is detected (different bos_idx)
+                # Keyed on entry_price (rounded) + BOS price — both are absolute
+                # and stable across detection window shifts (unlike bos_idx).
                 bos_info = schematic.get("bos_confirmation") or {}
-                bos_idx_val = bos_info.get("bos_idx")
-                fp = (tf, model, direction, bos_idx_val)
+                bos_price = round(float(bos_info.get("bos_price") or 0), 0)
+                entry_snap = round(float(
+                    schematic.get("entry", {}).get("price") or current_price
+                ), 0)
+                fp = (tf, model, direction, entry_snap, bos_price)
                 fp_traded_at = state.traded_bos_fingerprints.get(fp)
                 # Expire fingerprints older than 48 hours so valid re-entries are allowed
                 if fp_traded_at is not None:
@@ -812,7 +828,7 @@ def run_backtest(
         "tp1_close_pct": effective_tp1_close_pct,
         "tp1_level_pct": effective_tp1_level_pct,
         "trail_factor": effective_trail_factor,
-        "engine_version": 9,  # v9: BOS fingerprint cooldown prevents same-schematic re-entry
+        "engine_version": 11,  # v11: range state per-TF, step_interval in candles_by_tf, UTC normalize, price lookup fix
     }
 
     run_id = create_run(
@@ -869,8 +885,8 @@ def run_backtest(
         price_times = None
         price_closes = None
 
-    # Only these TFs need per-step slicing (MTF for detection, HTF for bias)
-    detection_tfs = list(set([HTF_TIMEFRAME] + MTF_TIMEFRAMES))
+    # Include step_interval so exit-checking can access its candles
+    detection_tfs = list(set([HTF_TIMEFRAME] + MTF_TIMEFRAMES + [step_interval]))
 
     try:
         for step_idx, current_time in enumerate(step_times):
@@ -878,9 +894,11 @@ def run_backtest(
             state.current_step = step_idx
 
             # Fast price lookup via binary search on pre-sorted 1m array
+            # Use side="left" - 1 to ensure we only access fully-closed candles
+            # (never the candle whose open_time == current_time)
             if price_times is not None:
                 ct_np = pd.Timestamp(current_time).to_datetime64()
-                idx = np.searchsorted(price_times, ct_np, side="right") - 1
+                idx = np.searchsorted(price_times, ct_np, side="left") - 1
                 if idx < 0:
                     continue
                 current_price = float(price_closes[idx])
@@ -926,13 +944,16 @@ def run_backtest(
                     min_rr=effective_min_rr,
                 )
                 if signal and signal.get("final_decision") == "TAKE":
-                    # Record BOS fingerprint to prevent same-schematic re-entry
+                    # Record BOS fingerprint to prevent same-schematic re-entry.
+                    # Use entry_price + BOS price (absolute, stable across window shifts).
                     sch = signal.get("_schematic") or {}
+                    bos_info_fp = (sch.get("bos_confirmation") or {})
                     bos_fp = (
                         signal.get("timeframe"),
                         signal.get("model"),
                         signal.get("direction"),
-                        (sch.get("bos_confirmation") or {}).get("bos_idx"),
+                        round(float(signal.get("entry_price") or current_price), 0),
+                        round(float(bos_info_fp.get("bos_price") or 0), 0),
                     )
                     state.traded_bos_fingerprints[bos_fp] = current_time
                     _open_trade(state, signal, current_time, current_price,

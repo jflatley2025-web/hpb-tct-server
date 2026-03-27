@@ -58,6 +58,9 @@ def get_session(timestamp_utc: datetime) -> Dict:
     """
     if timestamp_utc.tzinfo is None:
         timestamp_utc = timestamp_utc.replace(tzinfo=timezone.utc)
+    else:
+        # Normalize aware timestamps to UTC so session windows match correctly
+        timestamp_utc = timestamp_utc.astimezone(timezone.utc)
 
     t = timestamp_utc.time()
 

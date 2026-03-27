@@ -61,8 +61,24 @@ def simulate_threshold(
         """, (run_id, threshold))
         signals = [dict(r) for r in cur.fetchall()]
 
+        # Derive symbol from the run record rather than hardcoding BTCUSDT
+        cur.execute(
+            "SELECT config_json FROM backtest_runs WHERE id = %s", (run_id,)
+        )
+        run_row = cur.fetchone()
+        run_symbol = "BTCUSDT"
+        if run_row and run_row.get("config_json"):
+            try:
+                cfg = run_row["config_json"]
+                if isinstance(cfg, str):
+                    import json as _json
+                    cfg = _json.loads(cfg)
+                run_symbol = cfg.get("symbol", "BTCUSDT")
+            except Exception:
+                pass
+
         # Load 1m candles for outcome simulation
-        candles_1m = load_candles(conn, 'BTCUSDT', '1m')
+        candles_1m = load_candles(conn, run_symbol, '1m')
         candles_1m = candles_1m.sort_values('open_time').reset_index(drop=True)
 
         # Walk through signals simulating trades
