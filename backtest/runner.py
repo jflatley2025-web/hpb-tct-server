@@ -60,6 +60,63 @@ from backtest.session import get_session
 
 logger = logging.getLogger("backtest.runner")
 
+# ── v12/v13 filter constants ───────────────────────────────────────────
+# 15m quality gates (local overrides — global MIN_RR and threshold unchanged)
+_MIN_RR_15M = 0.8            # tighter RR for 15m entries
+_MIN_RR_15M_RELAXED = 0.7    # fallback for re-run if 15m trade count < 3
+_MIN_RANGE_PCT_15M = 0.003   # range must be >= 0.3% of price on 15m
+
+# Model 3 quality gates
+_TREND_LOOKBACK = 50         # candles to measure slope and volatility over
+_TREND_SLOPE_FLOOR = 0.0015  # absolute minimum slope regardless of volatility
+_TREND_VOL_MULTIPLIER = 0.5  # slope threshold = max(floor, vol * multiplier)
+_MODEL3_MAX_DISTANCE_PCT = 0.015  # entry must be within 1.5% of range midpoint
+
+# Optional 15m NY overtrade guard — set True for re-run only if trade count > 55
+_ENABLE_15M_NY_OVERTRADE_FILTER = False
+
+
+def _compute_volatility(closes, lookback: int = _TREND_LOOKBACK) -> float:
+    """Return average absolute 1-bar return over the last `lookback` bars."""
+    if len(closes) < lookback:
+        return 0.0
+    returns = [
+        abs((float(closes[i]) - float(closes[i - 1])) / float(closes[i - 1]))
+        for i in range(-lookback + 1, 0)
+        if float(closes[i - 1]) > 0
+    ]
+    return sum(returns) / len(returns) if returns else 0.0
+
+
+def _is_trending_environment(closes, lookback: int = _TREND_LOOKBACK) -> tuple:
+    """Return (trend_ok: bool, slope: float, min_slope: float).
+
+    Uses volatility-adjusted threshold: min_slope = max(floor, vol * multiplier).
+    This prevents the gate from being trivially easy in low-vol regimes or
+    impossibly tight in high-vol regimes.
+    """
+    if len(closes) < lookback:
+        return False, 0.0, _TREND_SLOPE_FLOOR
+    start = float(closes[-lookback])
+    end = float(closes[-1])
+    if start <= 0:
+        return False, 0.0, _TREND_SLOPE_FLOOR
+    slope = (end - start) / start
+    vol = _compute_volatility(closes, lookback)
+    min_slope = max(_TREND_SLOPE_FLOOR, vol * _TREND_VOL_MULTIPLIER)
+    return abs(slope) >= min_slope, slope, min_slope
+
+
+def _range_size_pct(range_info, current_price: float) -> float:
+    """Return (range_high - range_low) / current_price, or 0.0 on bad input."""
+    if not isinstance(range_info, dict) or current_price <= 0:
+        return 0.0
+    r_high = range_info.get("high") or 0
+    r_low = range_info.get("low") or 0
+    if r_high <= r_low:
+        return 0.0
+    return (r_high - r_low) / current_price
+
 
 # ── Backtest State ────────────────────────────────────────────────────
 
@@ -119,6 +176,14 @@ class BacktestState:
     # BOS fingerprint dedup: prevents re-entering the same schematic
     # Key: (tf, model, direction, bos_idx) — cleared after 48h or when BOS changes
     traded_bos_fingerprints: dict = field(default_factory=dict)  # fp -> timestamp traded
+    # v13 funnel diagnostics — accumulated across the full run
+    model3_detected: int = 0    # Model_3 schematics that entered gate pipeline
+    model3_tf_pass: int = 0     # passed TF restriction (1h only)
+    model3_trend_pass: int = 0  # passed adaptive trend gate
+    model3_trades: int = 0      # resulted in a TAKE trade
+    signals_15m_detected: int = 0  # 15m schematics that entered gate pipeline
+    signals_15m_passed: int = 0    # survived all 15m-specific gates
+    trades_15m: int = 0            # resulted in a TAKE trade
 
 
 # ── Multi-TF Synchronization ─────────────────────────────────────────
@@ -626,6 +691,12 @@ def run_gate_pipeline(
                 f"rig_status={rig_status} rig_should_block={rig_should_block}"
             )
 
+            # v13 funnel: count every Model_3 / 15m signal that reaches the gate
+            if "Model_3" in model:
+                state.model3_detected += 1
+            if tf == "15m":
+                state.signals_15m_detected += 1
+
             # Determine failure code
             failure_code = None
             skip_reason = None
@@ -649,6 +720,79 @@ def run_gate_pipeline(
                 final_decision = "SKIP"
                 skip_reason = "RR_TOO_LOW ({:.2f} < {:.2f})".format(actual_rr, min_rr)
                 failure_code = "FAIL_RR_FILTER"
+
+            # ── v12: 15m hardening gates ───────────────────────────────
+            elif tf == "15m" and actual_rr < _MIN_RR_15M:
+                final_decision = "SKIP"
+                skip_reason = "RR_15M_STRICT ({:.2f} < {:.2f})".format(actual_rr, _MIN_RR_15M)
+                failure_code = "FAIL_RR_15M_STRICT"
+                logger.info(
+                    "15M_FILTER | rr=%.2f (need %.2f) | session=%s",
+                    actual_rr, _MIN_RR_15M, session_name,
+                )
+            elif tf == "15m" and session_name == "asia":
+                final_decision = "SKIP"
+                skip_reason = "15M_ASIA_FILTER"
+                failure_code = "FAIL_15M_ASIA_FILTER"
+                logger.info(
+                    "15M_FILTER | session=Asia blocked | rr=%.2f", actual_rr,
+                )
+            elif tf == "15m" and _range_size_pct(range_info, current_price) < _MIN_RANGE_PCT_15M:
+                _rpct = _range_size_pct(range_info, current_price)
+                final_decision = "SKIP"
+                skip_reason = "RANGE_TOO_SMALL_15M ({:.4f} < {:.4f})".format(_rpct, _MIN_RANGE_PCT_15M)
+                failure_code = "FAIL_RANGE_TOO_SMALL_15M"
+                logger.info(
+                    "15M_FILTER | range_pct=%.4f (need %.4f) | session=%s | rr=%.2f",
+                    _rpct, _MIN_RANGE_PCT_15M, session_name, actual_rr,
+                )
+            elif tf == "15m" and session_name == "new_york" and _ENABLE_15M_NY_OVERTRADE_FILTER:
+                final_decision = "SKIP"
+                skip_reason = "15M_NY_OVERTRADE_GUARD"
+                failure_code = "FAIL_15M_NY_OVERTRADE"
+                logger.info("15M_FILTER | NY overtrade guard active | rr=%.2f", actual_rr)
+
+            # ── v12/v13: Model 3 quality gates ────────────────────────
+            elif "Model_3" in model and tf != "1h":
+                final_decision = "SKIP"
+                skip_reason = "MODEL3_TF_FILTER (tf={}, only 1h allowed)".format(tf)
+                failure_code = "FAIL_MODEL3_TF_FILTER"
+                logger.info(
+                    "MODEL3_CHECK | tf=%s BLOCKED (1h only) | trend not evaluated", tf,
+                )
+            elif "Model_3" in model:
+                state.model3_tf_pass += 1  # reached here only when tf == "1h"
+                _closes = df_tf["close"].values if df_tf is not None and len(df_tf) > 0 else []
+                _trend_ok, _slope, _min_slope = _is_trending_environment(_closes)
+                logger.info(
+                    "MODEL3_CHECK | tf=%s | trend_ok=%s | slope=%.4f | min_slope=%.4f",
+                    tf, _trend_ok, _slope, _min_slope,
+                )
+                if not _trend_ok:
+                    final_decision = "SKIP"
+                    skip_reason = "MODEL3_NO_TREND (slope={:.4f} < adaptive {:.4f})".format(
+                        abs(_slope), _min_slope
+                    )
+                    failure_code = "FAIL_MODEL3_NO_TREND"
+                else:
+                    state.model3_trend_pass += 1
+                    # Entry distance gate: reject if entry is > 1.5% from range midpoint
+                    _r_high = range_info.get("high", 0) if isinstance(range_info, dict) else 0
+                    _r_low = range_info.get("low", 0) if isinstance(range_info, dict) else 0
+                    if _r_high > _r_low and entry_price > 0:
+                        _range_mid = (_r_high + _r_low) / 2
+                        _dist_pct = abs(entry_price - _range_mid) / _range_mid
+                        if _dist_pct > _MODEL3_MAX_DISTANCE_PCT:
+                            final_decision = "SKIP"
+                            skip_reason = "MODEL3_EXTENDED (dist={:.4f} > {:.4f})".format(
+                                _dist_pct, _MODEL3_MAX_DISTANCE_PCT
+                            )
+                            failure_code = "FAIL_MODEL3_EXTENDED"
+                            logger.info(
+                                "MODEL3_CHECK | tf=%s | EXTENDED dist=%.4f (max %.4f)",
+                                tf, _dist_pct, _MODEL3_MAX_DISTANCE_PCT,
+                            )
+
             elif score < entry_threshold:
                 final_decision = "SKIP"
                 skip_reason = "SCORE_BELOW_THRESHOLD ({} < {})".format(score, entry_threshold)
@@ -671,6 +815,10 @@ def run_gate_pipeline(
                         final_decision = "SKIP"
                         skip_reason = "DUPLICATE_BOS (same schematic traded {:.0f}h ago)".format(age_hours)
                         failure_code = "FAIL_DUPLICATE_BOS"
+
+            # v13: track 15m signals that survived all gates (including BOS dedup)
+            if tf == "15m" and final_decision == "TAKE":
+                state.signals_15m_passed += 1
 
             signal = {
                 "signal_time": current_time,
@@ -828,7 +976,7 @@ def run_backtest(
         "tp1_close_pct": effective_tp1_close_pct,
         "tp1_level_pct": effective_tp1_level_pct,
         "trail_factor": effective_trail_factor,
-        "engine_version": 11,  # v11: range state per-TF, step_interval in candles_by_tf, UTC normalize, price lookup fix
+        "engine_version": 13,  # v13: adaptive trend filter, funnel diagnostics, Model 3 distance gate, 15m NY overtrade guard
     }
 
     run_id = create_run(
@@ -956,8 +1104,14 @@ def run_backtest(
                         round(float(bos_info_fp.get("bos_price") or 0), 0),
                     )
                     state.traded_bos_fingerprints[bos_fp] = current_time
-                    _open_trade(state, signal, current_time, current_price,
-                                tp1_level_pct=effective_tp1_level_pct)
+                    _trade_opened = _open_trade(state, signal, current_time, current_price,
+                                               tp1_level_pct=effective_tp1_level_pct)
+                    # v13: funnel trade counters — only increment if trade was actually opened
+                    if _trade_opened:
+                        if "Model_3" in signal.get("model", ""):
+                            state.model3_trades += 1
+                        if signal.get("timeframe") == "15m":
+                            state.trades_15m += 1
 
             # Progress logging
             if step_idx > 0 and step_idx % 100 == 0:
@@ -972,6 +1126,17 @@ def run_backtest(
         if state.open_trade is not None:
             last_price = current_price
             _close_trade(state, last_price, "backtest_end", end_date, conn, run_id)
+
+        # v13: emit funnel diagnostics before finalizing
+        logger.info(
+            "MODEL3_FUNNEL | detected=%d | passed_tf=%d | passed_trend=%d | trades=%d",
+            state.model3_detected, state.model3_tf_pass,
+            state.model3_trend_pass, state.model3_trades,
+        )
+        logger.info(
+            "15M_FUNNEL | detected=%d | passed_filters=%d | trades=%d",
+            state.signals_15m_detected, state.signals_15m_passed, state.trades_15m,
+        )
 
         # Complete run
         complete_run(
@@ -1066,6 +1231,7 @@ def _open_trade(state: BacktestState, signal: dict, current_time: datetime,
         f"OPEN #{state.trade_count}: {direction} @ {effective_entry:.2f} "
         f"(SL={stop_price:.2f}, TP={target_price:.2f}, R:R={signal.get('rr', 0):.2f})"
     )
+    return True
 
 
 def _close_trade(state: BacktestState, raw_exit_price: float, exit_reason: str,
