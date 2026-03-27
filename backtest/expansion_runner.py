@@ -275,16 +275,27 @@ def task1_multi_tf_expansion(conn):
     else:
         print(f"  15m data incomplete (count={count_15m}, range={min_15m} to {max_15m}). Ingesting...")
         _ingest_15m(conn)
-        # Re-validate before running
+        # Re-validate using the same date-coverage check as the pre-ingestion guard
         cur.execute("""
-            SELECT COUNT(*) FROM ohlcv_candles
+            SELECT COUNT(*), MIN(open_time), MAX(open_time)
+            FROM ohlcv_candles
             WHERE symbol='BTCUSDT' AND timeframe='15m'
         """)
-        count_after = cur.fetchone()[0]
-        if count_after > 0:
+        row_after = cur.fetchone()
+        count_after = row_after[0] if row_after else 0
+        min_after = row_after[1] if row_after else None
+        max_after = row_after[2] if row_after else None
+        has_full_window_after = (
+            count_after > 0
+            and min_after is not None
+            and max_after is not None
+            and pd.Timestamp(min_after) <= pd.Timestamp(START_DATE)
+            and pd.Timestamp(max_after) >= pd.Timestamp(END_DATE) - timedelta(days=1)
+        )
+        if has_full_window_after:
             _run_tf_expansion_backtest(conn, ["4h", "1h", "30m", "15m"])
         else:
-            print("  15m ingestion failed — skipping 15m expansion backtest")
+            print(f"  15m ingestion incomplete (count={count_after}, range={min_after} to {max_after}) — skipping 15m expansion backtest")
 
     # ── Analysis 3: HTF Context Windows ──
     print("\n  Analyzing HTF bias context impact...")
