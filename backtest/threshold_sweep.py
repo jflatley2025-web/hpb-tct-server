@@ -78,7 +78,11 @@ def simulate_threshold(
                 run_symbol = cfg.get("symbol", "BTCUSDT")
                 run_step_interval = cfg.get("step_interval", "1h")
             except Exception:
-                pass
+                logger.exception(
+                    "Failed to parse config_json for run_id=%s (row=%r) — "
+                    "falling back to symbol=BTCUSDT, step_interval=1h",
+                    run_id, run_row,
+                )
 
         # Load 1m candles for outcome simulation
         candles_1m = load_candles(conn, run_symbol, '1m')

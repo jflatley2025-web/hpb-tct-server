@@ -577,7 +577,10 @@ def task4_regime_analysis(conn, signals_df):
                 (take_signals["signal_time_dt"] <= opened + pd.Timedelta(hours=2))
             ]
             if not sig_match.empty:
-                regime = sig_match.iloc[0].get("gate_1a_bias", "unknown")
+                # Pick the signal closest in time to the trade open
+                closest_idx = (sig_match["signal_time_dt"] - opened).abs().idxmin()
+                _bias = sig_match.loc[closest_idx, "gate_1a_bias"]
+                regime = "unknown" if (pd.isna(_bias) or _bias == "") else _bias
             else:
                 regime = "unknown"
             regime_trades[regime].append(trade)

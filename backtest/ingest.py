@@ -338,7 +338,7 @@ def ingest(
         ccxt_symbol = symbol
     else:
         ccxt_symbol = symbol  # fallback: keep as-is if no match
-        for quote in ("USDT", "USDC", "BUSD", "USD", "BTC", "ETH"):
+        for quote in ("USDT", "USDC", "BUSD", "TUSD", "DAI", "PAX", "EUR", "GBP", "AUD", "BRL", "USD", "BTC", "ETH"):
             if symbol.endswith(quote):
                 base = symbol[: -len(quote)]
                 ccxt_symbol = f"{base}/{quote}"

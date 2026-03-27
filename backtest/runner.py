@@ -886,7 +886,7 @@ def run_backtest(
         price_closes = None
 
     # Include step_interval so exit-checking can access its candles
-    detection_tfs = list(set([HTF_TIMEFRAME] + MTF_TIMEFRAMES + [step_interval]))
+    detection_tfs = list({HTF_TIMEFRAME, *MTF_TIMEFRAMES, step_interval})
 
     try:
         for step_idx, current_time in enumerate(step_times):

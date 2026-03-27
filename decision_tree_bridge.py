@@ -1874,7 +1874,7 @@ class DecisionTreeEvaluator:
         # TODO: re-implement flip detection for v2 if needed
 
     def evaluate_schematic(self, schematic: Dict, htf_bias: str, current_price: float,
-                           total_candles: int = 200, max_stale_candles: int = 8,
+                           total_candles: int = 200, max_stale_candles: int = 190,
                            candle_df: Optional[pd.DataFrame] = None) -> Dict:
         """
         Evaluate a schematic using the 9-phase v2 pipeline.
@@ -1920,7 +1920,7 @@ class DecisionTreeEvaluator:
         # The original tight threshold (5 candles) was removed because bos_idx
         # typically falls at candles 80–160 in the 200-candle window; restoring
         # it at a permissive threshold keeps the guard without blocking live signals.
-        bos_age_idx = bos.get("bos_idx")
+        bos_age_idx = schematic.get("bos_idx")
         if bos_age_idx is not None and bos_age_idx < (total_candles - max_stale_candles):
             fail["failure_context"] = "stale-bos"
             candles_ago = total_candles - 1 - bos_age_idx
