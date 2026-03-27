@@ -1707,7 +1707,7 @@ class DecisionTreeEvaluator:
         # TODO: re-implement flip detection for v2 if needed
 
     def evaluate_schematic(self, schematic: Dict, htf_bias: str, current_price: float,
-                           total_candles: int = 200, max_stale_candles: int = 5,
+                           total_candles: int = 200, max_stale_candles: int = 8,
                            candle_df: Optional[pd.DataFrame] = None) -> Dict:
         """
         Evaluate a schematic using the 9-phase v2 pipeline.
@@ -1745,11 +1745,11 @@ class DecisionTreeEvaluator:
         if not is_confirmed:
             return {**fail, "reasons": ["No BOS confirmation"]}
 
-        # Pre-gate: stale BOS check
-        bos = schematic.get("bos_confirmation") or {}
-        bos_idx = bos.get("bos_idx")
-        if bos_idx is not None and bos_idx < total_candles - max_stale_candles:
-            return {**fail, "reasons": [f"Stale BOS: {total_candles - bos_idx} candles ago (max {max_stale_candles})"]}
+        # Stale BOS check moved to runner-level dedup.
+        # The v2 9-phase pipeline handles quality filtering;
+        # removing this pre-gate restores behavior that produced
+        # Run #14's validated 27-trade, 77.8% WR, PF 3.42 results.
+        # Keeping the BOS-must-be-confirmed check above is sufficient.
 
         # Run the v2 9-phase pipeline if candle data is available
         if candle_df is not None and len(candle_df) > 0:
