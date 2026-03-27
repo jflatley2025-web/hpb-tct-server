@@ -39,6 +39,13 @@ services:
         sync: false
       - key: PHEMEX_TRADE_LOG_DIR
         value: /opt/render/project/chroma_db
+      # MoonDev paper trading feed (schematics-5B engine)
+      - key: MOONDEV_PAPER_TRADING
+        value: "true"
+      - key: MOONDEV_API_KEY
+        sync: false
+      - key: MOONDEV_BASE_URL
+        value: https://api.moondev.com
 
     autoDeploy: true
 

@@ -657,6 +657,7 @@ class TCTSchematicDetector:
 
         # --- Re-accumulation (bullish continuation) ---
         re_acc_ranges = self._find_continuation_ranges("bullish")
+        logger.debug("[M3] bullish continuation: %d candidate ranges found", len(re_acc_ranges))
         for range_data in re_acc_ranges:
             try:
                 tap1 = self._create_tab(range_data, "range_low", "tap1_acc")
@@ -681,6 +682,24 @@ class TCTSchematicDetector:
                         model_type="Model_3"
                     )
                     if schematic:
+                        bos_info = schematic.get("bos_confirmation") or {}
+                        bos_idx_val = bos_info.get("bos_idx")
+                        n_candles = len(self.candles)
+                        logger.debug(
+                            "[M3] re_acc schematic built: bos_idx=%s, confirmed=%s, n=%d",
+                            bos_idx_val, schematic.get("is_confirmed"), n_candles
+                        )
+                        # BOS recency gate: reject schematics where BOS formed
+                        # more than 30 candles ago. Checking bos_idx (not range
+                        # completion j) ensures fresh BOS structures are kept even
+                        # when the range completed earlier in the window.
+                        bos_recency = 30
+                        if bos_idx_val is not None and bos_idx_val < (n_candles - bos_recency):
+                            logger.debug(
+                                "[M3] rejected re_acc: bos_idx=%d < threshold=%d",
+                                bos_idx_val, n_candles - bos_recency
+                            )
+                            continue
                         schematic["continuation_context"] = {
                             "type": "re_accumulation",
                             "impulse_direction": "bullish",
@@ -694,6 +713,7 @@ class TCTSchematicDetector:
 
         # --- Re-distribution (bearish continuation) ---
         re_dist_ranges = self._find_continuation_ranges("bearish")
+        logger.debug("[M3] bearish continuation: %d candidate ranges found", len(re_dist_ranges))
         for range_data in re_dist_ranges:
             try:
                 tap1 = self._create_tab(range_data, "range_high", "tap1_dist")
@@ -728,6 +748,21 @@ class TCTSchematicDetector:
                         model_type="Model_3"
                     )
                     if schematic:
+                        bos_info = schematic.get("bos_confirmation") or {}
+                        bos_idx_val = bos_info.get("bos_idx")
+                        n_candles = len(self.candles)
+                        logger.debug(
+                            "[M3] re_dist schematic built: bos_idx=%s, confirmed=%s, n=%d",
+                            bos_idx_val, schematic.get("is_confirmed"), n_candles
+                        )
+                        # BOS recency gate (same logic as re-accumulation above)
+                        bos_recency = 30
+                        if bos_idx_val is not None and bos_idx_val < (n_candles - bos_recency):
+                            logger.debug(
+                                "[M3] rejected re_dist: bos_idx=%d < threshold=%d",
+                                bos_idx_val, n_candles - bos_recency
+                            )
+                            continue
                         schematic["sweep_validation"] = sweep
                         schematic["continuation_context"] = {
                             "type": "re_distribution",
@@ -748,7 +783,8 @@ class TCTSchematicDetector:
                          key=sort_key, reverse=True)[:10]
         return bullish + bearish
 
-    def _find_continuation_ranges(self, impulse_direction: str) -> List[Dict]:
+    def _find_continuation_ranges(self, impulse_direction: str,
+                                   lookback_limit: int = 80) -> List[Dict]:
         """
         Find consolidation ranges that form AFTER an impulse move.
 
@@ -760,154 +796,140 @@ class TCTSchematicDetector:
 
         Returns ranges in the same format as _find_accumulation_ranges /
         _find_distribution_ranges so they can be processed identically.
+
+        lookback_limit: only scan the most recent N candles to avoid
+        detecting stale ranges deep in the history window.
         """
         ranges = []
         seen_pairs = set()
         candles = self.candles
         n = len(candles)
+        is_bullish = impulse_direction == "bullish"
 
         if n < self.CONTINUATION_IMPULSE_MIN_CANDLES + 20:
             return ranges
 
-        for i in range(self.CONTINUATION_IMPULSE_MIN_CANDLES + 5, n - 8):
-            # --- 1. Detect impulse leg ending near index i ---
+        # Restrict search to recent candles only.
+        # 200-candle window is ~8 days on 1h — too wide for continuation.
+        # 80 candles = ~3.3 days — aligns with active schematic formation.
+        scan_start = max(self.CONTINUATION_IMPULSE_MIN_CANDLES + 5,
+                         n - lookback_limit)
+
+        for i in range(scan_start, n - 8):
+            # ── 1. Detect impulse leg ending near index i ──────────────
             # Look back CONTINUATION_IMPULSE_MIN_CANDLES candles for a
             # directional move of at least CONTINUATION_IMPULSE_MIN_PCT.
             impulse_start = max(0, i - self.CONTINUATION_IMPULSE_MIN_CANDLES - 10)
             impulse_end = i
+            closes = candles.iloc[impulse_start:impulse_end]["close"].values
 
-            if impulse_direction == "bullish":
+            if is_bullish:
                 low_before = float(candles.iloc[impulse_start:impulse_end]["low"].min())
                 high_at = float(candles.iloc[impulse_end]["high"])
                 impulse_pct = (high_at - low_before) / low_before if low_before > 0 else 0
-
-                if impulse_pct < self.CONTINUATION_IMPULSE_MIN_PCT:
-                    continue
-
-                # Confirm impulse: closes should trend up
-                closes = candles.iloc[impulse_start:impulse_end]["close"].values
-                if len(closes) >= 4 and float(closes[-1]) <= float(closes[0]):
-                    continue
+                trend_ok = not (len(closes) >= 4 and float(closes[-1]) <= float(closes[0]))
             else:
                 high_before = float(candles.iloc[impulse_start:impulse_end]["high"].max())
                 low_at = float(candles.iloc[impulse_end]["low"])
                 impulse_pct = (high_before - low_at) / high_before if high_before > 0 else 0
+                trend_ok = not (len(closes) >= 4 and float(closes[-1]) >= float(closes[0]))
 
-                if impulse_pct < self.CONTINUATION_IMPULSE_MIN_PCT:
-                    continue
+            if impulse_pct < self.CONTINUATION_IMPULSE_MIN_PCT or not trend_ok:
+                continue
 
-                closes = candles.iloc[impulse_start:impulse_end]["close"].values
-                if len(closes) >= 4 and float(closes[-1]) >= float(closes[0]):
-                    continue
-
-            # --- 2. Find consolidation range starting near impulse end ---
-            # The range should form right after the impulse (within a few candles)
+            # ── 2. Find consolidation range starting near impulse end ──
             range_search_start = i
             range_search_end = min(i + self.CONTINUATION_RANGE_MAX_CANDLES, n - 5)
 
-            # For bullish continuation: range forms at the top of the impulse
-            # Look for swing high then swing low (range high -> range low)
-            if impulse_direction == "bullish":
-                # Find range high (near impulse top)
-                best_high_idx = None
-                best_high = 0
-                for j in range(range_search_start, min(range_search_start + 10, range_search_end)):
-                    if self._is_swing_high(j):
-                        h = float(candles.iloc[j]["high"])
-                        if h > best_high:
-                            best_high = h
-                            best_high_idx = j
+            # Bullish: range forms at impulse top → look for swing high then swing low.
+            # Bearish: range forms at impulse bottom → look for swing low then swing high.
+            if is_bullish:
+                anchor_fn = self._is_swing_high
+                second_fn = self._is_swing_low
+                anchor_init = float("-inf")
 
-                if best_high_idx is None:
-                    continue
+                def anchor_better(new: float, best: float) -> bool:
+                    return new > best
 
-                # Find range low after the high
-                for j in range(best_high_idx + 3, range_search_end):
-                    if not self._is_swing_low(j):
-                        continue
-
-                    range_low = float(candles.iloc[j]["low"])
-                    range_high = best_high
-                    if range_high <= range_low * 1.003:
-                        continue
-
-                    range_size = range_high - range_low
-                    equilibrium = (range_high + range_low) / 2
-
-                    # Check equilibrium touch
-                    if not self._check_equilibrium_touch(best_high_idx, j, equilibrium):
-                        continue
-
-                    pair = (best_high_idx, j)
-                    if pair in seen_pairs:
-                        continue
-                    seen_pairs.add(pair)
-
-                    ranges.append({
-                        "range_high": range_high,
-                        "range_low": range_low,
-                        "range_high_idx": best_high_idx,
-                        "range_low_idx": j,
-                        "equilibrium": equilibrium,
-                        "range_size": range_size,
-                        "dl_high": range_high + (range_size * self.DEVIATION_LIMIT_PERCENT),
-                        "dl_low": range_low - (range_size * self.DEVIATION_LIMIT_PERCENT),
-                        "direction": "accumulation",
-                        "impulse_pct": impulse_pct,
-                        "is_continuation": True,
-                    })
-                    break  # one range per impulse
-
+                def anchor_price(idx: int) -> float:
+                    return float(candles.iloc[idx]["high"])
             else:
-                # bearish: range forms at the bottom of the impulse
-                # Find range low (near impulse bottom)
-                best_low_idx = None
-                best_low = float("inf")
-                for j in range(range_search_start, min(range_search_start + 10, range_search_end)):
-                    if self._is_swing_low(j):
-                        lo = float(candles.iloc[j]["low"])
-                        if lo < best_low:
-                            best_low = lo
-                            best_low_idx = j
+                anchor_fn = self._is_swing_low
+                second_fn = self._is_swing_high
+                anchor_init = float("inf")
 
-                if best_low_idx is None:
+                def anchor_better(new: float, best: float) -> bool:  # type: ignore[misc]
+                    return new < best
+
+                def anchor_price(idx: int) -> float:  # type: ignore[misc]
+                    return float(candles.iloc[idx]["low"])
+
+            # Find anchor swing point (range_high for bull, range_low for bear)
+            best_anchor_idx = None
+            best_anchor_price = anchor_init
+            for j in range(range_search_start,
+                           min(range_search_start + 10, range_search_end)):
+                if anchor_fn(j):
+                    p = anchor_price(j)
+                    if anchor_better(p, best_anchor_price):
+                        best_anchor_price = p
+                        best_anchor_idx = j
+
+            if best_anchor_idx is None:
+                continue
+
+            # Find opposite swing point after the anchor
+            for j in range(best_anchor_idx + 3, range_search_end):
+                if not second_fn(j):
                     continue
 
-                # Find range high after the low
-                for j in range(best_low_idx + 3, range_search_end):
-                    if not self._is_swing_high(j):
-                        continue
-
+                if is_bullish:
+                    range_high = best_anchor_price
+                    range_low = float(candles.iloc[j]["low"])
+                    pair = (best_anchor_idx, j)
+                    range_high_idx, range_low_idx = best_anchor_idx, j
+                    eq_anchor_idx = best_anchor_idx
+                    direction_label = "accumulation"
+                    log_msg = "[M3] accepted bullish range: high_idx=%d, low_idx=%d, n=%d"
+                    log_args = (best_anchor_idx, j, n)
+                else:
                     range_high = float(candles.iloc[j]["high"])
-                    range_low = best_low
-                    if range_high <= range_low * 1.003:
-                        continue
+                    range_low = best_anchor_price
+                    pair = (j, best_anchor_idx)
+                    range_high_idx, range_low_idx = j, best_anchor_idx
+                    eq_anchor_idx = best_anchor_idx
+                    direction_label = "distribution"
+                    log_msg = "[M3] accepted bearish range: low_idx=%d, high_idx=%d, n=%d"
+                    log_args = (best_anchor_idx, j, n)
 
-                    range_size = range_high - range_low
-                    equilibrium = (range_high + range_low) / 2
+                if range_high <= range_low * 1.003:
+                    continue
 
-                    if not self._check_equilibrium_touch(best_low_idx, j, equilibrium):
-                        continue
+                range_size = range_high - range_low
+                equilibrium = (range_high + range_low) / 2
 
-                    pair = (j, best_low_idx)
-                    if pair in seen_pairs:
-                        continue
-                    seen_pairs.add(pair)
+                if not self._check_equilibrium_touch(eq_anchor_idx, j, equilibrium):
+                    continue
 
-                    ranges.append({
-                        "range_high": range_high,
-                        "range_low": range_low,
-                        "range_high_idx": j,
-                        "range_low_idx": best_low_idx,
-                        "equilibrium": equilibrium,
-                        "range_size": range_size,
-                        "dl_high": range_high + (range_size * self.DEVIATION_LIMIT_PERCENT),
-                        "dl_low": range_low - (range_size * self.DEVIATION_LIMIT_PERCENT),
-                        "direction": "distribution",
-                        "impulse_pct": impulse_pct,
-                        "is_continuation": True,
-                    })
-                    break
+                if pair in seen_pairs:
+                    continue
+                seen_pairs.add(pair)
+
+                logger.debug(log_msg, *log_args)
+                ranges.append({
+                    "range_high": range_high,
+                    "range_low": range_low,
+                    "range_high_idx": range_high_idx,
+                    "range_low_idx": range_low_idx,
+                    "equilibrium": equilibrium,
+                    "range_size": range_size,
+                    "dl_high": range_high + (range_size * self.DEVIATION_LIMIT_PERCENT),
+                    "dl_low": range_low - (range_size * self.DEVIATION_LIMIT_PERCENT),
+                    "direction": direction_label,
+                    "impulse_pct": impulse_pct,
+                    "is_continuation": True,
+                })
+                break  # one range per impulse
 
         return ranges
 

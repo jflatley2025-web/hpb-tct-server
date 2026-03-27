@@ -559,35 +559,42 @@ def task4_regime_analysis(conn, signals_df):
         )
 
     # Trade performance by regime
+    # Match each trade to its TAKE signal to get the signal's HTF regime (gate_1a_bias).
     if not trades_df.empty:
         print(f"\n  Trade Performance by HTF Regime:")
-        # Match trades to signals by time
+
+        take_signals = signals_df[signals_df["final_decision"] == "TAKE"].copy()
+        take_signals["signal_time_dt"] = pd.to_datetime(take_signals["signal_time"])
+
+        regime_trades = defaultdict(list)
         for _, trade in trades_df.iterrows():
             opened = pd.to_datetime(trade["opened_at"])
             if pd.isna(opened):
                 continue
-            # Find matching signal
-            sig_match = signals_df[
-                (pd.to_datetime(signals_df["signal_time"]) >= opened - pd.Timedelta(hours=2)) &
-                (pd.to_datetime(signals_df["signal_time"]) <= opened + pd.Timedelta(hours=2)) &
-                (signals_df["final_decision"] == "TAKE")
+            # Find the TAKE signal within ±2h of trade open
+            sig_match = take_signals[
+                (take_signals["signal_time_dt"] >= opened - pd.Timedelta(hours=2)) &
+                (take_signals["signal_time_dt"] <= opened + pd.Timedelta(hours=2))
             ]
+            if not sig_match.empty:
+                # Pick the signal closest in time to the trade open
+                closest_idx = (sig_match["signal_time_dt"] - opened).abs().idxmin()
+                _bias = sig_match.loc[closest_idx, "gate_1a_bias"]
+                regime = "unknown" if (pd.isna(_bias) or _bias == "") else _bias
+            else:
+                regime = "unknown"
+            regime_trades[regime].append(trade)
 
-        # Actually, let's use the direction field as a proxy for regime context
-        regime_trades = defaultdict(list)
-        for _, trade in trades_df.iterrows():
-            regime_trades[trade["direction"]].append(trade)
-
-        print(f"\n  {'Direction':<12} {'Trades':>7} {'Wins':>5} {'WR%':>6} {'PnL$':>8} {'Avg PnL':>8}")
-        print(f"  {'-'*52}")
-        for direction in sorted(regime_trades.keys()):
-            tlist = regime_trades[direction]
+        print(f"\n  {'Regime':<15} {'Trades':>7} {'Wins':>5} {'WR%':>6} {'PnL$':>8} {'Avg PnL':>8}")
+        print(f"  {'-'*56}")
+        for regime in sorted(regime_trades.keys()):
+            tlist = regime_trades[regime]
             t_wins = sum(1 for t in tlist if t["is_win"])
             t_pnl = sum(t["pnl_dollars"] or 0 for t in tlist)
             t_wr = (t_wins / len(tlist) * 100) if tlist else 0
             t_avg = (t_pnl / len(tlist)) if tlist else 0
             print(
-                f"  {direction:<12} {len(tlist):>7} {t_wins:>5} "
+                f"  {regime:<15} {len(tlist):>7} {t_wins:>5} "
                 f"{t_wr:>5.1f}% ${t_pnl:>7.0f} ${t_avg:>7.1f}"
             )
 

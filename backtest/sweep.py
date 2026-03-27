@@ -413,24 +413,47 @@ def task4_regime_analysis(conn):
         print("  No signals to analyze.")
         return [result]
 
-    # Classify signals by HTF bias (regime proxy)
+    # Classify signals by HTF bias (regime proxy).
+    # Each trade is assigned to at most one regime (the regime of the closest
+    # TAKE signal within ±2h). The single-pass assignment prevents the same
+    # trade from inflating multiple regime buckets.
+    take_signals = signals[signals["final_decision"] == "TAKE"].copy()
+    take_signals["signal_time_dt"] = pd.to_datetime(take_signals["signal_time"])
+    trades_opened = pd.to_datetime(trades["opened_at"])
+
+    trade_regime: dict = {}  # trade_idx -> regime string
+    seen_trade_idxs: set = set()
+    for _, trade in trades.iterrows():
+        trade_idx = trade.name
+        opened = trades_opened[trade_idx]
+        if pd.isna(opened):
+            continue
+        window = take_signals[
+            (take_signals["signal_time_dt"] >= opened - pd.Timedelta(hours=2)) &
+            (take_signals["signal_time_dt"] <= opened + pd.Timedelta(hours=2))
+        ]
+        if window.empty:
+            continue
+        # Pick the temporally closest TAKE signal to assign the regime
+        closest_idx = (window["signal_time_dt"] - opened).abs().idxmin()
+        bias = window.loc[closest_idx, "gate_1a_bias"]
+        regime = "unknown" if (pd.isna(bias) or bias == "") else bias
+        if trade_idx not in seen_trade_idxs:
+            seen_trade_idxs.add(trade_idx)
+            trade_regime[trade_idx] = regime
+
+    # Build per-regime trade lists from the single-pass assignment
+    regime_trade_rows: dict = {}
+    for trade_idx, regime in trade_regime.items():
+        regime_trade_rows.setdefault(regime, []).append(trades.loc[trade_idx])
+
     regime_stats = {}
     for regime in signals["gate_1a_bias"].unique():
         reg_sigs = signals[signals["gate_1a_bias"] == regime]
         reg_takes = reg_sigs[reg_sigs["final_decision"] == "TAKE"]
         reg_skips = reg_sigs[reg_sigs["final_decision"] == "SKIP"]
 
-        # Match trades to regime by time
-        reg_trades_list = []
-        for _, take in reg_takes.iterrows():
-            sig_time = pd.to_datetime(take["signal_time"])
-            matching = trades[
-                (pd.to_datetime(trades["opened_at"]) >= sig_time - pd.Timedelta(hours=2)) &
-                (pd.to_datetime(trades["opened_at"]) <= sig_time + pd.Timedelta(hours=2))
-            ]
-            if not matching.empty:
-                reg_trades_list.append(matching.iloc[0])
-
+        reg_trades_list = regime_trade_rows.get(regime, [])
         if reg_trades_list:
             reg_trades_df = pd.DataFrame(reg_trades_list)
             reg_wins = reg_trades_df["is_win"].sum()

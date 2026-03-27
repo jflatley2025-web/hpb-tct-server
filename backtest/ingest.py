@@ -92,7 +92,7 @@ def fetch_all_candles(
             batch = _fetch_candles_batch(exchange, symbol, timeframe, since_ms)
         except Exception as e:
             logger.error(f"Fetch error {symbol}/{timeframe} at {since_ms}: {e}")
-            break
+            raise
 
         if not batch:
             break
@@ -212,48 +212,18 @@ def check_integrity(df: pd.DataFrame, timeframe: str, symbol: str = "BTCUSDT"):
 
 # ── Upsert to database ───────────────────────────────────────────────
 
-def upsert_candles(conn, df: pd.DataFrame, symbol: str, timeframe: str) -> int:
-    """
-    Upsert candle data into ohlcv_candles. ON CONFLICT DO NOTHING.
-    Returns the number of rows inserted.
-    """
-    if df.empty:
-        return 0
-
-    inserted = 0
-    with conn.cursor() as cur:
-        for _, row in df.iterrows():
-            cur.execute(
-                """
-                INSERT INTO ohlcv_candles
-                    (symbol, timeframe, open_time, close_time,
-                     open, high, low, close, volume)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (symbol, timeframe, open_time) DO NOTHING
-                """,
-                (
-                    symbol, timeframe,
-                    row["open_time"], row["close_time"],
-                    float(row["open"]), float(row["high"]),
-                    float(row["low"]), float(row["close"]),
-                    float(row["volume"]),
-                ),
-            )
-            inserted += cur.rowcount
-    conn.commit()
-    logger.info(f"Upserted {symbol}/{timeframe}: {inserted}/{len(df)} new rows")
-    return inserted
+_OHLCV_UPSERT_SQL = """
+INSERT INTO ohlcv_candles
+    (symbol, timeframe, open_time, close_time,
+     open, high, low, close, volume)
+VALUES %s
+ON CONFLICT (symbol, timeframe, open_time) DO NOTHING
+"""
 
 
-def upsert_candles_batch(conn, df: pd.DataFrame, symbol: str, timeframe: str) -> int:
-    """
-    Batch upsert using executemany for better performance.
-    Returns the number of rows attempted.
-    """
-    if df.empty:
-        return 0
-
-    rows = [
+def _serialize_candle_rows(df: pd.DataFrame, symbol: str, timeframe: str) -> list:
+    """Convert a candle DataFrame to a list of tuples for batch upsert."""
+    return [
         (
             symbol, timeframe,
             row["open_time"], row["close_time"],
@@ -264,20 +234,29 @@ def upsert_candles_batch(conn, df: pd.DataFrame, symbol: str, timeframe: str) ->
         for _, row in df.iterrows()
     ]
 
+
+def upsert_candles(conn, df: pd.DataFrame, symbol: str, timeframe: str) -> int:
+    """
+    Upsert candle data into ohlcv_candles. ON CONFLICT DO NOTHING.
+    Delegates to upsert_candles_batch for consistent SQL.
+    Returns the number of rows attempted.
+    """
+    return upsert_candles_batch(conn, df, symbol, timeframe)
+
+
+def upsert_candles_batch(conn, df: pd.DataFrame, symbol: str, timeframe: str) -> int:
+    """
+    Batch upsert using execute_values for better performance.
+    Returns the number of rows attempted.
+    """
+    if df.empty:
+        return 0
+
+    rows = _serialize_candle_rows(df, symbol, timeframe)
+
+    from psycopg2.extras import execute_values
     with conn.cursor() as cur:
-        from psycopg2.extras import execute_values
-        execute_values(
-            cur,
-            """
-            INSERT INTO ohlcv_candles
-                (symbol, timeframe, open_time, close_time,
-                 open, high, low, close, volume)
-            VALUES %s
-            ON CONFLICT (symbol, timeframe, open_time) DO NOTHING
-            """,
-            rows,
-            page_size=500,
-        )
+        execute_values(cur, _OHLCV_UPSERT_SQL, rows, page_size=500)
     conn.commit()
     logger.info(f"Batch upserted {symbol}/{timeframe}: {len(rows)} rows")
     return len(rows)
@@ -354,7 +333,16 @@ def ingest(
 
     exchange, exchange_name = _get_exchange()
     # Normalize symbol for CCXT (e.g., "BTCUSDT" -> "BTC/USDT")
-    ccxt_symbol = symbol[:3] + "/" + symbol[3:] if "/" not in symbol else symbol
+    # Strip known quote currencies from the right to handle variable-length bases.
+    if "/" in symbol:
+        ccxt_symbol = symbol
+    else:
+        ccxt_symbol = symbol  # fallback: keep as-is if no match
+        for quote in ("USDT", "USDC", "BUSD", "TUSD", "DAI", "PAX", "EUR", "GBP", "AUD", "BRL", "USD", "BTC", "ETH"):
+            if symbol.endswith(quote):
+                base = symbol[: -len(quote)]
+                ccxt_symbol = f"{base}/{quote}"
+                break
 
     own_conn = conn is None
     if own_conn:

@@ -9,6 +9,7 @@ import os
 import hashlib
 import json
 import logging
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Optional
@@ -249,8 +250,13 @@ def drop_schema(conn=None):
 # ── Run management ────────────────────────────────────────────────────
 
 def compute_run_hash(config: dict) -> str:
-    """Deterministic hash from run configuration for idempotency."""
-    serialized = json.dumps(config, sort_keys=True, default=str)
+    """
+    Hash from run configuration + unique nonce.
+    Includes a UUID nonce so identical reruns never collide on the unique index.
+    The config is embedded so the hash remains traceable to its configuration.
+    """
+    payload = {**config, "_nonce": str(uuid.uuid4())}
+    serialized = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(serialized.encode()).hexdigest()
 
 

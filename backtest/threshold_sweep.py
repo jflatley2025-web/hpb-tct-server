@@ -14,6 +14,7 @@ from typing import Dict, List, Optional
 from backtest.config import (
     EXECUTION_SLIPPAGE_PCT, FEE_PCT, DEFAULT_LEVERAGE,
     RISK_PER_TRADE_PCT, STARTING_BALANCE, MIN_BARS_BETWEEN_TRADES,
+    timeframe_to_seconds,
 )
 from backtest.db import get_connection
 from backtest.ingest import load_candles
@@ -61,8 +62,51 @@ def simulate_threshold(
         """, (run_id, threshold))
         signals = [dict(r) for r in cur.fetchall()]
 
+        # Derive symbol and step_interval from the run record.
+        # step_interval column is authoritative; config_json is a fallback.
+        cur.execute(
+            "SELECT step_interval, config_json FROM backtest_runs WHERE id = %s",
+            (run_id,),
+        )
+        run_row = cur.fetchone()
+        run_symbol = "BTCUSDT"
+        run_step_interval = "1h"  # default; overridden below
+        if run_row:
+            # Prefer the persisted DB column first
+            if run_row.get("step_interval"):
+                run_step_interval = run_row["step_interval"]
+            # Parse config_json for symbol (and step_interval fallback)
+            if run_row.get("config_json"):
+                try:
+                    cfg = run_row["config_json"]
+                    if isinstance(cfg, str):
+                        import json as _json
+                        cfg = _json.loads(cfg)
+                    run_symbol = cfg.get("symbol", "BTCUSDT")
+                    # Only fall back to config if DB column was absent
+                    if not run_row.get("step_interval"):
+                        run_step_interval = cfg.get("step_interval", "1h")
+                except Exception:
+                    logger.exception(
+                        "Failed to parse config_json for run_id=%s (row=%r) — "
+                        "falling back to symbol=BTCUSDT, step_interval=1h",
+                        run_id, run_row,
+                    )
+
+        # Compute cooldown once — derived from step_interval so bar-count is
+        # correct for 1h, 30m, 15m runs alike.
+        try:
+            step_secs = timeframe_to_seconds(run_step_interval)
+        except ValueError:
+            logger.exception(
+                "Unknown step_interval %r for run_id=%s — defaulting to 1h",
+                run_step_interval, run_id,
+            )
+            step_secs = timeframe_to_seconds("1h")
+        cooldown = timedelta(seconds=MIN_BARS_BETWEEN_TRADES * step_secs)
+
         # Load 1m candles for outcome simulation
-        candles_1m = load_candles(conn, 'BTCUSDT', '1m')
+        candles_1m = load_candles(conn, run_symbol, '1m')
         candles_1m = candles_1m.sort_values('open_time').reset_index(drop=True)
 
         # Walk through signals simulating trades
@@ -79,7 +123,6 @@ def simulate_threshold(
 
             # Trade cooldown
             if trade_close_time is not None:
-                cooldown = timedelta(hours=MIN_BARS_BETWEEN_TRADES)
                 if sig['signal_time'] < trade_close_time + cooldown:
                     continue
 

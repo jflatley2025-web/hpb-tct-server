@@ -248,22 +248,54 @@ def task1_multi_tf_expansion(conn):
     # ── Analysis 2: Run backtest with 15m added ──
     print("\n  Running 15m expansion backtest...")
 
-    # Check if 15m data exists
+    # Validate that a full 15m window exists (must span the entire backtest range)
     cur = conn.cursor()
     cur.execute("""
-        SELECT COUNT(*) FROM ohlcv_candles
+        SELECT COUNT(*), MIN(open_time), MAX(open_time)
+        FROM ohlcv_candles
         WHERE symbol='BTCUSDT' AND timeframe='15m'
     """)
-    count_15m = cur.fetchone()[0]
+    row = cur.fetchone()
+    count_15m = row[0] if row else 0
+    min_15m = row[1] if row else None
+    max_15m = row[2] if row else None
 
-    if count_15m > 0:
-        print(f"  15m data available: {count_15m} candles")
-        # Run the actual backtest with 15m added to MTF_TIMEFRAMES
+    # Check coverage: data must reach back before START_DATE and forward past END_DATE
+    has_full_window = (
+        count_15m > 0
+        and min_15m is not None
+        and max_15m is not None
+        and pd.Timestamp(min_15m) <= pd.Timestamp(START_DATE)
+        and pd.Timestamp(max_15m) >= pd.Timestamp(END_DATE) - timedelta(days=1)
+    )
+
+    if has_full_window:
+        print(f"  15m data available: {count_15m} candles ({min_15m} to {max_15m})")
         _run_tf_expansion_backtest(conn, ["4h", "1h", "30m", "15m"])
     else:
-        print("  15m data NOT in database. Ingesting...")
+        print(f"  15m data incomplete (count={count_15m}, range={min_15m} to {max_15m}). Ingesting...")
         _ingest_15m(conn)
-        _run_tf_expansion_backtest(conn, ["4h", "1h", "30m", "15m"])
+        # Re-validate using the same date-coverage check as the pre-ingestion guard
+        cur.execute("""
+            SELECT COUNT(*), MIN(open_time), MAX(open_time)
+            FROM ohlcv_candles
+            WHERE symbol='BTCUSDT' AND timeframe='15m'
+        """)
+        row_after = cur.fetchone()
+        count_after = row_after[0] if row_after else 0
+        min_after = row_after[1] if row_after else None
+        max_after = row_after[2] if row_after else None
+        has_full_window_after = (
+            count_after > 0
+            and min_after is not None
+            and max_after is not None
+            and pd.Timestamp(min_after) <= pd.Timestamp(START_DATE)
+            and pd.Timestamp(max_after) >= pd.Timestamp(END_DATE) - timedelta(days=1)
+        )
+        if has_full_window_after:
+            _run_tf_expansion_backtest(conn, ["4h", "1h", "30m", "15m"])
+        else:
+            print(f"  15m ingestion incomplete (count={count_after}, range={min_after} to {max_after}) — skipping 15m expansion backtest")
 
     # ── Analysis 3: HTF Context Windows ──
     print("\n  Analyzing HTF bias context impact...")
@@ -310,10 +342,10 @@ def _ingest_15m(conn):
 
 def _run_tf_expansion_backtest(conn, mtf_list):
     """Run a backtest with expanded MTF list."""
+    import backtest.config as cfg
+    original_mtf = cfg.MTF_TIMEFRAMES
     try:
         # Temporarily patch MTF_TIMEFRAMES
-        import backtest.config as cfg
-        original_mtf = cfg.MTF_TIMEFRAMES
         cfg.MTF_TIMEFRAMES = mtf_list
 
         from backtest.runner import run_backtest
@@ -333,9 +365,6 @@ def _run_tf_expansion_backtest(conn, mtf_list):
             min_rr=BASELINE_MIN_RR,
             conn=conn,
         )
-
-        # Restore original
-        cfg.MTF_TIMEFRAMES = original_mtf
 
         if result:
             print(f"\n  15m Expansion Result:")
@@ -393,8 +422,9 @@ def _run_tf_expansion_backtest(conn, mtf_list):
     except Exception as e:
         logger.error(f"TF expansion backtest failed: {e}", exc_info=True)
         print(f"  TF expansion backtest failed: {e}")
-        import backtest.config as cfg
-        cfg.MTF_TIMEFRAMES = ["4h", "1h", "30m"]
+    finally:
+        # Always restore original MTF_TIMEFRAMES — even on unexpected exceptions
+        cfg.MTF_TIMEFRAMES = original_mtf
 
 
 # ═══════════════════════════════════════════════════════════════════════

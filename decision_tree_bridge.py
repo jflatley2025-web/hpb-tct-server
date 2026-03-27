@@ -1874,7 +1874,7 @@ class DecisionTreeEvaluator:
         # TODO: re-implement flip detection for v2 if needed
 
     def evaluate_schematic(self, schematic: Dict, htf_bias: str, current_price: float,
-                           total_candles: int = 200, max_stale_candles: int = 5,
+                           total_candles: int = 200, max_stale_candles: int = 190,
                            candle_df: Optional[pd.DataFrame] = None) -> Dict:
         """
         Evaluate a schematic using the 9-phase v2 pipeline.
@@ -1913,12 +1913,20 @@ class DecisionTreeEvaluator:
             fail["failure_context"] = "no-bos"
             return {**fail, "reasons": ["No BOS confirmation"]}
 
-        # Pre-gate: stale BOS check
-        bos = schematic.get("bos_confirmation") or {}
-        bos_idx = bos.get("bos_idx")
-        if bos_idx is not None and bos_idx < total_candles - max_stale_candles:
+        # Lightweight BOS age gate — complements runner-level fingerprint dedup.
+        # max_stale_candles is intentionally large (default 190 of 200) so only
+        # truly ancient BOS (formed in the first ~5% of the detection window)
+        # are rejected. This is a sanity guard, NOT a quality filter.
+        # The original tight threshold (5 candles) was removed because bos_idx
+        # typically falls at candles 80–160 in the 200-candle window; restoring
+        # it at a permissive threshold keeps the guard without blocking live signals.
+        bos_age_idx = schematic.get("bos_idx")
+        if bos_age_idx is not None and bos_age_idx < (total_candles - max_stale_candles):
             fail["failure_context"] = "stale-bos"
-            return {**fail, "reasons": [f"Stale BOS: {total_candles - bos_idx} candles ago (max {max_stale_candles})"]}
+            candles_ago = total_candles - 1 - bos_age_idx
+            return {**fail, "reasons": [
+                f"Stale BOS: {candles_ago} candles ago (max {max_stale_candles})"
+            ]}
 
         # Run the v2 9-phase pipeline if candle data is available
         if candle_df is not None and len(candle_df) > 0:
