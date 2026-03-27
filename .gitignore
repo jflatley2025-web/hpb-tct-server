@@ -47,6 +47,10 @@ redis-data/
 redis/
 redis-cli
 
+# Backtest engine — local only, not deployed to production server
+backtest/
+docker-compose.yml
+
 # Claude Code
 .claude/
 
