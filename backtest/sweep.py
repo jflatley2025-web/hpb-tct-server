@@ -420,8 +420,11 @@ def task4_regime_analysis(conn):
         reg_takes = reg_sigs[reg_sigs["final_decision"] == "TAKE"]
         reg_skips = reg_sigs[reg_sigs["final_decision"] == "SKIP"]
 
-        # Match trades to regime by time
+        # Match trades to regime by time.
+        # Use a seen-index set so the same trade is never counted twice when
+        # multiple TAKE signals fall within ±2h of a single opened trade.
         reg_trades_list = []
+        seen_trade_idxs: set = set()
         for _, take in reg_takes.iterrows():
             sig_time = pd.to_datetime(take["signal_time"])
             matching = trades[
@@ -429,7 +432,10 @@ def task4_regime_analysis(conn):
                 (pd.to_datetime(trades["opened_at"]) <= sig_time + pd.Timedelta(hours=2))
             ]
             if not matching.empty:
-                reg_trades_list.append(matching.iloc[0])
+                trade_idx = matching.index[0]
+                if trade_idx not in seen_trade_idxs:
+                    seen_trade_idxs.add(trade_idx)
+                    reg_trades_list.append(matching.iloc[0])
 
         if reg_trades_list:
             reg_trades_df = pd.DataFrame(reg_trades_list)

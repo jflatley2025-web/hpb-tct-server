@@ -14,6 +14,7 @@ from typing import Dict, List, Optional
 from backtest.config import (
     EXECUTION_SLIPPAGE_PCT, FEE_PCT, DEFAULT_LEVERAGE,
     RISK_PER_TRADE_PCT, STARTING_BALANCE, MIN_BARS_BETWEEN_TRADES,
+    timeframe_to_seconds,
 )
 from backtest.db import get_connection
 from backtest.ingest import load_candles
@@ -67,6 +68,7 @@ def simulate_threshold(
         )
         run_row = cur.fetchone()
         run_symbol = "BTCUSDT"
+        run_step_interval = "1h"  # default; overridden from run config below
         if run_row and run_row.get("config_json"):
             try:
                 cfg = run_row["config_json"]
@@ -74,6 +76,7 @@ def simulate_threshold(
                     import json as _json
                     cfg = _json.loads(cfg)
                 run_symbol = cfg.get("symbol", "BTCUSDT")
+                run_step_interval = cfg.get("step_interval", "1h")
             except Exception:
                 pass
 
@@ -93,9 +96,11 @@ def simulate_threshold(
             if in_trade:
                 continue
 
-            # Trade cooldown
+            # Trade cooldown — derived from the run's step_interval so the
+            # bar-count threshold is correct for 1h, 30m, 15m runs alike.
             if trade_close_time is not None:
-                cooldown = timedelta(hours=MIN_BARS_BETWEEN_TRADES)
+                step_secs = timeframe_to_seconds(run_step_interval)
+                cooldown = timedelta(seconds=MIN_BARS_BETWEEN_TRADES * step_secs)
                 if sig['signal_time'] < trade_close_time + cooldown:
                     continue
 
