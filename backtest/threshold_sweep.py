@@ -62,27 +62,36 @@ def simulate_threshold(
         """, (run_id, threshold))
         signals = [dict(r) for r in cur.fetchall()]
 
-        # Derive symbol from the run record rather than hardcoding BTCUSDT
+        # Derive symbol and step_interval from the run record.
+        # step_interval column is authoritative; config_json is a fallback.
         cur.execute(
-            "SELECT config_json FROM backtest_runs WHERE id = %s", (run_id,)
+            "SELECT step_interval, config_json FROM backtest_runs WHERE id = %s",
+            (run_id,),
         )
         run_row = cur.fetchone()
         run_symbol = "BTCUSDT"
-        run_step_interval = "1h"  # default; overridden from run config below
-        if run_row and run_row.get("config_json"):
-            try:
-                cfg = run_row["config_json"]
-                if isinstance(cfg, str):
-                    import json as _json
-                    cfg = _json.loads(cfg)
-                run_symbol = cfg.get("symbol", "BTCUSDT")
-                run_step_interval = cfg.get("step_interval", "1h")
-            except Exception:
-                logger.exception(
-                    "Failed to parse config_json for run_id=%s (row=%r) — "
-                    "falling back to symbol=BTCUSDT, step_interval=1h",
-                    run_id, run_row,
-                )
+        run_step_interval = "1h"  # default; overridden below
+        if run_row:
+            # Prefer the persisted DB column first
+            if run_row.get("step_interval"):
+                run_step_interval = run_row["step_interval"]
+            # Parse config_json for symbol (and step_interval fallback)
+            if run_row.get("config_json"):
+                try:
+                    cfg = run_row["config_json"]
+                    if isinstance(cfg, str):
+                        import json as _json
+                        cfg = _json.loads(cfg)
+                    run_symbol = cfg.get("symbol", "BTCUSDT")
+                    # Only fall back to config if DB column was absent
+                    if not run_row.get("step_interval"):
+                        run_step_interval = cfg.get("step_interval", "1h")
+                except Exception:
+                    logger.exception(
+                        "Failed to parse config_json for run_id=%s (row=%r) — "
+                        "falling back to symbol=BTCUSDT, step_interval=1h",
+                        run_id, run_row,
+                    )
 
         # Load 1m candles for outcome simulation
         candles_1m = load_candles(conn, run_symbol, '1m')
