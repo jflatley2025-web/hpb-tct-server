@@ -643,10 +643,14 @@ def run_gate_pipeline(
                 failure_code = "FAIL_1D_SCORE"
             else:
                 # BOS fingerprint check: don't re-enter the same schematic
-                # until a genuinely new BOS is detected (different bos_idx)
+                # Keyed on entry_price (rounded) + BOS price — both are absolute
+                # and stable across detection window shifts (unlike bos_idx).
                 bos_info = schematic.get("bos_confirmation") or {}
-                bos_idx_val = bos_info.get("bos_idx")
-                fp = (tf, model, direction, bos_idx_val)
+                bos_price = round(float(bos_info.get("bos_price") or 0), 0)
+                entry_snap = round(float(
+                    schematic.get("entry", {}).get("price") or current_price
+                ), 0)
+                fp = (tf, model, direction, entry_snap, bos_price)
                 fp_traded_at = state.traded_bos_fingerprints.get(fp)
                 # Expire fingerprints older than 48 hours so valid re-entries are allowed
                 if fp_traded_at is not None:
@@ -812,7 +816,7 @@ def run_backtest(
         "tp1_close_pct": effective_tp1_close_pct,
         "tp1_level_pct": effective_tp1_level_pct,
         "trail_factor": effective_trail_factor,
-        "engine_version": 9,  # v9: BOS fingerprint cooldown prevents same-schematic re-entry
+        "engine_version": 10,  # v10: absolute price-based BOS fingerprint (fixes window-shift re-entry)
     }
 
     run_id = create_run(
@@ -926,13 +930,16 @@ def run_backtest(
                     min_rr=effective_min_rr,
                 )
                 if signal and signal.get("final_decision") == "TAKE":
-                    # Record BOS fingerprint to prevent same-schematic re-entry
+                    # Record BOS fingerprint to prevent same-schematic re-entry.
+                    # Use entry_price + BOS price (absolute, stable across window shifts).
                     sch = signal.get("_schematic") or {}
+                    bos_info_fp = (sch.get("bos_confirmation") or {})
                     bos_fp = (
                         signal.get("timeframe"),
                         signal.get("model"),
                         signal.get("direction"),
-                        (sch.get("bos_confirmation") or {}).get("bos_idx"),
+                        round(float(signal.get("entry_price") or current_price), 0),
+                        round(float(bos_info_fp.get("bos_price") or 0), 0),
                     )
                     state.traded_bos_fingerprints[bos_fp] = current_time
                     _open_trade(state, signal, current_time, current_price,
