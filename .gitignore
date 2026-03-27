@@ -47,9 +47,8 @@ redis-data/
 redis/
 redis-cli
 
-# Backtest engine — local only, not deployed to production server
-backtest/
-docker-compose.yml
+# Local infrastructure (DB data dirs stay local, compose + backtest committed)
+# postgres-data/ and redis-data/ are already excluded above
 
 # Claude Code
 .claude/

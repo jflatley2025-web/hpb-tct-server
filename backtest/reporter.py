@@ -206,9 +206,13 @@ def compute_advanced_metrics(trades: pd.DataFrame, signals: pd.DataFrame) -> dic
             )
 
     # Adverse excursion analysis
-    if "mae" in trades.columns and trades["mae"].notna().any():
+    # MAE is stored as raw price change (e.g. low - entry for longs).
+    # Normalize to a fraction of entry price before thresholding.
+    if ("mae" in trades.columns and trades["mae"].notna().any()
+            and "entry_price" in trades.columns and trades["entry_price"].notna().any()):
         adverse_threshold = -0.01  # 1% adverse excursion
-        adverse_count = (trades["mae"] < adverse_threshold).sum()
+        mae_pct = trades["mae"] / trades["entry_price"].replace(0, float("nan"))
+        adverse_count = (mae_pct < adverse_threshold).sum()
         metrics["pct_trades_adverse_gt_1pct"] = round(
             (adverse_count / len(trades)) * 100, 2
         )

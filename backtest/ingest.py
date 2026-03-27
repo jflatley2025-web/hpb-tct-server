@@ -92,7 +92,7 @@ def fetch_all_candles(
             batch = _fetch_candles_batch(exchange, symbol, timeframe, since_ms)
         except Exception as e:
             logger.error(f"Fetch error {symbol}/{timeframe} at {since_ms}: {e}")
-            break
+            raise
 
         if not batch:
             break
@@ -354,7 +354,16 @@ def ingest(
 
     exchange, exchange_name = _get_exchange()
     # Normalize symbol for CCXT (e.g., "BTCUSDT" -> "BTC/USDT")
-    ccxt_symbol = symbol[:3] + "/" + symbol[3:] if "/" not in symbol else symbol
+    # Strip known quote currencies from the right to handle variable-length bases.
+    if "/" in symbol:
+        ccxt_symbol = symbol
+    else:
+        ccxt_symbol = symbol  # fallback: keep as-is if no match
+        for quote in ("USDT", "USDC", "BUSD", "USD", "BTC", "ETH"):
+            if symbol.endswith(quote):
+                base = symbol[: -len(quote)]
+                ccxt_symbol = f"{base}/{quote}"
+                break
 
     own_conn = conn is None
     if own_conn:

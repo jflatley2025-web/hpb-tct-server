@@ -683,10 +683,23 @@ class TCTSchematicDetector:
                     )
                     if schematic:
                         bos_info = schematic.get("bos_confirmation") or {}
+                        bos_idx_val = bos_info.get("bos_idx")
+                        n_candles = len(self.candles)
                         logger.debug(
                             "[M3] re_acc schematic built: bos_idx=%s, confirmed=%s, n=%d",
-                            bos_info.get("bos_idx"), schematic.get("is_confirmed"), len(self.candles)
+                            bos_idx_val, schematic.get("is_confirmed"), n_candles
                         )
+                        # BOS recency gate: reject schematics where BOS formed
+                        # more than 30 candles ago. Checking bos_idx (not range
+                        # completion j) ensures fresh BOS structures are kept even
+                        # when the range completed earlier in the window.
+                        bos_recency = 30
+                        if bos_idx_val is not None and bos_idx_val < (n_candles - bos_recency):
+                            logger.debug(
+                                "[M3] rejected re_acc: bos_idx=%d < threshold=%d",
+                                bos_idx_val, n_candles - bos_recency
+                            )
+                            continue
                         schematic["continuation_context"] = {
                             "type": "re_accumulation",
                             "impulse_direction": "bullish",
@@ -736,10 +749,20 @@ class TCTSchematicDetector:
                     )
                     if schematic:
                         bos_info = schematic.get("bos_confirmation") or {}
+                        bos_idx_val = bos_info.get("bos_idx")
+                        n_candles = len(self.candles)
                         logger.debug(
                             "[M3] re_dist schematic built: bos_idx=%s, confirmed=%s, n=%d",
-                            bos_info.get("bos_idx"), schematic.get("is_confirmed"), len(self.candles)
+                            bos_idx_val, schematic.get("is_confirmed"), n_candles
                         )
+                        # BOS recency gate (same logic as re-accumulation above)
+                        bos_recency = 30
+                        if bos_idx_val is not None and bos_idx_val < (n_candles - bos_recency):
+                            logger.debug(
+                                "[M3] rejected re_dist: bos_idx=%d < threshold=%d",
+                                bos_idx_val, n_candles - bos_recency
+                            )
+                            continue
                         schematic["sweep_validation"] = sweep
                         schematic["continuation_context"] = {
                             "type": "re_distribution",
@@ -790,9 +813,6 @@ class TCTSchematicDetector:
         # 80 candles = ~3.3 days — aligns with active schematic formation.
         scan_start = max(self.CONTINUATION_IMPULSE_MIN_CANDLES + 5,
                          n - lookback_limit)
-
-        # TASK 2: range must complete recently (last 20 candles)
-        recent_threshold = n - 20
 
         for i in range(scan_start, n - 8):
             # --- 1. Detect impulse leg ending near index i ---
@@ -863,11 +883,6 @@ class TCTSchematicDetector:
                     if not self._check_equilibrium_touch(best_high_idx, j, equilibrium):
                         continue
 
-                    # TASK 2: range must complete recently
-                    if j < recent_threshold:
-                        logger.debug("[M3] rejected bullish range: range_low_idx=%d < threshold=%d", j, recent_threshold)
-                        continue
-
                     pair = (best_high_idx, j)
                     if pair in seen_pairs:
                         continue
@@ -918,11 +933,6 @@ class TCTSchematicDetector:
                     equilibrium = (range_high + range_low) / 2
 
                     if not self._check_equilibrium_touch(best_low_idx, j, equilibrium):
-                        continue
-
-                    # TASK 2: range must complete recently
-                    if j < recent_threshold:
-                        logger.debug("[M3] rejected bearish range: range_high_idx=%d < threshold=%d", j, recent_threshold)
                         continue
 
                     pair = (j, best_low_idx)

@@ -1913,11 +1913,20 @@ class DecisionTreeEvaluator:
             fail["failure_context"] = "no-bos"
             return {**fail, "reasons": ["No BOS confirmation"]}
 
-        # Stale BOS check moved to runner-level BOS fingerprint dedup.
-        # The v2 9-phase pipeline handles quality filtering;
-        # removing this pre-gate restores behavior that produced
-        # Run #14's validated 27-trade, 77.8% WR, PF 3.42 results.
-        # Keeping the BOS-must-be-confirmed check above is sufficient.
+        # Lightweight BOS age gate — complements runner-level fingerprint dedup.
+        # max_stale_candles is intentionally large (default 190 of 200) so only
+        # truly ancient BOS (formed in the first ~5% of the detection window)
+        # are rejected. This is a sanity guard, NOT a quality filter.
+        # The original tight threshold (5 candles) was removed because bos_idx
+        # typically falls at candles 80–160 in the 200-candle window; restoring
+        # it at a permissive threshold keeps the guard without blocking live signals.
+        bos_age_idx = bos.get("bos_idx")
+        if bos_age_idx is not None and bos_age_idx < (total_candles - max_stale_candles):
+            fail["failure_context"] = "stale-bos"
+            candles_ago = total_candles - 1 - bos_age_idx
+            return {**fail, "reasons": [
+                f"Stale BOS: {candles_ago} candles ago (max {max_stale_candles})"
+            ]}
 
         # Run the v2 9-phase pipeline if candle data is available
         if candle_df is not None and len(candle_df) > 0:
