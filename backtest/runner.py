@@ -60,6 +60,45 @@ from backtest.session import get_session
 
 logger = logging.getLogger("backtest.runner")
 
+# ── v12 filter constants ───────────────────────────────────────────────
+# 15m quality gates (local overrides — global MIN_RR and threshold unchanged)
+_MIN_RR_15M = 0.8           # tighter RR for 15m entries
+_MIN_RANGE_PCT_15M = 0.003  # range must be >= 0.3% of price on 15m
+
+# Model 3 trend-strength gate
+_TREND_LOOKBACK = 50        # candles to measure slope over
+_MIN_TREND_SLOPE = 0.002    # |end-start|/start must be >= 0.2%
+
+
+def _is_trending_environment(
+    closes,
+    lookback: int = _TREND_LOOKBACK,
+    min_slope: float = _MIN_TREND_SLOPE,
+) -> bool:
+    """Return True when the last `lookback` closes show a net slope >= min_slope.
+
+    Used to gate Model 3 continuation setups: they should only fire when the
+    HTF candles confirm a directional move, not a sideways chop.
+    """
+    if len(closes) < lookback:
+        return False
+    start = float(closes[-lookback])
+    end = float(closes[-1])
+    if start <= 0:
+        return False
+    return abs((end - start) / start) >= min_slope
+
+
+def _range_size_pct(range_info, current_price: float) -> float:
+    """Return (range_high - range_low) / current_price, or 0.0 on bad input."""
+    if not isinstance(range_info, dict) or current_price <= 0:
+        return 0.0
+    r_high = range_info.get("high") or 0
+    r_low = range_info.get("low") or 0
+    if r_high <= r_low:
+        return 0.0
+    return (r_high - r_low) / current_price
+
 
 # ── Backtest State ────────────────────────────────────────────────────
 
@@ -649,6 +688,61 @@ def run_gate_pipeline(
                 final_decision = "SKIP"
                 skip_reason = "RR_TOO_LOW ({:.2f} < {:.2f})".format(actual_rr, min_rr)
                 failure_code = "FAIL_RR_FILTER"
+
+            # ── v12: 15m hardening gates ───────────────────────────────
+            elif tf == "15m" and actual_rr < _MIN_RR_15M:
+                final_decision = "SKIP"
+                skip_reason = "RR_15M_STRICT ({:.2f} < {:.2f})".format(actual_rr, _MIN_RR_15M)
+                failure_code = "FAIL_RR_15M_STRICT"
+                logger.info(
+                    "15M_FILTER | rr=%.2f (need %.2f) | session=%s",
+                    actual_rr, _MIN_RR_15M, session_name,
+                )
+            elif tf == "15m" and session_name == "Asia":
+                final_decision = "SKIP"
+                skip_reason = "15M_ASIA_FILTER"
+                failure_code = "FAIL_15M_ASIA_FILTER"
+                logger.info(
+                    "15M_FILTER | session=Asia blocked | rr=%.2f", actual_rr,
+                )
+            elif tf == "15m" and _range_size_pct(range_info, current_price) < _MIN_RANGE_PCT_15M:
+                _rpct = _range_size_pct(range_info, current_price)
+                final_decision = "SKIP"
+                skip_reason = "RANGE_TOO_SMALL_15M ({:.4f} < {:.4f})".format(_rpct, _MIN_RANGE_PCT_15M)
+                failure_code = "FAIL_RANGE_TOO_SMALL_15M"
+                logger.info(
+                    "15M_FILTER | range_pct=%.4f (need %.4f) | session=%s | rr=%.2f",
+                    _rpct, _MIN_RANGE_PCT_15M, session_name, actual_rr,
+                )
+
+            # ── v12: Model 3 quality gates ─────────────────────────────
+            elif "Model_3" in model and tf != "1h":
+                final_decision = "SKIP"
+                skip_reason = "MODEL3_TF_FILTER (tf={}, only 1h allowed)".format(tf)
+                failure_code = "FAIL_MODEL3_TF_FILTER"
+                logger.info(
+                    "MODEL3_CHECK | tf=%s BLOCKED (1h only) | trend not evaluated",
+                    tf,
+                )
+            elif "Model_3" in model:
+                _closes = df_tf["close"].values if df_tf is not None and len(df_tf) > 0 else []
+                _trend_ok = _is_trending_environment(_closes)
+                _slope = (
+                    (float(_closes[-1]) - float(_closes[-_TREND_LOOKBACK])) / float(_closes[-_TREND_LOOKBACK])
+                    if len(_closes) >= _TREND_LOOKBACK and float(_closes[-_TREND_LOOKBACK]) > 0
+                    else 0.0
+                )
+                logger.info(
+                    "MODEL3_CHECK | tf=%s | trend_ok=%s | slope=%.4f",
+                    tf, _trend_ok, _slope,
+                )
+                if not _trend_ok:
+                    final_decision = "SKIP"
+                    skip_reason = "MODEL3_NO_TREND (slope={:.4f} < {:.4f})".format(
+                        abs(_slope), _MIN_TREND_SLOPE
+                    )
+                    failure_code = "FAIL_MODEL3_NO_TREND"
+
             elif score < entry_threshold:
                 final_decision = "SKIP"
                 skip_reason = "SCORE_BELOW_THRESHOLD ({} < {})".format(score, entry_threshold)
@@ -828,7 +922,7 @@ def run_backtest(
         "tp1_close_pct": effective_tp1_close_pct,
         "tp1_level_pct": effective_tp1_level_pct,
         "trail_factor": effective_trail_factor,
-        "engine_version": 11,  # v11: range state per-TF, step_interval in candles_by_tf, UTC normalize, price lookup fix
+        "engine_version": 12,  # v12: Model 3 TF+trend gate, 15m session/range/RR hardening
     }
 
     run_id = create_run(
