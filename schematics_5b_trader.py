@@ -1024,6 +1024,20 @@ class Schematics5BTrader:
         self._jack_evaluator = JackTCTEvaluator()
         self.last_debug: Dict = {}
         self._lock = threading.Lock()
+        # Lifetime gate-block counters — incremented inside _scan_lock (no race).
+        # One counter per failure_context label + "passes" for the success path.
+        self._gate_metrics: Dict[str, int] = {
+            "l2_blocks": 0,
+            "l3_failures": 0,
+            "rig_blocks": 0,
+            "range_failures": 0,
+            "tap_failures": 0,
+            "liquidity_failures": 0,
+            "bos_failures": 0,
+            "htf_failures": 0,
+            "rr_failures": 0,
+            "passes": 0,
+        }
         # Per-symbol HTF bias cache: symbol → (bias_str, expiry_timestamp)
         self._htf_bias_cache: Dict[str, str] = {}
         self._htf_bias_expiry: Dict[str, float] = {}
@@ -1129,6 +1143,7 @@ class Schematics5BTrader:
             best_current_price = sym_result.get("current_price", 0.0)
             best_htf_bias = sym_result.get("htf_bias", "neutral")
             all_forming = sym_result.get("forming", [])
+            all_forming_ranges = sym_result.get("forming_all_ranges", [])
 
             with self._lock:
                 self.last_debug = {
@@ -1142,15 +1157,110 @@ class Schematics5BTrader:
                     "htf_cascade_active": True,
                     "forming_schematics": all_forming[:5],
                     "per_symbol": {SYMBOL: sym_result},
+                    # Lifetime gate-block counters (since process start).
+                    "gate_metrics": dict(self._gate_metrics),
                 }
 
-            # 3. Enter trade on highest-scoring qualifying setup.
+            # 3. RIG: Build real MSCE context and evaluate globally.
+            #    Uses canonical rig_engine — no fake session/RCM inputs.
+            from rig_engine import evaluate_rig_global
+            from msce_engine import get_msce_context
+
+            msce = get_msce_context(best_htf_bias)
+
+            # Select dominant range from unfiltered forming pool.
+            # Rank by range span (widest = most significant structural range),
+            # then use conservative (min) displacement across all valid ranges.
+            from hpb_rig_validator import compute_displacement as _cd
+
+            _valid_ranges = []
+            for _fs in (all_forming_ranges or []):
+                _rh = _fs.get("range_high")
+                _rl = _fs.get("range_low")
+                if _rh is not None and _rl is not None and _rh > _rl:
+                    _valid_ranges.append((_rh, _rl, _rh - _rl))
+
+            # Primary range: widest span (most significant structural range)
+            _rig_range_high = None
+            _rig_range_low = None
+            if _valid_ranges:
+                _valid_ranges.sort(key=lambda x: x[2], reverse=True)
+                _rig_range_high = _valid_ranges[0][0]
+                _rig_range_low = _valid_ranges[0][1]
+
+            # Conservative displacement: minimum across ALL valid ranges.
+            # If price is trapped in ANY range, RIG should know.
+            _all_displacements = [
+                _cd(best_current_price, rh, rl)
+                for rh, rl, _ in _valid_ranges
+            ]
+            _all_displacements = [d for d in _all_displacements if d is not None]
+            _conservative_disp = min(_all_displacements) if _all_displacements else None
+
+            rig_result = evaluate_rig_global(
+                htf_bias=best_htf_bias,
+                session_name=msce["session"],
+                session_bias=msce["session_bias"],
+                range_high=_rig_range_high,
+                range_low=_rig_range_low,
+                current_price=best_current_price,
+                displacement_override=_conservative_disp,
+            )
+            with self._lock:
+                self.last_debug["rig"] = rig_result
+                self.last_debug["msce"] = msce
+
+            # 4. Enter trade on highest-scoring qualifying setup.
             if best_setup:
                 schematic, evaluation = best_setup
                 entry_info = schematic.get("entry", {})
                 candidate_price = entry_info.get("price", best_current_price)
 
-                if self._is_duplicate_setup(candidate_price, evaluation["direction"]):
+                # Re-evaluate RIG with the actual schematic range (more precise)
+                sch_rng = schematic.get("range") or {}
+                sch_rh = sch_rng.get("high") or sch_rng.get("range_high")
+                sch_rl = sch_rng.get("low") or sch_rng.get("range_low")
+
+                # Estimate range duration from candle span + timeframe
+                _TF_TO_HOURS = {
+                    "1d": 24, "4h": 4, "1h": 1,
+                    "30m": 0.5, "15m": 0.25,
+                }
+                sch_duration = 48  # conservative default for confirmed schematic
+                high_idx = sch_rng.get("range_high_idx") or sch_rng.get("high_idx")
+                low_idx = sch_rng.get("range_low_idx") or sch_rng.get("low_idx")
+                if high_idx is not None and low_idx is not None:
+                    candle_span = abs(high_idx - low_idx)
+                    if candle_span > 0:
+                        hours_per_candle = _TF_TO_HOURS.get(best_tf, 1)
+                        sch_duration = candle_span * hours_per_candle
+
+                rig_result = evaluate_rig_global(
+                    htf_bias=best_htf_bias,
+                    session_name=msce["session"],
+                    session_bias=msce["session_bias"],
+                    range_high=sch_rh,
+                    range_low=sch_rl,
+                    current_price=best_current_price,
+                    range_duration_hours=sch_duration,
+                    exec_score=evaluation.get("score", 0) / 100.0,
+                )
+                with self._lock:
+                    self.last_debug["rig"] = rig_result
+
+                rig_blocked = rig_result.get("status") not in ("VALID", "NOT_EVALUATED", None)
+
+                if rig_blocked:
+                    logger.info("[5B] RIG BLOCK: %s", rig_result)
+                    cycle_result["action"] = "rig_blocked"
+                    cycle_result["details"] = {
+                        "price": best_current_price,
+                        "symbol": SYMBOL,
+                        "rig_status": rig_result.get("status"),
+                        "rig_reason": rig_result.get("reason"),
+                        "displacement": rig_result.get("displacement"),
+                    }
+                elif self._is_duplicate_setup(candidate_price, evaluation["direction"]):
                     cycle_result["action"] = "duplicate_setup_skipped"
                     cycle_result["details"] = {
                         "price": best_current_price,
@@ -1410,6 +1520,23 @@ class Schematics5BTrader:
                         eval_result["htf_upgraded"] = True
 
                     tf_evals.append(eval_result)
+                    # Gate metrics — _scan_lock is held so no race condition.
+                    _fc = eval_result.get("failure_context")
+                    _fc_map = {
+                        "L2":        "l2_blocks",
+                        "L3":        "l3_failures",
+                        "RIG":       "rig_blocks",
+                        "range":     "range_failures",
+                        "taps":      "tap_failures",
+                        "liquidity": "liquidity_failures",
+                        "BOS":       "bos_failures",
+                        "HTF":       "htf_failures",
+                        "RR":        "rr_failures",
+                    }
+                    if _fc in _fc_map:
+                        self._gate_metrics[_fc_map[_fc]] += 1
+                    if eval_result.get("pass"):
+                        self._gate_metrics["passes"] += 1
                     if eval_result["pass"] and eval_result["score"] > best_score:
                         best_score = eval_result["score"]
                         best_setup = (s, eval_result)
@@ -1442,21 +1569,18 @@ class Schematics5BTrader:
 
             # Collect forming (unconfirmed, all 3 taps present) schematics for display
             forming: List[Dict] = []
+            forming_all_ranges: List[Dict] = []
             for _ftf, _fsch_list in all_schematics_by_tf.items():
                 for _fs in _fsch_list:
                     if not isinstance(_fs, dict) or _fs.get("is_confirmed", False):
                         continue
                     _fdir = _fs.get("direction", "unknown")
-                    if htf_bias == "bullish" and _fdir == "bearish":
-                        continue
-                    if htf_bias == "bearish" and _fdir == "bullish":
-                        continue
                     if not (_fs.get("tap1") and _fs.get("tap2") and _fs.get("tap3")):
                         continue
                     _range = _fs.get("range") or {}
                     _sl = _fs.get("stop_loss")
                     _tgt = _fs.get("target")
-                    forming.append({
+                    _forming_entry = {
                         "symbol": symbol,
                         "tf": _ftf,
                         "direction": _fdir,
@@ -1469,7 +1593,15 @@ class Schematics5BTrader:
                         "target": _tgt.get("price") if isinstance(_tgt, dict) else _tgt,
                         "stop_loss": _sl.get("price") if isinstance(_sl, dict) else _sl,
                         "quality_score": _fs.get("quality_score", 0),
-                    })
+                    }
+                    # Unfiltered list for RIG (all directions, all ranges)
+                    forming_all_ranges.append(_forming_entry)
+                    # Display list: filtered by HTF bias alignment
+                    if htf_bias == "bullish" and _fdir == "bearish":
+                        continue
+                    if htf_bias == "bearish" and _fdir == "bullish":
+                        continue
+                    forming.append(_forming_entry)
             forming.sort(key=lambda x: (x.get("tap3") or {}).get("idx", 0), reverse=True)
 
             # Session context (MSCE integration)
@@ -1486,6 +1618,7 @@ class Schematics5BTrader:
                 "best_score": best_score,
                 "best_tf": best_tf_local,
                 "forming": forming[:5],
+                "forming_all_ranges": forming_all_ranges,
                 "timeframes": all_tf_results,
                 "session": session_info,
             })
@@ -1507,6 +1640,17 @@ class Schematics5BTrader:
     ) -> Dict:
         """Delegate to the shared module-level helper with a 5B-specific log label."""
         return refine_schematic_bos_with_ltf(schematic, ltf_dfs, label="5B-LTF")
+
+    # ----------------------------------------------------------------
+    # RIG — Range Integrity Gate (5B)
+    # ----------------------------------------------------------------
+    # Canonical RIG evaluation is now in rig_engine.py (evaluate_rig_global).
+    # Called directly from _scan_and_trade_locked() with real MSCE context.
+    # No per-class RIG methods needed.
+
+    # ----------------------------------------------------------------
+    # TRADE ENTRY
+    # ----------------------------------------------------------------
 
     def _enter_trade(self, schematic: Dict, evaluation: Dict, current_price: float, htf_bias: str,
                      symbol: str = SYMBOL, timeframe: str = "unknown") -> Dict:
