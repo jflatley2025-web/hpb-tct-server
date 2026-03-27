@@ -730,7 +730,7 @@ def run_gate_pipeline(
                     "15M_FILTER | rr=%.2f (need %.2f) | session=%s",
                     actual_rr, _MIN_RR_15M, session_name,
                 )
-            elif tf == "15m" and session_name == "Asia":
+            elif tf == "15m" and session_name == "asia":
                 final_decision = "SKIP"
                 skip_reason = "15M_ASIA_FILTER"
                 failure_code = "FAIL_15M_ASIA_FILTER"
@@ -746,7 +746,7 @@ def run_gate_pipeline(
                     "15M_FILTER | range_pct=%.4f (need %.4f) | session=%s | rr=%.2f",
                     _rpct, _MIN_RANGE_PCT_15M, session_name, actual_rr,
                 )
-            elif tf == "15m" and session_name == "NY" and _ENABLE_15M_NY_OVERTRADE_FILTER:
+            elif tf == "15m" and session_name == "new_york" and _ENABLE_15M_NY_OVERTRADE_FILTER:
                 final_decision = "SKIP"
                 skip_reason = "15M_NY_OVERTRADE_GUARD"
                 failure_code = "FAIL_15M_NY_OVERTRADE"
@@ -1104,13 +1104,14 @@ def run_backtest(
                         round(float(bos_info_fp.get("bos_price") or 0), 0),
                     )
                     state.traded_bos_fingerprints[bos_fp] = current_time
-                    _open_trade(state, signal, current_time, current_price,
-                                tp1_level_pct=effective_tp1_level_pct)
-                    # v13: funnel trade counters
-                    if "Model_3" in signal.get("model", ""):
-                        state.model3_trades += 1
-                    if signal.get("timeframe") == "15m":
-                        state.trades_15m += 1
+                    _trade_opened = _open_trade(state, signal, current_time, current_price,
+                                               tp1_level_pct=effective_tp1_level_pct)
+                    # v13: funnel trade counters — only increment if trade was actually opened
+                    if _trade_opened:
+                        if "Model_3" in signal.get("model", ""):
+                            state.model3_trades += 1
+                        if signal.get("timeframe") == "15m":
+                            state.trades_15m += 1
 
             # Progress logging
             if step_idx > 0 and step_idx % 100 == 0:
@@ -1230,6 +1231,7 @@ def _open_trade(state: BacktestState, signal: dict, current_time: datetime,
         f"OPEN #{state.trade_count}: {direction} @ {effective_entry:.2f} "
         f"(SL={stop_price:.2f}, TP={target_price:.2f}, R:R={signal.get('rr', 0):.2f})"
     )
+    return True
 
 
 def _close_trade(state: BacktestState, raw_exit_price: float, exit_reason: str,
