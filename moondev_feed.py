@@ -14,6 +14,7 @@ We add a small delay between requests to stay well under the limit.
 
 import os
 import time
+import threading
 import logging
 import requests
 import pandas as pd
@@ -24,7 +25,12 @@ logger = logging.getLogger("MoonDevFeed")
 # ================================================================
 # CONFIGURATION
 # ================================================================
-MOONDEV_API_KEY = os.getenv("MOONDEV_API_KEY", "perry.ve.18_qe")
+MOONDEV_API_KEY = os.getenv("MOONDEV_API_KEY")
+if not MOONDEV_API_KEY:
+    raise RuntimeError(
+        "MOONDEV_API_KEY environment variable is not set. "
+        "Export it before starting the process."
+    )
 MOONDEV_BASE_URL = os.getenv("MOONDEV_BASE_URL", "https://api.moondev.com")
 
 # Minimum delay between consecutive requests (seconds).
@@ -32,6 +38,7 @@ MOONDEV_BASE_URL = os.getenv("MOONDEV_BASE_URL", "https://api.moondev.com")
 # citizen and stay well under the limit for a shared key.
 _REQUEST_DELAY_S = 0.1
 _last_request_time: float = 0.0
+_rate_limit_lock = threading.Lock()
 
 # MoonDev uses its own coin naming; keep a map for the symbols we care about.
 # The API uses short uppercase tickers (e.g. "BTC") for /api/prices but
@@ -75,12 +82,13 @@ _PRICE_TICKER_MAP = {
 # ================================================================
 
 def _rate_limit():
-    """Block until the minimum inter-request delay has elapsed."""
+    """Block until the minimum inter-request delay has elapsed (thread-safe)."""
     global _last_request_time
-    elapsed = time.monotonic() - _last_request_time
-    if elapsed < _REQUEST_DELAY_S:
-        time.sleep(_REQUEST_DELAY_S - elapsed)
-    _last_request_time = time.monotonic()
+    with _rate_limit_lock:
+        elapsed = time.monotonic() - _last_request_time
+        if elapsed < _REQUEST_DELAY_S:
+            time.sleep(_REQUEST_DELAY_S - elapsed)
+        _last_request_time = time.monotonic()
 
 
 def _get(path: str, params: Optional[dict] = None, timeout: int = 20) -> requests.Response:
@@ -91,8 +99,7 @@ def _get(path: str, params: Optional[dict] = None, timeout: int = 20) -> request
         "X-API-Key": MOONDEV_API_KEY,
         "User-Agent": "HPB-TCT-Server/1.0",
     }
-    # Also pass key as query param for compatibility
-    qparams = {"api_key": MOONDEV_API_KEY, **(params or {})}
+    qparams = params or {}
     resp = requests.get(url, params=qparams, headers=headers, timeout=timeout)
     resp.raise_for_status()
     return resp

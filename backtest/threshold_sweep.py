@@ -93,6 +93,18 @@ def simulate_threshold(
                         run_id, run_row,
                     )
 
+        # Compute cooldown once — derived from step_interval so bar-count is
+        # correct for 1h, 30m, 15m runs alike.
+        try:
+            step_secs = timeframe_to_seconds(run_step_interval)
+        except ValueError:
+            logger.exception(
+                "Unknown step_interval %r for run_id=%s — defaulting to 1h",
+                run_step_interval, run_id,
+            )
+            step_secs = timeframe_to_seconds("1h")
+        cooldown = timedelta(seconds=MIN_BARS_BETWEEN_TRADES * step_secs)
+
         # Load 1m candles for outcome simulation
         candles_1m = load_candles(conn, run_symbol, '1m')
         candles_1m = candles_1m.sort_values('open_time').reset_index(drop=True)
@@ -109,11 +121,8 @@ def simulate_threshold(
             if in_trade:
                 continue
 
-            # Trade cooldown — derived from the run's step_interval so the
-            # bar-count threshold is correct for 1h, 30m, 15m runs alike.
+            # Trade cooldown
             if trade_close_time is not None:
-                step_secs = timeframe_to_seconds(run_step_interval)
-                cooldown = timedelta(seconds=MIN_BARS_BETWEEN_TRADES * step_secs)
                 if sig['signal_time'] < trade_close_time + cooldown:
                     continue
 

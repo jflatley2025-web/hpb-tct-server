@@ -846,15 +846,23 @@ class TCTSchematicDetector:
             if is_bullish:
                 anchor_fn = self._is_swing_high
                 second_fn = self._is_swing_low
-                anchor_init = 0
-                anchor_better = lambda new, best: new > best  # noqa: E731
-                anchor_price = lambda idx: float(candles.iloc[idx]["high"])
+                anchor_init = float("-inf")
+
+                def anchor_better(new: float, best: float) -> bool:
+                    return new > best
+
+                def anchor_price(idx: int) -> float:
+                    return float(candles.iloc[idx]["high"])
             else:
                 anchor_fn = self._is_swing_low
                 second_fn = self._is_swing_high
                 anchor_init = float("inf")
-                anchor_better = lambda new, best: new < best  # noqa: E731
-                anchor_price = lambda idx: float(candles.iloc[idx]["low"])
+
+                def anchor_better(new: float, best: float) -> bool:  # type: ignore[misc]
+                    return new < best
+
+                def anchor_price(idx: int) -> float:  # type: ignore[misc]
+                    return float(candles.iloc[idx]["low"])
 
             # Find anchor swing point (range_high for bull, range_low for bear)
             best_anchor_idx = None
