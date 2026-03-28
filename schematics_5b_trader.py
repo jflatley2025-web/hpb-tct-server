@@ -38,6 +38,15 @@ from trade_execution import (
 from decision_tree_bridge import DecisionTreeEvaluator
 from jack_tct_evaluator import JackTCTEvaluator
 from backtest.config import timeframe_to_seconds as _tf_seconds
+from portfolio_manager import (
+    USE_PORTFOLIO_LAYER as _USE_PORTFOLIO_LAYER,
+    PortfolioState as _PortfolioState,
+    PortfolioPosition as _PortfolioPosition,
+    can_open_trade as _pm_can_open_trade,
+    open_position as _pm_open_position,
+    close_position as _pm_close_position,
+    debug_snapshot as _pm_debug_snapshot,
+)
 
 # Reuse MEXC fetch helpers from tensor trader (no duplication)
 from tensor_tct_trader import (
@@ -1140,6 +1149,41 @@ class Schematics5BTrader:
         # This lock ensures only one thread mutates state at a time.
         self._scan_lock = threading.Lock()
 
+        # ── Issue 5: portfolio layer ───────────────────────────────────
+        # Equity is synced from self.state.balance before every can_open_trade()
+        # call so this object never drifts silently.  open_positions is
+        # reconstructed from current_trade (at most one) on startup.
+        self._portfolio: Optional[_PortfolioState] = None
+        if _USE_PORTFOLIO_LAYER:
+            self._portfolio = _PortfolioState(
+                equity=self.state.balance,
+                peak_equity=self.state.peak_balance,
+            )
+            # Reconstruct any open position so the risk cap is correct
+            # immediately — avoids a stale-zero total_risk_pct on the
+            # first cycle after a restart with an open trade.
+            _ct = self.state.current_trade
+            if _ct and _ct.get("entry_price") and _ct.get("risk_amount"):
+                _pm_open_position(
+                    self._portfolio,
+                    symbol=_ct.get("symbol", SYMBOL),
+                    direction=_ct.get("direction", "bullish"),
+                    notional_risk=float(_ct["risk_amount"]),
+                    entry_price=float(_ct["entry_price"]),
+                    model=_ct.get("model", "unknown"),
+                    timeframe=_ct.get("timeframe", "unknown"),
+                    opened_at=None,  # exact timestamp unavailable after reload
+                )
+                logger.info(
+                    "[5B] Portfolio layer: reconstructed open position "
+                    "from current_trade (symbol=%s risk=$%.2f)",
+                    _ct.get("symbol", SYMBOL), float(_ct["risk_amount"]),
+                )
+            logger.info(
+                "[5B] Portfolio layer ENABLED — %s",
+                _pm_debug_snapshot(self._portfolio),
+            )
+
         # Log the active data source so it's visible in server logs at startup.
         if _moondev.is_enabled():
             logger.info(
@@ -1704,9 +1748,49 @@ class Schematics5BTrader:
                                     pass  # malformed timestamp — skip compression check
 
                             if not _compress_block:
+                                # ── Issue 5: portfolio correlation check ───────────────
+                                # Evaluated with the DD-adjusted risk amount so the cap
+                                # is applied to what we'd actually put at risk.
+                                # When USE_PORTFOLIO_LAYER=False the check is a no-op
+                                # (returns allowed=True, scaling_factor=1.0 immediately).
+                                _pm_scaling = 1.0
+                                if self._portfolio is not None:
+                                    # Sync equity so total_risk_pct is accurate
+                                    self._portfolio.equity = self.state.balance
+                                    _p_stop = (schematic.get("stop_loss") or {}).get("price", 0)
+                                    _base_risk = (
+                                        self.state.balance * (RISK_PER_TRADE_PCT / 100) * _dd_mult
+                                    )
+                                    _pm_result = _pm_can_open_trade(
+                                        SYMBOL, _base_risk, self._portfolio
+                                    )
+                                    if not _pm_result["allowed"]:
+                                        logger.info(
+                                            "[5B] PORTFOLIO_BLOCK | reason=%s | "
+                                            "portfolio_risk=%.2f%%",
+                                            _pm_result["reason"],
+                                            _pm_result["adjusted_portfolio_risk"],
+                                        )
+                                        cycle_result["action"] = "portfolio_blocked"
+                                        cycle_result["details"] = {
+                                            "reason": _pm_result["reason"],
+                                            "adjusted_portfolio_risk": round(
+                                                _pm_result["adjusted_portfolio_risk"], 2
+                                            ),
+                                            "portfolio_snapshot": _pm_debug_snapshot(
+                                                self._portfolio
+                                            ),
+                                        }
+                                        # Skip _enter_trade — move to next cycle
+                                        _compress_block = True
+                                    else:
+                                        _pm_scaling = _pm_result["scaling_factor"]
+
+                            if not _compress_block:
                                 trade = self._enter_trade(
                                     schematic, evaluation, best_current_price, best_htf_bias,
-                                    SYMBOL, best_tf, risk_multiplier=_dd_mult,
+                                    SYMBOL, best_tf,
+                                    risk_multiplier=_dd_mult * _pm_scaling,
                                 )
                                 if trade.get("error"):
                                     # _enter_trade() rejected the setup (bad stop/target, R:R
@@ -1725,6 +1809,18 @@ class Schematics5BTrader:
                                     self.state.last_accepted_trade_priority = _priority
                                     cycle_result["action"] = "trade_entered"
                                     cycle_result["details"] = trade
+
+                                    # ── Issue 5: register in portfolio after confirmed entry
+                                    if self._portfolio is not None:
+                                        _pm_open_position(
+                                            self._portfolio,
+                                            symbol=SYMBOL,
+                                            direction=evaluation["direction"],
+                                            notional_risk=trade.get("risk_amount", 0.0),
+                                            entry_price=trade.get("entry_price", 0.0),
+                                            model=evaluation.get("model", "unknown"),
+                                            timeframe=best_tf or "unknown",
+                                        )
             else:
                 # Legacy: no qualifying setups found.
                 # Log if v2 independently found a signal (informational — not executed).
@@ -2352,6 +2448,10 @@ class Schematics5BTrader:
         position_size = trade.get("position_size", 0)
         pnl_dollars = position_size * (pnl_pct / 100)
         self.state.balance += pnl_dollars
+
+        # ── Issue 5: deregister from portfolio on close ────────────────
+        if self._portfolio is not None:
+            _pm_close_position(self._portfolio, trade.get("symbol", SYMBOL))
 
         # Issue 3: update peak on every close; clear all DD state on new equity high
         if self.state.balance > self.state.peak_balance:

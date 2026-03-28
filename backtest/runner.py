@@ -67,6 +67,14 @@ from decision_engine_v2 import (
     COMPRESSION_WINDOW_BARS as _COMPRESSION_WINDOW_BARS,
     compute_priority_score,
 )
+from portfolio_manager import (
+    USE_PORTFOLIO_LAYER as _USE_PORTFOLIO_LAYER,
+    PortfolioState,
+    can_open_trade as _pm_can_open_trade,
+    open_position as _pm_open_position,
+    close_position as _pm_close_position,
+    debug_snapshot as _pm_debug_snapshot,
+)
 
 logger = logging.getLogger("backtest.runner")
 
@@ -1096,6 +1104,7 @@ def run_backtest(
     tp1_close_pct: Optional[float] = None,
     tp1_level_pct: Optional[float] = None,
     trail_factor: Optional[float] = None,
+    portfolio: Optional[PortfolioState] = None,
 ) -> dict:
     """
     Run the full walk-forward backtest.
@@ -1183,6 +1192,24 @@ def run_backtest(
         peak_equity=starting_balance,
     )
 
+    # ── Issue 5: portfolio layer ───────────────────────────────────────
+    # Create a fresh PortfolioState if the flag is on and the caller didn't
+    # supply one (the multi-symbol path passes a shared instance in).
+    # When USE_PORTFOLIO_LAYER=False this is a no-op: _open_trade /
+    # _close_trade skip all portfolio logic when portfolio is None.
+    _portfolio: Optional[PortfolioState] = portfolio
+    if _USE_PORTFOLIO_LAYER and _portfolio is None:
+        _portfolio = PortfolioState(
+            equity=starting_balance,
+            peak_equity=starting_balance,
+        )
+        logger.info(
+            "Portfolio layer ENABLED — max_risk=%.1f%% | "
+            "portfolio snapshot: %s",
+            2.0,  # MAX_PORTFOLIO_RISK_PCT imported via _pm_debug_snapshot
+            _pm_debug_snapshot(_portfolio),
+        )
+
     # Determine step times
     if replay_at:
         step_times = [replay_at]
@@ -1259,7 +1286,8 @@ def run_backtest(
                     if exit_result:
                         exit_reason, raw_exit_price = exit_result
                         _close_trade(state, raw_exit_price, exit_reason,
-                                     current_time, conn, run_id)
+                                     current_time, conn, run_id,
+                                     portfolio=_portfolio)
 
             # ── Run gate pipeline (skip during warmup) ─────────────
             if state.open_trade is None and current_time >= warmup_end:
@@ -1311,8 +1339,11 @@ def run_backtest(
                             round(float(signal.get("entry_price") or current_price), 0),
                             round(float(bos_info_fp.get("bos_price") or 0), 0),
                         )
-                        _trade_opened = _open_trade(state, signal, current_time, current_price,
-                                                   tp1_level_pct=effective_tp1_level_pct)
+                        _trade_opened = _open_trade(
+                            state, signal, current_time, current_price,
+                            tp1_level_pct=effective_tp1_level_pct,
+                            portfolio=_portfolio,
+                        )
                         # v13: funnel trade counters — only increment if trade was actually opened
                         if _trade_opened:
                             # Record fingerprint only on confirmed open; avoids
@@ -1338,7 +1369,8 @@ def run_backtest(
         # Close any remaining open trade at last price
         if state.open_trade is not None:
             last_price = current_price
-            _close_trade(state, last_price, "backtest_end", end_date, conn, run_id)
+            _close_trade(state, last_price, "backtest_end", end_date, conn, run_id,
+                         portfolio=_portfolio)
 
         # v13: emit funnel diagnostics before finalizing
         logger.info(
@@ -1386,8 +1418,14 @@ def run_backtest(
 # ── Trade Management ──────────────────────────────────────────────────
 
 def _open_trade(state: BacktestState, signal: dict, current_time: datetime,
-                current_price: float, tp1_level_pct: float = 0.5):
-    """Open a new trade from a qualifying signal."""
+                current_price: float, tp1_level_pct: float = 0.5,
+                portfolio: Optional[PortfolioState] = None):
+    """Open a new trade from a qualifying signal.
+
+    Args:
+        portfolio: Shared PortfolioState when USE_PORTFOLIO_LAYER is active.
+                   Pass None (default) for the single-symbol path — no overhead.
+    """
     direction = signal["direction"]
     entry_price = signal.get("entry_price", current_price)
     stop_price = signal["stop_price"]
@@ -1420,6 +1458,27 @@ def _open_trade(state: BacktestState, signal: dict, current_time: datetime,
             "position_size=%.4f risk_amount=%.4f",
             risk_multiplier, position_size, risk_amount,
         )
+
+    # ── Issue 5: Portfolio correlation-aware exposure check ────────────
+    # Evaluated AFTER DD scaling so the cap is applied to actual risk taken.
+    # When USE_PORTFOLIO_LAYER=False can_open_trade() returns immediately with
+    # allowed=True and scaling_factor=1.0 — zero overhead on the normal path.
+    if portfolio is not None:
+        portfolio.equity = state.equity  # sync before every decision
+        _sym = (signal.get("_schematic") or {}).get("symbol") or "BTCUSDT"
+        _pm_check = _pm_can_open_trade(_sym, risk_amount, portfolio)
+        if not _pm_check["allowed"]:
+            logger.info(
+                "PORTFOLIO_BLOCK | symbol=%s | reason=%s | "
+                "portfolio_risk=%.2f%%",
+                _sym, _pm_check["reason"],
+                _pm_check["adjusted_portfolio_risk"],
+            )
+            return None  # signal stays logged in DB as TAKE; execution suppressed
+        sf = _pm_check["scaling_factor"]
+        if sf < 1.0:
+            position_size = round(position_size * sf, 4)
+            risk_amount = round(risk_amount * sf, 4)
 
     # Calculate TP1 price: configurable % of entry→target move
     tp1_price = signal.get("tp1_price")
@@ -1455,12 +1514,31 @@ def _open_trade(state: BacktestState, signal: dict, current_time: datetime,
         f"OPEN #{state.trade_count}: {direction} @ {effective_entry:.2f} "
         f"(SL={stop_price:.2f}, TP={target_price:.2f}, R:R={signal.get('rr', 0):.2f})"
     )
+
+    # ── Issue 5: register in shared portfolio after confirmed open ─────
+    if portfolio is not None:
+        _pm_open_position(
+            portfolio,
+            symbol=state.open_trade.symbol,
+            direction=direction,
+            notional_risk=risk_amount,
+            entry_price=effective_entry,
+            model=signal.get("model", "unknown"),
+            timeframe=signal["timeframe"],
+            opened_at=current_time,
+        )
+
     return True
 
 
 def _close_trade(state: BacktestState, raw_exit_price: float, exit_reason: str,
-                 current_time: datetime, conn, run_id: int):
-    """Close the current open trade and record it."""
+                 current_time: datetime, conn, run_id: int,
+                 portfolio: Optional[PortfolioState] = None):
+    """Close the current open trade and record it.
+
+    Args:
+        portfolio: Shared PortfolioState — deregisters the position when provided.
+    """
     trade = state.open_trade
     if trade is None:
         return
@@ -1488,6 +1566,11 @@ def _close_trade(state: BacktestState, raw_exit_price: float, exit_reason: str,
 
     is_win = pnl_dollars > 0
     state.equity += pnl_dollars
+
+    # ── Issue 5: deregister from shared portfolio ─────────────────────
+    # Close BEFORE the peak/DD update so total_risk_pct reflects reality.
+    if portfolio is not None:
+        _pm_close_position(portfolio, trade.symbol)
 
     if is_win:
         state.wins += 1
@@ -1547,9 +1630,84 @@ def _close_trade(state: BacktestState, raw_exit_price: float, exit_reason: str,
 
 # ── CLI Entrypoint ────────────────────────────────────────────────────
 
+def run_portfolio_backtest(
+    symbols: List[str],
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+    step_interval: str = "1h",
+    starting_balance: float = STARTING_BALANCE,
+    entry_threshold: Optional[int] = None,
+    warmup_days: int = 0,
+    conn=None,
+    min_rr: Optional[float] = None,
+) -> Dict[str, dict]:
+    """Run sequential per-symbol backtests sharing a single PortfolioState.
+
+    Each symbol's backtest runs in full over [start_date, end_date] before
+    the next symbol starts.  Equity carries forward between symbols so the
+    portfolio risk cap is evaluated against the evolving account balance.
+
+    NOTE: This is a *sequential* approximation, not a true step-interleaved
+    multi-symbol backtest (where BTC and ETH candles advance simultaneously).
+    True interleaving is a future enhancement — this implementation validates
+    the portfolio plumbing and correlation math with minimal complexity.
+
+    Returns:
+        dict keyed by symbol containing the per-symbol summary dict.
+    """
+    from portfolio_manager import PortfolioState as _PS
+    portfolio = _PS(equity=starting_balance, peak_equity=starting_balance)
+    logger.info(
+        "Portfolio backtest: symbols=%s | starting_balance=$%.2f",
+        symbols, starting_balance,
+    )
+
+    results: Dict[str, dict] = {}
+    current_balance = starting_balance
+
+    own_conn = conn is None
+    if own_conn:
+        conn = get_connection()
+
+    try:
+        for sym in symbols:
+            logger.info("--- Portfolio backtest: running %s (equity=$%.2f) ---",
+                        sym, current_balance)
+            r = run_backtest(
+                symbol=sym,
+                start_date=start_date,
+                end_date=end_date,
+                step_interval=step_interval,
+                starting_balance=current_balance,
+                entry_threshold=entry_threshold,
+                warmup_days=warmup_days,
+                conn=conn,
+                min_rr=min_rr,
+                portfolio=portfolio,
+            )
+            results[sym] = r
+            current_balance = r["final_balance"]
+            portfolio.equity = current_balance
+            portfolio.peak_equity = max(portfolio.peak_equity, current_balance)
+            logger.info(
+                "--- %s done: final=$%.2f trades=%d ---",
+                sym, current_balance, r["total_trades"],
+            )
+    finally:
+        if own_conn:
+            conn.close()
+
+    return results
+
+
 def main():
     parser = argparse.ArgumentParser(description="HPB-TCT Backtest Runner")
-    parser.add_argument("--symbol", default="BTCUSDT")
+    parser.add_argument("--symbol", default="BTCUSDT",
+                        help="Single symbol (default BTCUSDT)")
+    parser.add_argument("--symbols", nargs="+", default=None,
+                        help="Multi-symbol portfolio backtest "
+                             "(e.g. --symbols BTCUSDT ETHUSDT SOLUSDT). "
+                             "Overrides --symbol when 2+ provided.")
     parser.add_argument("--start", help="Start date YYYY-MM-DD")
     parser.add_argument("--end", help="End date YYYY-MM-DD")
     parser.add_argument("--step", default="1h",
@@ -1579,26 +1737,48 @@ def main():
     conn = get_connection()
     create_schema(conn)
 
+    # Resolve effective symbol list
+    effective_symbols = args.symbols or [args.symbol]
+    multi_symbol = len(effective_symbols) > 1
+
     try:
-        summary = run_backtest(
-            symbol=args.symbol,
-            start_date=start,
-            end_date=end,
-            step_interval=args.step,
-            starting_balance=args.balance,
-            entry_threshold=args.threshold,
-            warmup_days=args.warmup,
-            replay_at=replay,
-            conn=conn,
-        )
-        print(f"\n{'='*40}")
-        print("BACKTEST SUMMARY")
-        print(f"{'='*40}")
-        for k, v in summary.items():
-            if isinstance(v, float):
-                print(f"  {k}: {v:.2f}")
-            else:
-                print(f"  {k}: {v}")
+        if multi_symbol:
+            summaries = run_portfolio_backtest(
+                symbols=effective_symbols,
+                start_date=start,
+                end_date=end,
+                step_interval=args.step,
+                starting_balance=args.balance,
+                entry_threshold=args.threshold,
+                warmup_days=args.warmup,
+                conn=conn,
+            )
+            for sym, summary in summaries.items():
+                print(f"\n{'='*40}")
+                print(f"PORTFOLIO BACKTEST — {sym}")
+                print(f"{'='*40}")
+                for k, v in summary.items():
+                    print(f"  {k}: {v:.2f}" if isinstance(v, float) else f"  {k}: {v}")
+        else:
+            summary = run_backtest(
+                symbol=effective_symbols[0],
+                start_date=start,
+                end_date=end,
+                step_interval=args.step,
+                starting_balance=args.balance,
+                entry_threshold=args.threshold,
+                warmup_days=args.warmup,
+                replay_at=replay,
+                conn=conn,
+            )
+            print(f"\n{'='*40}")
+            print("BACKTEST SUMMARY")
+            print(f"{'='*40}")
+            for k, v in summary.items():
+                if isinstance(v, float):
+                    print(f"  {k}: {v:.2f}")
+                else:
+                    print(f"  {k}: {v}")
     finally:
         conn.close()
 
