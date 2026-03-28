@@ -39,6 +39,31 @@ _DT_LIQ    = _read_dt("liquidity_decision_tree.html")
 _DT_SD     = _read_dt("supply_demand_decision_tree.html")
 _DT_MS     = _read_dt("market_structure_decision_tree.html")
 
+# Stub page shown for temporarily-disabled routes.
+_DISABLED_PAGE_HTML = """<!DOCTYPE html>
+<html>
+<head>
+<title>Page Disabled</title>
+<meta charset="utf-8">
+<style>
+  body{background:#0a0a0f;color:#aaa;font-family:sans-serif;display:flex;
+       align-items:center;justify-content:center;height:100vh;margin:0;text-align:center;}
+  h2{color:#ccc;margin-bottom:1rem;}
+  a{color:#4fc3f7;text-decoration:none;}
+  a:hover{text-decoration:underline;}
+  .note{font-size:.8rem;color:#555;margin-top:1.5rem;}
+</style>
+</head>
+<body>
+<div>
+  <h2>This page has been temporarily disabled</h2>
+  <p>Development is currently focused on the Schematics-5B trading engine.</p>
+  <p><a href="/schematics-5B">http://localhost:10000/schematics-5B</a></p>
+  <p class="note">Remote: https://hpb-tct-server.onrender.com/schematics-5B</p>
+</div>
+</body>
+</html>"""
+
 # ChromaDB + SentenceTransformer are initialized lazily on first use so the
 # heavy model weights (all-MiniLM-L6-v2 + torch) don't load at startup and
 # exhaust the 512MB Render instance before the port can open.
@@ -3592,9 +3617,9 @@ async def startup_event():
     logger.info("[5B-TRADE] Background auto-scan loop launched (supervised)")
 
 
-    # Start the Phemex TCT 6-gate simulated trading bot
-    asyncio.create_task(_auto_scan_supervisor(phemex_tct_auto_scan_loop, "PHEMEX-TCT"))
-    logger.info("[PHEMEX-TCT] Background auto-scan loop launched (supervised)")
+    # PHEMEX-TCT disabled — page temporarily disabled to focus on 5B engine
+    # asyncio.create_task(_auto_scan_supervisor(phemex_tct_auto_scan_loop, "PHEMEX-TCT"))
+    # logger.info("[PHEMEX-TCT] Background auto-scan loop launched (supervised)")
 
 
 @app.on_event("shutdown")
@@ -4606,6 +4631,8 @@ async def schematics_5a_page(symbol: str = "BTCUSDT", timeframe: str = "4h"):
     Shows completed, active (ready-to-trade), and in-formation models
     with full chart overlays mirroring the lecture PDF schematics.
     """
+    # PAGE DISABLED — temporarily returning stub while focusing on schematics-5B
+    return HTMLResponse(content=_DISABLED_PAGE_HTML)
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -6385,6 +6412,8 @@ async def dashboard():
     Interactive TCT Dashboard with candlestick chart and all TCT metrics.
     Displays: Market Structure, Ranges, Supply/Demand Zones, Liquidity, Deviations, Risk Management.
     """
+    # PAGE DISABLED — temporarily returning stub while focusing on schematics-5B
+    return HTMLResponse(content=_DISABLED_PAGE_HTML)
     html_content = """
 <!DOCTYPE html>
 <html lang="en">
@@ -15332,6 +15361,8 @@ async def tensor_trade_page():
     Shows current trade, trade history, P&L, win/loss analysis,
     reward-based adaptations, and running balance.
     """
+    # PAGE DISABLED — temporarily returning stub while focusing on schematics-5B
+    return HTMLResponse(content=_DISABLED_PAGE_HTML)
     html = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -19057,6 +19088,8 @@ async def phemex_tct_page():
     Shows current trade, historical trades, and performance stats.
     Auto-refreshes every 30s — no user input required.
     """
+    # PAGE DISABLED — temporarily returning stub while focusing on schematics-5B
+    return HTMLResponse(content=_DISABLED_PAGE_HTML)
     html = """<!DOCTYPE html>
 <html lang="en">
 <head>
