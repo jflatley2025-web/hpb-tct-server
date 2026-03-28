@@ -1473,7 +1473,32 @@ class Schematics5BTrader:
                 self.last_debug["rig"] = rig_result
                 self.last_debug["msce"] = msce
 
-            # 4. Enter trade on highest-scoring qualifying setup.
+            # 4. DD hard-block timestamp — start the 72h reset clock as soon as equity
+            #    crosses the hard threshold, REGARDLESS of whether any setup qualifies.
+            #    Previously this only ran inside `if best_setup:` so scan cycles with no
+            #    candidates would never set dd_triggered_at and the clock never started.
+            _dd_mult = self._dd_risk_multiplier()
+            if _dd_mult == 0.0 and self.state.dd_triggered_at is None:
+                # Prefer the timestamp returned by the v2 engine (first-crossing detection
+                # in decide()) if available; fall back to now.
+                _v2_dd_ts = (
+                    _v2_result.get("new_dd_protection_triggered_at")
+                    if _v2_result
+                    else None
+                )
+                self.state.dd_triggered_at = (
+                    _v2_dd_ts.isoformat()
+                    if isinstance(_v2_dd_ts, datetime)
+                    else datetime.now(timezone.utc).isoformat()
+                )
+                self.state.save()
+                logger.info(
+                    "[5B] DD hard block: starting 72h reset clock "
+                    "(balance=$%.2f peak=$%.2f)",
+                    self.state.balance, self.state.peak_balance,
+                )
+
+            # 5. Enter trade on highest-scoring qualifying setup.
             if best_setup:
                 schematic, evaluation = best_setup
                 entry_info = schematic.get("entry", {})
@@ -1593,11 +1618,9 @@ class Schematics5BTrader:
                                 best_tf,
                             )
 
-                        # Issue 3: compute DD risk multiplier from live balance state.
-                        # When USE_UNIFIED_ENGINE=True the v2 gate already blocked hard-DD
-                        # signals at the PASS level; this independently guards the legacy path.
-                        _dd_mult = self._dd_risk_multiplier()
-
+                        # Issue 3: DD risk multiplier — already computed above before this block
+                        # (_dd_mult = self._dd_risk_multiplier()) so the 72h clock starts even
+                        # on cycles where no schematic reaches this point.
                         if _dd_mult == 0.0:
                             logger.info(
                                 "[5B] DD hard block: suppressing legacy TAKE — "
@@ -1685,13 +1708,23 @@ class Schematics5BTrader:
                                     schematic, evaluation, best_current_price, best_htf_bias,
                                     SYMBOL, best_tf, risk_multiplier=_dd_mult,
                                 )
-                                # v15: record accepted trade for next compression window
-                                self.state.last_accepted_trade_ts = (
-                                    datetime.now(timezone.utc).isoformat()
-                                )
-                                self.state.last_accepted_trade_priority = _priority
-                                cycle_result["action"] = "trade_entered"
-                                cycle_result["details"] = trade
+                                if trade.get("error"):
+                                    # _enter_trade() rejected the setup (bad stop/target, R:R
+                                    # too low at market, etc.) — do NOT update the compression
+                                    # window so a valid future trade is not locked out.
+                                    logger.warning(
+                                        "[5B] _enter_trade failed: %s", trade["error"]
+                                    )
+                                    cycle_result["action"] = "entry_failed"
+                                    cycle_result["details"] = trade
+                                else:
+                                    # v15: only record accepted trade when order was placed
+                                    self.state.last_accepted_trade_ts = (
+                                        datetime.now(timezone.utc).isoformat()
+                                    )
+                                    self.state.last_accepted_trade_priority = _priority
+                                    cycle_result["action"] = "trade_entered"
+                                    cycle_result["details"] = trade
             else:
                 # Legacy: no qualifying setups found.
                 # Log if v2 independently found a signal (informational — not executed).

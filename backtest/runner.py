@@ -1298,8 +1298,10 @@ def run_backtest(
                         # Signal remains in DB as TAKE (it passed all gates).
                         pass
                     else:
-                        # Record BOS fingerprint to prevent same-schematic re-entry.
-                        # Use entry_price + BOS price (absolute, stable across window shifts).
+                        # Build BOS fingerprint (entry_price + BOS price — absolute,
+                        # stable across window shifts).  Written ONLY after _open_trade()
+                        # confirms the trade was placed so a failed open doesn't permanently
+                        # dedup the same schematic for 48h.
                         sch = signal.get("_schematic") or {}
                         bos_info_fp = (sch.get("bos_confirmation") or {})
                         bos_fp = (
@@ -1309,11 +1311,13 @@ def run_backtest(
                             round(float(signal.get("entry_price") or current_price), 0),
                             round(float(bos_info_fp.get("bos_price") or 0), 0),
                         )
-                        state.traded_bos_fingerprints[bos_fp] = current_time
                         _trade_opened = _open_trade(state, signal, current_time, current_price,
                                                    tp1_level_pct=effective_tp1_level_pct)
                         # v13: funnel trade counters — only increment if trade was actually opened
                         if _trade_opened:
+                            # Record fingerprint only on confirmed open; avoids
+                            # deduping a schematic when _open_trade() fails/returns falsy.
+                            state.traded_bos_fingerprints[bos_fp] = current_time
                             # v15: update compression state on every executed trade
                             state.last_accepted_trade_time = current_time
                             state.last_accepted_trade_priority = _priority
