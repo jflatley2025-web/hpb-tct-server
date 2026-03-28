@@ -1,0 +1,4489 @@
+====================================================================================================
+BACKTEST REPORT  |  RUN 27  |  ENGINE v11  |  OFFICIAL v11 BASELINE
+====================================================================================================
+
+CONFIGURATION
+------------------------------------------------------------
+  Exchange:          Binance (simulated, closed-candle fills, no slippage model)
+  Pair:              BTCUSDT
+  Period:            2025-04-01  to  2026-03-24
+  Step interval:     1h
+  Score threshold:   50
+  Warmup days:       90  (signals enabled from 2025-06-30)
+  Starting balance:  $5,000.00
+  Engine version:    11
+  Run completed:     2026-03-27 19:09:52.991294+00:00
+
+CORE METRICS
+------------------------------------------------------------
+  Total trades:      133
+  Wins / Losses:     108 W  /  25 L
+  Win rate:          81.2%
+  Profit factor:     4.97
+  Expectancy:        $83.59 / trade
+  Avg winner:        $128.89
+  Avg loser:         -$112.11
+  Win/Loss ratio:    1.15x
+  Gross profit:      $13,920.31
+  Gross loss:        -$2,802.77
+  Net profit:        $11,117.58  (+222.4%)
+  Final balance:     $16,117.58
+  Max drawdown:      4.35%
+
+PERFORMANCE BY MODEL
+----------------------------------------------------------------------------------------------------
+  Model                               Trades  Wins    WR%     Net PnL    Avg PnL    GrossWin   GrossLoss     PF
+  --------------------------------------------------------------------------------------------------
+  Model_1                                 67    55  82.1%    6,235.79      93.07    7,669.31    1,433.52   5.35
+  Model_1_from_M2_failure                  7     7 100.0%      594.29      84.90      594.29        0.00    inf
+  Model_2                                 27    23  85.2%    2,866.25     106.16    3,527.74      661.49   5.33
+  Model_3                                 32    23  71.9%    1,421.21      44.41    2,128.97      707.76   3.01
+
+PERFORMANCE BY TIMEFRAME
+--------------------------------------------------------------------------------
+  TF       Trades  Wins    WR%     Net PnL    Avg PnL
+  -------------------------------------------------------
+  15m          39    27  69.2%    1,604.32      41.14
+  1h           34    29  85.3%    2,452.42      72.13
+  30m          31    27  87.1%    2,641.72      85.22
+  4h           29    25  86.2%    4,419.08     152.38
+
+MONTHLY PERFORMANCE
+------------------------------------------------------------
+  Month        Trades  Wins    WR%     Net PnL
+  ---------------------------------------------
+  2025-06           4     2  50.0%     -110.15
+  2025-07          15    11  73.3%      312.85
+  2025-08           1     0   0.0%      -70.90
+  2025-09          22    22 100.0%      682.70
+  2025-10          20    18  90.0%    2,058.68
+  2025-11          15    11  73.3%    2,588.01
+  2025-12           5     4  80.0%      361.55
+  2026-01          24    19  79.2%    3,036.35
+  2026-02          14    13  92.9%    2,082.25
+  2026-03          13     8  61.5%      176.20
+
+PnL vs WIN RATE ANALYSIS
+--------------------------------------------------------------------------------
+
+  Model PnL vs WR (sorted by WR descending):
+  Model                                  WR%      Net PnL   PnL/Trade
+  ----------------------------------------------------------------------
+  Model_1_from_M2_failure             100.0%  $    594.29  $    84.90/trade
+  Model_2                              85.2%  $  2,866.25  $   106.16/trade
+  Model_1                              82.1%  $  6,235.79  $    93.07/trade
+  Model_3                              71.9%  $  1,421.21  $    44.41/trade
+
+  Timeframe PnL vs WR (sorted by avg PnL descending):
+  TF          WR%      Net PnL   PnL/Trade
+  --------------------------------------------------
+  4h        86.2%  $  4,419.08  $   152.38/trade
+  30m       87.1%  $  2,641.72  $    85.22/trade
+  1h        85.3%  $  2,452.42  $    72.13/trade
+  15m       69.2%  $  1,604.32  $    41.14/trade
+
+  Key Observations:
+  - 15m: lowest WR (69.2%) and lowest avg PnL ($41/trade) -- primary target for v12/v13 hardening
+  - Model_2/15m: 8 trades, 62.5% WR, -$13 net -- only net-negative model x TF bucket
+  - Model_3/4h: 10 trades, 70% WR, $25 avg -- low edge; eliminated by FAIL_MODEL3_TF_FILTER in v12
+  - 4h TF: highest avg PnL ($152/trade), 29 trades -- best edge quality
+  - Model_1_from_M2_failure: 7/7 wins (100% WR, $85/trade) -- strongest sub-pattern
+  - High PF (4.97) driven by avg win/loss ratio of 1.15x
+
+====================================================================================================
+TRADE-BY-TRADE LOG
+====================================================================================================
+
+
+  ------------------------------------------------------------------------------------------
+  TRADE #001  |  BTCUSDT  |  1h  |  BULLISH  |  Model_2                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-06-30 15:00:00 UTC
+  Closed:         2025-06-30 16:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      1h
+  Model:          Model_2
+
+  --- PRICES ---
+  Entry price:    $107,164.80
+  Stop loss:      $106,662.86  (0.47% from entry  |  dollar risk $4843836.62)
+  Target price:   $108,007.00  (0.79% from entry  |  RR 1.68)
+  TP1 price:      $107,612.69      (HIT)
+  Exit price:     $107,393.29  (0.21% from entry)
+  Exit reason:    trailing_stop
+
+  --- POSITION ---
+  Size:           9650.230342 BTC
+  Risk amount:    $50.00
+  Leverage:       10.0x
+  Entry score:    60.0
+
+  --- OUTCOME ---
+  MFE:            569.22%  (max favorable excursion)
+  MAE:            -481.48%  (max adverse excursion)
+  PnL:            +$11.62  (+0.23%)
+  Balance before: $5,000.00
+  Balance after:  $5,011.62
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #002  |  BTCUSDT  |  1h  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-06-30 17:00:00 UTC
+  Closed:         2025-06-30 18:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      1h
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $107,278.00
+  Stop loss:      $106,474.66  (0.75% from entry  |  dollar risk $5042374.16)
+  Target price:   $107,742.00  (0.43% from entry  |  RR 0.58)
+  TP1 price:      $107,536.82      (HIT)
+  Exit price:     $107,590.82  (0.29% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           6276.762213 BTC
+  Risk amount:    $50.12
+  Leverage:       10.0x
+  Entry score:    60.0
+
+  --- OUTCOME ---
+  MFE:            464.36%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$4.47  (+0.09%)
+  Balance before: $5,011.62
+  Balance after:  $5,016.09
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #003  |  BTCUSDT  |  15m  |  BULLISH  |  Model_1                         |  LOSS
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-06-30 19:00:00 UTC
+  Closed:         2025-06-30 20:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      15m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $107,712.00
+  Stop loss:      $107,283.53  (0.40% from entry  |  dollar risk $4802052.55)
+  Target price:   $108,300.00  (0.55% from entry  |  RR 1.37)
+  TP1 price:      $108,032.93      (MISS)
+  Exit price:     $107,283.53  (0.40% from entry)
+  Exit reason:    stop_hit
+
+  --- POSITION ---
+  Size:           11207.337096 BTC
+  Risk amount:    $50.16
+  Leverage:       10.0x
+  Entry score:    60.0
+
+  --- OUTCOME ---
+  MFE:            43.64%  (max favorable excursion)
+  MAE:            -560.06%  (max adverse excursion)
+  PnL:            $-69.19  (-1.38%)
+  Balance before: $5,016.09
+  Balance after:  $4,946.90
+  Result:         LOSS
+
+  ------------------------------------------------------------------------------------------
+  TRADE #004  |  BTCUSDT  |  4h  |  BULLISH  |  Model_3                         |  LOSS
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-06-30 21:00:00 UTC
+  Closed:         2025-07-01 11:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      4h
+  Model:          Model_3
+
+  --- PRICES ---
+  Entry price:    $107,552.40
+  Stop loss:      $106,416.22  (1.06% from entry  |  dollar risk $5082610.76)
+  Target price:   $108,290.00  (0.69% from entry  |  RR 0.65)
+  TP1 price:      $107,948.09      (MISS)
+  Exit price:     $106,416.22  (1.06% from entry)
+  Exit reason:    stop_hit
+
+  --- POSITION ---
+  Size:           4473.420377 BTC
+  Risk amount:    $49.47
+  Leverage:       10.0x
+  Entry score:    56.0
+
+  --- OUTCOME ---
+  MFE:            N/A  (max favorable excursion)
+  MAE:            -1288.98%  (max adverse excursion)
+  PnL:            $-57.05  (-1.15%)
+  Balance before: $4,946.90
+  Balance after:  $4,889.85
+  Result:         LOSS
+
+  ------------------------------------------------------------------------------------------
+  TRADE #005  |  BTCUSDT  |  4h  |  BULLISH  |  Model_2                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-07-02 03:00:00 UTC
+  Closed:         2025-07-02 05:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      4h
+  Model:          Model_2
+
+  --- PRICES ---
+  Entry price:    $105,329.70
+  Stop loss:      $104,481.88  (0.80% from entry  |  dollar risk $4851667.66)
+  Target price:   $106,219.20  (0.84% from entry  |  RR 1.05)
+  TP1 price:      $105,800.78      (HIT)
+  Exit price:     $106,219.20  (0.84% from entry)
+  Exit reason:    target_hit
+
+  --- POSITION ---
+  Size:           5722.547888 BTC
+  Risk amount:    $48.90
+  Leverage:       10.0x
+  Entry score:    55.0
+
+  --- OUTCOME ---
+  MFE:            1006.84%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$25.77  (+0.53%)
+  Balance before: $4,889.86
+  Balance after:  $4,915.63
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #006  |  BTCUSDT  |  30m  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-07-02 06:00:00 UTC
+  Closed:         2025-07-02 07:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      30m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $105,791.10
+  Stop loss:      $105,348.68  (0.42% from entry  |  dollar risk $4647273.24)
+  Target price:   $106,289.40  (0.47% from entry  |  RR 1.13)
+  TP1 price:      $106,066.70      (HIT)
+  Exit price:     $106,788.90  (0.94% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           10504.163992 BTC
+  Risk amount:    $49.16
+  Leverage:       10.0x
+  Entry score:    87.0
+
+  --- OUTCOME ---
+  MFE:            1167.60%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$42.68  (+0.87%)
+  Balance before: $4,915.63
+  Balance after:  $4,958.31
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #007  |  BTCUSDT  |  4h  |  BULLISH  |  Model_1_from_M2_failure         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-07-02 09:00:00 UTC
+  Closed:         2025-07-02 16:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      4h
+  Model:          Model_1_from_M2_failure
+
+  --- PRICES ---
+  Entry price:    $105,329.70
+  Stop loss:      $103,305.59  (1.92% from entry  |  dollar risk $5092680.14)
+  Target price:   $108,439.00  (2.95% from entry  |  RR 1.54)
+  TP1 price:      $106,910.68      (HIT)
+  Exit price:     $108,439.00  (2.95% from entry)
+  Exit reason:    target_hit
+
+  --- POSITION ---
+  Size:           2516.007090 BTC
+  Risk amount:    $49.58
+  Leverage:       10.0x
+  Entry score:    60.0
+
+  --- OUTCOME ---
+  MFE:            3387.64%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$51.07  (+1.03%)
+  Balance before: $4,958.31
+  Balance after:  $5,009.38
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #008  |  BTCUSDT  |  1h  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-07-02 17:00:00 UTC
+  Closed:         2025-07-02 18:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      1h
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $107,184.00
+  Stop loss:      $106,698.35  (0.45% from entry  |  dollar risk $4838053.47)
+  Target price:   $108,539.00  (1.26% from entry  |  RR 2.79)
+  TP1 price:      $107,888.30      (HIT)
+  Exit price:     $109,099.30  (1.79% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           9961.975802 BTC
+  Risk amount:    $50.09
+  Leverage:       10.0x
+  Entry score:    87.0
+
+  --- OUTCOME ---
+  MFE:            2512.41%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$102.21  (+2.04%)
+  Balance before: $5,009.38
+  Balance after:  $5,111.59
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #009  |  BTCUSDT  |  4h  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-07-02 19:00:00 UTC
+  Closed:         2025-07-02 20:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      4h
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $102,830.00
+  Stop loss:      $100,739.31  (2.03% from entry  |  dollar risk $5132648.30)
+  Target price:   $108,974.70  (5.98% from entry  |  RR 2.94)
+  TP1 price:      $105,928.06      (HIT)
+  Exit price:     $108,974.70  (5.98% from entry)
+  Exit reason:    target_hit
+
+  --- POSITION ---
+  Size:           2454.997385 BTC
+  Risk amount:    $51.12
+  Leverage:       10.0x
+  Entry score:    75.0
+
+  --- OUTCOME ---
+  MFE:            6806.59%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$105.45  (+2.06%)
+  Balance before: $5,111.59
+  Balance after:  $5,217.04
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #010  |  BTCUSDT  |  4h  |  BULLISH  |  Model_3                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-07-02 21:00:00 UTC
+  Closed:         2025-07-02 22:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      4h
+  Model:          Model_3
+
+  --- PRICES ---
+  Entry price:    $107,552.40
+  Stop loss:      $106,416.22  (1.06% from entry  |  dollar risk $5360157.43)
+  Target price:   $108,290.00  (0.69% from entry  |  RR 0.65)
+  TP1 price:      $107,948.09      (HIT)
+  Exit price:     $109,210.59  (1.54% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           4717.700921 BTC
+  Risk amount:    $52.17
+  Leverage:       10.0x
+  Entry score:    84.0
+
+  --- OUTCOME ---
+  MFE:            1946.32%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$35.81  (+0.69%)
+  Balance before: $5,217.04
+  Balance after:  $5,252.85
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #011  |  BTCUSDT  |  1h  |  BULLISH  |  Model_2                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-07-02 23:00:00 UTC
+  Closed:         2025-07-03 00:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      1h
+  Model:          Model_2
+
+  --- PRICES ---
+  Entry price:    $107,164.80
+  Stop loss:      $106,662.86  (0.47% from entry  |  dollar risk $5088787.09)
+  Target price:   $108,007.00  (0.79% from entry  |  RR 1.68)
+  TP1 price:      $107,612.69      (HIT)
+  Exit price:     $108,785.79  (1.51% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           10138.237825 BTC
+  Risk amount:    $52.53
+  Leverage:       10.0x
+  Entry score:    57.0
+
+  --- OUTCOME ---
+  MFE:            1961.72%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$78.01  (+1.49%)
+  Balance before: $5,252.85
+  Balance after:  $5,330.86
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #012  |  BTCUSDT  |  15m  |  BULLISH  |  Model_1                         |  LOSS
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-07-03 22:00:00 UTC
+  Closed:         2025-07-04 05:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      15m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $109,913.00
+  Stop loss:      $108,997.35  (0.83% from entry  |  dollar risk $5530309.57)
+  Target price:   $110,529.00  (0.56% from entry  |  RR 0.67)
+  TP1 price:      $110,248.48      (MISS)
+  Exit price:     $108,997.35  (0.83% from entry)
+  Exit reason:    stop_hit
+
+  --- POSITION ---
+  Size:           6039.776825 BTC
+  Risk amount:    $53.31
+  Leverage:       10.0x
+  Entry score:    57.0
+
+  --- OUTCOME ---
+  MFE:            N/A  (max favorable excursion)
+  MAE:            -1016.26%  (max adverse excursion)
+  PnL:            $-63.55  (-1.19%)
+  Balance before: $5,330.86
+  Balance after:  $5,267.31
+  Result:         LOSS
+
+  ------------------------------------------------------------------------------------------
+  TRADE #013  |  BTCUSDT  |  4h  |  BULLISH  |  Model_3                         |  LOSS
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-07-21 08:00:00 UTC
+  Closed:         2025-07-21 19:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      4h
+  Model:          Model_3
+
+  --- PRICES ---
+  Entry price:    $118,865.90
+  Stop loss:      $117,315.70  (1.30% from entry  |  dollar risk $6032869.47)
+  Target price:   $123,226.00  (3.67% from entry  |  RR 2.81)
+  TP1 price:      $121,075.67      (MISS)
+  Exit price:     $117,315.70  (1.30% from entry)
+  Exit reason:    stop_hit
+
+  --- POSITION ---
+  Size:           3891.671701 BTC
+  Risk amount:    $52.67
+  Leverage:       10.0x
+  Entry score:    89.0
+
+  --- OUTCOME ---
+  MFE:            574.67%  (max favorable excursion)
+  MAE:            -1839.33%  (max adverse excursion)
+  PnL:            $-59.26  (-1.13%)
+  Balance before: $5,267.30
+  Balance after:  $5,208.04
+  Result:         LOSS
+
+  ------------------------------------------------------------------------------------------
+  TRADE #014  |  BTCUSDT  |  1h  |  BEARISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-07-21 20:00:00 UTC
+  Closed:         2025-07-21 21:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      1h
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $118,164.20
+  Stop loss:      $118,884.64  (0.61% from entry  |  dollar risk $5684769.05)
+  Target price:   $117,267.90  (0.76% from entry  |  RR 1.24)
+  TP1 price:      $117,686.51      (HIT)
+  Exit price:     $117,084.61  (0.91% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           7890.690478 BTC
+  Risk amount:    $52.08
+  Leverage:       10.0x
+  Entry score:    87.0
+
+  --- OUTCOME ---
+  MFE:            1439.12%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$36.65  (+0.70%)
+  Balance before: $5,208.04
+  Balance after:  $5,244.69
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #015  |  BTCUSDT  |  30m  |  BEARISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-07-21 22:00:00 UTC
+  Closed:         2025-07-22 02:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      30m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $118,340.00
+  Stop loss:      $119,708.10  (1.16% from entry  |  dollar risk $5946293.45)
+  Target price:   $116,462.00  (1.59% from entry  |  RR 1.37)
+  TP1 price:      $117,371.42      (HIT)
+  Exit price:     $117,025.42  (1.11% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           4346.375312 BTC
+  Risk amount:    $52.45
+  Leverage:       10.0x
+  Entry score:    53.0
+
+  --- OUTCOME ---
+  MFE:            2164.83%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$33.48  (+0.64%)
+  Balance before: $5,244.70
+  Balance after:  $5,278.18
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #016  |  BTCUSDT  |  4h  |  BEARISH  |  Model_3                         |  LOSS
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-07-22 05:00:00 UTC
+  Closed:         2025-07-22 08:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      4h
+  Model:          Model_3
+
+  --- PRICES ---
+  Entry price:    $117,267.90
+  Stop loss:      $118,547.31  (1.09% from entry  |  dollar risk $5915416.66)
+  Target price:   $115,726.70  (1.31% from entry  |  RR 1.20)
+  TP1 price:      $116,467.98      (MISS)
+  Exit price:     $118,547.31  (1.09% from entry)
+  Exit reason:    stop_hit
+
+  --- POSITION ---
+  Size:           4623.564887 BTC
+  Risk amount:    $52.78
+  Leverage:       10.0x
+  Entry score:    59.0
+
+  --- OUTCOME ---
+  MFE:            648.47%  (max favorable excursion)
+  MAE:            -1382.73%  (max adverse excursion)
+  PnL:            $-60.67  (-1.15%)
+  Balance before: $5,278.18
+  Balance after:  $5,217.51
+  Result:         LOSS
+
+  ------------------------------------------------------------------------------------------
+  TRADE #017  |  BTCUSDT  |  1h  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-07-22 09:00:00 UTC
+  Closed:         2025-07-22 10:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      1h
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $117,387.10
+  Stop loss:      $116,082.38  (1.11% from entry  |  dollar risk $5863953.40)
+  Target price:   $118,492.00  (0.94% from entry  |  RR 0.85)
+  TP1 price:      $117,968.90      (HIT)
+  Exit price:     $118,128.60  (0.63% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           4494.415198 BTC
+  Risk amount:    $52.18
+  Leverage:       10.0x
+  Entry score:    60.0
+
+  --- OUTCOME ---
+  MFE:            1205.91%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$16.55  (+0.32%)
+  Balance before: $5,217.51
+  Balance after:  $5,234.06
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #018  |  BTCUSDT  |  1h  |  BULLISH  |  Model_1_from_M2_failure         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-07-22 11:00:00 UTC
+  Closed:         2025-07-22 12:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      1h
+  Model:          Model_1_from_M2_failure
+
+  --- PRICES ---
+  Entry price:    $117,387.10
+  Stop loss:      $116,082.38  (1.11% from entry  |  dollar risk $5882554.34)
+  Target price:   $118,492.00  (0.94% from entry  |  RR 0.85)
+  TP1 price:      $117,968.90      (HIT)
+  Exit price:     $118,492.00  (0.94% from entry)
+  Exit reason:    target_hit
+
+  --- POSITION ---
+  Size:           4508.671857 BTC
+  Risk amount:    $52.34
+  Leverage:       10.0x
+  Entry score:    87.0
+
+  --- OUTCOME ---
+  MFE:            1742.11%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$23.57  (+0.45%)
+  Balance before: $5,234.07
+  Balance after:  $5,257.64
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #019  |  BTCUSDT  |  4h  |  BULLISH  |  Model_1                         |  LOSS
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-07-22 13:00:00 UTC
+  Closed:         2025-07-25 04:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      4h
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $120,069.30
+  Stop loss:      $115,600.51  (3.72% from entry  |  dollar risk $6232237.52)
+  Target price:   $123,226.00  (2.63% from entry  |  RR 0.71)
+  TP1 price:      $121,677.67      (MISS)
+  Exit price:     $115,600.51  (3.72% from entry)
+  Exit reason:    stop_hit
+
+  --- POSITION ---
+  Size:           1394.614719 BTC
+  Risk amount:    $52.58
+  Leverage:       10.0x
+  Entry score:    56.0
+
+  --- OUTCOME ---
+  MFE:            119.97%  (max favorable excursion)
+  MAE:            -4793.33%  (max adverse excursion)
+  PnL:            $-54.92  (-1.04%)
+  Balance before: $5,257.63
+  Balance after:  $5,202.71
+  Result:         LOSS
+
+  ------------------------------------------------------------------------------------------
+  TRADE #020  |  BTCUSDT  |  30m  |  BEARISH  |  Model_1                         |  LOSS
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-08-09 20:00:00 UTC
+  Closed:         2025-08-10 03:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      30m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $116,549.10
+  Stop loss:      $117,037.43  (0.42% from entry  |  dollar risk $5414544.16)
+  Target price:   $115,888.00  (0.57% from entry  |  RR 1.35)
+  TP1 price:      $116,189.41      (MISS)
+  Exit price:     $117,037.43  (0.42% from entry)
+  Exit reason:    stop_hit
+
+  --- POSITION ---
+  Size:           11087.879431 BTC
+  Risk amount:    $52.03
+  Leverage:       10.0x
+  Entry score:    87.0
+
+  --- OUTCOME ---
+  MFE:            121.63%  (max favorable excursion)
+  MAE:            -831.27%  (max adverse excursion)
+  PnL:            $-70.90  (-1.36%)
+  Balance before: $5,202.71
+  Balance after:  $5,131.81
+  Result:         LOSS
+
+  ------------------------------------------------------------------------------------------
+  TRADE #021  |  BTCUSDT  |  4h  |  BULLISH  |  Model_3                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-09-09 00:00:00 UTC
+  Closed:         2025-09-09 01:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      4h
+  Model:          Model_3
+
+  --- PRICES ---
+  Entry price:    $111,415.10
+  Stop loss:      $109,702.35  (1.54% from entry  |  dollar risk $5540273.92)
+  Target price:   $112,571.30  (1.04% from entry  |  RR 0.68)
+  TP1 price:      $112,021.05      (HIT)
+  Exit price:     $111,555.75  (0.13% from entry)
+  Exit reason:    trailing_stop
+
+  --- POSITION ---
+  Size:           3234.724228 BTC
+  Risk amount:    $51.32
+  Leverage:       10.0x
+  Entry score:    60.0
+
+  --- OUTCOME ---
+  MFE:            635.19%  (max favorable excursion)
+  MAE:            -9.21%  (max adverse excursion)
+  PnL:            +$4.53  (+0.09%)
+  Balance before: $5,131.81
+  Balance after:  $5,136.34
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #022  |  BTCUSDT  |  15m  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-09-09 04:00:00 UTC
+  Closed:         2025-09-09 05:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      15m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $111,222.00
+  Stop loss:      $110,596.64  (0.56% from entry  |  dollar risk $5248836.52)
+  Target price:   $111,610.20  (0.35% from entry  |  RR 0.62)
+  TP1 price:      $111,443.91      (HIT)
+  Exit price:     $111,946.21  (0.65% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           8393.250209 BTC
+  Risk amount:    $51.36
+  Leverage:       10.0x
+  Entry score:    66.0
+
+  --- OUTCOME ---
+  MFE:            834.89%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$19.30  (+0.38%)
+  Balance before: $5,136.34
+  Balance after:  $5,155.64
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #023  |  BTCUSDT  |  1h  |  BULLISH  |  Model_1_from_M2_failure         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-09-09 07:00:00 UTC
+  Closed:         2025-09-09 08:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      1h
+  Model:          Model_1_from_M2_failure
+
+  --- PRICES ---
+  Entry price:    $110,729.10
+  Stop loss:      $109,942.43  (0.71% from entry  |  dollar risk $5336102.90)
+  Target price:   $111,763.50  (0.93% from entry  |  RR 1.31)
+  TP1 price:      $111,273.98      (HIT)
+  Exit price:     $112,787.98  (1.86% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           6783.152914 BTC
+  Risk amount:    $51.56
+  Leverage:       10.0x
+  Entry score:    72.0
+
+  --- OUTCOME ---
+  MFE:            2493.04%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$66.46  (+1.29%)
+  Balance before: $5,155.64
+  Balance after:  $5,222.10
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #024  |  BTCUSDT  |  4h  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-09-09 09:00:00 UTC
+  Closed:         2025-09-09 16:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      4h
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $109,911.00
+  Stop loss:      $107,153.91  (2.51% from entry  |  dollar risk $5630302.94)
+  Target price:   $113,484.90  (3.25% from entry  |  RR 1.30)
+  TP1 price:      $111,725.43      (HIT)
+  Exit price:     $111,298.73  (1.26% from entry)
+  Exit reason:    trailing_stop
+
+  --- POSITION ---
+  Size:           2042.120900 BTC
+  Risk amount:    $52.22
+  Leverage:       10.0x
+  Entry score:    75.0
+
+  --- OUTCOME ---
+  MFE:            3092.24%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$25.74  (+0.49%)
+  Balance before: $5,222.10
+  Balance after:  $5,247.84
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #025  |  BTCUSDT  |  1h  |  BEARISH  |  Model_1_from_M2_failure         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-09-09 17:00:00 UTC
+  Closed:         2025-09-10 07:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      1h
+  Model:          Model_1_from_M2_failure
+
+  --- PRICES ---
+  Entry price:    $112,399.80
+  Stop loss:      $113,316.75  (0.82% from entry  |  dollar risk $5555139.73)
+  Target price:   $110,608.80  (1.59% from entry  |  RR 1.95)
+  TP1 price:      $111,476.20      (HIT)
+  Exit price:     $111,743.80  (0.58% from entry)
+  Exit reason:    trailing_stop
+
+  --- POSITION ---
+  Size:           6058.279874 BTC
+  Risk amount:    $52.48
+  Leverage:       10.0x
+  Entry score:    60.0
+
+  --- OUTCOME ---
+  MFE:            1467.20%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$30.78  (+0.59%)
+  Balance before: $5,247.85
+  Balance after:  $5,278.63
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #026  |  BTCUSDT  |  1h  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-09-10 08:00:00 UTC
+  Closed:         2025-09-10 09:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      1h
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $110,729.10
+  Stop loss:      $109,937.67  (0.71% from entry  |  dollar risk $5465553.14)
+  Target price:   $111,763.50  (0.93% from entry  |  RR 1.31)
+  TP1 price:      $111,273.98      (HIT)
+  Exit price:     $112,363.08  (1.48% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           6905.938557 BTC
+  Risk amount:    $52.79
+  Leverage:       10.0x
+  Entry score:    66.0
+
+  --- OUTCOME ---
+  MFE:            2068.14%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$54.42  (+1.03%)
+  Balance before: $5,278.63
+  Balance after:  $5,333.05
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #027  |  BTCUSDT  |  30m  |  BULLISH  |  Model_3                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-09-11 04:00:00 UTC
+  Closed:         2025-09-11 05:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      30m
+  Model:          Model_3
+
+  --- PRICES ---
+  Entry price:    $113,893.30
+  Stop loss:      $113,395.80  (0.44% from entry  |  dollar risk $5452858.89)
+  Target price:   $114,318.00  (0.37% from entry  |  RR 0.85)
+  TP1 price:      $114,134.12      (HIT)
+  Exit price:     $114,233.22  (0.30% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           10960.476322 BTC
+  Risk amount:    $53.33
+  Leverage:       10.0x
+  Entry score:    84.0
+
+  --- OUTCOME ---
+  MFE:            466.85%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$6.55  (+0.12%)
+  Balance before: $5,333.05
+  Balance after:  $5,339.60
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #028  |  BTCUSDT  |  4h  |  BULLISH  |  Model_3                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-09-11 06:00:00 UTC
+  Closed:         2025-09-11 07:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      4h
+  Model:          Model_3
+
+  --- PRICES ---
+  Entry price:    $111,415.10
+  Stop loss:      $109,702.35  (1.54% from entry  |  dollar risk $5764601.45)
+  Target price:   $112,571.30  (1.04% from entry  |  RR 0.68)
+  TP1 price:      $112,021.05      (HIT)
+  Exit price:     $112,571.30  (1.04% from entry)
+  Exit reason:    target_hit
+
+  --- POSITION ---
+  Size:           3365.699283 BTC
+  Risk amount:    $53.40
+  Leverage:       10.0x
+  Entry score:    75.0
+
+  --- OUTCOME ---
+  MFE:            2991.19%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$20.03  (+0.38%)
+  Balance before: $5,339.60
+  Balance after:  $5,359.63
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #029  |  BTCUSDT  |  15m  |  BEARISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-09-11 10:00:00 UTC
+  Closed:         2025-09-11 13:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      15m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $113,962.00
+  Stop loss:      $114,485.28  (0.46% from entry  |  dollar risk $5505395.48)
+  Target price:   $113,154.10  (0.71% from entry  |  RR 1.54)
+  TP1 price:      $113,529.56      (HIT)
+  Exit price:     $113,855.46  (0.09% from entry)
+  Exit reason:    trailing_stop
+
+  --- POSITION ---
+  Size:           10520.976380 BTC
+  Risk amount:    $53.60
+  Leverage:       10.0x
+  Entry score:    57.0
+
+  --- OUTCOME ---
+  MFE:            425.02%  (max favorable excursion)
+  MAE:            -640.98%  (max adverse excursion)
+  PnL:            +$4.37  (+0.08%)
+  Balance before: $5,359.64
+  Balance after:  $5,364.01
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #030  |  BTCUSDT  |  1h  |  BULLISH  |  Model_1_from_M2_failure         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-09-11 14:00:00 UTC
+  Closed:         2025-09-11 15:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      1h
+  Model:          Model_1_from_M2_failure
+
+  --- PRICES ---
+  Entry price:    $110,729.10
+  Stop loss:      $109,904.94  (0.74% from entry  |  dollar risk $5568417.00)
+  Target price:   $113,400.00  (2.41% from entry  |  RR 3.24)
+  TP1 price:      $112,092.23      (HIT)
+  Exit price:     $113,400.00  (2.41% from entry)
+  Exit reason:    target_hit
+
+  --- POSITION ---
+  Size:           6756.492085 BTC
+  Risk amount:    $53.64
+  Leverage:       10.0x
+  Entry score:    72.0
+
+  --- OUTCOME ---
+  MFE:            3899.14%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$109.80  (+2.05%)
+  Balance before: $5,364.01
+  Balance after:  $5,473.81
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #031  |  BTCUSDT  |  1h  |  BULLISH  |  Model_2                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-09-17 04:00:00 UTC
+  Closed:         2025-09-17 06:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      1h
+  Model:          Model_2
+
+  --- PRICES ---
+  Entry price:    $115,526.40
+  Stop loss:      $114,918.87  (0.53% from entry  |  dollar risk $5777535.50)
+  Target price:   $116,773.10  (1.08% from entry  |  RR 2.05)
+  TP1 price:      $116,178.63      (HIT)
+  Exit price:     $116,605.53  (0.93% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           9509.845568 BTC
+  Risk amount:    $54.74
+  Leverage:       10.0x
+  Entry score:    60.0
+
+  --- OUTCOME ---
+  MFE:            1615.84%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$52.66  (+0.96%)
+  Balance before: $5,473.81
+  Balance after:  $5,526.47
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #032  |  BTCUSDT  |  1h  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-09-17 07:00:00 UTC
+  Closed:         2025-09-17 08:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      1h
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $115,607.90
+  Stop loss:      $115,117.31  (0.42% from entry  |  dollar risk $5718456.45)
+  Target price:   $116,164.40  (0.48% from entry  |  RR 1.13)
+  TP1 price:      $115,915.05      (HIT)
+  Exit price:     $116,164.40  (0.48% from entry)
+  Exit reason:    target_hit
+
+  --- POSITION ---
+  Size:           11656.189131 BTC
+  Risk amount:    $55.26
+  Leverage:       10.0x
+  Entry score:    87.0
+
+  --- OUTCOME ---
+  MFE:            1616.30%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$20.78  (+0.38%)
+  Balance before: $5,526.47
+  Balance after:  $5,547.25
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #033  |  BTCUSDT  |  4h  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-09-17 09:00:00 UTC
+  Closed:         2025-09-17 10:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      4h
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $109,911.00
+  Stop loss:      $107,153.91  (2.51% from entry  |  dollar risk $5980870.58)
+  Target price:   $113,484.90  (3.25% from entry  |  RR 1.30)
+  TP1 price:      $111,725.43      (HIT)
+  Exit price:     $113,484.90  (3.25% from entry)
+  Exit reason:    target_hit
+
+  --- POSITION ---
+  Size:           2169.272406 BTC
+  Risk amount:    $55.47
+  Leverage:       10.0x
+  Entry score:    63.0
+
+  --- OUTCOME ---
+  MFE:            6893.24%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$48.90  (+0.88%)
+  Balance before: $5,547.25
+  Balance after:  $5,596.15
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #034  |  BTCUSDT  |  1h  |  BEARISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-09-17 14:00:00 UTC
+  Closed:         2025-09-17 15:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      1h
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $116,159.60
+  Stop loss:      $116,923.48  (0.66% from entry  |  dollar risk $6038118.91)
+  Target price:   $115,167.00  (0.85% from entry  |  RR 1.30)
+  TP1 price:      $115,634.26      (HIT)
+  Exit price:     $115,925.26  (0.20% from entry)
+  Exit reason:    trailing_stop
+
+  --- POSITION ---
+  Size:           7904.538554 BTC
+  Risk amount:    $55.96
+  Leverage:       10.0x
+  Entry score:    57.0
+
+  --- OUTCOME ---
+  MFE:            643.52%  (max favorable excursion)
+  MAE:            -142.48%  (max adverse excursion)
+  PnL:            +$10.45  (+0.19%)
+  Balance before: $5,596.15
+  Balance after:  $5,606.60
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #035  |  BTCUSDT  |  1h  |  BEARISH  |  Model_1_from_M2_failure         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-09-17 16:00:00 UTC
+  Closed:         2025-09-17 17:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      1h
+  Model:          Model_1_from_M2_failure
+
+  --- PRICES ---
+  Entry price:    $116,159.60
+  Stop loss:      $117,100.54  (0.81% from entry  |  dollar risk $6130910.71)
+  Target price:   $115,167.00  (0.85% from entry  |  RR 1.05)
+  TP1 price:      $115,634.26      (HIT)
+  Exit price:     $115,857.36  (0.26% from entry)
+  Exit reason:    trailing_stop
+
+  --- POSITION ---
+  Size:           6515.729712 BTC
+  Risk amount:    $56.07
+  Leverage:       10.0x
+  Entry score:    56.0
+
+  --- OUTCOME ---
+  MFE:            711.42%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$10.52  (+0.19%)
+  Balance before: $5,606.59
+  Balance after:  $5,617.11
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #036  |  BTCUSDT  |  30m  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-09-17 21:00:00 UTC
+  Closed:         2025-09-17 22:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      30m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $115,526.40
+  Stop loss:      $114,694.04  (0.72% from entry  |  dollar risk $6071173.88)
+  Target price:   $116,083.00  (0.48% from entry  |  RR 0.67)
+  TP1 price:      $115,833.58      (HIT)
+  Exit price:     $115,880.58  (0.31% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           7293.927960 BTC
+  Risk amount:    $56.17
+  Leverage:       10.0x
+  Entry score:    53.0
+
+  --- OUTCOME ---
+  MFE:            545.84%  (max favorable excursion)
+  MAE:            -265.86%  (max adverse excursion)
+  PnL:            +$6.64  (+0.12%)
+  Balance before: $5,617.12
+  Balance after:  $5,623.76
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #037  |  BTCUSDT  |  15m  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-09-17 23:00:00 UTC
+  Closed:         2025-09-18 00:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      15m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $116,244.00
+  Stop loss:      $115,886.95  (0.31% from entry  |  dollar risk $5624899.13)
+  Target price:   $117,282.00  (0.89% from entry  |  RR 2.91)
+  TP1 price:      $116,792.06      (HIT)
+  Exit price:     $116,509.96  (0.23% from entry)
+  Exit reason:    trailing_stop
+
+  --- POSITION ---
+  Size:           15753.901790 BTC
+  Risk amount:    $56.24
+  Leverage:       10.0x
+  Entry score:    78.0
+
+  --- OUTCOME ---
+  MFE:            697.78%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$24.41  (+0.43%)
+  Balance before: $5,623.76
+  Balance after:  $5,648.17
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #038  |  BTCUSDT  |  15m  |  BEARISH  |  Model_3                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-09-26 11:00:00 UTC
+  Closed:         2025-09-26 12:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      15m
+  Model:          Model_3
+
+  --- PRICES ---
+  Entry price:    $109,427.00
+  Stop loss:      $109,637.79  (0.19% from entry  |  dollar risk $4904486.83)
+  Target price:   $109,057.00  (0.34% from entry  |  RR 1.76)
+  TP1 price:      $109,214.64      (HIT)
+  Exit price:     $108,774.94  (0.60% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           23267.391065 BTC
+  Risk amount:    $56.48
+  Leverage:       10.0x
+  Entry score:    60.0
+
+  --- OUTCOME ---
+  MFE:            754.99%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$46.60  (+0.83%)
+  Balance before: $5,648.17
+  Balance after:  $5,694.77
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #039  |  BTCUSDT  |  15m  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-09-26 14:00:00 UTC
+  Closed:         2025-09-26 15:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      15m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $109,211.40
+  Stop loss:      $108,880.92  (0.30% from entry  |  dollar risk $5340096.02)
+  Target price:   $109,811.10  (0.55% from entry  |  RR 1.81)
+  TP1 price:      $109,538.55      (HIT)
+  Exit price:     $109,503.35  (0.27% from entry)
+  Exit reason:    trailing_stop
+
+  --- POSITION ---
+  Size:           16158.507923 BTC
+  Risk amount:    $56.95
+  Leverage:       10.0x
+  Entry score:    90.0
+
+  --- OUTCOME ---
+  MFE:            509.89%  (max favorable excursion)
+  MAE:            -499.61%  (max adverse excursion)
+  PnL:            +$14.26  (+0.25%)
+  Balance before: $5,694.77
+  Balance after:  $5,709.03
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #040  |  BTCUSDT  |  4h  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-09-26 18:00:00 UTC
+  Closed:         2025-09-29 14:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      4h
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $109,911.00
+  Stop loss:      $107,153.91  (2.51% from entry  |  dollar risk $6155297.99)
+  Target price:   $113,484.90  (3.25% from entry  |  RR 1.30)
+  TP1 price:      $111,725.43      (HIT)
+  Exit price:     $113,484.90  (3.25% from entry)
+  Exit reason:    target_hit
+
+  --- POSITION ---
+  Size:           2232.537539 BTC
+  Risk amount:    $57.09
+  Leverage:       10.0x
+  Entry score:    60.0
+
+  --- OUTCOME ---
+  MFE:            3532.14%  (max favorable excursion)
+  MAE:            -945.26%  (max adverse excursion)
+  PnL:            +$50.33  (+0.88%)
+  Balance before: $5,709.03
+  Balance after:  $5,759.36
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #041  |  BTCUSDT  |  1h  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-09-29 15:00:00 UTC
+  Closed:         2025-09-29 16:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      1h
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $112,504.50
+  Stop loss:      $111,439.22  (0.95% from entry  |  dollar risk $6157619.74)
+  Target price:   $113,275.00  (0.68% from entry  |  RR 0.72)
+  TP1 price:      $112,917.88      (HIT)
+  Exit price:     $113,772.78  (1.13% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           5780.282872 BTC
+  Risk amount:    $57.59
+  Leverage:       10.0x
+  Entry score:    81.0
+
+  --- OUTCOME ---
+  MFE:            1569.15%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$31.89  (+0.55%)
+  Balance before: $5,759.36
+  Balance after:  $5,791.25
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #042  |  BTCUSDT  |  30m  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-09-30 20:00:00 UTC
+  Closed:         2025-09-30 21:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      30m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $113,642.00
+  Stop loss:      $112,830.75  (0.71% from entry  |  dollar risk $6153576.48)
+  Target price:   $114,800.00  (1.02% from entry  |  RR 1.43)
+  TP1 price:      $114,249.41      (HIT)
+  Exit price:     $114,176.01  (0.47% from entry)
+  Exit reason:    trailing_stop
+
+  --- POSITION ---
+  Size:           7585.302283 BTC
+  Risk amount:    $57.91
+  Leverage:       10.0x
+  Entry score:    83.0
+
+  --- OUTCOME ---
+  MFE:            1027.78%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$23.28  (+0.40%)
+  Balance before: $5,791.25
+  Balance after:  $5,814.53
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #043  |  BTCUSDT  |  15m  |  BULLISH  |  Model_1                         |  LOSS
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-10-02 10:00:00 UTC
+  Closed:         2025-10-02 11:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      15m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $118,681.00
+  Stop loss:      $118,345.45  (0.28% from entry  |  dollar risk $5866689.50)
+  Target price:   $119,067.50  (0.33% from entry  |  RR 1.15)
+  TP1 price:      $118,903.92      (HIT)
+  Exit price:     $118,777.92  (0.08% from entry)
+  Exit reason:    trailing_stop
+
+  --- POSITION ---
+  Size:           17483.801213 BTC
+  Risk amount:    $58.15
+  Leverage:       10.0x
+  Entry score:    60.0
+
+  --- OUTCOME ---
+  MFE:            201.16%  (max favorable excursion)
+  MAE:            -163.54%  (max adverse excursion)
+  PnL:            $-10.54  (-0.18%)
+  Balance before: $5,814.52
+  Balance after:  $5,803.98
+  Result:         LOSS
+
+  ------------------------------------------------------------------------------------------
+  TRADE #044  |  BTCUSDT  |  30m  |  BULLISH  |  Model_3                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-10-02 16:00:00 UTC
+  Closed:         2025-10-02 17:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      30m
+  Model:          Model_3
+
+  --- PRICES ---
+  Entry price:    $118,941.50
+  Stop loss:      $118,260.69  (0.57% from entry  |  dollar risk $6351937.85)
+  Target price:   $119,458.90  (0.44% from entry  |  RR 0.76)
+  TP1 price:      $119,229.94      (HIT)
+  Exit price:     $120,084.24  (0.96% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           9329.916610 BTC
+  Risk amount:    $58.04
+  Leverage:       10.0x
+  Entry score:    84.0
+
+  --- OUTCOME ---
+  MFE:            1312.23%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$37.89  (+0.65%)
+  Balance before: $5,803.98
+  Balance after:  $5,841.87
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #045  |  BTCUSDT  |  1h  |  BULLISH  |  Model_3                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-10-02 21:00:00 UTC
+  Closed:         2025-10-02 22:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      1h
+  Model:          Model_3
+
+  --- PRICES ---
+  Entry price:    $118,941.50
+  Stop loss:      $118,259.92  (0.57% from entry  |  dollar risk $6393982.04)
+  Target price:   $119,458.90  (0.44% from entry  |  RR 0.76)
+  TP1 price:      $119,229.94      (HIT)
+  Exit price:     $120,535.24  (1.34% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           9381.144983 BTC
+  Risk amount:    $58.42
+  Leverage:       10.0x
+  Entry score:    57.0
+
+  --- OUTCOME ---
+  MFE:            1763.23%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$55.87  (+0.96%)
+  Balance before: $5,841.87
+  Balance after:  $5,897.74
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #046  |  BTCUSDT  |  4h  |  BEARISH  |  Model_3                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-10-17 01:00:00 UTC
+  Closed:         2025-10-20 04:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      4h
+  Model:          Model_3
+
+  --- PRICES ---
+  Entry price:    $113,603.60
+  Stop loss:      $116,202.40  (2.29% from entry  |  dollar risk $6553456.53)
+  Target price:   $101,500.00  (10.65% from entry  |  RR 4.66)
+  TP1 price:      $107,523.40      (HIT)
+  Exit price:     $109,537.90  (3.58% from entry)
+  Exit reason:    trailing_stop
+
+  --- POSITION ---
+  Size:           2521.726016 BTC
+  Risk amount:    $58.98
+  Leverage:       10.0x
+  Entry score:    52.0
+
+  --- OUTCOME ---
+  MFE:            10032.30%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$107.77  (+1.83%)
+  Balance before: $5,897.74
+  Balance after:  $6,005.51
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #047  |  BTCUSDT  |  30m  |  BULLISH  |  Model_2                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-10-20 06:00:00 UTC
+  Closed:         2025-10-20 07:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      30m
+  Model:          Model_2
+
+  --- PRICES ---
+  Entry price:    $106,920.70
+  Stop loss:      $106,718.64  (0.19% from entry  |  dollar risk $5080220.86)
+  Target price:   $107,307.20  (0.36% from entry  |  RR 1.91)
+  TP1 price:      $107,140.68      (HIT)
+  Exit price:     $111,207.68  (4.01% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           25142.389108 BTC
+  Risk amount:    $60.06
+  Leverage:       10.0x
+  Entry score:    72.0
+
+  --- OUTCOME ---
+  MFE:            4400.04%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$480.37  (+8.00%)
+  Balance before: $6,005.51
+  Balance after:  $6,485.88
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #048  |  BTCUSDT  |  15m  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-10-23 01:00:00 UTC
+  Closed:         2025-10-23 02:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      15m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $107,679.90
+  Stop loss:      $106,640.26  (0.97% from entry  |  dollar risk $6643434.70)
+  Target price:   $108,800.00  (1.04% from entry  |  RR 1.08)
+  TP1 price:      $108,266.87      (HIT)
+  Exit price:     $107,958.17  (0.26% from entry)
+  Exit reason:    trailing_stop
+
+  --- POSITION ---
+  Size:           6390.142240 BTC
+  Risk amount:    $64.86
+  Leverage:       10.0x
+  Entry score:    60.0
+
+  --- OUTCOME ---
+  MFE:            757.56%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$13.20  (+0.20%)
+  Balance before: $6,485.88
+  Balance after:  $6,499.08
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #049  |  BTCUSDT  |  15m  |  BULLISH  |  Model_2                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-10-23 03:00:00 UTC
+  Closed:         2025-10-23 04:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      15m
+  Model:          Model_2
+
+  --- PRICES ---
+  Entry price:    $108,216.80
+  Stop loss:      $107,759.62  (0.42% from entry  |  dollar risk $6291936.36)
+  Target price:   $108,644.10  (0.39% from entry  |  RR 0.93)
+  TP1 price:      $108,457.50      (HIT)
+  Exit price:     $108,563.40  (0.32% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           13762.613003 BTC
+  Risk amount:    $64.99
+  Leverage:       10.0x
+  Entry score:    57.0
+
+  --- OUTCOME ---
+  MFE:            479.09%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$10.48  (+0.16%)
+  Balance before: $6,499.08
+  Balance after:  $6,509.56
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #050  |  BTCUSDT  |  30m  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-10-23 05:00:00 UTC
+  Closed:         2025-10-23 06:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      30m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $108,394.40
+  Stop loss:      $107,539.78  (0.79% from entry  |  dollar risk $6638534.37)
+  Target price:   $109,150.00  (0.70% from entry  |  RR 0.88)
+  TP1 price:      $108,799.30      (HIT)
+  Exit price:     $108,635.30  (0.22% from entry)
+  Exit reason:    trailing_stop
+
+  --- POSITION ---
+  Size:           7767.801864 BTC
+  Risk amount:    $65.10
+  Leverage:       10.0x
+  Entry score:    56.0
+
+  --- OUTCOME ---
+  MFE:            537.40%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$7.98  (+0.12%)
+  Balance before: $6,509.56
+  Balance after:  $6,517.54
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #051  |  BTCUSDT  |  15m  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-10-23 07:00:00 UTC
+  Closed:         2025-10-23 08:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      15m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $107,917.70
+  Stop loss:      $107,711.31  (0.19% from entry  |  dollar risk $5578638.73)
+  Target price:   $109,150.00  (1.14% from entry  |  RR 5.97)
+  TP1 price:      $108,560.83      (HIT)
+  Exit price:     $109,685.63  (1.64% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           27029.074153 BTC
+  Risk amount:    $65.18
+  Leverage:       10.0x
+  Entry score:    72.0
+
+  --- OUTCOME ---
+  MFE:            2303.14%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$248.98  (+3.82%)
+  Balance before: $6,517.54
+  Balance after:  $6,766.52
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #052  |  BTCUSDT  |  4h  |  BULLISH  |  Model_3                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-10-23 09:00:00 UTC
+  Closed:         2025-10-24 15:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      4h
+  Model:          Model_3
+
+  --- PRICES ---
+  Entry price:    $109,150.00
+  Stop loss:      $107,353.94  (1.65% from entry  |  dollar risk $7171437.87)
+  Target price:   $113,619.90  (4.10% from entry  |  RR 2.49)
+  TP1 price:      $111,412.24      (HIT)
+  Exit price:     $109,980.34  (0.76% from entry)
+  Exit reason:    trailing_stop
+
+  --- POSITION ---
+  Size:           3992.867657 BTC
+  Risk amount:    $67.67
+  Leverage:       10.0x
+  Entry score:    58.0
+
+  --- OUTCOME ---
+  MFE:            2983.43%  (max favorable excursion)
+  MAE:            -504.57%  (max adverse excursion)
+  PnL:            +$48.75  (+0.72%)
+  Balance before: $6,766.51
+  Balance after:  $6,815.26
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #053  |  BTCUSDT  |  15m  |  BEARISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-10-24 16:00:00 UTC
+  Closed:         2025-10-24 20:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      15m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $111,250.30
+  Stop loss:      $111,548.84  (0.27% from entry  |  dollar risk $6387971.05)
+  Target price:   $109,350.00  (1.71% from entry  |  RR 6.37)
+  TP1 price:      $110,272.34      (HIT)
+  Exit price:     $110,731.14  (0.47% from entry)
+  Exit reason:    trailing_stop
+
+  --- POSITION ---
+  Size:           21397.514048 BTC
+  Risk amount:    $68.15
+  Leverage:       10.0x
+  Entry score:    54.0
+
+  --- OUTCOME ---
+  MFE:            1385.87%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$102.34  (+1.50%)
+  Balance before: $6,815.26
+  Balance after:  $6,917.60
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #054  |  BTCUSDT  |  15m  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-10-24 21:00:00 UTC
+  Closed:         2025-10-25 17:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      15m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $110,621.00
+  Stop loss:      $109,836.88  (0.71% from entry  |  dollar risk $7151681.53)
+  Target price:   $112,188.00  (1.42% from entry  |  RR 2.00)
+  TP1 price:      $111,432.16      (HIT)
+  Exit price:     $111,194.16  (0.52% from entry)
+  Exit reason:    trailing_stop
+
+  --- POSITION ---
+  Size:           9120.646752 BTC
+  Risk amount:    $69.18
+  Leverage:       10.0x
+  Entry score:    56.0
+
+  --- OUTCOME ---
+  MFE:            1273.69%  (max favorable excursion)
+  MAE:            -45.01%  (max adverse excursion)
+  PnL:            +$39.25  (+0.57%)
+  Balance before: $6,917.60
+  Balance after:  $6,956.85
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #055  |  BTCUSDT  |  15m  |  BULLISH  |  Model_2                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-10-25 23:00:00 UTC
+  Closed:         2025-10-26 04:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      15m
+  Model:          Model_2
+
+  --- PRICES ---
+  Entry price:    $111,121.00
+  Stop loss:      $110,444.78  (0.61% from entry  |  dollar risk $7147152.40)
+  Target price:   $112,188.00  (0.96% from entry  |  RR 1.58)
+  TP1 price:      $111,682.28      (HIT)
+  Exit price:     $111,412.08  (0.26% from entry)
+  Exit reason:    trailing_stop
+
+  --- POSITION ---
+  Size:           10569.270954 BTC
+  Risk amount:    $69.57
+  Leverage:       10.0x
+  Entry score:    59.0
+
+  --- OUTCOME ---
+  MFE:            741.24%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$19.90  (+0.29%)
+  Balance before: $6,956.85
+  Balance after:  $6,976.75
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #056  |  BTCUSDT  |  15m  |  BULLISH  |  Model_2                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-10-26 06:00:00 UTC
+  Closed:         2025-10-26 10:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      15m
+  Model:          Model_2
+
+  --- PRICES ---
+  Entry price:    $111,522.60
+  Stop loss:      $111,338.22  (0.17% from entry  |  dollar risk $5976958.77)
+  Target price:   $111,950.00  (0.38% from entry  |  RR 2.32)
+  TP1 price:      $111,764.18      (HIT)
+  Exit price:     $112,613.48  (0.98% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           32416.524413 BTC
+  Risk amount:    $69.77
+  Leverage:       10.0x
+  Entry score:    56.0
+
+  --- OUTCOME ---
+  MFE:            1220.94%  (max favorable excursion)
+  MAE:            -46.76%  (max adverse excursion)
+  PnL:            +$130.28  (+1.87%)
+  Balance before: $6,976.75
+  Balance after:  $7,107.03
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #057  |  BTCUSDT  |  30m  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-10-26 12:00:00 UTC
+  Closed:         2025-10-26 13:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      30m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $111,121.00
+  Stop loss:      $109,997.64  (1.01% from entry  |  dollar risk $7528975.81)
+  Target price:   $112,188.00  (0.96% from entry  |  RR 0.95)
+  TP1 price:      $111,682.28      (HIT)
+  Exit price:     $113,332.28  (1.99% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           6702.193248 BTC
+  Risk amount:    $71.07
+  Leverage:       10.0x
+  Entry score:    69.0
+
+  --- OUTCOME ---
+  MFE:            2661.44%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$70.47  (+0.99%)
+  Balance before: $7,107.03
+  Balance after:  $7,177.50
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #058  |  BTCUSDT  |  1h  |  BULLISH  |  Model_2                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-10-26 23:00:00 UTC
+  Closed:         2025-10-27 00:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      1h
+  Model:          Model_2
+
+  --- PRICES ---
+  Entry price:    $109,706.40
+  Stop loss:      $106,534.84  (2.89% from entry  |  dollar risk $7744178.08)
+  Target price:   $114,013.60  (3.93% from entry  |  RR 1.36)
+  TP1 price:      $111,887.43      (HIT)
+  Exit price:     $114,013.60  (3.93% from entry)
+  Exit reason:    target_hit
+
+  --- POSITION ---
+  Size:           2441.756764 BTC
+  Risk amount:    $71.78
+  Leverage:       10.0x
+  Entry score:    62.0
+
+  --- OUTCOME ---
+  MFE:            5209.75%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$67.38  (+0.94%)
+  Balance before: $7,177.51
+  Balance after:  $7,244.89
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #059  |  BTCUSDT  |  15m  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-10-27 07:00:00 UTC
+  Closed:         2025-10-27 08:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      15m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $111,479.00
+  Stop loss:      $111,213.92  (0.24% from entry  |  dollar risk $6676639.73)
+  Target price:   $111,950.00  (0.42% from entry  |  RR 1.78)
+  TP1 price:      $111,742.37      (HIT)
+  Exit price:     $116,192.37  (4.23% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           25187.263210 BTC
+  Risk amount:    $72.45
+  Leverage:       10.0x
+  Entry score:    63.0
+
+  --- OUTCOME ---
+  MFE:            4865.26%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$512.56  (+7.07%)
+  Balance before: $7,244.89
+  Balance after:  $7,757.45
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #060  |  BTCUSDT  |  15m  |  BULLISH  |  Model_1                         |  LOSS
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-10-28 18:00:00 UTC
+  Closed:         2025-10-28 20:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      15m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $115,040.10
+  Stop loss:      $114,568.52  (0.41% from entry  |  dollar risk $7957980.24)
+  Target price:   $116,400.00  (1.18% from entry  |  RR 2.88)
+  TP1 price:      $115,748.81      (MISS)
+  Exit price:     $114,568.52  (0.41% from entry)
+  Exit reason:    stop_hit
+
+  --- POSITION ---
+  Size:           16875.143638 BTC
+  Risk amount:    $77.57
+  Leverage:       10.0x
+  Entry score:    50.0
+
+  --- OUTCOME ---
+  MFE:            281.58%  (max favorable excursion)
+  MAE:            -1530.62%  (max adverse excursion)
+  PnL:            $-106.22  (-1.37%)
+  Balance before: $7,757.45
+  Balance after:  $7,651.23
+  Result:         LOSS
+
+  ------------------------------------------------------------------------------------------
+  TRADE #061  |  BTCUSDT  |  15m  |  BEARISH  |  Model_2                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-10-28 21:00:00 UTC
+  Closed:         2025-10-28 22:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      15m
+  Model:          Model_2
+
+  --- PRICES ---
+  Entry price:    $114,644.60
+  Stop loss:      $115,631.10  (0.86% from entry  |  dollar risk $8285868.38)
+  Target price:   $113,440.30  (1.05% from entry  |  RR 1.22)
+  TP1 price:      $114,013.79      (HIT)
+  Exit price:     $112,773.49  (1.63% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           8399.224312 BTC
+  Risk amount:    $76.51
+  Leverage:       10.0x
+  Entry score:    60.0
+
+  --- OUTCOME ---
+  MFE:            2387.28%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$75.35  (+0.98%)
+  Balance before: $7,651.22
+  Balance after:  $7,726.57
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #062  |  BTCUSDT  |  30m  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-10-31 04:00:00 UTC
+  Closed:         2025-10-31 17:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      30m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $107,948.70
+  Stop loss:      $107,250.09  (0.65% from entry  |  dollar risk $7746420.49)
+  Target price:   $111,600.00  (3.38% from entry  |  RR 5.23)
+  TP1 price:      $109,801.34      (HIT)
+  Exit price:     $109,374.04  (1.32% from entry)
+  Exit reason:    trailing_stop
+
+  --- POSITION ---
+  Size:           11088.333241 BTC
+  Risk amount:    $77.27
+  Leverage:       10.0x
+  Entry score:    57.0
+
+  --- OUTCOME ---
+  MFE:            3170.03%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$146.62  (+1.90%)
+  Balance before: $7,726.57
+  Balance after:  $7,873.19
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #063  |  BTCUSDT  |  4h  |  BEARISH  |  Model_2                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-11-03 08:00:00 UTC
+  Closed:         2025-11-03 16:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      4h
+  Model:          Model_2
+
+  --- PRICES ---
+  Entry price:    $111,250.20
+  Stop loss:      $112,051.37  (0.72% from entry  |  dollar risk $8186191.80)
+  Target price:   $106,650.90  (4.13% from entry  |  RR 5.74)
+  TP1 price:      $108,922.74      (HIT)
+  Exit price:     $107,771.84  (3.13% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           10217.821736 BTC
+  Risk amount:    $78.73
+  Leverage:       10.0x
+  Entry score:    75.0
+
+  --- OUTCOME ---
+  MFE:            5694.57%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$246.90  (+3.14%)
+  Balance before: $7,873.19
+  Balance after:  $8,120.09
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #064  |  BTCUSDT  |  4h  |  BEARISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-11-03 17:00:00 UTC
+  Closed:         2025-11-04 15:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      4h
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $113,440.30
+  Stop loss:      $114,249.81  (0.71% from entry  |  dollar risk $8603992.48)
+  Target price:   $103,514.50  (8.75% from entry  |  RR 12.26)
+  TP1 price:      $108,449.04      (HIT)
+  Exit price:     $103,514.50  (8.75% from entry)
+  Exit reason:    target_hit
+
+  --- POSITION ---
+  Size:           10628.668873 BTC
+  Risk amount:    $81.20
+  Leverage:       10.0x
+  Entry score:    74.0
+
+  --- OUTCOME ---
+  MFE:            10457.48%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$678.67  (+8.36%)
+  Balance before: $8,120.09
+  Balance after:  $8,798.76
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #065  |  BTCUSDT  |  15m  |  BEARISH  |  Model_2                         |  LOSS
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-11-08 04:00:00 UTC
+  Closed:         2025-11-09 15:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      15m
+  Model:          Model_2
+
+  --- PRICES ---
+  Entry price:    $102,756.50
+  Stop loss:      $103,412.16  (0.64% from entry  |  dollar risk $8380110.87)
+  Target price:   $99,803.90  (2.87% from entry  |  RR 4.50)
+  TP1 price:      $101,254.51      (MISS)
+  Exit price:     $103,412.16  (0.64% from entry)
+  Exit reason:    stop_hit
+
+  --- POSITION ---
+  Size:           12781.105676 BTC
+  Risk amount:    $87.99
+  Leverage:       10.0x
+  Entry score:    60.0
+
+  --- OUTCOME ---
+  MFE:            1330.12%  (max favorable excursion)
+  MAE:            -1338.68%  (max adverse excursion)
+  PnL:            $-109.76  (-1.25%)
+  Balance before: $8,798.76
+  Balance after:  $8,689.00
+  Result:         LOSS
+
+  ------------------------------------------------------------------------------------------
+  TRADE #066  |  BTCUSDT  |  4h  |  BULLISH  |  Model_3                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-11-09 16:00:00 UTC
+  Closed:         2025-11-11 18:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      4h
+  Model:          Model_3
+
+  --- PRICES ---
+  Entry price:    $102,496.40
+  Stop loss:      $99,028.35  (3.38% from entry  |  dollar risk $8780616.99)
+  Target price:   $111,245.50  (8.54% from entry  |  RR 2.52)
+  TP1 price:      $106,896.57      (HIT)
+  Exit price:     $103,151.07  (0.64% from entry)
+  Exit reason:    trailing_stop
+
+  --- POSITION ---
+  Size:           2531.858517 BTC
+  Risk amount:    $86.89
+  Leverage:       10.0x
+  Entry score:    81.0
+
+  --- OUTCOME ---
+  MFE:            4952.35%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$57.46  (+0.66%)
+  Balance before: $8,689.01
+  Balance after:  $8,746.47
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #067  |  BTCUSDT  |  4h  |  BEARISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-11-13 20:00:00 UTC
+  Closed:         2025-11-13 21:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      4h
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $113,440.30
+  Stop loss:      $114,249.81  (0.71% from entry  |  dollar risk $9267692.51)
+  Target price:   $103,514.50  (8.75% from entry  |  RR 12.26)
+  TP1 price:      $108,449.04      (HIT)
+  Exit price:     $103,514.50  (8.75% from entry)
+  Exit reason:    target_hit
+
+  --- POSITION ---
+  Size:           11448.549622 BTC
+  Risk amount:    $87.46
+  Leverage:       10.0x
+  Entry score:    66.0
+
+  --- OUTCOME ---
+  MFE:            15382.68%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$731.02  (+8.36%)
+  Balance before: $8,746.47
+  Balance after:  $9,477.49
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #068  |  BTCUSDT  |  4h  |  BEARISH  |  Model_2                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-11-13 22:00:00 UTC
+  Closed:         2025-11-13 23:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      4h
+  Model:          Model_2
+
+  --- PRICES ---
+  Entry price:    $111,250.20
+  Stop loss:      $112,051.37  (0.72% from entry  |  dollar risk $9854271.35)
+  Target price:   $106,650.90  (4.13% from entry  |  RR 5.74)
+  TP1 price:      $108,922.74      (HIT)
+  Exit price:     $106,650.90  (4.13% from entry)
+  Exit reason:    target_hit
+
+  --- POSITION ---
+  Size:           12299.881358 BTC
+  Risk amount:    $94.77
+  Leverage:       10.0x
+  Entry score:    63.0
+
+  --- OUTCOME ---
+  MFE:            12495.87%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$359.24  (+3.79%)
+  Balance before: $9,477.49
+  Balance after:  $9,836.73
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #069  |  BTCUSDT  |  15m  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-11-15 02:00:00 UTC
+  Closed:         2025-11-15 03:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      15m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $95,412.00
+  Stop loss:      $93,942.97  (1.54% from entry  |  dollar risk $9094767.07)
+  Target price:   $97,407.50  (2.09% from entry  |  RR 1.36)
+  TP1 price:      $96,433.60       (HIT)
+  Exit price:     $95,515.80  (0.11% from entry)
+  Exit reason:    trailing_stop
+
+  --- POSITION ---
+  Size:           6191.001593 BTC
+  Risk amount:    $98.37
+  Leverage:       10.0x
+  Entry score:    86.0
+
+  --- OUTCOME ---
+  MFE:            1029.99%  (max favorable excursion)
+  MAE:            -54.61%  (max adverse excursion)
+  PnL:            +$24.42  (+0.25%)
+  Balance before: $9,836.73
+  Balance after:  $9,861.15
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #070  |  BTCUSDT  |  30m  |  BULLISH  |  Model_2                         |  LOSS
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-11-15 14:00:00 UTC
+  Closed:         2025-11-15 17:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      30m
+  Model:          Model_2
+
+  --- PRICES ---
+  Entry price:    $96,064.90
+  Stop loss:      $95,878.57  (0.19% from entry  |  dollar risk $7535398.36)
+  Target price:   $97,407.50  (1.40% from entry  |  RR 7.21)
+  TP1 price:      $96,760.22       (MISS)
+  Exit price:     $95,878.57  (0.19% from entry)
+  Exit reason:    stop_hit
+
+  --- POSITION ---
+  Size:           40440.275846 BTC
+  Risk amount:    $98.61
+  Leverage:       10.0x
+  Entry score:    98.0
+
+  --- OUTCOME ---
+  MFE:            362.77%  (max favorable excursion)
+  MAE:            -393.93%  (max adverse excursion)
+  PnL:            $-167.31  (-1.70%)
+  Balance before: $9,861.15
+  Balance after:  $9,693.84
+  Result:         LOSS
+
+  ------------------------------------------------------------------------------------------
+  TRADE #071  |  BTCUSDT  |  30m  |  BULLISH  |  Model_1                         |  LOSS
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-11-15 18:00:00 UTC
+  Closed:         2025-11-15 21:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      30m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $96,064.90
+  Stop loss:      $95,805.65  (0.27% from entry  |  dollar risk $7860637.44)
+  Target price:   $96,818.10  (0.78% from entry  |  RR 2.91)
+  TP1 price:      $96,465.52       (MISS)
+  Exit price:     $95,805.65  (0.27% from entry)
+  Exit reason:    stop_hit
+
+  --- POSITION ---
+  Size:           30321.152257 BTC
+  Risk amount:    $96.94
+  Leverage:       10.0x
+  Entry score:    55.0
+
+  --- OUTCOME ---
+  MFE:            235.27%  (max favorable excursion)
+  MAE:            -977.83%  (max adverse excursion)
+  PnL:            $-148.44  (-1.53%)
+  Balance before: $9,693.85
+  Balance after:  $9,545.41
+  Result:         LOSS
+
+  ------------------------------------------------------------------------------------------
+  TRADE #072  |  BTCUSDT  |  1h  |  BEARISH  |  Model_3                         |  LOSS
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-11-15 23:00:00 UTC
+  Closed:         2025-11-16 10:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      1h
+  Model:          Model_3
+
+  --- PRICES ---
+  Entry price:    $95,719.00
+  Stop loss:      $96,525.21  (0.84% from entry  |  dollar risk $8620459.76)
+  Target price:   $94,000.10  (1.80% from entry  |  RR 2.13)
+  TP1 price:      $94,835.62       (MISS)
+  Exit price:     $96,525.21  (0.84% from entry)
+  Exit reason:    stop_hit
+
+  --- POSITION ---
+  Size:           10692.547069 BTC
+  Risk amount:    $95.45
+  Leverage:       10.0x
+  Entry score:    58.0
+
+  --- OUTCOME ---
+  MFE:            816.74%  (max favorable excursion)
+  MAE:            -955.46%  (max adverse excursion)
+  PnL:            $-113.68  (-1.19%)
+  Balance before: $9,545.41
+  Balance after:  $9,431.73
+  Result:         LOSS
+
+  ------------------------------------------------------------------------------------------
+  TRADE #073  |  BTCUSDT  |  30m  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-11-16 11:00:00 UTC
+  Closed:         2025-11-16 12:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      30m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $95,923.40
+  Stop loss:      $95,588.55  (0.35% from entry  |  dollar risk $7917681.32)
+  Target price:   $96,475.70  (0.58% from entry  |  RR 1.65)
+  TP1 price:      $96,223.53       (HIT)
+  Exit price:     $96,196.93  (0.29% from entry)
+  Exit reason:    trailing_stop
+
+  --- POSITION ---
+  Size:           23645.457136 BTC
+  Risk amount:    $94.32
+  Leverage:       10.0x
+  Entry score:    57.0
+
+  --- OUTCOME ---
+  MFE:            477.74%  (max favorable excursion)
+  MAE:            -462.06%  (max adverse excursion)
+  PnL:            +$24.55  (+0.26%)
+  Balance before: $9,431.73
+  Balance after:  $9,456.28
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #074  |  BTCUSDT  |  15m  |  BEARISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-11-16 14:00:00 UTC
+  Closed:         2025-11-16 15:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      15m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $95,861.00
+  Stop loss:      $96,201.11  (0.35% from entry  |  dollar risk $7941218.38)
+  Target price:   $95,135.10  (0.76% from entry  |  RR 2.13)
+  TP1 price:      $95,474.08       (HIT)
+  Exit price:     $95,658.98  (0.21% from entry)
+  Exit reason:    trailing_stop
+
+  --- POSITION ---
+  Size:           23349.107884 BTC
+  Risk amount:    $94.56
+  Leverage:       10.0x
+  Entry score:    54.0
+
+  --- OUTCOME ---
+  MFE:            493.07%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$26.23  (+0.28%)
+  Balance before: $9,456.28
+  Balance after:  $9,482.51
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #075  |  BTCUSDT  |  1h  |  BEARISH  |  Model_3                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-11-16 16:00:00 UTC
+  Closed:         2025-11-16 17:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      1h
+  Model:          Model_3
+
+  --- PRICES ---
+  Entry price:    $95,736.90
+  Stop loss:      $96,528.23  (0.83% from entry  |  dollar risk $8556153.44)
+  Target price:   $94,000.10  (1.81% from entry  |  RR 2.19)
+  TP1 price:      $94,844.57       (HIT)
+  Exit price:     $94,871.17  (0.90% from entry)
+  Exit reason:    trailing_stop
+
+  --- POSITION ---
+  Size:           10812.370868 BTC
+  Risk amount:    $94.83
+  Leverage:       10.0x
+  Entry score:    75.0
+
+  --- OUTCOME ---
+  MFE:            1662.33%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$78.26  (+0.83%)
+  Balance before: $9,482.52
+  Balance after:  $9,560.78
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #076  |  BTCUSDT  |  4h  |  BEARISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-11-16 20:00:00 UTC
+  Closed:         2025-11-16 21:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      4h
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $113,440.30
+  Stop loss:      $114,170.56  (0.64% from entry  |  dollar risk $10059053.38)
+  Target price:   $107,476.80  (5.26% from entry  |  RR 8.17)
+  TP1 price:      $110,430.19      (HIT)
+  Exit price:     $107,476.80  (5.26% from entry)
+  Exit reason:    target_hit
+
+  --- POSITION ---
+  Size:           13774.581428 BTC
+  Risk amount:    $95.61
+  Leverage:       10.0x
+  Entry score:    63.0
+
+  --- OUTCOME ---
+  MFE:            19410.58%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$518.40  (+5.42%)
+  Balance before: $9,560.78
+  Balance after:  $10,079.18
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #077  |  BTCUSDT  |  4h  |  BEARISH  |  Model_2                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-11-16 22:00:00 UTC
+  Closed:         2025-11-16 23:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      4h
+  Model:          Model_2
+
+  --- PRICES ---
+  Entry price:    $111,250.20
+  Stop loss:      $112,051.37  (0.72% from entry  |  dollar risk $10479880.62)
+  Target price:   $106,650.90  (4.13% from entry  |  RR 5.74)
+  TP1 price:      $108,922.74      (HIT)
+  Exit price:     $106,650.90  (4.13% from entry)
+  Exit reason:    target_hit
+
+  --- POSITION ---
+  Size:           13080.752871 BTC
+  Risk amount:    $100.79
+  Leverage:       10.0x
+  Entry score:    63.0
+
+  --- OUTCOME ---
+  MFE:            18173.87%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$382.05  (+3.79%)
+  Balance before: $10,079.18
+  Balance after:  $10,461.23
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #078  |  BTCUSDT  |  15m  |  BEARISH  |  Model_3                         |  LOSS
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-12-06 09:00:00 UTC
+  Closed:         2025-12-06 10:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      15m
+  Model:          Model_3
+
+  --- PRICES ---
+  Entry price:    $89,527.00
+  Stop loss:      $89,743.02  (0.24% from entry  |  dollar risk $7754134.30)
+  Target price:   $89,196.30  (0.37% from entry  |  RR 1.53)
+  TP1 price:      $89,339.27       (HIT)
+  Exit price:     $89,400.97  (0.14% from entry)
+  Exit reason:    trailing_stop
+
+  --- POSITION ---
+  Size:           35895.446276 BTC
+  Risk amount:    $104.61
+  Leverage:       10.0x
+  Entry score:    60.0
+
+  --- OUTCOME ---
+  MFE:            224.24%  (max favorable excursion)
+  MAE:            -184.36%  (max adverse excursion)
+  PnL:            $-7.06  (-0.07%)
+  Balance before: $10,461.22
+  Balance after:  $10,454.16
+  Result:         LOSS
+
+  ------------------------------------------------------------------------------------------
+  TRADE #079  |  BTCUSDT  |  1h  |  BEARISH  |  Model_3                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-12-06 23:00:00 UTC
+  Closed:         2025-12-07 14:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      1h
+  Model:          Model_3
+
+  --- PRICES ---
+  Entry price:    $89,467.90
+  Stop loss:      $90,314.99  (0.95% from entry  |  dollar risk $8879525.86)
+  Target price:   $88,040.40  (1.60% from entry  |  RR 1.69)
+  TP1 price:      $88,731.78       (HIT)
+  Exit price:     $89,341.38  (0.14% from entry)
+  Exit reason:    trailing_stop
+
+  --- POSITION ---
+  Size:           10482.363024 BTC
+  Risk amount:    $104.54
+  Leverage:       10.0x
+  Entry score:    57.0
+
+  --- OUTCOME ---
+  MFE:            773.17%  (max favorable excursion)
+  MAE:            -366.13%  (max adverse excursion)
+  PnL:            +$30.12  (+0.29%)
+  Balance before: $10,454.16
+  Balance after:  $10,484.28
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #080  |  BTCUSDT  |  1h  |  BEARISH  |  Model_3                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-12-07 15:00:00 UTC
+  Closed:         2025-12-07 16:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      1h
+  Model:          Model_3
+
+  --- PRICES ---
+  Entry price:    $89,203.10
+  Stop loss:      $89,834.98  (0.71% from entry  |  dollar risk $8731321.79)
+  Target price:   $88,040.40  (1.30% from entry  |  RR 1.84)
+  TP1 price:      $88,599.45       (HIT)
+  Exit price:     $88,737.05  (0.52% from entry)
+  Exit reason:    trailing_stop
+
+  --- POSITION ---
+  Size:           13818.049986 BTC
+  Risk amount:    $104.84
+  Leverage:       10.0x
+  Entry score:    72.0
+
+  --- OUTCOME ---
+  MFE:            980.50%  (max favorable excursion)
+  MAE:            -556.00%  (max adverse excursion)
+  PnL:            +$55.96  (+0.53%)
+  Balance before: $10,484.28
+  Balance after:  $10,540.24
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #081  |  BTCUSDT  |  30m  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-12-07 17:00:00 UTC
+  Closed:         2025-12-07 18:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      30m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $89,392.10
+  Stop loss:      $89,050.78  (0.38% from entry  |  dollar risk $8335349.02)
+  Target price:   $89,789.30  (0.44% from entry  |  RR 1.16)
+  TP1 price:      $89,613.05       (HIT)
+  Exit price:     $91,118.45  (1.93% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           24420.635583 BTC
+  Risk amount:    $105.40
+  Leverage:       10.0x
+  Entry score:    90.0
+
+  --- OUTCOME ---
+  MFE:            1857.90%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$218.12  (+2.07%)
+  Balance before: $10,540.25
+  Balance after:  $10,758.37
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #082  |  BTCUSDT  |  30m  |  BULLISH  |  Model_2                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2025-12-07 19:00:00 UTC
+  Closed:         2025-12-07 20:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      30m
+  Model:          Model_2
+
+  --- PRICES ---
+  Entry price:    $89,588.60
+  Stop loss:      $89,040.97  (0.61% from entry  |  dollar risk $8913962.58)
+  Target price:   $90,279.80  (0.77% from entry  |  RR 1.26)
+  TP1 price:      $89,956.60       (HIT)
+  Exit price:     $90,279.80  (0.77% from entry)
+  Exit reason:    target_hit
+
+  --- POSITION ---
+  Size:           16277.226358 BTC
+  Risk amount:    $107.58
+  Leverage:       10.0x
+  Entry score:    60.0
+
+  --- OUTCOME ---
+  MFE:            1915.91%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$64.41  (+0.60%)
+  Balance before: $10,758.37
+  Balance after:  $10,822.78
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #083  |  BTCUSDT  |  15m  |  BULLISH  |  Model_2                         |  LOSS
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-01-10 02:00:00 UTC
+  Closed:         2026-01-10 05:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      15m
+  Model:          Model_2
+
+  --- PRICES ---
+  Entry price:    $90,655.30
+  Stop loss:      $90,482.49  (0.19% from entry  |  dollar risk $7776553.53)
+  Target price:   $92,020.20  (1.51% from entry  |  RR 7.90)
+  TP1 price:      $91,360.41       (MISS)
+  Exit price:     $90,482.49  (0.19% from entry)
+  Exit reason:    stop_hit
+
+  --- POSITION ---
+  Size:           45000.599098 BTC
+  Risk amount:    $108.23
+  Leverage:       10.0x
+  Entry score:    60.0
+
+  --- OUTCOME ---
+  MFE:            75.37%  (max favorable excursion)
+  MAE:            -291.63%  (max adverse excursion)
+  PnL:            $-184.67  (-1.71%)
+  Balance before: $10,822.77
+  Balance after:  $10,638.10
+  Result:         LOSS
+
+  ------------------------------------------------------------------------------------------
+  TRADE #084  |  BTCUSDT  |  1h  |  BEARISH  |  Model_1                         |  LOSS
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-01-10 06:00:00 UTC
+  Closed:         2026-01-12 02:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      1h
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $90,518.40
+  Stop loss:      $91,530.90  (1.12% from entry  |  dollar risk $9212807.02)
+  Target price:   $89,700.00  (0.90% from entry  |  RR 0.81)
+  TP1 price:      $90,086.57       (MISS)
+  Exit price:     $91,530.90  (1.12% from entry)
+  Exit reason:    stop_hit
+
+  --- POSITION ---
+  Size:           9099.068658 BTC
+  Risk amount:    $106.38
+  Leverage:       10.0x
+  Entry score:    60.0
+
+  --- OUTCOME ---
+  MFE:            242.84%  (max favorable excursion)
+  MAE:            -1326.86%  (max adverse excursion)
+  PnL:            $-121.90  (-1.15%)
+  Balance before: $10,638.10
+  Balance after:  $10,516.20
+  Result:         LOSS
+
+  ------------------------------------------------------------------------------------------
+  TRADE #085  |  BTCUSDT  |  30m  |  BULLISH  |  Model_1_from_M2_failure         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-01-12 03:00:00 UTC
+  Closed:         2026-01-12 04:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      30m
+  Model:          Model_1_from_M2_failure
+
+  --- PRICES ---
+  Entry price:    $90,619.70
+  Stop loss:      $90,387.91  (0.26% from entry  |  dollar risk $7975458.13)
+  Target price:   $91,628.60  (1.11% from entry  |  RR 4.35)
+  TP1 price:      $91,146.80       (HIT)
+  Exit price:     $92,038.80  (1.57% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           34408.713779 BTC
+  Risk amount:    $105.16
+  Leverage:       10.0x
+  Entry score:    90.0
+
+  --- OUTCOME ---
+  MFE:            1855.59%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$302.09  (+2.87%)
+  Balance before: $10,516.20
+  Balance after:  $10,818.29
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #086  |  BTCUSDT  |  1h  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-01-12 05:00:00 UTC
+  Closed:         2026-01-12 06:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      1h
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $90,654.70
+  Stop loss:      $90,095.78  (0.62% from entry  |  dollar risk $9076129.60)
+  Target price:   $92,020.20  (1.51% from entry  |  RR 2.44)
+  TP1 price:      $91,360.11       (HIT)
+  Exit price:     $92,020.20  (1.51% from entry)
+  Exit reason:    target_hit
+
+  --- POSITION ---
+  Size:           16238.749870 BTC
+  Risk amount:    $108.18
+  Leverage:       10.0x
+  Entry score:    60.0
+
+  --- OUTCOME ---
+  MFE:            1564.87%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$153.67  (+1.42%)
+  Balance before: $10,818.28
+  Balance after:  $10,971.95
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #087  |  BTCUSDT  |  1h  |  BULLISH  |  Model_2                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-01-12 07:00:00 UTC
+  Closed:         2026-01-12 09:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      1h
+  Model:          Model_2
+
+  --- PRICES ---
+  Entry price:    $90,654.70
+  Stop loss:      $90,380.08  (0.30% from entry  |  dollar risk $8541704.19)
+  Target price:   $92,020.20  (1.51% from entry  |  RR 4.97)
+  TP1 price:      $91,360.11       (HIT)
+  Exit price:     $91,302.01  (0.71% from entry)
+  Exit reason:    trailing_stop
+
+  --- POSITION ---
+  Size:           31103.948710 BTC
+  Risk amount:    $109.72
+  Leverage:       10.0x
+  Entry score:    60.0
+
+  --- OUTCOME ---
+  MFE:            1262.07%  (max favorable excursion)
+  MAE:            -300.03%  (max adverse excursion)
+  PnL:            +$171.25  (+1.56%)
+  Balance before: $10,971.95
+  Balance after:  $11,143.20
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #088  |  BTCUSDT  |  30m  |  BEARISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-01-12 10:00:00 UTC
+  Closed:         2026-01-12 11:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      30m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $91,099.40
+  Stop loss:      $91,299.71  (0.22% from entry  |  dollar risk $8266521.91)
+  Target price:   $90,396.30  (0.77% from entry  |  RR 3.51)
+  TP1 price:      $90,725.08       (HIT)
+  Exit price:     $90,703.78  (0.43% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           41269.055224 BTC
+  Risk amount:    $111.43
+  Leverage:       10.0x
+  Entry score:    52.0
+
+  --- OUTCOME ---
+  MFE:            678.85%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$94.04  (+0.84%)
+  Balance before: $11,143.20
+  Balance after:  $11,237.24
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #089  |  BTCUSDT  |  30m  |  BULLISH  |  Model_2                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-01-12 15:00:00 UTC
+  Closed:         2026-01-12 16:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      30m
+  Model:          Model_2
+
+  --- PRICES ---
+  Entry price:    $90,619.70
+  Stop loss:      $90,497.31  (0.14% from entry  |  dollar risk $7435477.95)
+  Target price:   $91,628.60  (1.11% from entry  |  RR 8.24)
+  TP1 price:      $91,146.80       (HIT)
+  Exit price:     $91,197.80  (0.64% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           60754.317907 BTC
+  Risk amount:    $112.37
+  Leverage:       10.0x
+  Entry score:    96.0
+
+  --- OUTCOME ---
+  MFE:            1014.59%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$251.75  (+2.24%)
+  Balance before: $11,237.25
+  Balance after:  $11,489.00
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #090  |  BTCUSDT  |  1h  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-01-12 17:00:00 UTC
+  Closed:         2026-01-12 18:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      1h
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $90,870.40
+  Stop loss:      $90,215.33  (0.72% from entry  |  dollar risk $9767829.05)
+  Target price:   $91,284.60  (0.46% from entry  |  RR 0.63)
+  TP1 price:      $91,100.22       (HIT)
+  Exit price:     $92,114.72  (1.37% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           14911.077030 BTC
+  Risk amount:    $114.89
+  Leverage:       10.0x
+  Entry score:    90.0
+
+  --- OUTCOME ---
+  MFE:            1383.26%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$91.76  (+0.80%)
+  Balance before: $11,489.00
+  Balance after:  $11,580.76
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #091  |  BTCUSDT  |  4h  |  BULLISH  |  Model_2                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-01-12 20:00:00 UTC
+  Closed:         2026-01-12 21:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      4h
+  Model:          Model_2
+
+  --- PRICES ---
+  Entry price:    $91,284.60
+  Stop loss:      $90,373.40  (1.00% from entry  |  dollar risk $10072218.08)
+  Target price:   $92,020.20  (0.81% from entry  |  RR 0.81)
+  TP1 price:      $91,675.22       (HIT)
+  Exit price:     $91,703.42  (0.46% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           11053.746554 BTC
+  Risk amount:    $115.81
+  Leverage:       10.0x
+  Entry score:    57.0
+
+  --- OUTCOME ---
+  MFE:            718.16%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$27.42  (+0.24%)
+  Balance before: $11,580.76
+  Balance after:  $11,608.18
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #092  |  BTCUSDT  |  30m  |  BULLISH  |  Model_2                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-01-13 04:00:00 UTC
+  Closed:         2026-01-13 06:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      30m
+  Model:          Model_2
+
+  --- PRICES ---
+  Entry price:    $91,382.10
+  Stop loss:      $91,033.47  (0.38% from entry  |  dollar risk $9383321.60)
+  Target price:   $92,048.40  (0.73% from entry  |  RR 1.91)
+  TP1 price:      $91,738.10       (HIT)
+  Exit price:     $91,946.60  (0.62% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           26915.151477 BTC
+  Risk amount:    $116.08
+  Leverage:       10.0x
+  Entry score:    56.0
+
+  --- OUTCOME ---
+  MFE:            829.11%  (max favorable excursion)
+  MAE:            -77.89%  (max adverse excursion)
+  PnL:            +$82.97  (+0.71%)
+  Balance before: $11,608.18
+  Balance after:  $11,691.15
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #093  |  BTCUSDT  |  30m  |  BULLISH  |  Model_3                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-01-13 07:00:00 UTC
+  Closed:         2026-01-13 08:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      30m
+  Model:          Model_3
+
+  --- PRICES ---
+  Entry price:    $91,382.10
+  Stop loss:      $91,034.42  (0.38% from entry  |  dollar risk $9447420.51)
+  Target price:   $92,048.40  (0.73% from entry  |  RR 1.92)
+  TP1 price:      $91,738.10       (HIT)
+  Exit price:     $91,896.70  (0.56% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           27172.590217 BTC
+  Risk amount:    $116.91
+  Leverage:       10.0x
+  Entry score:    60.0
+
+  --- OUTCOME ---
+  MFE:            779.21%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$76.36  (+0.65%)
+  Balance before: $11,691.15
+  Balance after:  $11,767.51
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #094  |  BTCUSDT  |  15m  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-01-13 16:00:00 UTC
+  Closed:         2026-01-13 17:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      15m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $90,830.00
+  Stop loss:      $90,333.07  (0.55% from entry  |  dollar risk $9798290.59)
+  Target price:   $92,520.60  (1.86% from entry  |  RR 3.40)
+  TP1 price:      $91,698.01       (HIT)
+  Exit price:     $92,520.60  (1.86% from entry)
+  Exit reason:    target_hit
+
+  --- POSITION ---
+  Size:           19717.806263 BTC
+  Risk amount:    $117.68
+  Leverage:       10.0x
+  Entry score:    72.0
+
+  --- OUTCOME ---
+  MFE:            2877.59%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$239.04  (+2.03%)
+  Balance before: $11,767.52
+  Balance after:  $12,006.56
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #095  |  BTCUSDT  |  4h  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-01-13 18:00:00 UTC
+  Closed:         2026-01-13 19:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      4h
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $87,719.10
+  Stop loss:      $86,810.79  (1.04% from entry  |  dollar risk $10051930.27)
+  Target price:   $90,598.00  (3.28% from entry  |  RR 3.17)
+  TP1 price:      $89,180.48       (HIT)
+  Exit price:     $90,598.00  (3.28% from entry)
+  Exit reason:    target_hit
+
+  --- POSITION ---
+  Size:           11066.653904 BTC
+  Risk amount:    $120.07
+  Leverage:       10.0x
+  Entry score:    56.0
+
+  --- OUTCOME ---
+  MFE:            6108.74%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$251.98  (+2.10%)
+  Balance before: $12,006.56
+  Balance after:  $12,258.54
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #096  |  BTCUSDT  |  15m  |  BULLISH  |  Model_3                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-01-14 13:00:00 UTC
+  Closed:         2026-01-14 15:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      15m
+  Model:          Model_3
+
+  --- PRICES ---
+  Entry price:    $95,014.40
+  Stop loss:      $94,830.09  (0.19% from entry  |  dollar risk $9265022.90)
+  Target price:   $95,561.90  (0.58% from entry  |  RR 2.97)
+  TP1 price:      $95,311.90       (HIT)
+  Exit price:     $96,570.50  (1.64% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           50269.784511 BTC
+  Risk amount:    $122.59
+  Leverage:       10.0x
+  Entry score:    59.0
+
+  --- OUTCOME ---
+  MFE:            1758.59%  (max favorable excursion)
+  MAE:            -169.61%  (max adverse excursion)
+  PnL:            +$391.89  (+3.20%)
+  Balance before: $12,258.54
+  Balance after:  $12,650.43
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #097  |  BTCUSDT  |  30m  |  BULLISH  |  Model_3                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-01-14 16:00:00 UTC
+  Closed:         2026-01-14 17:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      30m
+  Model:          Model_3
+
+  --- PRICES ---
+  Entry price:    $95,240.20
+  Stop loss:      $94,651.00  (0.62% from entry  |  dollar risk $11152917.66)
+  Target price:   $96,543.00  (1.37% from entry  |  RR 2.21)
+  TP1 price:      $95,915.41       (HIT)
+  Exit price:     $97,069.11  (1.92% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           18928.980852 BTC
+  Risk amount:    $126.50
+  Leverage:       10.0x
+  Entry score:    60.0
+
+  --- OUTCOME ---
+  MFE:            2408.88%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$211.73  (+1.67%)
+  Balance before: $12,650.43
+  Balance after:  $12,862.16
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #098  |  BTCUSDT  |  30m  |  BULLISH  |  Model_2                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-01-14 18:00:00 UTC
+  Closed:         2026-01-14 19:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      30m
+  Model:          Model_2
+
+  --- PRICES ---
+  Entry price:    $95,240.20
+  Stop loss:      $94,675.02  (0.59% from entry  |  dollar risk $11303660.75)
+  Target price:   $95,796.80  (0.58% from entry  |  RR 0.98)
+  TP1 price:      $95,542.31       (HIT)
+  Exit price:     $96,855.01  (1.70% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           20000.107481 BTC
+  Risk amount:    $128.62
+  Leverage:       10.0x
+  Entry score:    57.0
+
+  --- OUTCOME ---
+  MFE:            1821.68%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$162.10  (+1.26%)
+  Balance before: $12,862.15
+  Balance after:  $13,024.25
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #099  |  BTCUSDT  |  4h  |  BULLISH  |  Model_2                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-01-14 20:00:00 UTC
+  Closed:         2026-01-14 21:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      4h
+  Model:          Model_2
+
+  --- PRICES ---
+  Entry price:    $91,284.60
+  Stop loss:      $90,373.40  (1.00% from entry  |  dollar risk $11327675.58)
+  Target price:   $92,020.20  (0.81% from entry  |  RR 0.81)
+  TP1 price:      $91,675.22       (HIT)
+  Exit price:     $97,580.42  (6.90% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           12431.547252 BTC
+  Risk amount:    $130.24
+  Leverage:       10.0x
+  Entry score:    84.0
+
+  --- OUTCOME ---
+  MFE:            6595.16%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$430.62  (+3.31%)
+  Balance before: $13,024.25
+  Balance after:  $13,454.87
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #100  |  BTCUSDT  |  1h  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-01-15 10:00:00 UTC
+  Closed:         2026-01-15 11:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      1h
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $90,870.40
+  Stop loss:      $90,215.33  (0.72% from entry  |  dollar risk $11439192.89)
+  Target price:   $91,284.60  (0.46% from entry  |  RR 0.63)
+  TP1 price:      $91,100.22       (HIT)
+  Exit price:     $96,886.92  (6.62% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           17462.497081 BTC
+  Risk amount:    $134.55
+  Leverage:       10.0x
+  Entry score:    66.0
+
+  --- OUTCOME ---
+  MFE:            6155.46%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$565.54  (+4.20%)
+  Balance before: $13,454.87
+  Balance after:  $14,020.41
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #101  |  BTCUSDT  |  15m  |  BEARISH  |  Model_3                         |  LOSS
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-01-16 10:00:00 UTC
+  Closed:         2026-01-16 11:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      15m
+  Model:          Model_3
+
+  --- PRICES ---
+  Entry price:    $95,547.60
+  Stop loss:      $95,842.47  (0.31% from entry  |  dollar risk $11522602.83)
+  Target price:   $95,132.90  (0.43% from entry  |  RR 1.41)
+  TP1 price:      $95,316.36       (HIT)
+  Exit price:     $95,491.16  (0.06% from entry)
+  Exit reason:    trailing_stop
+
+  --- POSITION ---
+  Size:           39077.155980 BTC
+  Risk amount:    $140.20
+  Leverage:       10.0x
+  Entry score:    59.0
+
+  --- OUTCOME ---
+  MFE:            192.13%  (max favorable excursion)
+  MAE:            -134.17%  (max adverse excursion)
+  PnL:            $-17.35  (-0.12%)
+  Balance before: $14,020.41
+  Balance after:  $14,003.06
+  Result:         LOSS
+
+  ------------------------------------------------------------------------------------------
+  TRADE #102  |  BTCUSDT  |  30m  |  BULLISH  |  Model_2                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-01-16 21:00:00 UTC
+  Closed:         2026-01-16 23:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      30m
+  Model:          Model_2
+
+  --- PRICES ---
+  Entry price:    $95,240.20
+  Stop loss:      $94,675.02  (0.59% from entry  |  dollar risk $12306319.64)
+  Target price:   $95,796.80  (0.58% from entry  |  RR 0.98)
+  TP1 price:      $95,542.31       (HIT)
+  Exit price:     $95,345.51  (0.11% from entry)
+  Exit reason:    trailing_stop
+
+  --- POSITION ---
+  Size:           21774.159812 BTC
+  Risk amount:    $140.03
+  Leverage:       10.0x
+  Entry score:    87.0
+
+  --- OUTCOME ---
+  MFE:            312.18%  (max favorable excursion)
+  MAE:            -24.32%  (max adverse excursion)
+  PnL:            +$4.09  (+0.03%)
+  Balance before: $14,003.06
+  Balance after:  $14,007.15
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #103  |  BTCUSDT  |  15m  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-01-17 00:00:00 UTC
+  Closed:         2026-01-17 03:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      15m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $95,221.50
+  Stop loss:      $94,783.06  (0.46% from entry  |  dollar risk $12037331.16)
+  Target price:   $95,789.80  (0.60% from entry  |  RR 1.30)
+  TP1 price:      $95,529.46       (HIT)
+  Exit price:     $95,325.56  (0.11% from entry)
+  Exit reason:    trailing_stop
+
+  --- POSITION ---
+  Size:           27455.036190 BTC
+  Risk amount:    $140.07
+  Leverage:       10.0x
+  Entry score:    55.0
+
+  --- OUTCOME ---
+  MFE:            316.79%  (max favorable excursion)
+  MAE:            -72.61%  (max adverse excursion)
+  PnL:            +$5.83  (+0.04%)
+  Balance before: $14,007.15
+  Balance after:  $14,012.98
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #104  |  BTCUSDT  |  1h  |  BEARISH  |  Model_3                         |  LOSS
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-01-17 05:00:00 UTC
+  Closed:         2026-01-17 07:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      1h
+  Model:          Model_3
+
+  --- PRICES ---
+  Entry price:    $95,451.30
+  Stop loss:      $95,862.04  (0.43% from entry  |  dollar risk $11977208.67)
+  Target price:   $95,132.90  (0.33% from entry  |  RR 0.78)
+  TP1 price:      $95,268.24       (HIT)
+  Exit price:     $95,335.04  (0.12% from entry)
+  Exit reason:    trailing_stop
+
+  --- POSITION ---
+  Size:           29159.931706 BTC
+  Risk amount:    $140.13
+  Leverage:       10.0x
+  Entry score:    54.0
+
+  --- OUTCOME ---
+  MFE:            203.87%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            $-11.12  (-0.08%)
+  Balance before: $14,012.98
+  Balance after:  $14,001.86
+  Result:         LOSS
+
+  ------------------------------------------------------------------------------------------
+  TRADE #105  |  BTCUSDT  |  1h  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-01-17 14:00:00 UTC
+  Closed:         2026-01-17 15:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      1h
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $90,870.40
+  Stop loss:      $90,215.33  (0.72% from entry  |  dollar risk $11904242.24)
+  Target price:   $91,284.60  (0.46% from entry  |  RR 0.63)
+  TP1 price:      $91,100.22       (HIT)
+  Exit price:     $91,284.60  (0.46% from entry)
+  Exit reason:    target_hit
+
+  --- POSITION ---
+  Size:           18172.418053 BTC
+  Risk amount:    $140.02
+  Leverage:       10.0x
+  Entry score:    63.0
+
+  --- OUTCOME ---
+  MFE:            4619.56%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$28.91  (+0.21%)
+  Balance before: $14,001.87
+  Balance after:  $14,030.78
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #106  |  BTCUSDT  |  30m  |  BULLISH  |  Model_1                         |  LOSS
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-01-17 16:00:00 UTC
+  Closed:         2026-01-19 00:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      30m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $95,348.30
+  Stop loss:      $94,671.60  (0.71% from entry  |  dollar risk $12503879.69)
+  Target price:   $95,852.70  (0.53% from entry  |  RR 0.75)
+  TP1 price:      $95,624.34       (MISS)
+  Exit price:     $94,671.60  (0.71% from entry)
+  Exit reason:    stop_hit
+
+  --- POSITION ---
+  Size:           18477.838926 BTC
+  Risk amount:    $140.31
+  Leverage:       10.0x
+  Entry score:    52.0
+
+  --- OUTCOME ---
+  MFE:            175.03%  (max favorable excursion)
+  MAE:            -1795.97%  (max adverse excursion)
+  PnL:            $-171.65  (-1.22%)
+  Balance before: $14,030.78
+  Balance after:  $13,859.13
+  Result:         LOSS
+
+  ------------------------------------------------------------------------------------------
+  TRADE #107  |  BTCUSDT  |  15m  |  BULLISH  |  Model_3                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-02-06 12:00:00 UTC
+  Closed:         2026-02-06 13:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      15m
+  Model:          Model_3
+
+  --- PRICES ---
+  Entry price:    $65,200.00
+  Stop loss:      $64,441.54  (1.16% from entry  |  dollar risk $8668096.30)
+  Target price:   $66,000.00  (1.23% from entry  |  RR 1.05)
+  TP1 price:      $65,616.30       (HIT)
+  Exit price:     $66,241.70  (1.60% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           11428.577852 BTC
+  Risk amount:    $138.59
+  Leverage:       10.0x
+  Entry score:    72.0
+
+  --- OUTCOME ---
+  MFE:            1392.80%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$105.39  (+0.76%)
+  Balance before: $13,859.13
+  Balance after:  $13,964.52
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #108  |  BTCUSDT  |  15m  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-02-06 20:00:00 UTC
+  Closed:         2026-02-06 23:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      15m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $70,307.00
+  Stop loss:      $69,110.32  (1.70% from entry  |  dollar risk $9542619.15)
+  Target price:   $71,974.90  (2.37% from entry  |  RR 1.39)
+  TP1 price:      $71,158.53       (HIT)
+  Exit price:     $70,756.63  (0.64% from entry)
+  Exit reason:    trailing_stop
+
+  --- POSITION ---
+  Size:           7974.258028 BTC
+  Risk amount:    $139.65
+  Leverage:       10.0x
+  Entry score:    50.0
+
+  --- OUTCOME ---
+  MFE:            1230.85%  (max favorable excursion)
+  MAE:            -506.65%  (max adverse excursion)
+  PnL:            +$58.19  (+0.42%)
+  Balance before: $13,964.52
+  Balance after:  $14,022.71
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #109  |  BTCUSDT  |  15m  |  BEARISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-02-07 06:00:00 UTC
+  Closed:         2026-02-07 07:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      15m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $70,600.10
+  Stop loss:      $71,713.28  (1.58% from entry  |  dollar risk $9590959.23)
+  Target price:   $69,709.80  (1.26% from entry  |  RR 0.80)
+  TP1 price:      $70,137.30       (HIT)
+  Exit price:     $69,185.00  (2.00% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           8615.789688 BTC
+  Risk amount:    $140.23
+  Leverage:       10.0x
+  Entry score:    56.0
+
+  --- OUTCOME ---
+  MFE:            1807.30%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$97.88  (+0.70%)
+  Balance before: $14,022.71
+  Balance after:  $14,120.59
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #110  |  BTCUSDT  |  15m  |  BEARISH  |  Model_3                         |  LOSS
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-02-08 04:00:00 UTC
+  Closed:         2026-02-08 08:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      15m
+  Model:          Model_3
+
+  --- PRICES ---
+  Entry price:    $69,247.90
+  Stop loss:      $69,475.06  (0.33% from entry  |  dollar risk $8480709.30)
+  Target price:   $68,548.70  (1.01% from entry  |  RR 3.08)
+  TP1 price:      $68,880.99       (MISS)
+  Exit price:     $69,475.06  (0.33% from entry)
+  Exit reason:    stop_hit
+
+  --- POSITION ---
+  Size:           37332.981022 BTC
+  Risk amount:    $141.21
+  Leverage:       10.0x
+  Entry score:    55.0
+
+  --- OUTCOME ---
+  MFE:            242.28%  (max favorable excursion)
+  MAE:            -496.02%  (max adverse excursion)
+  PnL:            $-204.74  (-1.45%)
+  Balance before: $14,120.59
+  Balance after:  $13,915.85
+  Result:         LOSS
+
+  ------------------------------------------------------------------------------------------
+  TRADE #111  |  BTCUSDT  |  30m  |  BULLISH  |  Model_2                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-02-08 09:00:00 UTC
+  Closed:         2026-02-08 10:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      30m
+  Model:          Model_2
+
+  --- PRICES ---
+  Entry price:    $69,420.00
+  Stop loss:      $68,960.08  (0.66% from entry  |  dollar risk $8986975.16)
+  Target price:   $69,888.00  (0.67% from entry  |  RR 1.02)
+  TP1 price:      $69,671.35       (HIT)
+  Exit price:     $70,493.96  (1.55% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           19540.130881 BTC
+  Risk amount:    $139.16
+  Leverage:       10.0x
+  Entry score:    84.0
+
+  --- OUTCOME ---
+  MFE:            1255.89%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$148.26  (+1.07%)
+  Balance before: $13,915.85
+  Balance after:  $14,064.11
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #112  |  BTCUSDT  |  15m  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-02-08 11:00:00 UTC
+  Closed:         2026-02-08 12:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      15m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $69,420.00
+  Stop loss:      $69,211.76  (0.30% from entry  |  dollar risk $8372592.04)
+  Target price:   $69,707.90  (0.41% from entry  |  RR 1.38)
+  TP1 price:      $69,581.30       (HIT)
+  Exit price:     $71,086.90  (2.40% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           40207.226588 BTC
+  Risk amount:    $140.64
+  Leverage:       10.0x
+  Entry score:    57.0
+
+  --- OUTCOME ---
+  MFE:            1758.79%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$450.54  (+3.20%)
+  Balance before: $14,064.11
+  Balance after:  $14,514.65
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #113  |  BTCUSDT  |  30m  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-02-24 20:00:00 UTC
+  Closed:         2026-02-25 02:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      30m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $64,422.90
+  Stop loss:      $63,282.88  (1.77% from entry  |  dollar risk $9098358.84)
+  Target price:   $65,016.00  (0.92% from entry  |  RR 0.52)
+  TP1 price:      $64,735.56       (HIT)
+  Exit price:     $66,031.06  (2.50% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           7980.876507 BTC
+  Risk amount:    $145.15
+  Leverage:       10.0x
+  Entry score:    56.0
+
+  --- OUTCOME ---
+  MFE:            1856.39%  (max favorable excursion)
+  MAE:            -626.61%  (max adverse excursion)
+  PnL:            +$103.31  (+0.71%)
+  Balance before: $14,514.65
+  Balance after:  $14,617.96
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #114  |  BTCUSDT  |  15m  |  BULLISH  |  Model_2                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-02-25 03:00:00 UTC
+  Closed:         2026-02-25 04:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      15m
+  Model:          Model_2
+
+  --- PRICES ---
+  Entry price:    $64,245.90
+  Stop loss:      $63,833.89  (0.64% from entry  |  dollar risk $8716538.01)
+  Target price:   $64,584.50  (0.53% from entry  |  RR 0.82)
+  TP1 price:      $64,431.26       (HIT)
+  Exit price:     $65,799.86  (2.42% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           21156.132166 BTC
+  Risk amount:    $146.18
+  Leverage:       10.0x
+  Entry score:    60.0
+
+  --- OUTCOME ---
+  MFE:            1675.08%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$244.86  (+1.68%)
+  Balance before: $14,617.96
+  Balance after:  $14,862.82
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #115  |  BTCUSDT  |  30m  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-02-25 05:00:00 UTC
+  Closed:         2026-02-25 06:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      30m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $64,245.90
+  Stop loss:      $63,960.36  (0.44% from entry  |  dollar risk $8587442.46)
+  Target price:   $64,521.90  (0.43% from entry  |  RR 0.97)
+  TP1 price:      $64,399.96       (HIT)
+  Exit price:     $65,397.66  (1.79% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           30074.604632 BTC
+  Risk amount:    $148.63
+  Leverage:       10.0x
+  Entry score:    57.0
+
+  --- OUTCOME ---
+  MFE:            1241.58%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$246.72  (+1.66%)
+  Balance before: $14,862.82
+  Balance after:  $15,109.54
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #116  |  BTCUSDT  |  1h  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-02-25 07:00:00 UTC
+  Closed:         2026-02-25 14:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      1h
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $64,521.90
+  Stop loss:      $63,841.60  (1.05% from entry  |  dollar risk $9312234.16)
+  Target price:   $66,600.00  (3.22% from entry  |  RR 3.05)
+  TP1 price:      $65,577.08       (HIT)
+  Exit price:     $66,600.00  (3.22% from entry)
+  Exit reason:    target_hit
+
+  --- POSITION ---
+  Size:           13688.422996 BTC
+  Risk amount:    $151.10
+  Leverage:       10.0x
+  Entry score:    57.0
+
+  --- OUTCOME ---
+  MFE:            2111.84%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$305.40  (+2.02%)
+  Balance before: $15,109.54
+  Balance after:  $15,414.94
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #117  |  BTCUSDT  |  30m  |  BULLISH  |  Model_3                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-02-25 15:00:00 UTC
+  Closed:         2026-02-25 16:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      30m
+  Model:          Model_3
+
+  --- PRICES ---
+  Entry price:    $65,653.10
+  Stop loss:      $64,734.78  (1.40% from entry  |  dollar risk $9775990.58)
+  Target price:   $66,312.50  (1.00% from entry  |  RR 0.72)
+  TP1 price:      $65,999.21       (HIT)
+  Exit price:     $67,257.91  (2.44% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           10645.516352 BTC
+  Risk amount:    $154.15
+  Leverage:       10.0x
+  Entry score:    87.0
+
+  --- OUTCOME ---
+  MFE:            1885.27%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$137.27  (+0.89%)
+  Balance before: $15,414.94
+  Balance after:  $15,552.21
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #118  |  BTCUSDT  |  15m  |  BEARISH  |  Model_3                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-02-26 08:00:00 UTC
+  Closed:         2026-02-26 09:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      15m
+  Model:          Model_3
+
+  --- PRICES ---
+  Entry price:    $68,130.10
+  Stop loss:      $68,618.39  (0.72% from entry  |  dollar risk $9899790.04)
+  Target price:   $67,600.00  (0.78% from entry  |  RR 1.09)
+  TP1 price:      $67,848.02       (HIT)
+  Exit price:     $68,048.02  (0.12% from entry)
+  Exit reason:    trailing_stop
+
+  --- POSITION ---
+  Size:           20274.406679 BTC
+  Risk amount:    $155.52
+  Leverage:       10.0x
+  Entry score:    87.0
+
+  --- OUTCOME ---
+  MFE:            296.03%  (max favorable excursion)
+  MAE:            -148.97%  (max adverse excursion)
+  PnL:            +$14.68  (+0.09%)
+  Balance before: $15,552.21
+  Balance after:  $15,566.89
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #119  |  BTCUSDT  |  15m  |  BEARISH  |  Model_3                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-02-26 12:00:00 UTC
+  Closed:         2026-02-26 15:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      15m
+  Model:          Model_3
+
+  --- PRICES ---
+  Entry price:    $68,059.50
+  Stop loss:      $68,613.66  (0.81% from entry  |  dollar risk $9976794.24)
+  Target price:   $67,600.00  (0.68% from entry  |  RR 0.83)
+  TP1 price:      $67,812.74       (HIT)
+  Exit price:     $67,472.94  (0.86% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           18003.454310 BTC
+  Risk amount:    $155.67
+  Leverage:       10.0x
+  Entry score:    75.0
+
+  --- OUTCOME ---
+  MFE:            765.27%  (max favorable excursion)
+  MAE:            -274.43%  (max adverse excursion)
+  PnL:            +$75.20  (+0.48%)
+  Balance before: $15,566.88
+  Balance after:  $15,642.08
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #120  |  BTCUSDT  |  1h  |  BEARISH  |  Model_3                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-02-26 16:00:00 UTC
+  Closed:         2026-02-28 07:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      1h
+  Model:          Model_3
+
+  --- PRICES ---
+  Entry price:    $67,800.00
+  Stop loss:      $68,955.33  (1.70% from entry  |  dollar risk $10297866.93)
+  Target price:   $63,828.50  (5.86% from entry  |  RR 3.44)
+  TP1 price:      $65,797.30       (HIT)
+  Exit price:     $64,988.90  (4.15% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           8913.386294 BTC
+  Risk amount:    $156.42
+  Leverage:       10.0x
+  Entry score:    60.0
+
+  --- OUTCOME ---
+  MFE:            4746.00%  (max favorable excursion)
+  MAE:            -454.90%  (max adverse excursion)
+  PnL:            +$299.29  (+1.91%)
+  Balance before: $15,642.09
+  Balance after:  $15,941.38
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #121  |  BTCUSDT  |  4h  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-03-05 08:00:00 UTC
+  Closed:         2026-03-05 09:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      4h
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $67,083.50
+  Stop loss:      $63,747.02  (4.97% from entry  |  dollar risk $10592889.27)
+  Target price:   $69,999.90  (4.35% from entry  |  RR 0.87)
+  TP1 price:      $68,558.47       (HIT)
+  Exit price:     $69,999.90  (4.35% from entry)
+  Exit reason:    target_hit
+
+  --- POSITION ---
+  Size:           3174.873511 BTC
+  Risk amount:    $159.41
+  Leverage:       10.0x
+  Entry score:    60.0
+
+  --- OUTCOME ---
+  MFE:            5257.96%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$97.64  (+0.61%)
+  Balance before: $15,941.38
+  Balance after:  $16,039.02
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #122  |  BTCUSDT  |  4h  |  BULLISH  |  Model_3                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-03-05 10:00:00 UTC
+  Closed:         2026-03-05 11:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      4h
+  Model:          Model_3
+
+  --- PRICES ---
+  Entry price:    $67,083.50
+  Stop loss:      $64,974.49  (3.14% from entry  |  dollar risk $10596387.37)
+  Target price:   $69,999.90  (4.35% from entry  |  RR 1.38)
+  TP1 price:      $68,558.47       (HIT)
+  Exit price:     $69,999.90  (4.35% from entry)
+  Exit reason:    target_hit
+
+  --- POSITION ---
+  Size:           5024.346694 BTC
+  Risk amount:    $160.39
+  Leverage:       10.0x
+  Entry score:    57.0
+
+  --- OUTCOME ---
+  MFE:            6442.66%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$154.52  (+0.96%)
+  Balance before: $16,039.01
+  Balance after:  $16,193.53
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #123  |  BTCUSDT  |  15m  |  BULLISH  |  Model_1                         |  LOSS
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-03-05 12:00:00 UTC
+  Closed:         2026-03-05 14:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      15m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $72,666.60
+  Stop loss:      $72,378.83  (0.40% from entry  |  dollar risk $10453369.23)
+  Target price:   $74,096.00  (1.97% from entry  |  RR 4.97)
+  TP1 price:      $73,399.47       (MISS)
+  Exit price:     $72,378.83  (0.40% from entry)
+  Exit reason:    stop_hit
+
+  --- POSITION ---
+  Size:           36324.925918 BTC
+  Risk amount:    $161.94
+  Leverage:       10.0x
+  Entry score:    51.0
+
+  --- OUTCOME ---
+  MFE:            373.77%  (max favorable excursion)
+  MAE:            -506.63%  (max adverse excursion)
+  PnL:            $-223.61  (-1.38%)
+  Balance before: $16,193.54
+  Balance after:  $15,969.93
+  Result:         LOSS
+
+  ------------------------------------------------------------------------------------------
+  TRADE #124  |  BTCUSDT  |  15m  |  BULLISH  |  Model_1                         |  LOSS
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-03-06 04:00:00 UTC
+  Closed:         2026-03-06 05:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      15m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $71,014.70
+  Stop loss:      $70,763.64  (0.35% from entry  |  dollar risk $9940738.63)
+  Target price:   $71,566.00  (0.78% from entry  |  RR 2.20)
+  TP1 price:      $71,308.10       (MISS)
+  Exit price:     $70,763.64  (0.35% from entry)
+  Exit reason:    stop_hit
+
+  --- POSITION ---
+  Size:           39595.386828 BTC
+  Risk amount:    $159.70
+  Leverage:       10.0x
+  Entry score:    56.0
+
+  --- OUTCOME ---
+  MFE:            69.19%  (max favorable excursion)
+  MAE:            -778.51%  (max adverse excursion)
+  PnL:            $-226.93  (-1.42%)
+  Balance before: $15,969.92
+  Balance after:  $15,742.99
+  Result:         LOSS
+
+  ------------------------------------------------------------------------------------------
+  TRADE #125  |  BTCUSDT  |  15m  |  BULLISH  |  Model_2                         |  LOSS
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-03-07 12:00:00 UTC
+  Closed:         2026-03-07 15:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      15m
+  Model:          Model_2
+
+  --- PRICES ---
+  Entry price:    $68,107.00
+  Stop loss:      $67,710.91  (0.58% from entry  |  dollar risk $9878178.87)
+  Target price:   $68,544.80  (0.64% from entry  |  RR 1.11)
+  TP1 price:      $68,342.93       (MISS)
+  Exit price:     $67,710.91  (0.58% from entry)
+  Exit reason:    stop_hit
+
+  --- POSITION ---
+  Size:           24939.102208 BTC
+  Risk amount:    $157.43
+  Leverage:       10.0x
+  Entry score:    59.0
+
+  --- OUTCOME ---
+  MFE:            N/A  (max favorable excursion)
+  MAE:            -522.05%  (max adverse excursion)
+  PnL:            $-199.75  (-1.27%)
+  Balance before: $15,743.00
+  Balance after:  $15,543.25
+  Result:         LOSS
+
+  ------------------------------------------------------------------------------------------
+  TRADE #126  |  BTCUSDT  |  30m  |  BEARISH  |  Model_3                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-03-07 18:00:00 UTC
+  Closed:         2026-03-07 19:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      30m
+  Model:          Model_3
+
+  --- PRICES ---
+  Entry price:    $68,058.00
+  Stop loss:      $68,357.07  (0.44% from entry  |  dollar risk $9492982.14)
+  Target price:   $67,777.00  (0.41% from entry  |  RR 0.94)
+  TP1 price:      $67,900.49       (HIT)
+  Exit price:     $67,620.19  (0.64% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           31742.097521 BTC
+  Risk amount:    $155.43
+  Leverage:       10.0x
+  Entry score:    60.0
+
+  --- OUTCOME ---
+  MFE:            527.27%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$77.04  (+0.50%)
+  Balance before: $15,543.25
+  Balance after:  $15,620.29
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #127  |  BTCUSDT  |  4h  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-03-11 00:00:00 UTC
+  Closed:         2026-03-11 01:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      4h
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $67,083.50
+  Stop loss:      $63,747.02  (4.97% from entry  |  dollar risk $10379529.84)
+  Target price:   $69,999.90  (4.35% from entry  |  RR 0.87)
+  TP1 price:      $68,558.47       (HIT)
+  Exit price:     $69,999.90  (4.35% from entry)
+  Exit reason:    target_hit
+
+  --- POSITION ---
+  Size:           3110.925972 BTC
+  Risk amount:    $156.20
+  Leverage:       10.0x
+  Entry score:    57.0
+
+  --- OUTCOME ---
+  MFE:            3048.96%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$95.67  (+0.61%)
+  Balance before: $15,620.29
+  Balance after:  $15,715.96
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #128  |  BTCUSDT  |  1h  |  BEARISH  |  Model_1                         |  LOSS
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-03-11 04:00:00 UTC
+  Closed:         2026-03-13 01:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      1h
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $69,720.00
+  Stop loss:      $71,893.62  (3.12% from entry  |  dollar risk $10778821.47)
+  Target price:   $65,616.30  (5.89% from entry  |  RR 1.89)
+  TP1 price:      $67,650.72       (MISS)
+  Exit price:     $71,893.62  (3.12% from entry)
+  Exit reason:    stop_hit
+
+  --- POSITION ---
+  Size:           4958.930903 BTC
+  Risk amount:    $157.16
+  Leverage:       10.0x
+  Entry score:    60.0
+
+  --- OUTCOME ---
+  MFE:            707.74%  (max favorable excursion)
+  MAE:            -2314.86%  (max adverse excursion)
+  PnL:            $-165.67  (-1.05%)
+  Balance before: $15,715.96
+  Balance after:  $15,550.29
+  Result:         LOSS
+
+  ------------------------------------------------------------------------------------------
+  TRADE #129  |  BTCUSDT  |  4h  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-03-13 04:00:00 UTC
+  Closed:         2026-03-13 05:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      4h
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $67,083.50
+  Stop loss:      $63,747.02  (4.97% from entry  |  dollar risk $10333018.44)
+  Target price:   $69,999.90  (4.35% from entry  |  RR 0.87)
+  TP1 price:      $68,558.47       (HIT)
+  Exit price:     $69,999.90  (4.35% from entry)
+  Exit reason:    target_hit
+
+  --- POSITION ---
+  Size:           3096.985692 BTC
+  Risk amount:    $155.50
+  Leverage:       10.0x
+  Entry score:    75.0
+
+  --- OUTCOME ---
+  MFE:            4382.66%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$95.24  (+0.61%)
+  Balance before: $15,550.30
+  Balance after:  $15,645.54
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #130  |  BTCUSDT  |  30m  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-03-13 09:00:00 UTC
+  Closed:         2026-03-13 10:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      30m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $70,120.10
+  Stop loss:      $69,174.52  (1.35% from entry  |  dollar risk $10583731.58)
+  Target price:   $71,086.20  (1.38% from entry  |  RR 1.02)
+  TP1 price:      $70,620.68       (HIT)
+  Exit price:     $71,639.38  (2.17% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           11192.798923 BTC
+  Risk amount:    $156.46
+  Leverage:       10.0x
+  Entry score:    62.0
+
+  --- OUTCOME ---
+  MFE:            1949.74%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$139.25  (+0.89%)
+  Balance before: $15,645.53
+  Balance after:  $15,784.78
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #131  |  BTCUSDT  |  1h  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-03-13 11:00:00 UTC
+  Closed:         2026-03-13 12:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      1h
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $67,529.00
+  Stop loss:      $66,774.47  (1.12% from entry  |  dollar risk $10207841.86)
+  Target price:   $68,195.40  (0.99% from entry  |  RR 0.88)
+  TP1 price:      $67,879.08       (HIT)
+  Exit price:     $72,212.68  (6.94% from entry)
+  Exit reason:    breakeven_after_tp1
+
+  --- POSITION ---
+  Size:           13528.813930 BTC
+  Risk amount:    $157.85
+  Leverage:       10.0x
+  Entry score:    53.0
+
+  --- OUTCOME ---
+  MFE:            4966.24%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$477.37  (+3.02%)
+  Balance before: $15,784.78
+  Balance after:  $16,262.15
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #132  |  BTCUSDT  |  15m  |  BULLISH  |  Model_1                         |  WIN
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-03-14 04:00:00 UTC
+  Closed:         2026-03-14 05:00:00 UTC
+  Direction:      BULLISH
+  Timeframe:      15m
+  Model:          Model_1
+
+  --- PRICES ---
+  Entry price:    $70,907.00
+  Stop loss:      $70,546.84  (0.51% from entry  |  dollar risk $10502886.07)
+  Target price:   $71,485.60  (0.82% from entry  |  RR 1.61)
+  TP1 price:      $71,214.03       (HIT)
+  Exit price:     $71,033.63  (0.18% from entry)
+  Exit reason:    trailing_stop
+
+  --- POSITION ---
+  Size:           29161.722758 BTC
+  Risk amount:    $162.62
+  Leverage:       10.0x
+  Entry score:    56.0
+
+  --- OUTCOME ---
+  MFE:            362.75%  (max favorable excursion)
+  MAE:            N/A  (max adverse excursion)
+  PnL:            +$32.26  (+0.20%)
+  Balance before: $16,262.16
+  Balance after:  $16,294.42
+  Result:         WIN
+
+  ------------------------------------------------------------------------------------------
+  TRADE #133  |  BTCUSDT  |  1h  |  BEARISH  |  Model_3                         |  LOSS
+  ------------------------------------------------------------------------------------------
+  Exchange:       Binance (simulated)
+  Pair:           BTCUSDT
+  Opened:         2026-03-14 11:00:00 UTC
+  Closed:         2026-03-15 22:00:00 UTC
+  Direction:      BEARISH
+  Timeframe:      1h
+  Model:          Model_3
+
+  --- PRICES ---
+  Entry price:    $70,827.60
+  Stop loss:      $72,212.54  (1.96% from entry  |  dollar risk $11247565.44)
+  Target price:   $69,353.30  (2.08% from entry  |  RR 1.06)
+  TP1 price:      $70,072.74       (MISS)
+  Exit price:     $72,212.54  (1.96% from entry)
+  Exit reason:    stop_hit
+
+  --- POSITION ---
+  Size:           8121.349432 BTC
+  Risk amount:    $162.94
+  Leverage:       10.0x
+  Entry score:    53.0
+
+  --- OUTCOME ---
+  MFE:            318.69%  (max favorable excursion)
+  MAE:            -1429.81%  (max adverse excursion)
+  PnL:            $-176.83  (-1.09%)
+  Balance before: $16,294.41
+  Balance after:  $16,117.58
+  Result:         LOSS
+
+====================================================================================================
+END OF REPORT  |  RUN 27  |  ENGINE v11  |  133 TRADES  |  81.2% WR  |  PF 4.97  |  +$11,117.58
+====================================================================================================
