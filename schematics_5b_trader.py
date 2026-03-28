@@ -413,8 +413,9 @@ class Schematics5BTradeState:
         self.last_error: Optional[str] = None
         self.trading_mode: str = "claude"  # "claude" | "jack"
         # Issue 3: DD protection state
-        self.peak_balance: float = STARTING_BALANCE  # highest equity seen
-        self.dd_triggered_at: Optional[str] = None   # ISO UTC string; None = not in hard block
+        self.peak_balance: float = STARTING_BALANCE  # highest balance seen
+        self.dd_triggered_at: Optional[str] = None   # ISO UTC; None = not in hard block
+        self.dd_trough_balance: Optional[float] = None  # lowest balance since hard block trigger
         self._load()
 
     def _load(self):
@@ -439,6 +440,7 @@ class Schematics5BTradeState:
                 # Issue 3: DD protection state (default to current balance as peak on first load)
                 self.peak_balance = data.get("peak_balance", self.balance)
                 self.dd_triggered_at = data.get("dd_triggered_at")
+                self.dd_trough_balance = data.get("dd_trough_balance")
                 # Validate current_trade — discard if essential fields are missing/zero
                 if self.current_trade:
                     ep = self.current_trade.get("entry_price", 0)
@@ -471,6 +473,7 @@ class Schematics5BTradeState:
                 # Issue 3: DD protection state
                 "peak_balance": round(self.peak_balance, 2),
                 "dd_triggered_at": self.dd_triggered_at,
+                "dd_trough_balance": round(self.dd_trough_balance, 2) if self.dd_trough_balance is not None else None,
             }
             with open(TRADE_LOG_PATH, "w") as f:
                 json.dump(data, f, indent=2, default=str)
@@ -1138,15 +1141,19 @@ class Schematics5BTrader:
 
     def _dd_risk_multiplier(self) -> float:
         """
-        Issue 3: compute the current DD risk tier from live balance state.
+        Hybrid DD risk tier from live balance state.
 
         Returns:
             1.0  — no DD concern, full position size
             0.5  — soft throttle (DD ≥ 2%), halve position size
             0.0  — hard block (DD ≥ 4%), do NOT enter trade
 
-        Reads thresholds from decision_engine_v2 so the live bot and
-        backtest are always governed by the same constants.
+        Hard-block reset requires BOTH:
+            1. hours_since_trigger >= _DD_RESET_HOURS
+            2. equity recovered >= _DD_RECOVERY_PCT of (peak→trough) gap
+
+        Reads all thresholds from decision_engine_v2 constants so the
+        live bot and backtest are always governed by the same values.
         Fails open (returns 1.0) if the import is unavailable.
         """
         try:
@@ -1156,6 +1163,7 @@ class Schematics5BTrader:
                 _DD_HARD_THRESHOLD,
                 _DD_RISK_SCALE,
                 _DD_RESET_HOURS,
+                _DD_RECOVERY_PCT,
             )
         except ImportError:
             return 1.0
@@ -1166,25 +1174,54 @@ class Schematics5BTrader:
         dd_pct = (self.state.peak_balance - self.state.balance) / self.state.peak_balance
 
         if dd_pct >= _DD_HARD_THRESHOLD:
-            # Check 72h reset window
+            # Track trough — keep the lowest balance seen since hard block started.
+            if (
+                self.state.dd_trough_balance is None
+                or self.state.balance < self.state.dd_trough_balance
+            ):
+                self.state.dd_trough_balance = self.state.balance
+
             if self.state.dd_triggered_at is not None:
                 try:
                     triggered_dt = datetime.fromisoformat(self.state.dd_triggered_at)
                     hours_in_dd = (
                         datetime.now(timezone.utc) - triggered_dt
                     ).total_seconds() / 3600
-                    if hours_in_dd >= _DD_RESET_HOURS:
-                        # Re-baseline: allow trading at full risk again
+
+                    # Compute recovery fraction: what fraction of peak→trough has been regained.
+                    _trough = self.state.dd_trough_balance
+                    _recovery = 0.0
+                    if _trough is not None and self.state.peak_balance > _trough:
+                        _recovery = (
+                            (self.state.balance - _trough)
+                            / (self.state.peak_balance - _trough)
+                        )
+
+                    if hours_in_dd >= _DD_RESET_HOURS and _recovery >= _DD_RECOVERY_PCT:
                         logger.info(
-                            "[5B] DD hard reset: %.0fh elapsed — re-baselining peak $%.2f → $%.2f",
-                            hours_in_dd, self.state.peak_balance, self.state.balance,
+                            "[5B] DD hard reset: %.0fh elapsed, recovery=%.0f%% ≥ %.0f%% "
+                            "(trough=$%.2f) — re-baselining peak $%.2f → $%.2f",
+                            hours_in_dd, _recovery * 100, _DD_RECOVERY_PCT * 100,
+                            (_trough or 0), self.state.peak_balance, self.state.balance,
                         )
                         self.state.peak_balance = self.state.balance
                         self.state.dd_triggered_at = None
+                        self.state.dd_trough_balance = None
                         self.state.save()
                         return 1.0
+                    else:
+                        if hours_in_dd >= _DD_RESET_HOURS:
+                            # Time elapsed but recovery not sufficient — log diagnostic.
+                            logger.debug(
+                                "[5B] DD hard block: %.0fh elapsed but recovery=%.2f%% < %.0f%% "
+                                "(trough=$%.2f balance=$%.2f) — blocked",
+                                hours_in_dd, _recovery * 100, _DD_RECOVERY_PCT * 100,
+                                (_trough or 0), self.state.balance,
+                            )
+
                 except (ValueError, TypeError):
                     pass  # malformed timestamp — treat as not yet triggered
+
             return 0.0  # hard block
 
         if dd_pct >= _DD_SOFT_THRESHOLD:
@@ -2169,15 +2206,16 @@ class Schematics5BTrader:
         pnl_dollars = position_size * (pnl_pct / 100)
         self.state.balance += pnl_dollars
 
-        # Issue 3: update peak_balance on every close; clear hard-block trigger on new high
+        # Issue 3: update peak on every close; clear all DD state on new equity high
         if self.state.balance > self.state.peak_balance:
             self.state.peak_balance = self.state.balance
             if self.state.dd_triggered_at is not None:
                 logger.info(
-                    "[5B] DD reset: equity set new high $%.2f — clearing hard-block timer",
+                    "[5B] DD reset: equity set new high $%.2f — clearing hard-block timer and trough",
                     self.state.balance,
                 )
                 self.state.dd_triggered_at = None
+            self.state.dd_trough_balance = None  # clear trough — back above previous peak
 
         if is_win:
             self.state.total_wins += 1

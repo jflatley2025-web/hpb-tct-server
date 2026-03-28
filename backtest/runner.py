@@ -84,7 +84,9 @@ _MIN_SCORE_HARD = 65         # score 57-64 confirmed losers — blocked regardle
 _DD_SOFT_THRESHOLD = 0.02    # soft throttle: halve position size when DD ≥ 2%
 _DD_HARD_THRESHOLD = 0.04    # hard block: skip new entries entirely when DD ≥ 4%
 _DD_RISK_SCALE = 0.5         # position size multiplier applied during soft throttle
-_DD_RESET_HOURS = 72         # re-baseline peak equity after this many hours in hard block
+_DD_RESET_HOURS = 72         # minimum hours in hard block before reset is even evaluated
+_DD_RECOVERY_PCT = 0.5       # equity must recover ≥ 50% of peak→trough gap before reset
+                              # e.g. peak=$10k, trough=$9.6k, must recover to $9.8k
 
 # Optional 15m NY overtrade guard — set True for re-run only if trade count > 55
 _ENABLE_15M_NY_OVERTRADE_FILTER = False
@@ -200,6 +202,9 @@ class BacktestState:
     trades_15m: int = 0            # resulted in a TAKE trade
     # v14: DD protection state — tracks when protection first triggered
     dd_protection_triggered_at: Optional[datetime] = None  # None = not in protection
+    # Lowest equity recorded since hard block first triggered.
+    # Required for hybrid reset: reset only when time AND partial recovery both met.
+    dd_trough_equity: Optional[float] = None  # None = not in hard block
 
 
 # ── Multi-TF Synchronization ─────────────────────────────────────────
@@ -713,33 +718,57 @@ def run_gate_pipeline(
             if tf == "15m":
                 state.signals_15m_detected += 1
 
-            # ── Issue 3: DD tier — computed per schematic, consistent per step ─
-            # Must be evaluated BEFORE the gate chain so the elif can reference
-            # _risk_multiplier without re-computing equity state mid-chain.
+            # ── Hybrid DD tier — computed per schematic, consistent per step ──
+            # Evaluated BEFORE the gate chain so the elif can reference _risk_multiplier.
+            # Reset requires BOTH: time elapsed AND partial equity recovery.
             _risk_multiplier = 1.0
             if state.peak_equity > 0:
                 _step_dd = (state.peak_equity - state.equity) / state.peak_equity
                 if _step_dd >= _DD_HARD_THRESHOLD:
-                    # Record first trigger time (persists across schematics on same step)
+                    # Record first trigger and initialise trough on first crossing.
                     if state.dd_protection_triggered_at is None:
                         state.dd_protection_triggered_at = current_time
+                        state.dd_trough_equity = state.equity
                         logger.info(
-                            "DD_PROTECTION | hard block triggered | dd=%.2f%%",
-                            _step_dd * 100,
+                            "DD_PROTECTION | hard block triggered | dd=%.2f%% | trough=$%.2f",
+                            _step_dd * 100, state.equity,
                         )
+                    else:
+                        # Keep trough at the lowest point seen since trigger.
+                        if state.dd_trough_equity is None or state.equity < state.dd_trough_equity:
+                            state.dd_trough_equity = state.equity
+
                     _hours_in_dd = (
                         current_time - state.dd_protection_triggered_at
                     ).total_seconds() / 3600
-                    if _hours_in_dd >= _DD_RESET_HOURS:
+
+                    # Recovery fraction: how much of peak→trough gap has been reclaimed.
+                    _recovery = 0.0
+                    _trough = state.dd_trough_equity
+                    if _trough is not None and state.peak_equity > _trough:
+                        _recovery = (state.equity - _trough) / (state.peak_equity - _trough)
+
+                    if _hours_in_dd >= _DD_RESET_HOURS and _recovery >= _DD_RECOVERY_PCT:
                         logger.info(
-                            "DD_PROTECTION | %.0fh elapsed — resetting peak $%.2f → $%.2f to resume",
-                            _hours_in_dd, state.peak_equity, state.equity,
+                            "DD_PROTECTION | reset: %.0fh elapsed, recovery=%.0f%% ≥ %.0f%% "
+                            "(trough=$%.2f) — resetting peak $%.2f → $%.2f",
+                            _hours_in_dd, _recovery * 100, _DD_RECOVERY_PCT * 100,
+                            (_trough or 0), state.peak_equity, state.equity,
                         )
                         state.peak_equity = state.equity
                         state.dd_protection_triggered_at = None
+                        state.dd_trough_equity = None
                         # _risk_multiplier stays 1.0 — full risk after reset
                     else:
-                        _risk_multiplier = 0.0  # hard block
+                        _risk_multiplier = 0.0  # hard block remains
+                        if _hours_in_dd >= _DD_RESET_HOURS:
+                            # Time elapsed but recovery not sufficient — log diagnostic.
+                            logger.debug(
+                                "DD_PROTECTION | %.0fh elapsed but recovery=%.2f%% < %.0f%% "
+                                "(trough=$%.2f equity=$%.2f) — blocked",
+                                _hours_in_dd, _recovery * 100, _DD_RECOVERY_PCT * 100,
+                                (_trough or 0), state.equity,
+                            )
                 elif _step_dd >= _DD_SOFT_THRESHOLD:
                     _risk_multiplier = _DD_RISK_SCALE  # soft throttle: 50% risk
                     logger.info(
@@ -1418,6 +1447,7 @@ def _close_trade(state: BacktestState, raw_exit_price: float, exit_reason: str,
     if state.equity > state.peak_equity:
         state.peak_equity = state.equity
         state.dd_protection_triggered_at = None  # equity recovered; reset protection
+        state.dd_trough_equity = None            # clear trough — back above previous peak
     current_dd = ((state.peak_equity - state.equity) / state.peak_equity) * 100
     state.drawdown = current_dd
     if current_dd > state.max_drawdown_pct:

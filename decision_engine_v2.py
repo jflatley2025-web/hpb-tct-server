@@ -90,7 +90,9 @@ _MIN_SCORE_HARD = 65          # hard score floor — scores 57-64 blocked regard
 _DD_SOFT_THRESHOLD = 0.02     # soft throttle: scale risk to DD_RISK_SCALE when DD ≥ 2%
 _DD_HARD_THRESHOLD = 0.04     # hard block: halt new entries entirely when DD ≥ 4%
 _DD_RISK_SCALE = 0.5          # position size multiplier applied during soft throttle
-_DD_RESET_HOURS = 72          # re-baseline peak equity after this many hours in hard block
+_DD_RESET_HOURS = 72          # minimum hours in hard block before reset is even evaluated
+_DD_RECOVERY_PCT = 0.5        # equity must recover ≥ 50% of (peak→trough) gap before reset
+                               # e.g. peak=$10k, trough=$9.6k (4% DD), must recover to $9.8k
 _ENABLE_15M_NY_OVERTRADE_FILTER = False  # optional NY overtrade guard
 
 # Detection window limits (performance)
@@ -211,8 +213,9 @@ def decide(
             "target_price": float,
             "rr": float,
             "risk_multiplier": float,    # 1.0 = full risk, 0.5 = soft throttle, 0.0 = hard block
-            "new_peak": float | None,    # caller must store this as peak_equity on next call;
-                                         # None when equity state was not provided
+            "new_peak": float | None,    # caller must store as peak_equity on next call
+            "new_trough": float | None,  # caller must store as dd_trough_equity on next call;
+                                         # None outside hard block; tracks lowest equity since trigger
             "metadata": {
                 "htf_bias": str,
                 "gate_1a_pass": bool,
@@ -245,6 +248,7 @@ def decide(
         "rr": 0.0,
         "risk_multiplier": 1.0,
         "new_peak": None,
+        "new_trough": None,
         "metadata": {},
     }
 
@@ -258,38 +262,67 @@ def decide(
     peak_equity: Optional[float] = context.get("peak_equity")
     equity: Optional[float] = context.get("equity")
     dd_protection_triggered_at: Optional[datetime] = context.get("dd_protection_triggered_at")
+    # Lowest equity recorded since hard block first triggered.
+    # Caller must store new_trough from each result and pass it back here.
+    dd_trough_equity: Optional[float] = context.get("dd_trough_equity")
 
     if not current_price or not current_time:
         return {**_PASS, "reason": "missing_required_context (current_price or current_time)"}
 
-    # ── Issue 3: 3-tier DD tier — computed once before scanning ──────────
-    # _risk_multiplier flows into every TAKE result so callers can scale
-    # position size without re-implementing DD logic.
-    # _new_peak must be stored back by the caller as peak_equity on the
-    # next call — this keeps decide() stateless.
+    # ── Hybrid DD tier — computed once before scanning ───────────────────
+    # _risk_multiplier flows into every result so callers can scale position size.
+    # _new_peak / _new_trough must be stored by the caller and passed back next call
+    # via context["peak_equity"] / context["dd_trough_equity"] — keeps decide() stateless.
     _risk_multiplier: float = 1.0
     _new_peak: Optional[float] = None
+    _new_trough: Optional[float] = None   # None outside hard block
 
     if USE_DD_PROTECTION and peak_equity is not None and equity is not None and peak_equity > 0:
-        _new_peak = max(peak_equity, equity)  # default: propagate new highs
+        _new_peak = max(peak_equity, equity)  # always propagate equity highs
         _cur_dd = (peak_equity - equity) / peak_equity
 
         if _cur_dd >= _DD_HARD_THRESHOLD:
-            # Hard tier — check whether the 72h reset window has elapsed.
+            # Hard tier — track trough (lowest equity since trigger).
+            # min() keeps trough sliding down if equity keeps falling.
+            _new_trough = (
+                min(dd_trough_equity, equity)
+                if dd_trough_equity is not None
+                else equity
+            )
+
             if dd_protection_triggered_at is not None:
                 _hours_in_dd = (current_time - dd_protection_triggered_at).total_seconds() / 3600
-                if _hours_in_dd >= _DD_RESET_HOURS:
-                    # Reset: re-baseline peak to current equity so trading resumes.
+
+                # Recovery fraction: how much of peak→trough gap has been reclaimed.
+                _recovery = 0.0
+                if peak_equity > _new_trough:
+                    _recovery = (equity - _new_trough) / (peak_equity - _new_trough)
+
+                if _hours_in_dd >= _DD_RESET_HOURS and _recovery >= _DD_RECOVERY_PCT:
+                    # Hybrid condition met — re-baseline and clear trough.
                     _new_peak = equity
+                    _new_trough = None  # protection fully exited
                     logger.info(
-                        "DD hard reset: %.0fh elapsed — re-baselining peak $%.2f → $%.2f",
-                        _hours_in_dd, peak_equity, equity,
+                        "DD hard reset: %.0fh elapsed, recovery=%.0f%% ≥ %.0f%% "
+                        "(trough=$%.2f) — re-baselining peak $%.2f → $%.2f",
+                        _hours_in_dd, _recovery * 100, _DD_RECOVERY_PCT * 100,
+                        (dd_trough_equity or 0), peak_equity, equity,
                     )
-                    # _risk_multiplier stays 1.0 — full risk resumes after reset
+                    # _risk_multiplier stays 1.0 — full risk resumes
                 else:
-                    _risk_multiplier = 0.0   # hard block: signal will be rejected below
+                    _risk_multiplier = 0.0  # hard block remains
+                    if _hours_in_dd >= _DD_RESET_HOURS:
+                        # Time elapsed but recovery not sufficient — stay blocked, log why.
+                        logger.debug(
+                            "DD hard block: %.0fh elapsed but recovery=%.2f%% < %.0f%% "
+                            "(trough=$%.2f equity=$%.2f) — blocked",
+                            _hours_in_dd, _recovery * 100, _DD_RECOVERY_PCT * 100,
+                            _new_trough, equity,
+                        )
             else:
-                _risk_multiplier = 0.0       # first time crossing hard threshold
+                # First time crossing hard threshold — no trigger timestamp yet in context.
+                # Caller must set dd_protection_triggered_at and pass it next call.
+                _risk_multiplier = 0.0
 
         elif _cur_dd >= _DD_SOFT_THRESHOLD:
             # Soft tier — allow the trade but halve position size.
@@ -531,9 +564,17 @@ def decide(
             # risk_multiplier carried in the best_signal result.
             elif _risk_multiplier == 0.0:
                 final_decision = "PASS"
+                _block_dd = (peak_equity - equity) / peak_equity * 100
+                # Compute recovery for the skip_reason so logs are diagnostic
+                _block_recovery = 0.0
+                if _new_trough is not None and peak_equity > _new_trough:
+                    _block_recovery = (equity - _new_trough) / (peak_equity - _new_trough)
                 skip_reason = (
-                    f"DD_HARD_BLOCK (dd={(peak_equity - equity) / peak_equity * 100:.2f}%"
-                    f" >= {_DD_HARD_THRESHOLD * 100:.0f}%)"
+                    f"DD_HARD_BLOCK (dd={_block_dd:.2f}% >= {_DD_HARD_THRESHOLD * 100:.0f}%"
+                    f", recovery={_block_recovery:.0%}"
+                    f", trough=${_new_trough:.2f})"
+                    if _new_trough is not None
+                    else f"DD_HARD_BLOCK (dd={_block_dd:.2f}% >= {_DD_HARD_THRESHOLD * 100:.0f}%)"
                 )
                 failure_code = "FAIL_DD_PROTECTION"
 
@@ -690,8 +731,10 @@ def decide(
                     "rr": actual_rr if actual_rr > 0 else rr,
                     # Caller must apply risk_multiplier to position size.
                     # Caller must store new_peak as peak_equity on the next call.
+                    # Caller must store new_trough as dd_trough_equity on the next call.
                     "risk_multiplier": _risk_multiplier,
                     "new_peak": _new_peak,
+                    "new_trough": _new_trough,
                     "metadata": {
                         "htf_bias": htf_bias,
                         "gate_1a_pass": gate_1a_pass,
@@ -712,4 +755,4 @@ def decide(
 
     # On PASS: still return new_peak so callers can track equity highs even
     # when no trade fires (e.g. equity just set a new high with no signal).
-    return best_signal if best_signal is not None else {**_PASS, "new_peak": _new_peak}
+    return best_signal if best_signal is not None else {**_PASS, "new_peak": _new_peak, "new_trough": _new_trough}
