@@ -175,12 +175,15 @@ def run_parity_check(
     run_id: int,
     limit: int = 200,
     verbose: bool = False,
-    symbol: str = "BTCUSDT",
+    symbol: Optional[str] = None,
 ) -> Dict:
     """
     Main parity check entry point.
 
     Returns a result dict with match_rate, mismatch details, etc.
+
+    ``symbol`` is optional — when omitted the run's stored symbol from
+    backtest_runs is used. Pass an explicit value only to override.
     """
     from decision_engine_v2 import decide
 
@@ -190,9 +193,12 @@ def run_parity_check(
         conn.close()
         raise ValueError(f"Run ID {run_id} not found in backtest_runs")
 
+    # Use the run's own symbol unless the caller explicitly overrides it.
+    symbol = symbol or run_info.get("symbol") or "BTCUSDT"
+
     logger.info(
         "Parity check: run_id=%d symbol=%s status=%s trades=%s — fetching %d signals",
-        run_id, run_info.get("symbol", symbol), run_info.get("status"),
+        run_id, symbol, run_info.get("status"),
         run_info.get("total_trades"), limit,
     )
 
@@ -328,7 +334,12 @@ def _print_report(r: Dict):
     print()
 
     pass_threshold = 99.0
-    if r["match_rate"] >= pass_threshold:
+    min_signals = 100
+    total = r["signals_compared"]
+    if total < min_signals:
+        print(f"  RESULT: ✗ FAIL  (insufficient signals: {total} compared < {min_signals} required)")
+        print(f"           Increase --limit or ensure the run has >= {min_signals} signals.")
+    elif r["match_rate"] >= pass_threshold:
         print(f"  RESULT: ✓ PASS  (match_rate={r['match_rate']:.2f}% >= {pass_threshold}%)")
     else:
         print(f"  RESULT: ✗ FAIL  (match_rate={r['match_rate']:.2f}% < {pass_threshold}%)")
@@ -373,8 +384,9 @@ def main():
     else:
         _print_report(result)
 
-    # Exit 1 if parity check failed
-    if result.get("match_rate", 0) < 99.0:
+    # Exit 1 if parity check failed — requires both minimum signal count AND match rate.
+    # A 100% match rate on 5 signals is meaningless; enforce the floor before trusting the rate.
+    if result.get("signals_compared", 0) < 100 or result.get("match_rate", 0) < 99.0:
         sys.exit(1)
 
 

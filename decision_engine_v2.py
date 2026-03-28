@@ -45,10 +45,10 @@ Usage:
 DO NOT modify gate values here without updating runner.py to match.
 """
 
+import concurrent.futures
 import logging
-import threading
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
 
 from backtest.config import (
     ENTRY_THRESHOLD,
@@ -86,6 +86,12 @@ _ENABLE_15M_NY_OVERTRADE_FILTER = False  # optional NY overtrade guard
 # Detection window limits (performance)
 _DETECTION_WINDOW = 200
 _STEP_TIMEOUT_SECONDS = 10
+
+# Bounded thread pool for schematic detection.
+# Prevents unbounded daemon-thread accumulation on repeated timeouts in long-running processes.
+_DETECT_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="tct_detect"
+)
 
 
 # ── Helper functions (verbatim from runner.py) ────────────────────────
@@ -129,7 +135,7 @@ def _range_size_pct(range_info, current_price: float) -> float:
 
 # ── Module import cache ───────────────────────────────────────────────
 
-def _get_modules() -> Dict:
+def _get_modules() -> dict:
     """Import live modules once and cache. Mirrors runner._get_live_modules()."""
     if not hasattr(_get_modules, "_cache"):
         from tct_schematics import detect_tct_schematics
@@ -152,9 +158,9 @@ def _get_modules() -> Dict:
 # ── Unified decision function ─────────────────────────────────────────
 
 def decide(
-    candles_by_tf: Dict,
-    context: Dict,
-) -> Dict:
+    candles_by_tf: dict,
+    context: dict,
+) -> dict:
     """
     Unified decision engine — v14 gate logic.
 
@@ -231,7 +237,7 @@ def decide(
     current_time: Optional[datetime] = context.get("current_time")
     entry_threshold: int = context.get("entry_threshold", ENTRY_THRESHOLD)
     min_rr: float = context.get("min_rr", MIN_RR)
-    traded_bos_fingerprints: Dict = context.get("traded_bos_fingerprints") or {}
+    traded_bos_fingerprints: dict = context.get("traded_bos_fingerprints") or {}
 
     # DD protection (stateful — omit keys to disable this gate)
     peak_equity: Optional[float] = context.get("peak_equity")
@@ -244,7 +250,7 @@ def decide(
     try:
         mods = _get_modules()
     except ImportError as e:
-        logger.error("decide(): module import failed: %s", e)
+        logger.exception("decide(): module import failed: %s", e)
         return {**_PASS, "reason": f"import_error: {e}"}
 
     detect_tct_schematics = mods["detect"]
@@ -285,7 +291,7 @@ def decide(
     gate_1a_pass: bool = htf_bias != "neutral"
 
     # ── Scan MTF timeframes ───────────────────────────────────────
-    best_signal: Optional[Dict] = None
+    best_signal: Optional[dict] = None
     best_score: float = 0
 
     for tf in MTF_TIMEFRAMES:
@@ -298,24 +304,16 @@ def decide(
         # ── Schematic detection (with timeout) ───────────────────
         try:
             pc = PivotCache(df_tf, lookback=3)
-            det_result: List = [None]
-            det_error: List = [None]
 
-            def _detect(df=df_tf, pc=pc, out=det_result, err=det_error):
-                try:
-                    out[0] = detect_tct_schematics(df, [], pivot_cache=pc)
-                except Exception as ex:
-                    err[0] = ex
+            def _run_detect(df=df_tf, p=pc):
+                return detect_tct_schematics(df, [], pivot_cache=p)
 
-            t = threading.Thread(target=_detect, daemon=True)
-            t.start()
-            t.join(timeout=_STEP_TIMEOUT_SECONDS)
-            if t.is_alive():
+            _fut = _DETECT_EXECUTOR.submit(_run_detect)
+            try:
+                det = _fut.result(timeout=_STEP_TIMEOUT_SECONDS)
+            except concurrent.futures.TimeoutError:
                 logger.debug("decide(): detection timeout on %s", tf)
                 continue
-            if det_error[0]:
-                raise det_error[0]
-            det = det_result[0]
             if det is None:
                 continue
 
@@ -328,7 +326,7 @@ def decide(
             continue
 
         # ── Per-key dedup: keep most-recent BOS per model/direction ──
-        best_by_key: Dict[str, dict] = {}
+        best_by_key: dict[str, dict] = {}
         for s in all_schematics:
             if not isinstance(s, dict) or not s.get("is_confirmed"):
                 continue
@@ -470,7 +468,7 @@ def decide(
             # ── Global RR filter ──────────────────────────────────
             elif actual_rr < min_rr:
                 final_decision = "PASS"
-                skip_reason = "RR_TOO_LOW ({:.2f} < {:.2f})".format(actual_rr, min_rr)
+                skip_reason = f"RR_TOO_LOW ({actual_rr:.2f} < {min_rr:.2f})"
                 failure_code = "FAIL_RR_FILTER"
 
             # ── v14: soft DD protection (optional — needs equity state) ──
@@ -489,23 +487,19 @@ def decide(
                         _in_window = False  # reset elapsed — fall through to next gate
                 if _in_window:
                     final_decision = "PASS"
-                    skip_reason = "DD_PROTECTION (dd={:.2f}% > {:.0f}%)".format(
-                        _cur_dd, _MAX_DD_SOFT * 100
-                    )
+                    skip_reason = f"DD_PROTECTION (dd={_cur_dd:.2f}% > {_MAX_DD_SOFT * 100:.0f}%)"
                     failure_code = "FAIL_DD_PROTECTION"
 
             # ── v14: global displacement floor ────────────────────
             elif local_displacement < _MIN_DISPLACEMENT:
                 final_decision = "PASS"
-                skip_reason = "LOW_DISPLACEMENT ({:.3f} < {:.2f})".format(
-                    local_displacement, _MIN_DISPLACEMENT
-                )
+                skip_reason = f"LOW_DISPLACEMENT ({local_displacement:.3f} < {_MIN_DISPLACEMENT:.2f})"
                 failure_code = "FAIL_LOW_DISPLACEMENT"
 
             # ── v12: 15m RR strict ────────────────────────────────
             elif tf == "15m" and actual_rr < _MIN_RR_15M:
                 final_decision = "PASS"
-                skip_reason = "RR_15M_STRICT ({:.2f} < {:.2f})".format(actual_rr, _MIN_RR_15M)
+                skip_reason = f"RR_15M_STRICT ({actual_rr:.2f} < {_MIN_RR_15M:.2f})"
                 failure_code = "FAIL_RR_15M_STRICT"
 
             # ── v12: 15m Asia session block ───────────────────────
@@ -518,9 +512,7 @@ def decide(
             elif tf == "15m" and _range_size_pct(range_info, current_price) < _MIN_RANGE_PCT_15M:
                 _rpct = _range_size_pct(range_info, current_price)
                 final_decision = "PASS"
-                skip_reason = "RANGE_TOO_SMALL_15M ({:.4f} < {:.4f})".format(
-                    _rpct, _MIN_RANGE_PCT_15M
-                )
+                skip_reason = f"RANGE_TOO_SMALL_15M ({_rpct:.4f} < {_MIN_RANGE_PCT_15M:.4f})"
                 failure_code = "FAIL_RANGE_TOO_SMALL_15M"
 
             # ── Optional: 15m NY overtrade guard ─────────────────
@@ -532,9 +524,7 @@ def decide(
             # ── v14: 15m stricter displacement (3A) ──────────────
             elif tf == "15m" and local_displacement < _MIN_DISPLACEMENT_15M:
                 final_decision = "PASS"
-                skip_reason = "15M_LOW_DISPLACEMENT ({:.3f} < {:.2f})".format(
-                    local_displacement, _MIN_DISPLACEMENT_15M
-                )
+                skip_reason = f"15M_LOW_DISPLACEMENT ({local_displacement:.3f} < {_MIN_DISPLACEMENT_15M:.2f})"
                 failure_code = "FAIL_15M_LOW_DISPLACEMENT"
 
             # ═══════════════════════════════════════════════════════
@@ -561,9 +551,7 @@ def decide(
                     )
                     if _loc_fail:
                         final_decision = "PASS"
-                        skip_reason = "15M_POOR_ENTRY_LOCATION (pos={:.3f}, dir={})".format(
-                            _pos, direction
-                        )
+                        skip_reason = f"15M_POOR_ENTRY_LOCATION (pos={_pos:.3f}, dir={direction})"
                         failure_code = "FAIL_15M_POOR_ENTRY_LOCATION"
 
             # ── v14: block Model_2 on 15m (3C) ───────────────────
@@ -575,23 +563,21 @@ def decide(
             # ── v14: hard score floor (ALL models) ───────────────
             if final_decision == "TAKE" and score < _MIN_SCORE_HARD:
                 final_decision = "PASS"
-                skip_reason = "SCORE_HARD_FLOOR ({} < {})".format(score, _MIN_SCORE_HARD)
+                skip_reason = f"SCORE_HARD_FLOOR ({score} < {_MIN_SCORE_HARD})"
                 failure_code = "FAIL_SCORE_HARD_FLOOR"
 
             # ── v12/v13: Model 3 quality gates ───────────────────
             if final_decision == "TAKE" and "Model_3" in model:
                 if tf != "1h":
                     final_decision = "PASS"
-                    skip_reason = "MODEL3_TF_FILTER (tf={}, only 1h allowed)".format(tf)
+                    skip_reason = f"MODEL3_TF_FILTER (tf={tf}, only 1h allowed)"
                     failure_code = "FAIL_MODEL3_TF_FILTER"
                 else:
                     _closes = df_tf["close"].values if df_tf is not None and len(df_tf) > 0 else []
                     _trend_ok, _slope, _min_slope = _is_trending_environment(_closes)
                     if not _trend_ok:
                         final_decision = "PASS"
-                        skip_reason = "MODEL3_NO_TREND (slope={:.4f} < adaptive {:.4f})".format(
-                            abs(_slope), _min_slope
-                        )
+                        skip_reason = f"MODEL3_NO_TREND (slope={abs(_slope):.4f} < adaptive {_min_slope:.4f})"
                         failure_code = "FAIL_MODEL3_NO_TREND"
                     else:
                         _r_high = range_info.get("high", 0) if isinstance(range_info, dict) else 0
@@ -601,15 +587,13 @@ def decide(
                             _dist_pct = abs(entry_price - _range_mid) / _range_mid
                             if _dist_pct > _MODEL3_MAX_DISTANCE_PCT:
                                 final_decision = "PASS"
-                                skip_reason = "MODEL3_EXTENDED (dist={:.4f} > {:.4f})".format(
-                                    _dist_pct, _MODEL3_MAX_DISTANCE_PCT
-                                )
+                                skip_reason = f"MODEL3_EXTENDED (dist={_dist_pct:.4f} > {_MODEL3_MAX_DISTANCE_PCT:.4f})"
                                 failure_code = "FAIL_MODEL3_EXTENDED"
 
             # ── Score threshold ───────────────────────────────────
             if final_decision == "TAKE" and score < entry_threshold:
                 final_decision = "PASS"
-                skip_reason = "SCORE_BELOW_THRESHOLD ({} < {})".format(score, entry_threshold)
+                skip_reason = f"SCORE_BELOW_THRESHOLD ({score} < {entry_threshold})"
                 failure_code = "FAIL_1D_SCORE"
 
             # ── BOS fingerprint dedup ─────────────────────────────
@@ -621,12 +605,18 @@ def decide(
                 ), 0)
                 fp = (tf, model, direction, entry_snap, bos_price)
                 fp_traded_at = traded_bos_fingerprints.get(fp)
-                if fp_traded_at is not None:
+                if isinstance(fp_traded_at, datetime):
                     age_hours = (current_time - fp_traded_at).total_seconds() / 3600
                     if age_hours < 48:
                         final_decision = "PASS"
-                        skip_reason = "DUPLICATE_BOS (same schematic {:.0f}h ago)".format(age_hours)
+                        skip_reason = f"DUPLICATE_BOS (same schematic {age_hours:.0f}h ago)"
                         failure_code = "FAIL_DUPLICATE_BOS"
+                elif fp_traded_at is not None:
+                    # Caller stored a non-datetime value — log and skip dedup rather than crash.
+                    logger.warning(
+                        "decide(): traded_bos_fingerprints[%s] has unexpected type %s — ignoring entry",
+                        fp, type(fp_traded_at).__name__,
+                    )
 
             logger.debug(
                 "decide(): tf=%s model=%s dir=%s score=%s rr=%.2f "

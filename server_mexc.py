@@ -9,7 +9,7 @@ import time
 import httpx
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from range_utils import check_equilibrium_touch
@@ -2931,6 +2931,20 @@ def validate_1D(context: Dict) -> Dict:
     except Exception:
         return {"passed": False, "ExecutionConfidence_Total": 0.0}
 
+def _build_candles_by_tf(context: Dict) -> Dict:
+    """Extract HTF (4h) and LTF (15m) DataFrames from a gate context dict.
+
+    Returns only keys whose DataFrames are present so callers can pass the
+    result directly to decision_engine_v2.decide() without extra guards.
+    """
+    out: Dict = {}
+    if context.get("htf_candles") is not None:
+        out["4h"] = context["htf_candles"]
+    if context.get("ltf_candles") is not None:
+        out["15m"] = context["ltf_candles"]
+    return out
+
+
 def validate_gates(context: Dict) -> Dict:
     # ── Unified engine path (feature-flagged, default OFF) ────────────
     # When USE_UNIFIED_ENGINE is True, route through decision_engine_v2.decide()
@@ -2948,11 +2962,7 @@ def validate_gates(context: Dict) -> Dict:
     if USE_UNIFIED_ENGINE and _v2_available:
         # Build candles_by_tf from whatever the endpoint provided.
         # htf_candles = 4h, ltf_candles = 15m (from /api/validate fetch).
-        _candles_by_tf: Dict = {}
-        if context.get("htf_candles") is not None:
-            _candles_by_tf["4h"] = context["htf_candles"]
-        if context.get("ltf_candles") is not None:
-            _candles_by_tf["15m"] = context["ltf_candles"]
+        _candles_by_tf: Dict = _build_candles_by_tf(context)
 
         _v2_ctx = {
             "current_price": context.get("current_price", 0.0),
@@ -3002,11 +3012,7 @@ def validate_gates(context: Dict) -> Dict:
     # ── Shadow mode: compute v2 result alongside legacy (no side effects) ─
     if _v2_available:
         try:
-            _candles_by_tf = {}
-            if context.get("htf_candles") is not None:
-                _candles_by_tf["4h"] = context["htf_candles"]
-            if context.get("ltf_candles") is not None:
-                _candles_by_tf["15m"] = context["ltf_candles"]
+            _candles_by_tf = _build_candles_by_tf(context)
             _v2_shadow = _v2_decide(
                 _candles_by_tf,
                 {
@@ -3022,7 +3028,7 @@ def validate_gates(context: Dict) -> Dict:
                 _v2_shadow.get("failure_code"),
             )
         except Exception as _e:
-            logger.debug("SHADOW v2 error: %s", _e)
+            logger.warning("SHADOW v2 error [%s]: %s", type(_e).__name__, _e)
 
     # ── Legacy gate pipeline (unchanged) ─────────────────────────────
     context["1A"] = validate_1A(context)
