@@ -353,8 +353,13 @@
   ],
   "total_wins": 0,
   "total_losses": 9,
-  "last_scan_time": "2026-03-28T18:00:06.419385+00:00",
+  "last_scan_time": "2026-03-28T18:57:47.626327+00:00",
   "last_scan_action": "no_qualifying_setups",
   "last_error": null,
-  "trading_mode": "claude"
+  "trading_mode": "claude",
+  "peak_balance": 4418.9,
+  "dd_triggered_at": null,
+  "dd_trough_balance": null,
+  "last_accepted_trade_ts": null,
+  "last_accepted_trade_priority": 0.0
 }
