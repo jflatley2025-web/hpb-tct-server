@@ -59,7 +59,7 @@ l('  Step interval:     1h')
 l(f'  Score threshold:   {cfg.get("entry_threshold", cfg.get("threshold", 50))}')
 l('  Warmup days:       90  (signals enabled from 2025-06-30)')
 l('  Starting balance:  $5,000.00')
-l(f'  Engine version:    {cfg.get("engine_version", 11)}')
+l(f'  Engine version:    {_engine}')
 l(f'  Run completed:     {completed}')
 l('')
 l('CORE METRICS')
@@ -210,7 +210,7 @@ for t in trades:
 
 l('')
 l('='*100)
-l('END OF REPORT  |  RUN 27  |  ENGINE v11  |  133 TRADES  |  81.2% WR  |  PF 4.97  |  +$11,117.58')
+l(f'END OF REPORT  |  RUN 27  |  ENGINE v{_engine}  |  {total} TRADES  |  {float(wr):.1f}% WR  |  PF {pf:.2f}  |  +${fmt(net)}')
 l('='*100)
 
 print('\n'.join(out))
