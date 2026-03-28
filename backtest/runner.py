@@ -60,7 +60,7 @@ from backtest.session import get_session
 
 logger = logging.getLogger("backtest.runner")
 
-# ── v12/v13 filter constants ───────────────────────────────────────────
+# ── v12/v13/v14 filter constants ──────────────────────────────────────
 # 15m quality gates (local overrides — global MIN_RR and threshold unchanged)
 _MIN_RR_15M = 0.8            # tighter RR for 15m entries
 _MIN_RR_15M_RELAXED = 0.7    # fallback for re-run if 15m trade count < 3
@@ -68,9 +68,19 @@ _MIN_RANGE_PCT_15M = 0.003   # range must be >= 0.3% of price on 15m
 
 # Model 3 quality gates
 _TREND_LOOKBACK = 50         # candles to measure slope and volatility over
-_TREND_SLOPE_FLOOR = 0.0015  # absolute minimum slope regardless of volatility
+_TREND_SLOPE_FLOOR = 0.003   # v14: raised from 0.0015 — filters weaker continuation trends
 _TREND_VOL_MULTIPLIER = 0.5  # slope threshold = max(floor, vol * multiplier)
 _MODEL3_MAX_DISTANCE_PCT = 0.015  # entry must be within 1.5% of range midpoint
+
+# v14: global displacement quality gate (applied after RR filter, before score)
+_MIN_DISPLACEMENT = 0.50     # minimum local_displacement for any signal
+_MIN_DISPLACEMENT_15M = 0.65 # stricter displacement floor for 15m specifically
+
+# v14: hard score floor (below threshold trades are removed before score gate)
+_MIN_SCORE_HARD = 65         # score 57-64 confirmed losers — blocked regardless of threshold
+
+# v14: soft drawdown protection — pause new entries during cluster losses
+_MAX_DD_SOFT = 0.04          # halt new signals when current DD exceeds 4%
 
 # Optional 15m NY overtrade guard — set True for re-run only if trade count > 55
 _ENABLE_15M_NY_OVERTRADE_FILTER = False
@@ -721,7 +731,21 @@ def run_gate_pipeline(
                 skip_reason = "RR_TOO_LOW ({:.2f} < {:.2f})".format(actual_rr, min_rr)
                 failure_code = "FAIL_RR_FILTER"
 
-            # ── v12: 15m hardening gates ───────────────────────────────
+            # ── v14: soft drawdown protection ─────────────────────────
+            elif state.peak_equity > 0 and (state.peak_equity - state.equity) / state.peak_equity > _MAX_DD_SOFT:
+                _cur_dd = (state.peak_equity - state.equity) / state.peak_equity * 100
+                final_decision = "SKIP"
+                skip_reason = "DD_PROTECTION (dd={:.2f}% > {:.0f}%)".format(_cur_dd, _MAX_DD_SOFT * 100)
+                failure_code = "FAIL_DD_PROTECTION"
+                logger.info("DD_PROTECTION | current_dd=%.2f%% | pausing new entries", _cur_dd)
+
+            # ── v14: global displacement quality gate ──────────────────
+            elif local_displacement < _MIN_DISPLACEMENT:
+                final_decision = "SKIP"
+                skip_reason = "LOW_DISPLACEMENT ({:.3f} < {:.2f})".format(local_displacement, _MIN_DISPLACEMENT)
+                failure_code = "FAIL_LOW_DISPLACEMENT"
+
+            # ── v12/v14: 15m hardening gates ──────────────────────────
             elif tf == "15m" and actual_rr < _MIN_RR_15M:
                 final_decision = "SKIP"
                 skip_reason = "RR_15M_STRICT ({:.2f} < {:.2f})".format(actual_rr, _MIN_RR_15M)
@@ -751,6 +775,42 @@ def run_gate_pipeline(
                 skip_reason = "15M_NY_OVERTRADE_GUARD"
                 failure_code = "FAIL_15M_NY_OVERTRADE"
                 logger.info("15M_FILTER | NY overtrade guard active | rr=%.2f", actual_rr)
+
+            # ── v14: 15m stricter displacement gate (3A) ──────────────
+            elif tf == "15m" and local_displacement < _MIN_DISPLACEMENT_15M:
+                final_decision = "SKIP"
+                skip_reason = "15M_LOW_DISPLACEMENT ({:.3f} < {:.2f})".format(local_displacement, _MIN_DISPLACEMENT_15M)
+                failure_code = "FAIL_15M_LOW_DISPLACEMENT"
+                logger.info(
+                    "15M_FILTER | low_displacement=%.3f (need %.2f) | session=%s",
+                    local_displacement, _MIN_DISPLACEMENT_15M, session_name,
+                )
+
+            # ── v14: 15m entry location gate (3B) — must be near range extreme ──
+            elif tf == "15m" and isinstance(range_info, dict) and range_info.get("high") and range_info.get("low"):
+                _r_high_loc = float(range_info["high"])
+                _r_low_loc = float(range_info["low"])
+                if _r_high_loc > _r_low_loc and entry_price > 0:
+                    _pos = (entry_price - _r_low_loc) / (_r_high_loc - _r_low_loc)
+                    _loc_fail = (
+                        (direction == "bullish" and _pos > 0.4) or
+                        (direction == "bearish" and _pos < 0.6)
+                    )
+                    if _loc_fail:
+                        final_decision = "SKIP"
+                        skip_reason = "15M_POOR_ENTRY_LOCATION (pos={:.3f}, dir={})".format(_pos, direction)
+                        failure_code = "FAIL_15M_POOR_ENTRY_LOCATION"
+                        logger.info(
+                            "15M_FILTER | poor_entry_location pos=%.3f | dir=%s | session=%s",
+                            _pos, direction, session_name,
+                        )
+
+            # ── v14: block Model_2 on 15m (3C) — confirmed weak ───────
+            elif tf == "15m" and model == "Model_2":
+                final_decision = "SKIP"
+                skip_reason = "MODEL2_15M_BLOCK"
+                failure_code = "FAIL_MODEL2_15M_BLOCK"
+                logger.info("15M_FILTER | Model_2 blocked on 15m | session=%s", session_name)
 
             # ── v12/v13: Model 3 quality gates ────────────────────────
             elif "Model_3" in model and tf != "1h":
@@ -792,6 +852,12 @@ def run_gate_pipeline(
                                 "MODEL3_CHECK | tf=%s | EXTENDED dist=%.4f (max %.4f)",
                                 tf, _dist_pct, _MODEL3_MAX_DISTANCE_PCT,
                             )
+
+            # ── v14: hard score floor — below this score always filtered ──
+            elif score < _MIN_SCORE_HARD:
+                final_decision = "SKIP"
+                skip_reason = "SCORE_HARD_FLOOR ({} < {})".format(score, _MIN_SCORE_HARD)
+                failure_code = "FAIL_SCORE_HARD_FLOOR"
 
             elif score < entry_threshold:
                 final_decision = "SKIP"
@@ -852,7 +918,15 @@ def run_gate_pipeline(
                 "stop_price": stop_price,
                 "target_price": target_price,
                 "rr": actual_rr if actual_rr > 0 else rr,
-                "schematic_json": schematic if replay_mode else None,
+                "schematic_json": {
+                    "bos_idx": schematic.get("bos_idx"),
+                    "tap1": schematic.get("tap1_price"),
+                    "tap2": schematic.get("tap2_price"),
+                    "tap3": schematic.get("tap3_price"),
+                    "range_start": schematic.get("range_start_idx"),
+                    "range_end": schematic.get("range_end_idx"),
+                    "sweep_type": schematic.get("sweep_type"),
+                } if schematic else None,
             }
 
             # Log the signal
@@ -976,7 +1050,7 @@ def run_backtest(
         "tp1_close_pct": effective_tp1_close_pct,
         "tp1_level_pct": effective_tp1_level_pct,
         "trail_factor": effective_trail_factor,
-        "engine_version": 13,  # v13: adaptive trend filter, funnel diagnostics, Model 3 distance gate, 15m NY overtrade guard
+        "engine_version": 14,  # v14: displacement gate, hard score floor, 15m entry location/displacement/M2 block, raised trend floor, soft DD guard, schematic_json persist
     }
 
     run_id = create_run(
