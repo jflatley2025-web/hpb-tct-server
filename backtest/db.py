@@ -440,6 +440,32 @@ def insert_signal(conn, run_id: int, signal: dict) -> int:
     return row_id
 
 
+# ── Model name normalization ──────────────────────────────────────────
+
+def normalize_model(model: Optional[str]) -> Optional[str]:
+    """Map legacy model names from historical DB rows to current taxonomy.
+
+    Historical rows written before the Model_3 → continuation rename contain
+    the string "Model_3".  New rows use "Model_1_CONTINUATION" or
+    "Model_2_CONTINUATION".  Call this wherever model names are read from DB
+    for display, grouping, or analysis so both old and new rows behave the same.
+    """
+    if model == "Model_3":
+        return "Model_1_CONTINUATION"
+    return model
+
+
+def model_family(model: Optional[str]) -> Optional[str]:
+    """Return the top-level family ("Model_1" or "Model_2") for a model string."""
+    if not model:
+        return None
+    if "Model_2" in model:
+        return "Model_2"
+    if "Model_1" in model or model == "Model_3":
+        return "Model_1"
+    return model
+
+
 # ── Entrypoint ────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

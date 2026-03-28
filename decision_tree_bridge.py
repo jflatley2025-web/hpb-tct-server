@@ -1015,8 +1015,8 @@ def build_5a_inputs(schematic: Dict, range_eval: RangeEvaluation) -> TCTSchemati
     sch_dir = Dir5A.ACCUMULATION if is_acc else Dir5A.DISTRIBUTION
 
     # Determine model type
-    if "Model_3" in model:
-        # Model 3 (continuation) uses same tap structure — map to MODEL_1
+    if "_CONTINUATION" in model or model == "Model_3":
+        # Continuation models use same tap structure — map to MODEL_1
         # for the 5A decision tree which only knows MODEL_1/MODEL_2.
         model_type = MT5A.MODEL_1
     elif "Model_1" in model:
@@ -1080,8 +1080,8 @@ def build_5b_inputs(schematic: Dict, eval_5a: TCTSchematicEvaluation,
     is_acc = direction == "bullish"
     sch_dir = Dir5B.ACCUMULATION if is_acc else Dir5B.DISTRIBUTION
 
-    if "Model_3" in model:
-        model_type = MT5B.MODEL_1  # Model 3 uses same structure as MODEL_1
+    if "_CONTINUATION" in model or model == "Model_3":
+        model_type = MT5B.MODEL_1  # continuation uses same structure as MODEL_1
     elif "Model_1" in model:
         model_type = MT5B.MODEL_1
     elif "Model_2" in model:
@@ -1602,8 +1602,8 @@ def compute_composite_score_v2(
 
     model_str = schematic.get("model", "")
 
-    if "Model_3" in model_str:
-        model_type = "Model_3"
+    if "_CONTINUATION" in model_str or model_str == "Model_3":
+        model_type = "_CONTINUATION"
     elif "Model_1" in model_str:
         model_type = "Model_1"
     elif "Model_2" in model_str:
@@ -1626,8 +1626,8 @@ def compute_composite_score_v2(
         else:
             tap_valid = tap3["price"] < tap2["price"]
 
-    elif model_type == "Model_3":
-        # Model 3 uses same tap structure as Model 1 or 2 —
+    elif model_type == "_CONTINUATION":
+        # Continuation models use same tap structure as Model_1 or Model_2 —
         # already validated by _build_accumulation/distribution_schematic.
         # Accept both deviation patterns (M1-style lower/higher OR M2-style HL/LH).
         tap_valid = True

@@ -720,18 +720,18 @@ def decide(
                 skip_reason = f"SCORE_HARD_FLOOR ({score} < {_MIN_SCORE_HARD})"
                 failure_code = "FAIL_SCORE_HARD_FLOOR"
 
-            # ── v12/v13: Model 3 quality gates ───────────────────
-            if final_decision == "TAKE" and "Model_3" in model:
+            # ── v12/v13: Continuation model quality gates ─────────
+            if final_decision == "TAKE" and "_CONTINUATION" in model:
                 if tf != "1h":
                     final_decision = "PASS"
-                    skip_reason = f"MODEL3_TF_FILTER (tf={tf}, only 1h allowed)"
+                    skip_reason = f"CONT_TF_FILTER (tf={tf}, only 1h allowed)"
                     failure_code = "FAIL_MODEL3_TF_FILTER"
                 else:
                     _closes = df_tf["close"].values if df_tf is not None and len(df_tf) > 0 else []
                     _trend_ok, _slope, _min_slope = _is_trending_environment(_closes)
                     if not _trend_ok:
                         final_decision = "PASS"
-                        skip_reason = f"MODEL3_NO_TREND (slope={abs(_slope):.4f} < adaptive {_min_slope:.4f})"
+                        skip_reason = f"CONT_NO_TREND (slope={abs(_slope):.4f} < adaptive {_min_slope:.4f})"
                         failure_code = "FAIL_MODEL3_NO_TREND"
                     else:
                         _r_high = range_info.get("high", 0) if isinstance(range_info, dict) else 0
@@ -741,7 +741,7 @@ def decide(
                             _dist_pct = abs(entry_price - _range_mid) / _range_mid
                             if _dist_pct > _MODEL3_MAX_DISTANCE_PCT:
                                 final_decision = "PASS"
-                                skip_reason = f"MODEL3_EXTENDED (dist={_dist_pct:.4f} > {_MODEL3_MAX_DISTANCE_PCT:.4f})"
+                                skip_reason = f"CONT_EXTENDED (dist={_dist_pct:.4f} > {_MODEL3_MAX_DISTANCE_PCT:.4f})"
                                 failure_code = "FAIL_MODEL3_EXTENDED"
 
             # ── Score threshold ───────────────────────────────────

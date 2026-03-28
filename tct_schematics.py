@@ -657,7 +657,7 @@ class TCTSchematicDetector:
 
         # --- Re-accumulation (bullish continuation) ---
         re_acc_ranges = self._find_continuation_ranges("bullish")
-        logger.debug("[M3] bullish continuation: %d candidate ranges found", len(re_acc_ranges))
+        logger.debug("[CONT] bullish continuation: %d candidate ranges found", len(re_acc_ranges))
         for range_data in re_acc_ranges:
             try:
                 tap1 = self._create_tab(range_data, "range_low", "tap1_acc")
@@ -677,17 +677,19 @@ class TCTSchematicDetector:
                 for tap3, sub in [(tap3_m1, "a"), (tap3_m2, "b")]:
                     if tap3 is None:
                         continue
+                    # sub=="a" uses M1 tap structure (lower tap3), sub=="b" uses M2 (higher)
+                    _cont_model = "Model_1_CONTINUATION" if sub == "a" else "Model_2_CONTINUATION"
                     schematic = self._build_accumulation_schematic(
                         range_data, tap1, tap2, tap3,
-                        model_type="Model_3"
+                        model_type=_cont_model
                     )
                     if schematic:
                         bos_info = schematic.get("bos_confirmation") or {}
                         bos_idx_val = bos_info.get("bos_idx")
                         n_candles = len(self.candles)
                         logger.debug(
-                            "[M3] re_acc schematic built: bos_idx=%s, confirmed=%s, n=%d",
-                            bos_idx_val, schematic.get("is_confirmed"), n_candles
+                            "[CONT] re_acc schematic built (%s): bos_idx=%s, confirmed=%s, n=%d",
+                            _cont_model, bos_idx_val, schematic.get("is_confirmed"), n_candles
                         )
                         # BOS recency gate: reject schematics where BOS formed
                         # more than 30 candles ago. Checking bos_idx (not range
@@ -696,7 +698,7 @@ class TCTSchematicDetector:
                         bos_recency = 30
                         if bos_idx_val is not None and bos_idx_val < (n_candles - bos_recency):
                             logger.debug(
-                                "[M3] rejected re_acc: bos_idx=%d < threshold=%d",
+                                "[CONT] rejected re_acc: bos_idx=%d < threshold=%d",
                                 bos_idx_val, n_candles - bos_recency
                             )
                             continue
@@ -708,12 +710,12 @@ class TCTSchematicDetector:
                         schematics.append(schematic)
 
             except Exception as e:
-                logger.debug(f"Model 3 re-accumulation error: {e}")
+                logger.debug(f"Continuation re-accumulation error: {e}")
                 continue
 
         # --- Re-distribution (bearish continuation) ---
         re_dist_ranges = self._find_continuation_ranges("bearish")
-        logger.debug("[M3] bearish continuation: %d candidate ranges found", len(re_dist_ranges))
+        logger.debug("[CONT] bearish continuation: %d candidate ranges found", len(re_dist_ranges))
         for range_data in re_dist_ranges:
             try:
                 tap1 = self._create_tab(range_data, "range_high", "tap1_dist")
@@ -733,33 +735,35 @@ class TCTSchematicDetector:
                 for tap3, sub in [(tap3_m1, "a"), (tap3_m2, "b")]:
                     if tap3 is None:
                         continue
+                    # sub=="a" uses M1 tap structure (higher tap3), sub=="b" uses M2 (lower)
+                    _cont_model = "Model_1_CONTINUATION" if sub == "a" else "Model_2_CONTINUATION"
                     # Sweep gate: reject true breaks (same as Model_1/2 distribution)
                     sweep = self._validate_distribution_sweep(
                         range_data, tap2, tap3
                     )
                     if sweep["has_sweep"] and sweep["classification"] == "true_break":
                         logger.debug(
-                            "Model_3 re-distribution aborted: true_break "
+                            "continuation re-distribution aborted: true_break "
                             "(swept=%s)", sweep.get("pools_swept")
                         )
                         continue
                     schematic = self._build_distribution_schematic(
                         range_data, tap1, tap2, tap3,
-                        model_type="Model_3"
+                        model_type=_cont_model
                     )
                     if schematic:
                         bos_info = schematic.get("bos_confirmation") or {}
                         bos_idx_val = bos_info.get("bos_idx")
                         n_candles = len(self.candles)
                         logger.debug(
-                            "[M3] re_dist schematic built: bos_idx=%s, confirmed=%s, n=%d",
-                            bos_idx_val, schematic.get("is_confirmed"), n_candles
+                            "[CONT] re_dist schematic built (%s): bos_idx=%s, confirmed=%s, n=%d",
+                            _cont_model, bos_idx_val, schematic.get("is_confirmed"), n_candles
                         )
                         # BOS recency gate (same logic as re-accumulation above)
                         bos_recency = 30
                         if bos_idx_val is not None and bos_idx_val < (n_candles - bos_recency):
                             logger.debug(
-                                "[M3] rejected re_dist: bos_idx=%d < threshold=%d",
+                                "[CONT] rejected re_dist: bos_idx=%d < threshold=%d",
                                 bos_idx_val, n_candles - bos_recency
                             )
                             continue
@@ -772,7 +776,7 @@ class TCTSchematicDetector:
                         schematics.append(schematic)
 
             except Exception as e:
-                logger.debug(f"Model 3 re-distribution error: {e}")
+                logger.debug(f"Continuation re-distribution error: {e}")
                 continue
 
         # Partition by direction, sort/cap each side independently
@@ -890,7 +894,7 @@ class TCTSchematicDetector:
                     range_high_idx, range_low_idx = best_anchor_idx, j
                     eq_anchor_idx = best_anchor_idx
                     direction_label = "accumulation"
-                    log_msg = "[M3] accepted bullish range: high_idx=%d, low_idx=%d, n=%d"
+                    log_msg = "[CONT] accepted bullish range: high_idx=%d, low_idx=%d, n=%d"
                     log_args = (best_anchor_idx, j, n)
                 else:
                     range_high = float(candles.iloc[j]["high"])
@@ -899,7 +903,7 @@ class TCTSchematicDetector:
                     range_high_idx, range_low_idx = j, best_anchor_idx
                     eq_anchor_idx = best_anchor_idx
                     direction_label = "distribution"
-                    log_msg = "[M3] accepted bearish range: low_idx=%d, high_idx=%d, n=%d"
+                    log_msg = "[CONT] accepted bearish range: low_idx=%d, high_idx=%d, n=%d"
                     log_args = (best_anchor_idx, j, n)
 
                 if range_high <= range_low * 1.003:
