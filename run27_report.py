@@ -1,6 +1,12 @@
-import psycopg2, json
+import psycopg2, json, os
 
-conn = psycopg2.connect(host='localhost', dbname='first_db_local', user='bulldog', password='Schlittlebah44!', port=5432)
+conn = psycopg2.connect(
+    host=os.environ.get("BACKTEST_DB_HOST", "localhost"),
+    dbname=os.environ.get("BACKTEST_DB_NAME", "first_db_local"),
+    user=os.environ.get("BACKTEST_DB_USER", "bulldog"),
+    password=os.environ.get("BACKTEST_DB_PASSWORD", ""),
+    port=int(os.environ.get("BACKTEST_DB_PORT", "5432")),
+)
 cur = conn.cursor()
 
 cur.execute("SELECT total_trades, wins, losses, win_rate, final_balance, max_drawdown_pct, starting_balance, completed_at, config_json FROM backtest_runs WHERE id=27")
@@ -40,7 +46,8 @@ def l(s=''):
     out.append(s)
 
 l('='*100)
-l('BACKTEST REPORT  |  RUN 27  |  ENGINE v11  |  OFFICIAL v11 BASELINE')
+_engine = cfg.get("engine_version", cfg.get("engine", 11))
+l(f'BACKTEST REPORT  |  RUN 27  |  ENGINE v{_engine}  |  OFFICIAL v11 BASELINE')
 l('='*100)
 l('')
 l('CONFIGURATION')
@@ -49,7 +56,7 @@ l('  Exchange:          Binance (simulated, closed-candle fills, no slippage mod
 l('  Pair:              BTCUSDT')
 l('  Period:            2025-04-01  to  2026-03-24')
 l('  Step interval:     1h')
-l(f'  Score threshold:   {cfg.get("threshold", 50)}')
+l(f'  Score threshold:   {cfg.get("entry_threshold", cfg.get("threshold", 50))}')
 l('  Warmup days:       90  (signals enabled from 2025-06-30)')
 l('  Starting balance:  $5,000.00')
 l(f'  Engine version:    {cfg.get("engine_version", 11)}')
@@ -140,8 +147,6 @@ for t in trades:
     wl = 'WIN' if is_win else 'LOSS'
     tp1_s = f'${float(tp1_price):,.2f}' if tp1_price else 'N/A'
     tp1_hit_s = 'HIT' if tp1_hit else 'MISS'
-    mfe_s = f'{float(mfe):.2f}%' if mfe else 'N/A'
-    mae_s = f'{float(mae):.2f}%' if mae else 'N/A'
     lev_s = f'{float(leverage):.1f}x' if leverage else '1.0x'
     score_s = f'{float(entry_score):.1f}' if entry_score else 'N/A'
     opened_s = str(opened_at)[:19] if opened_at else 'N/A'
@@ -150,7 +155,9 @@ for t in trades:
     stop_f = float(stop_price)
     target_f = float(target_price)
     exit_f = float(exit_price)
-    size_f = float(position_size)
+    # position_size is USD notional — convert to BTC quantity for price-distance math
+    size_notional = float(position_size)
+    size_qty = size_notional / entry_f  # BTC quantity
     risk_f = float(risk_amount)
     rr_f = float(rr)
     pnl_f = float(pnl_dollars)
@@ -159,6 +166,11 @@ for t in trades:
     stop_dist_pct = abs(entry_f - stop_f) / entry_f * 100
     target_dist_pct = abs(target_f - entry_f) / entry_f * 100
     exit_dist_pct = abs(exit_f - entry_f) / entry_f * 100
+    # MFE/MAE are stored as absolute price deltas — convert to % of entry
+    mfe_f = float(mfe) if mfe else 0.0
+    mae_f = abs(float(mae)) if mae else 0.0
+    mfe_s = f'{mfe_f:.2f} pts ({mfe_f / entry_f * 100:.3f}%)' if mfe else 'N/A'
+    mae_s = f'{mae_f:.2f} pts ({mae_f / entry_f * 100:.3f}%)' if mae else 'N/A'
     bal_before = bal_f - pnl_f
     pnl_sign = '+' if pnl_f >= 0 else ''
 
@@ -176,14 +188,14 @@ for t in trades:
     l('')
     l('  --- PRICES ---')
     l(f'  Entry price:    ${entry_f:,.2f}')
-    l(f'  Stop loss:      ${stop_f:,.2f}  ({stop_dist_pct:.2f}% from entry  |  dollar risk ${abs(entry_f - stop_f) * size_f:.2f})')
+    l(f'  Stop loss:      ${stop_f:,.2f}  ({stop_dist_pct:.2f}% from entry  |  dollar risk ${abs(entry_f - stop_f) * size_qty:.2f})')
     l(f'  Target price:   ${target_f:,.2f}  ({target_dist_pct:.2f}% from entry  |  RR {rr_f:.2f})')
     l(f'  TP1 price:      {tp1_s:<15}  ({tp1_hit_s})')
     l(f'  Exit price:     ${exit_f:,.2f}  ({exit_dist_pct:.2f}% from entry)')
     l(f'  Exit reason:    {exit_reason}')
     l('')
     l('  --- POSITION ---')
-    l(f'  Size:           {size_f:.6f} BTC')
+    l(f'  Size:           {size_qty:.6f} BTC  (${size_notional:,.2f} notional)')
     l(f'  Risk amount:    ${risk_f:.2f}')
     l(f'  Leverage:       {lev_s}')
     l(f'  Entry score:    {score_s}')

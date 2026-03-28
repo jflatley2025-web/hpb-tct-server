@@ -81,6 +81,8 @@ _MIN_SCORE_HARD = 65         # score 57-64 confirmed losers — blocked regardle
 
 # v14: soft drawdown protection — pause new entries during cluster losses
 _MAX_DD_SOFT = 0.04          # halt new signals when current DD exceeds 4%
+_DD_RESET_HOURS = 72         # after this many hours in DD protection, reset peak to current
+                              # so trading can resume (prevents permanent halt in backtest)
 
 # Optional 15m NY overtrade guard — set True for re-run only if trade count > 55
 _ENABLE_15M_NY_OVERTRADE_FILTER = False
@@ -194,6 +196,8 @@ class BacktestState:
     signals_15m_detected: int = 0  # 15m schematics that entered gate pipeline
     signals_15m_passed: int = 0    # survived all 15m-specific gates
     trades_15m: int = 0            # resulted in a TAKE trade
+    # v14: DD protection state — tracks when protection first triggered
+    dd_protection_triggered_at: Optional[datetime] = None  # None = not in protection
 
 
 # ── Multi-TF Synchronization ─────────────────────────────────────────
@@ -732,12 +736,34 @@ def run_gate_pipeline(
                 failure_code = "FAIL_RR_FILTER"
 
             # ── v14: soft drawdown protection ─────────────────────────
+            # Pauses new entries during loss clusters. Automatically resets after
+            # _DD_RESET_HOURS so a permanent halt cannot occur in backtesting.
             elif state.peak_equity > 0 and (state.peak_equity - state.equity) / state.peak_equity > _MAX_DD_SOFT:
                 _cur_dd = (state.peak_equity - state.equity) / state.peak_equity * 100
-                final_decision = "SKIP"
-                skip_reason = "DD_PROTECTION (dd={:.2f}% > {:.0f}%)".format(_cur_dd, _MAX_DD_SOFT * 100)
-                failure_code = "FAIL_DD_PROTECTION"
-                logger.info("DD_PROTECTION | current_dd=%.2f%% | pausing new entries", _cur_dd)
+                # First trigger: record start time
+                if state.dd_protection_triggered_at is None:
+                    state.dd_protection_triggered_at = current_time
+                    logger.info(
+                        "DD_PROTECTION | triggered | current_dd=%.2f%% | pausing new entries",
+                        _cur_dd,
+                    )
+                # Time-based reset: after _DD_RESET_HOURS, re-baseline peak_equity so
+                # trading can resume. This prevents permanent halt when equity stays flat.
+                _hours_in_dd = (current_time - state.dd_protection_triggered_at).total_seconds() / 3600
+                if _hours_in_dd >= _DD_RESET_HOURS:
+                    logger.info(
+                        "DD_PROTECTION | %.0fh elapsed — resetting peak_equity $%.2f -> $%.2f to resume",
+                        _hours_in_dd, state.peak_equity, state.equity,
+                    )
+                    state.peak_equity = state.equity
+                    state.dd_protection_triggered_at = None
+                    # Don't skip — fall through to next gate by not setting failure_code
+                else:
+                    final_decision = "SKIP"
+                    skip_reason = "DD_PROTECTION (dd={:.2f}% > {:.0f}%, {:.0f}h/{:.0f}h)".format(
+                        _cur_dd, _MAX_DD_SOFT * 100, _hours_in_dd, _DD_RESET_HOURS,
+                    )
+                    failure_code = "FAIL_DD_PROTECTION"
 
             # ── v14: global displacement quality gate ──────────────────
             elif local_displacement < _MIN_DISPLACEMENT:
@@ -786,8 +812,10 @@ def run_gate_pipeline(
                     local_displacement, _MIN_DISPLACEMENT_15M, session_name,
                 )
 
-            # ── v14: 15m entry location gate (3B) — must be near range extreme ──
-            elif tf == "15m" and isinstance(range_info, dict) and range_info.get("high") and range_info.get("low"):
+            # ── v14: 15m entry location gate (3B) ─────────────────────
+            # Standalone if-guard (not elif) so it never short-circuits the
+            # Model_2 block, score gates, or BOS dedup below.
+            if final_decision == "TAKE" and tf == "15m" and isinstance(range_info, dict) and range_info.get("high") and range_info.get("low"):
                 _r_high_loc = float(range_info["high"])
                 _r_low_loc = float(range_info["low"])
                 if _r_high_loc > _r_low_loc and entry_price > 0:
@@ -806,67 +834,73 @@ def run_gate_pipeline(
                         )
 
             # ── v14: block Model_2 on 15m (3C) — confirmed weak ───────
-            elif tf == "15m" and model == "Model_2":
+            # Standalone if-guard: runs even when the location check above passed.
+            if final_decision == "TAKE" and tf == "15m" and model == "Model_2":
                 final_decision = "SKIP"
                 skip_reason = "MODEL2_15M_BLOCK"
                 failure_code = "FAIL_MODEL2_15M_BLOCK"
                 logger.info("15M_FILTER | Model_2 blocked on 15m | session=%s", session_name)
 
-            # ── v12/v13: Model 3 quality gates ────────────────────────
-            elif "Model_3" in model and tf != "1h":
-                final_decision = "SKIP"
-                skip_reason = "MODEL3_TF_FILTER (tf={}, only 1h allowed)".format(tf)
-                failure_code = "FAIL_MODEL3_TF_FILTER"
-                logger.info(
-                    "MODEL3_CHECK | tf=%s BLOCKED (1h only) | trend not evaluated", tf,
-                )
-            elif "Model_3" in model:
-                state.model3_tf_pass += 1  # reached here only when tf == "1h"
-                _closes = df_tf["close"].values if df_tf is not None and len(df_tf) > 0 else []
-                _trend_ok, _slope, _min_slope = _is_trending_environment(_closes)
-                logger.info(
-                    "MODEL3_CHECK | tf=%s | trend_ok=%s | slope=%.4f | min_slope=%.4f",
-                    tf, _trend_ok, _slope, _min_slope,
-                )
-                if not _trend_ok:
-                    final_decision = "SKIP"
-                    skip_reason = "MODEL3_NO_TREND (slope={:.4f} < adaptive {:.4f})".format(
-                        abs(_slope), _min_slope
-                    )
-                    failure_code = "FAIL_MODEL3_NO_TREND"
-                else:
-                    state.model3_trend_pass += 1
-                    # Entry distance gate: reject if entry is > 1.5% from range midpoint
-                    _r_high = range_info.get("high", 0) if isinstance(range_info, dict) else 0
-                    _r_low = range_info.get("low", 0) if isinstance(range_info, dict) else 0
-                    if _r_high > _r_low and entry_price > 0:
-                        _range_mid = (_r_high + _r_low) / 2
-                        _dist_pct = abs(entry_price - _range_mid) / _range_mid
-                        if _dist_pct > _MODEL3_MAX_DISTANCE_PCT:
-                            final_decision = "SKIP"
-                            skip_reason = "MODEL3_EXTENDED (dist={:.4f} > {:.4f})".format(
-                                _dist_pct, _MODEL3_MAX_DISTANCE_PCT
-                            )
-                            failure_code = "FAIL_MODEL3_EXTENDED"
-                            logger.info(
-                                "MODEL3_CHECK | tf=%s | EXTENDED dist=%.4f (max %.4f)",
-                                tf, _dist_pct, _MODEL3_MAX_DISTANCE_PCT,
-                            )
-
-            # ── v14: hard score floor — below this score always filtered ──
-            elif score < _MIN_SCORE_HARD:
+            # ── v14: hard score floor (BEFORE model-specific branches) ──
+            # Standalone guard so it applies to ALL models including Model_3,
+            # which previously bypassed it via the elif chain.
+            if final_decision == "TAKE" and score < _MIN_SCORE_HARD:
                 final_decision = "SKIP"
                 skip_reason = "SCORE_HARD_FLOOR ({} < {})".format(score, _MIN_SCORE_HARD)
                 failure_code = "FAIL_SCORE_HARD_FLOOR"
 
-            elif score < entry_threshold:
+            # ── v12/v13: Model 3 quality gates ────────────────────────
+            if final_decision == "TAKE" and "Model_3" in model:
+                if tf != "1h":
+                    final_decision = "SKIP"
+                    skip_reason = "MODEL3_TF_FILTER (tf={}, only 1h allowed)".format(tf)
+                    failure_code = "FAIL_MODEL3_TF_FILTER"
+                    logger.info(
+                        "MODEL3_CHECK | tf=%s BLOCKED (1h only) | trend not evaluated", tf,
+                    )
+                else:
+                    state.model3_tf_pass += 1
+                    _closes = df_tf["close"].values if df_tf is not None and len(df_tf) > 0 else []
+                    _trend_ok, _slope, _min_slope = _is_trending_environment(_closes)
+                    logger.info(
+                        "MODEL3_CHECK | tf=%s | trend_ok=%s | slope=%.4f | min_slope=%.4f",
+                        tf, _trend_ok, _slope, _min_slope,
+                    )
+                    if not _trend_ok:
+                        final_decision = "SKIP"
+                        skip_reason = "MODEL3_NO_TREND (slope={:.4f} < adaptive {:.4f})".format(
+                            abs(_slope), _min_slope
+                        )
+                        failure_code = "FAIL_MODEL3_NO_TREND"
+                    else:
+                        state.model3_trend_pass += 1
+                        # Entry distance gate: reject if entry is > 1.5% from range midpoint
+                        _r_high = range_info.get("high", 0) if isinstance(range_info, dict) else 0
+                        _r_low = range_info.get("low", 0) if isinstance(range_info, dict) else 0
+                        if _r_high > _r_low and entry_price > 0:
+                            _range_mid = (_r_high + _r_low) / 2
+                            _dist_pct = abs(entry_price - _range_mid) / _range_mid
+                            if _dist_pct > _MODEL3_MAX_DISTANCE_PCT:
+                                final_decision = "SKIP"
+                                skip_reason = "MODEL3_EXTENDED (dist={:.4f} > {:.4f})".format(
+                                    _dist_pct, _MODEL3_MAX_DISTANCE_PCT
+                                )
+                                failure_code = "FAIL_MODEL3_EXTENDED"
+                                logger.info(
+                                    "MODEL3_CHECK | tf=%s | EXTENDED dist=%.4f (max %.4f)",
+                                    tf, _dist_pct, _MODEL3_MAX_DISTANCE_PCT,
+                                )
+
+            # ── score threshold ────────────────────────────────────────
+            if final_decision == "TAKE" and score < entry_threshold:
                 final_decision = "SKIP"
                 skip_reason = "SCORE_BELOW_THRESHOLD ({} < {})".format(score, entry_threshold)
                 failure_code = "FAIL_1D_SCORE"
-            else:
-                # BOS fingerprint check: don't re-enter the same schematic
-                # Keyed on entry_price (rounded) + BOS price — both are absolute
-                # and stable across detection window shifts (unlike bos_idx).
+
+            # ── BOS fingerprint dedup ──────────────────────────────────
+            # Keyed on entry_price (rounded) + BOS price — both absolute and
+            # stable across detection window shifts (unlike bos_idx).
+            if final_decision == "TAKE":
                 bos_info = schematic.get("bos_confirmation") or {}
                 bos_price = round(float(bos_info.get("bos_price") or 0), 0)
                 entry_snap = round(float(
@@ -919,12 +953,19 @@ def run_gate_pipeline(
                 "target_price": target_price,
                 "rr": actual_rr if actual_rr > 0 else rr,
                 "schematic_json": {
-                    "bos_idx": schematic.get("bos_idx"),
-                    "tap1": schematic.get("tap1_price"),
-                    "tap2": schematic.get("tap2_price"),
-                    "tap3": schematic.get("tap3_price"),
-                    "range_start": schematic.get("range_start_idx"),
-                    "range_end": schematic.get("range_end_idx"),
+                    # bos_confirmation sub-dict: {"bos_idx": int, "bos_price": float, ...}
+                    "bos_idx":   (schematic.get("bos_confirmation") or {}).get("bos_idx"),
+                    "bos_price": (schematic.get("bos_confirmation") or {}).get("bos_price"),
+                    # tap dicts: {"price": float, "idx": int, "type": str, ...}
+                    "tap1_price": (schematic.get("tap1") or {}).get("price"),
+                    "tap1_idx":   (schematic.get("tap1") or {}).get("idx"),
+                    "tap2_price": (schematic.get("tap2") or {}).get("price"),
+                    "tap2_idx":   (schematic.get("tap2") or {}).get("idx"),
+                    "tap3_price": (schematic.get("tap3") or {}).get("price"),
+                    "tap3_idx":   (schematic.get("tap3") or {}).get("idx"),
+                    # range sub-dict: {"high": float, "low": float, "equilibrium": float, ...}
+                    "range_high": (schematic.get("range") or {}).get("high"),
+                    "range_low":  (schematic.get("range") or {}).get("low"),
                     "sweep_type": schematic.get("sweep_type"),
                 } if schematic else None,
             }
@@ -1050,7 +1091,7 @@ def run_backtest(
         "tp1_close_pct": effective_tp1_close_pct,
         "tp1_level_pct": effective_tp1_level_pct,
         "trail_factor": effective_trail_factor,
-        "engine_version": 14,  # v14: displacement gate, hard score floor, 15m entry location/displacement/M2 block, raised trend floor, soft DD guard, schematic_json persist
+        "engine_version": 15,  # v15: gate-chain elif→if fix (score floor now runs for Model_3), DD time-reset (72h), schematic_json real keys
     }
 
     run_id = create_run(
@@ -1344,9 +1385,10 @@ def _close_trade(state: BacktestState, raw_exit_price: float, exit_reason: str,
     else:
         state.losses += 1
 
-    # Update drawdown
+    # Update drawdown — also clear DD protection when equity sets a new high
     if state.equity > state.peak_equity:
         state.peak_equity = state.equity
+        state.dd_protection_triggered_at = None  # equity recovered; reset protection
     current_dd = ((state.peak_equity - state.equity) / state.peak_equity) * 100
     state.drawdown = current_dd
     if current_dd > state.max_drawdown_pct:
