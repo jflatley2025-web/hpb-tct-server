@@ -322,60 +322,76 @@ def decide(
 
     if USE_DD_PROTECTION and peak_equity is not None and equity is not None and peak_equity > 0:
         _new_peak = max(peak_equity, equity)  # always propagate equity highs
-        _cur_dd = (peak_equity - equity) / peak_equity
 
-        if _cur_dd >= _DD_HARD_THRESHOLD:
-            # Hard tier — track trough (lowest equity since trigger).
-            # min() keeps trough sliding down if equity keeps falling.
+        if equity > peak_equity:
+            # New equity high — clear all DD protection state unconditionally.
+            # Matching runner.py _close_trade() behaviour: new high cancels the timer.
+            _new_dd_protection_triggered_at = None
+            _new_trough = None
+            # _risk_multiplier stays 1.0
+
+        elif dd_protection_triggered_at is not None:
+            # Hard block is LATCHED — it persists regardless of whether the current
+            # drawdown temporarily recovered above _DD_HARD_THRESHOLD (e.g. bounced
+            # into the soft band).  The only exits are:
+            #   (A) new equity high (handled above), or
+            #   (B) hybrid reset: time elapsed AND sufficient equity recovery.
             _new_trough = (
                 min(dd_trough_equity, equity)
                 if dd_trough_equity is not None
                 else equity
             )
+            _hours_in_dd = (current_time - dd_protection_triggered_at).total_seconds() / 3600
 
-            if dd_protection_triggered_at is not None:
-                _hours_in_dd = (current_time - dd_protection_triggered_at).total_seconds() / 3600
+            # Recovery fraction: how much of peak→trough gap has been reclaimed.
+            _recovery = 0.0
+            if peak_equity > _new_trough:
+                _recovery = (equity - _new_trough) / (peak_equity - _new_trough)
 
-                # Recovery fraction: how much of peak→trough gap has been reclaimed.
-                _recovery = 0.0
-                if peak_equity > _new_trough:
-                    _recovery = (equity - _new_trough) / (peak_equity - _new_trough)
-
-                if _hours_in_dd >= _DD_RESET_HOURS and _recovery >= _DD_RECOVERY_PCT:
-                    # Hybrid condition met — re-baseline and clear trough + trigger.
-                    _new_peak = equity
-                    _new_trough = None                         # protection fully exited
-                    _new_dd_protection_triggered_at = None     # reset — caller must clear this
-                    logger.info(
-                        "DD hard reset: %.0fh elapsed, recovery=%.0f%% ≥ %.0f%% "
-                        "(trough=$%.2f) — re-baselining peak $%.2f → $%.2f",
-                        _hours_in_dd, _recovery * 100, _DD_RECOVERY_PCT * 100,
-                        (dd_trough_equity or 0), peak_equity, equity,
-                    )
-                    # _risk_multiplier stays 1.0 — full risk resumes
-                else:
-                    _risk_multiplier = 0.0  # hard block remains
-                    if _hours_in_dd >= _DD_RESET_HOURS:
-                        # Time elapsed but recovery not sufficient — stay blocked, log why.
-                        logger.debug(
-                            "DD hard block: %.0fh elapsed but recovery=%.2f%% < %.0f%% "
-                            "(trough=$%.2f equity=$%.2f) — blocked",
-                            _hours_in_dd, _recovery * 100, _DD_RECOVERY_PCT * 100,
-                            _new_trough, equity,
-                        )
+            if _hours_in_dd >= _DD_RESET_HOURS and _recovery >= _DD_RECOVERY_PCT:
+                # Hybrid condition met — re-baseline and clear trough + trigger.
+                _new_peak = equity
+                _new_trough = None                         # protection fully exited
+                _new_dd_protection_triggered_at = None     # reset — caller must clear this
+                logger.info(
+                    "DD hard reset: %.0fh elapsed, recovery=%.0f%% ≥ %.0f%% "
+                    "(trough=$%.2f) — re-baselining peak $%.2f → $%.2f",
+                    _hours_in_dd, _recovery * 100, _DD_RECOVERY_PCT * 100,
+                    (dd_trough_equity or 0), peak_equity, equity,
+                )
+                # _risk_multiplier stays 1.0 — full risk resumes
             else:
-                # First time crossing hard threshold — no trigger timestamp yet in context.
-                # Return current_time so caller can store and pass it back next call.
+                _risk_multiplier = 0.0  # hard block remains
+                if _hours_in_dd >= _DD_RESET_HOURS:
+                    # Time elapsed but recovery not sufficient — stay blocked, log why.
+                    logger.debug(
+                        "DD hard block: %.0fh elapsed but recovery=%.2f%% < %.0f%% "
+                        "(trough=$%.2f equity=$%.2f) — blocked",
+                        _hours_in_dd, _recovery * 100, _DD_RECOVERY_PCT * 100,
+                        _new_trough, equity,
+                    )
+
+        else:
+            # No prior hard block — evaluate fresh DD tiers from current drawdown.
+            _cur_dd = (peak_equity - equity) / peak_equity
+
+            if _cur_dd >= _DD_HARD_THRESHOLD:
+                # First crossing — latch the hard block.
+                _new_trough = equity
                 _risk_multiplier = 0.0
                 _new_dd_protection_triggered_at = current_time
+                logger.info(
+                    "DD hard block triggered: dd=%.2f%% ≥ %.0f%% — trough=$%.2f",
+                    _cur_dd * 100, _DD_HARD_THRESHOLD * 100, equity,
+                )
 
-        elif _cur_dd >= _DD_SOFT_THRESHOLD:
-            # Soft tier — allow the trade but halve position size.
-            _risk_multiplier = _DD_RISK_SCALE
-            logger.debug(
-                "DD soft throttle: dd=%.2f%% ≥ %.0f%% — scaling risk to %.0f%%",
-                _cur_dd * 100, _DD_SOFT_THRESHOLD * 100, _DD_RISK_SCALE * 100,
-            )
+            elif _cur_dd >= _DD_SOFT_THRESHOLD:
+                # Soft tier — allow the trade but halve position size.
+                _risk_multiplier = _DD_RISK_SCALE
+                logger.debug(
+                    "DD soft throttle: dd=%.2f%% ≥ %.0f%% — scaling risk to %.0f%%",
+                    _cur_dd * 100, _DD_SOFT_THRESHOLD * 100, _DD_RISK_SCALE * 100,
+                )
 
     try:
         mods = _get_modules()
@@ -817,10 +833,13 @@ def decide(
 
     # On PASS: propagate DD state and expose the highest-score blocked candidate's
     # failure_code so callers can inspect why no trade fired without parsing logs.
+    # risk_multiplier is explicitly overridden so soft-throttle callers see the
+    # correct tier (0.5) even on cycles where no trade qualifies.
     return best_signal if best_signal is not None else {
         **_PASS,
         "failure_code": _best_blocked_code,
         "reason": _best_blocked_reason or "no_signal",
+        "risk_multiplier": _risk_multiplier,
         "new_peak": _new_peak,
         "new_trough": _new_trough,
         "new_dd_protection_triggered_at": _new_dd_protection_triggered_at,

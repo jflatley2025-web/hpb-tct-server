@@ -1384,6 +1384,21 @@ class Schematics5BTrader:
                 # Pass all fetched MTF candles (1d/4h/1h/30m) — decide() skips
                 # TFs with insufficient data so missing 15m is handled gracefully.
                 _candles_by_tf = dict(sym_result.get("mtf_dfs") or {})
+                # Guard the ISO timestamp parse — persisted state can be malformed if the
+                # trade log was manually edited or written by an older version of the bot.
+                # A bad value degrades to None (no prior hard-block trigger known).
+                try:
+                    _parsed_dd_triggered_at = (
+                        datetime.fromisoformat(self.state.dd_triggered_at)
+                        if self.state.dd_triggered_at
+                        else None
+                    )
+                except (ValueError, TypeError) as _dte:
+                    logger.warning(
+                        "[5B] malformed dd_triggered_at=%r — treating as not triggered: %s",
+                        self.state.dd_triggered_at, _dte,
+                    )
+                    _parsed_dd_triggered_at = None
                 _v2_ctx = {
                     "current_price": best_current_price,
                     "current_time": datetime.now(timezone.utc),
@@ -1392,11 +1407,7 @@ class Schematics5BTrader:
                     # in shadow mode — _dd_risk_multiplier() manages live state independently.
                     "peak_equity": self.state.peak_balance,
                     "equity": self.state.balance,
-                    "dd_protection_triggered_at": (
-                        datetime.fromisoformat(self.state.dd_triggered_at)
-                        if self.state.dd_triggered_at
-                        else None
-                    ),
+                    "dd_protection_triggered_at": _parsed_dd_triggered_at,
                     "dd_trough_equity": self.state.dd_trough_balance,
                 }
                 try:
