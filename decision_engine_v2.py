@@ -170,7 +170,7 @@ def compute_priority_score(
         10% — local displacement (0–1 scaled to 0–100)
 
     This function is the single definition of priority_score.
-    backtest/runner.py mirrors it inline — keep in sync if weights change.
+    Import and call this function from all callers — do not inline the formula.
     """
     return (
         score * 0.5

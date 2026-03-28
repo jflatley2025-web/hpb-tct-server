@@ -57,6 +57,16 @@ from backtest.db import (
 )
 from backtest.ingest import load_candles
 from backtest.session import get_session
+from decision_engine_v2 import (
+    _DD_SOFT_THRESHOLD,
+    _DD_HARD_THRESHOLD,
+    _DD_RISK_SCALE,
+    _DD_RESET_HOURS,
+    _DD_RECOVERY_PCT,
+    USE_TRADE_COMPRESSION as _USE_TRADE_COMPRESSION,
+    COMPRESSION_WINDOW_BARS as _COMPRESSION_WINDOW_BARS,
+    compute_priority_score,
+)
 
 logger = logging.getLogger("backtest.runner")
 
@@ -79,21 +89,12 @@ _MIN_DISPLACEMENT_15M = 0.65 # stricter displacement floor for 15m specifically
 # v14: hard score floor (below threshold trades are removed before score gate)
 _MIN_SCORE_HARD = 65         # score 57-64 confirmed losers — blocked regardless of threshold
 
-# Issue 3: 3-tier drawdown control (mirror of decision_engine_v2.py constants)
-# DO NOT change these values without a matching change in decision_engine_v2.py.
-_DD_SOFT_THRESHOLD = 0.02    # soft throttle: halve position size when DD ≥ 2%
-_DD_HARD_THRESHOLD = 0.04    # hard block: skip new entries entirely when DD ≥ 4%
-_DD_RISK_SCALE = 0.5         # position size multiplier applied during soft throttle
-_DD_RESET_HOURS = 72         # minimum hours in hard block before reset is even evaluated
-_DD_RECOVERY_PCT = 0.5       # equity must recover ≥ 50% of peak→trough gap before reset
-                              # e.g. peak=$10k, trough=$9.6k, must recover to $9.8k
+# DD constants + compression flags imported from decision_engine_v2 (single source of truth).
+# Aliases with leading underscores are set at top-of-file so all existing references continue to work.
+# See decision_engine_v2.py for values and rationale.
 
-# v15: trade compression (mirror of decision_engine_v2.py — keep in sync)
-# Priority formula: score*0.5 + rcm*100*0.2 + rr*10*0.2 + displacement*100*0.1
-_USE_TRADE_COMPRESSION = True
-_COMPRESSION_WINDOW_BARS = 6  # bars on signal's own timeframe; 1h signal → 6h window
-
-# Optional 15m NY overtrade guard — set True for re-run only if trade count > 55
+# Optional 15m NY overtrade guard — backtest-only tuning flag; set True only if trade count > 55.
+# Kept local (not imported) so backtest re-runs can toggle it without touching the live engine.
 _ENABLE_15M_NY_OVERTRADE_FILTER = False
 
 
@@ -1002,12 +1003,12 @@ def run_gate_pipeline(
                 "skip_reason": skip_reason,
                 "failure_code": failure_code,
                 "risk_multiplier": _risk_multiplier,
-                # v15: composite quality rank — mirrored from compute_priority_score()
-                "priority_score": (
-                    score * 0.5
-                    + rcm_score * 100 * 0.2
-                    + (actual_rr if actual_rr > 0 else rr) * 10 * 0.2
-                    + local_displacement * 100 * 0.1
+                # v15: composite quality rank — single source: decision_engine_v2.compute_priority_score
+                "priority_score": compute_priority_score(
+                    score,
+                    rcm_score,
+                    actual_rr if actual_rr > 0 else rr,
+                    local_displacement,
                 ),
                 "structure_state": structure_state,
                 "entry_price": entry_price,

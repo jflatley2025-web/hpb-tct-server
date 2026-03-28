@@ -1369,6 +1369,7 @@ class Schematics5BTrader:
                     USE_UNIFIED_ENGINE as _USE_V2,
                     USE_TRADE_COMPRESSION as _USE_COMPRESSION,
                     COMPRESSION_WINDOW_BARS as _COMPRESSION_BARS,
+                    compute_priority_score as _cps,
                 )
                 _v2_available = True
             except ImportError:
@@ -1376,6 +1377,7 @@ class Schematics5BTrader:
                 _USE_V2 = False
                 _USE_COMPRESSION = False
                 _COMPRESSION_BARS = 6
+                _cps = None
 
             _v2_result: Optional[Dict] = None
             if _v2_available:
@@ -1606,7 +1608,8 @@ class Schematics5BTrader:
                             }
                         else:
                             # ── v15: compute priority score ───────────────────────
-                            # Mirror of compute_priority_score() in decision_engine_v2.
+                            # Single source: decision_engine_v2.compute_priority_score.
+                            # Falls back to inline formula if module is unavailable.
                             _p_stop = (schematic.get("stop_loss") or {}).get("price", 0)
                             _p_tgt = (schematic.get("target") or {}).get("price", 0)
                             _p_risk = abs(best_current_price - _p_stop) if _p_stop else 0
@@ -1615,11 +1618,17 @@ class Schematics5BTrader:
                                 if _p_risk > 0 and _p_tgt else 0.0
                             )
                             _p_disp = (schematic.get("range") or {}).get("displacement", 0.0)
+                            _p_score = evaluation.get("score", 0)
+                            _p_rcm = schematic.get("quality_score", 0.0)
                             _priority = (
-                                evaluation.get("score", 0) * 0.5
-                                + schematic.get("quality_score", 0.0) * 100 * 0.2
-                                + _p_rr * 10 * 0.2
-                                + _p_disp * 100 * 0.1
+                                _cps(_p_score, _p_rcm, _p_rr, _p_disp)
+                                if _cps is not None
+                                else (
+                                    _p_score * 0.5
+                                    + _p_rcm * 100 * 0.2
+                                    + _p_rr * 10 * 0.2
+                                    + _p_disp * 100 * 0.1
+                                )
                             )
 
                             # ── v15: compression check (post-gate execution filter) ─
