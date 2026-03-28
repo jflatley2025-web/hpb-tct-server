@@ -129,6 +129,46 @@ DUPLICATE_COOLDOWN_SECONDS = 300
 DUPLICATE_PRICE_TOLERANCE = 0.002
 
 
+# ================================================================
+# DECISION ENGINE AUDIT LOG
+# Writes one JSON line per cycle to schematics_5b_decision_audit.log
+# so shadow-mode comparisons can be reviewed without DB changes.
+# ================================================================
+_AUDIT_LOG_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "schematics_5b_decision_audit.log",
+)
+_audit_logger = logging.getLogger("5B.audit")
+_audit_logger.setLevel(logging.DEBUG)
+# Lazy-add a file handler only when we first write (avoids creating the file
+# on import if audit logging is never triggered).
+_audit_fh_added = False
+
+
+def _5b_audit_log(entry: Dict) -> None:
+    """Append one JSON-encoded decision-comparison record to the audit log.
+
+    Each record contains:
+        symbol, timestamp, legacy_decision, v2_decision, match,
+        model, timeframe, score, v2_failure_code, v2_reason,
+        htf_bias, use_unified_engine
+    """
+    global _audit_fh_added
+    if not _audit_fh_added:
+        try:
+            fh = logging.FileHandler(_AUDIT_LOG_PATH, encoding="utf-8")
+            fh.setFormatter(logging.Formatter("%(message)s"))
+            _audit_logger.addHandler(fh)
+            _audit_fh_added = True
+        except Exception as _e:
+            logger.warning("[5B-AUDIT] Could not open audit log: %s", _e)
+            return
+    try:
+        _audit_logger.debug(json.dumps(entry, default=str))
+    except Exception as _e:
+        logger.warning("[5B-AUDIT] Write failed: %s", _e)
+
+
 def _get_entry_session_context(base_score: float) -> Dict:
     """Get session manipulation context for trade entry (MSCE integration)."""
     try:
@@ -1201,6 +1241,41 @@ class Schematics5BTrader:
                     "gate_metrics": dict(self._gate_metrics),
                 }
 
+            # ── Unified engine shadow run ──────────────────────────────────
+            # Always run decision_engine_v2.decide() in parallel with the legacy
+            # pipeline so we accumulate a shadow comparison log before activating.
+            # USE_UNIFIED_ENGINE = False → shadow only (no behaviour change).
+            # USE_UNIFIED_ENGINE = True  → v2 result gates the actual trade.
+            try:
+                from decision_engine_v2 import decide as _v2_decide, USE_UNIFIED_ENGINE as _USE_V2
+                _v2_available = True
+            except ImportError:
+                _v2_available = False
+                _USE_V2 = False
+
+            _v2_result: Optional[Dict] = None
+            if _v2_available:
+                # Pass all fetched MTF candles (1d/4h/1h/30m) — decide() skips
+                # TFs with insufficient data so missing 15m is handled gracefully.
+                _candles_by_tf = dict(sym_result.get("mtf_dfs") or {})
+                _v2_ctx = {
+                    "current_price": best_current_price,
+                    "current_time": datetime.now(timezone.utc),
+                }
+                try:
+                    _v2_result = _v2_decide(_candles_by_tf, _v2_ctx)
+                    logger.debug(
+                        "[5B] V2 shadow: decision=%s score=%s tf=%s model=%s failure=%s",
+                        _v2_result.get("decision"),
+                        _v2_result.get("score"),
+                        _v2_result.get("timeframe"),
+                        _v2_result.get("model"),
+                        _v2_result.get("failure_code"),
+                    )
+                except Exception as _ve:
+                    logger.warning("[5B] V2 shadow error: %s", _ve)
+                    _v2_result = None
+
             # 3. RIG: Build real MSCE context and evaluate globally.
             #    Uses canonical rig_engine — no fake session/RCM inputs.
             from rig_engine import evaluate_rig_global
@@ -1309,13 +1384,99 @@ class Schematics5BTrader:
                         "reason": "Same setup as recent trade — cooldown active",
                     }
                 else:
-                    trade = self._enter_trade(
-                        schematic, evaluation, best_current_price, best_htf_bias,
-                        SYMBOL, best_tf,
-                    )
-                    cycle_result["action"] = "trade_entered"
-                    cycle_result["details"] = trade
+                    # ── Shadow log + v2 gate ───────────────────────────────
+                    # Legacy pipeline says TAKE. Check whether the unified engine
+                    # agrees. If USE_UNIFIED_ENGINE=True and v2 says PASS, we block
+                    # the trade and record the failure code. If USE_UNIFIED_ENGINE=False
+                    # we always execute (shadow mode — log only).
+                    _v2_decision = _v2_result.get("decision", "PASS") if _v2_result else "not_run"
+                    _v2_blocks = _USE_V2 and _v2_result is not None and _v2_decision != "TAKE"
+
+                    _5b_audit_log({
+                        "symbol": SYMBOL,
+                        "timestamp": cycle_result["timestamp"],
+                        "legacy_decision": "TAKE",
+                        "v2_decision": _v2_decision,
+                        "match": _v2_decision == "TAKE" or _v2_decision == "not_run",
+                        "model": evaluation.get("model", "unknown"),
+                        "timeframe": best_tf,
+                        "score": evaluation.get("score", 0),
+                        "v2_score": _v2_result.get("score", 0) if _v2_result else None,
+                        "v2_failure_code": _v2_result.get("failure_code") if _v2_result else None,
+                        "v2_reason": _v2_result.get("reason") if _v2_result else None,
+                        "htf_bias": best_htf_bias,
+                        "entry_price": candidate_price,
+                        "use_unified_engine": _USE_V2,
+                    })
+
+                    if _v2_blocks:
+                        # v2 gate fired — trade blocked by unified engine
+                        logger.info(
+                            "[5B] V2 GATE BLOCK: legacy=TAKE v2=PASS | "
+                            "failure=%s reason=%s | score=%s model=%s tf=%s",
+                            _v2_result.get("failure_code"),
+                            _v2_result.get("reason"),
+                            evaluation.get("score"),
+                            evaluation.get("model"),
+                            best_tf,
+                        )
+                        cycle_result["action"] = "v2_gate_blocked"
+                        cycle_result["details"] = {
+                            "price": best_current_price,
+                            "symbol": SYMBOL,
+                            "legacy_would_take": True,
+                            "v2_decision": _v2_decision,
+                            "v2_failure_code": _v2_result.get("failure_code"),
+                            "v2_reason": _v2_result.get("reason"),
+                            "score": evaluation.get("score"),
+                            "model": evaluation.get("model"),
+                            "timeframe": best_tf,
+                        }
+                    else:
+                        if _v2_result and _v2_decision != "TAKE":
+                            # Shadow-mode mismatch: log but still execute
+                            logger.info(
+                                "[5B] SHADOW MISMATCH (not blocking): legacy=TAKE v2=%s | "
+                                "failure=%s | score=%s model=%s tf=%s",
+                                _v2_decision,
+                                _v2_result.get("failure_code"),
+                                evaluation.get("score"),
+                                evaluation.get("model"),
+                                best_tf,
+                            )
+                        trade = self._enter_trade(
+                            schematic, evaluation, best_current_price, best_htf_bias,
+                            SYMBOL, best_tf,
+                        )
+                        cycle_result["action"] = "trade_entered"
+                        cycle_result["details"] = trade
             else:
+                # Legacy: no qualifying setups found.
+                # Log if v2 independently found a signal (informational — not executed).
+                if _v2_result is not None and _v2_result.get("decision") == "TAKE":
+                    logger.info(
+                        "[5B] V2 FOUND SETUP (legacy missed): model=%s tf=%s score=%s — "
+                        "not executing (legacy must confirm first)",
+                        _v2_result.get("model"),
+                        _v2_result.get("timeframe"),
+                        _v2_result.get("score"),
+                    )
+                    _5b_audit_log({
+                        "symbol": SYMBOL,
+                        "timestamp": cycle_result["timestamp"],
+                        "legacy_decision": "PASS",
+                        "v2_decision": "TAKE",
+                        "match": False,
+                        "model": _v2_result.get("model"),
+                        "timeframe": _v2_result.get("timeframe"),
+                        "score": _v2_result.get("score"),
+                        "v2_failure_code": None,
+                        "v2_reason": "v2_found_setup_legacy_missed",
+                        "htf_bias": best_htf_bias,
+                        "entry_price": _v2_result.get("entry_price"),
+                        "use_unified_engine": _USE_V2,
+                    })
+
                 cycle_result["action"] = "no_qualifying_setups"
                 cycle_result["details"] = {
                     "symbols": [SYMBOL],
@@ -1419,6 +1580,9 @@ class Schematics5BTrader:
             "forming": [],
             "timeframes": {},
             "error": None,
+            # Populated below after parallel fetch — exposed so _scan_and_trade_locked
+            # can pass candles to decision_engine_v2.decide() without re-fetching.
+            "mtf_dfs": {},
         }
 
         try:
@@ -1470,6 +1634,11 @@ class Schematics5BTrader:
                             ltf_dfs[tf] = None
 
             logger.info(f"[5B] parallel candle fetch done ({time.time()-_t0:.1f}s)")
+            # Expose fetched MTF DataFrames so the caller can pass them to
+            # decision_engine_v2.decide() without a second round-trip to the API.
+            out["mtf_dfs"] = {
+                tf: df for tf, df in mtf_dfs.items() if df is not None
+            }
             # Phase A: collect all schematics per TF (needed for HTF cascade)
             all_schematics_by_tf: Dict[str, List[Dict]] = {}
             for tf in active_mtf_tfs:
