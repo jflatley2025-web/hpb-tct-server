@@ -38,7 +38,7 @@ PORTFOLIO_CLOSE  — position deregistered after trade closes
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
 
 logger = logging.getLogger("portfolio_manager")
 
@@ -53,7 +53,7 @@ MAX_PORTFOLIO_RISK_PCT: float = 2.0   # % of equity; cap on total correlated ris
 # Pairwise Pearson-like coefficients (monthly, crypto bull-market regime).
 # Key: (A, B) with A < B alphabetically (canonical order).
 # Unlisted pairs default to 0.0 (uncorrelated / no data).
-_CORRELATION: Dict[Tuple[str, str], float] = {
+_CORRELATION: dict[tuple[str, str], float] = {
     ("BTC", "ETH"): 0.85,
     ("BTC", "SOL"): 0.75,
     ("ETH", "SOL"): 0.80,
@@ -118,13 +118,13 @@ class PortfolioState:
     """
     equity: float
     peak_equity: float
-    open_positions: List[PortfolioPosition] = field(default_factory=list)
+    open_positions: list[PortfolioPosition] = field(default_factory=list)
     last_update_ts: Optional[datetime] = None
 
     @property
-    def symbol_exposure(self) -> Dict[str, float]:
+    def symbol_exposure(self) -> dict[str, float]:
         """Dollars at risk per base asset across all open positions."""
-        exposure: Dict[str, float] = {}
+        exposure: dict[str, float] = {}
         for pos in self.open_positions:
             base = _base_asset(pos.symbol)
             exposure[base] = exposure.get(base, 0.0) + pos.notional_risk
@@ -145,22 +145,32 @@ def adjusted_portfolio_risk(
     new_symbol: str,
     new_risk: float,
     portfolio: PortfolioState,
-) -> Tuple[float, Dict]:
+) -> tuple[float, dict]:
     """Compute the correlation-weighted risk contribution of the new trade.
 
-    The adjusted risk is the sum of:
-      - new_risk × 1.0 (self, always included)
-      - new_risk × corr(new_symbol, pos.symbol)  for every open position
+    **Intentional linear approximation** — not a full variance-covariance
+    marginal risk calculation.  The adjusted risk is simply:
 
-    This measures how much total "correlated stress" the trade adds to
-    the portfolio — a BTC trade alongside an existing ETH position adds
-    0.85× of BTC risk as correlated ETH exposure, not just 0.
+        adj_risk = new_risk × 1.0                              (self)
+                 + new_risk × corr(new_symbol, pos.symbol)     (each open pos)
+
+    This treats ``new_risk`` as the unit of "stress" and scales it by the
+    pairwise correlation with every existing position.  It does NOT:
+      - weight contributions by each position's own notional_risk
+      - compute the full portfolio variance (σ_new × ρ(new, portfolio))
+      - use a covariance matrix (Σ) for rigorous marginal risk contribution
+
+    The approximation deliberately favours simplicity and determinism over
+    precision: it over-estimates exposure when existing positions are large
+    and under-estimates when they are small.  For quick sizing decisions at
+    the trade entry stage this is acceptable; a rigorous MRC would require
+    the full Σ and is deferred until the position universe grows.
 
     Returns:
         adjusted_risk_dollars (float)  — correlation-weighted risk added
         details (dict)                 — per-symbol breakdown for logging
     """
-    details: Dict[str, dict] = {}
+    details: dict[str, dict] = {}
     correlated_risk = new_risk  # self-correlation = 1.0
 
     for pos in portfolio.open_positions:
@@ -181,7 +191,7 @@ def can_open_trade(
     symbol: str,
     effective_risk: float,
     portfolio: PortfolioState,
-) -> Dict:
+) -> dict:
     """Check whether the portfolio can absorb a new position.
 
     Computes the correlation-weighted risk the new trade adds on top
@@ -248,9 +258,14 @@ def can_open_trade(
             "correlation_details": details,
         }
 
-    # Over the cap — compute remaining headroom
+    # Over the cap — compute remaining headroom.
+    # Guard: adj_risk_pct == 0 means effective_risk is zero, so the new trade
+    # adds no correlated exposure; allow it in full regardless of headroom.
     headroom_pct = max(0.0, MAX_PORTFOLIO_RISK_PCT - current_risk_pct)
-    scaling_factor = min(1.0, headroom_pct / adj_risk_pct) if adj_risk_pct > 0 else 0.0
+    if adj_risk_pct <= 0:
+        scaling_factor = 1.0  # zero-risk trade: no cap impact, always full size
+    else:
+        scaling_factor = min(1.0, headroom_pct / adj_risk_pct)
 
     if scaling_factor < 0.05:
         # Less than 5% of intended size — not worth placing; hard block
@@ -306,7 +321,25 @@ def open_position(
 
     Must be called AFTER the order has been successfully placed —
     never speculatively before the trade is confirmed.
+
+    Duplicate prevention: if a position for the same base asset is already
+    registered, a warning is logged and the new entry is NOT added.  The
+    system currently supports at most one trade per symbol at a time
+    (BacktestState.open_trade / Schematics5BTradeState.current_trade are
+    both single-trade fields), so a duplicate here always indicates a caller
+    bug (e.g., open_position called twice without a matching close_position).
     """
+    base_new = _base_asset(symbol)
+    for existing in portfolio.open_positions:
+        if _base_asset(existing.symbol) == base_new:
+            logger.warning(
+                "PORTFOLIO_OPEN | symbol=%s — duplicate position detected "
+                "(base_asset=%s already open with risk=$%.2f); "
+                "skipping registration to prevent double-counting",
+                symbol, base_new, existing.notional_risk,
+            )
+            return existing  # return the existing position, do not append
+
     pos = PortfolioPosition(
         symbol=symbol,
         direction=direction,
@@ -331,36 +364,54 @@ def close_position(
     portfolio: PortfolioState,
     symbol: str,
 ) -> bool:
-    """Deregister the first open position matching symbol.
+    """Deregister all open positions matching symbol's base asset.
+
+    Removes every entry whose base asset matches, not just the first.
+    Under normal operation there is exactly one match; removing all
+    ensures the portfolio stays clean even if open_position was somehow
+    called twice (the duplicate warning in open_position guards against
+    that, but close_position is the safety net).
 
     Does NOT update portfolio.equity — callers are responsible for
     keeping it current (sync from source-of-truth state before each
     can_open_trade() call).
 
-    Returns True if a matching position was found and removed.
+    Returns True if at least one matching position was found and removed.
     """
     base = _base_asset(symbol)
-    for i, pos in enumerate(portfolio.open_positions):
-        if _base_asset(pos.symbol) == base:
-            portfolio.open_positions.pop(i)
-            portfolio.last_update_ts = datetime.now(timezone.utc)
-            logger.debug(
-                "PORTFOLIO_CLOSE | symbol=%s | "
-                "n_positions=%d total_risk_pct=%.2f%%",
-                symbol,
-                len(portfolio.open_positions),
-                portfolio.total_risk_pct,
-            )
-            return True
+    before = len(portfolio.open_positions)
+    portfolio.open_positions = [
+        pos for pos in portfolio.open_positions
+        if _base_asset(pos.symbol) != base
+    ]
+    removed = before - len(portfolio.open_positions)
 
-    logger.warning(
-        "PORTFOLIO_CLOSE | symbol=%s — no matching open position found",
-        symbol,
+    if removed == 0:
+        logger.warning(
+            "PORTFOLIO_CLOSE | symbol=%s — no matching open position found",
+            symbol,
+        )
+        return False
+
+    if removed > 1:
+        logger.warning(
+            "PORTFOLIO_CLOSE | symbol=%s — removed %d duplicate entries "
+            "(expected 1); check for double open_position calls",
+            symbol, removed,
+        )
+
+    portfolio.last_update_ts = datetime.now(timezone.utc)
+    logger.debug(
+        "PORTFOLIO_CLOSE | symbol=%s removed=%d | "
+        "n_positions=%d total_risk_pct=%.2f%%",
+        symbol, removed,
+        len(portfolio.open_positions),
+        portfolio.total_risk_pct,
     )
-    return False
+    return True
 
 
-def debug_snapshot(portfolio: PortfolioState) -> Dict:
+def debug_snapshot(portfolio: PortfolioState) -> dict:
     """Return a serialisable snapshot of the portfolio state for logging."""
     return {
         "equity": round(portfolio.equity, 2),

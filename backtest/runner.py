@@ -69,6 +69,7 @@ from decision_engine_v2 import (
 )
 from portfolio_manager import (
     USE_PORTFOLIO_LAYER as _USE_PORTFOLIO_LAYER,
+    MAX_PORTFOLIO_RISK_PCT as _PM_MAX_RISK_PCT,
     PortfolioState,
     can_open_trade as _pm_can_open_trade,
     open_position as _pm_open_position,
@@ -1206,7 +1207,7 @@ def run_backtest(
         logger.info(
             "Portfolio layer ENABLED — max_risk=%.1f%% | "
             "portfolio snapshot: %s",
-            2.0,  # MAX_PORTFOLIO_RISK_PCT imported via _pm_debug_snapshot
+            _PM_MAX_RISK_PCT,
             _pm_debug_snapshot(_portfolio),
         )
 
@@ -1533,7 +1534,7 @@ def _open_trade(state: BacktestState, signal: dict, current_time: datetime,
 
 def _close_trade(state: BacktestState, raw_exit_price: float, exit_reason: str,
                  current_time: datetime, conn, run_id: int,
-                 portfolio: Optional[PortfolioState] = None):
+                 portfolio: Optional[PortfolioState] = None) -> None:
     """Close the current open trade and record it.
 
     Args:

@@ -1163,22 +1163,43 @@ class Schematics5BTrader:
             # immediately — avoids a stale-zero total_risk_pct on the
             # first cycle after a restart with an open trade.
             _ct = self.state.current_trade
-            if _ct and _ct.get("entry_price") and _ct.get("risk_amount"):
-                _pm_open_position(
-                    self._portfolio,
-                    symbol=_ct.get("symbol", SYMBOL),
-                    direction=_ct.get("direction", "bullish"),
-                    notional_risk=float(_ct["risk_amount"]),
-                    entry_price=float(_ct["entry_price"]),
-                    model=_ct.get("model", "unknown"),
-                    timeframe=_ct.get("timeframe", "unknown"),
-                    opened_at=None,  # exact timestamp unavailable after reload
-                )
-                logger.info(
-                    "[5B] Portfolio layer: reconstructed open position "
-                    "from current_trade (symbol=%s risk=$%.2f)",
-                    _ct.get("symbol", SYMBOL), float(_ct["risk_amount"]),
-                )
+            if _ct and _ct.get("entry_price"):
+                # Prefer the stored risk_amount (exact).  Fall back to
+                # position_size * RISK_PER_TRADE_PCT / leverage as a best-effort
+                # estimate so old-format trades (pre-risk_amount field) still
+                # register a non-zero exposure in the portfolio.
+                _ct_risk: Optional[float] = None
+                if _ct.get("risk_amount"):
+                    _ct_risk = float(_ct["risk_amount"])
+                elif _ct.get("position_size") and _ct.get("entry_price"):
+                    # position_size is denominated in the base asset (contracts).
+                    # Notional risk ≈ balance × RISK_PER_TRADE_PCT / 100 as a
+                    # conservative floor; use that rather than leaving it zero.
+                    _ct_risk = self.state.balance * (RISK_PER_TRADE_PCT / 100)
+                    logger.warning(
+                        "[5B] Portfolio layer: current_trade missing "
+                        "'risk_amount' — using balance-based fallback "
+                        "$%.2f for position registration; "
+                        "this may be an old-format trade record",
+                        _ct_risk,
+                    )
+
+                if _ct_risk is not None and _ct_risk > 0:
+                    _pm_open_position(
+                        self._portfolio,
+                        symbol=_ct.get("symbol", SYMBOL),
+                        direction=_ct.get("direction", "bullish"),
+                        notional_risk=_ct_risk,
+                        entry_price=float(_ct["entry_price"]),
+                        model=_ct.get("model", "unknown"),
+                        timeframe=_ct.get("timeframe", "unknown"),
+                        opened_at=None,  # exact timestamp unavailable after reload
+                    )
+                    logger.info(
+                        "[5B] Portfolio layer: reconstructed open position "
+                        "from current_trade (symbol=%s risk=$%.2f)",
+                        _ct.get("symbol", SYMBOL), _ct_risk,
+                    )
             logger.info(
                 "[5B] Portfolio layer ENABLED — %s",
                 _pm_debug_snapshot(self._portfolio),
@@ -1747,46 +1768,45 @@ class Schematics5BTrader:
                                 except (ValueError, TypeError):
                                     pass  # malformed timestamp — skip compression check
 
-                            if not _compress_block:
-                                # ── Issue 5: portfolio correlation check ───────────────
-                                # Evaluated with the DD-adjusted risk amount so the cap
-                                # is applied to what we'd actually put at risk.
-                                # When USE_PORTFOLIO_LAYER=False the check is a no-op
-                                # (returns allowed=True, scaling_factor=1.0 immediately).
-                                _pm_scaling = 1.0
-                                if self._portfolio is not None:
-                                    # Sync equity so total_risk_pct is accurate
-                                    self._portfolio.equity = self.state.balance
-                                    _p_stop = (schematic.get("stop_loss") or {}).get("price", 0)
-                                    _base_risk = (
-                                        self.state.balance * (RISK_PER_TRADE_PCT / 100) * _dd_mult
+                            # ── Issue 5: portfolio correlation check ───────────────
+                            # Use a dedicated flag so portfolio suppression is never
+                            # conflated with compression suppression — they have
+                            # different semantics and different cycle_result actions.
+                            # Evaluated even when _compress_block is True so the
+                            # portfolio state stays visible in logs on every cycle.
+                            _portfolio_block = False
+                            _pm_scaling = 1.0
+                            if not _compress_block and self._portfolio is not None:
+                                # Sync equity so total_risk_pct is accurate
+                                self._portfolio.equity = self.state.balance
+                                _base_risk = (
+                                    self.state.balance * (RISK_PER_TRADE_PCT / 100) * _dd_mult
+                                )
+                                _pm_result = _pm_can_open_trade(
+                                    SYMBOL, _base_risk, self._portfolio
+                                )
+                                if not _pm_result["allowed"]:
+                                    logger.info(
+                                        "[5B] PORTFOLIO_BLOCK | reason=%s | "
+                                        "portfolio_risk=%.2f%%",
+                                        _pm_result["reason"],
+                                        _pm_result["adjusted_portfolio_risk"],
                                     )
-                                    _pm_result = _pm_can_open_trade(
-                                        SYMBOL, _base_risk, self._portfolio
-                                    )
-                                    if not _pm_result["allowed"]:
-                                        logger.info(
-                                            "[5B] PORTFOLIO_BLOCK | reason=%s | "
-                                            "portfolio_risk=%.2f%%",
-                                            _pm_result["reason"],
-                                            _pm_result["adjusted_portfolio_risk"],
-                                        )
-                                        cycle_result["action"] = "portfolio_blocked"
-                                        cycle_result["details"] = {
-                                            "reason": _pm_result["reason"],
-                                            "adjusted_portfolio_risk": round(
-                                                _pm_result["adjusted_portfolio_risk"], 2
-                                            ),
-                                            "portfolio_snapshot": _pm_debug_snapshot(
-                                                self._portfolio
-                                            ),
-                                        }
-                                        # Skip _enter_trade — move to next cycle
-                                        _compress_block = True
-                                    else:
-                                        _pm_scaling = _pm_result["scaling_factor"]
+                                    _portfolio_block = True
+                                    cycle_result["action"] = "portfolio_blocked"
+                                    cycle_result["details"] = {
+                                        "reason": _pm_result["reason"],
+                                        "adjusted_portfolio_risk": round(
+                                            _pm_result["adjusted_portfolio_risk"], 2
+                                        ),
+                                        "portfolio_snapshot": _pm_debug_snapshot(
+                                            self._portfolio
+                                        ),
+                                    }
+                                else:
+                                    _pm_scaling = _pm_result["scaling_factor"]
 
-                            if not _compress_block:
+                            if not _compress_block and not _portfolio_block:
                                 trade = self._enter_trade(
                                     schematic, evaluation, best_current_price, best_htf_bias,
                                     SYMBOL, best_tf,
