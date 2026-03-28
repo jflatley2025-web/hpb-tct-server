@@ -67,6 +67,18 @@ logger = logging.getLogger("decision_engine_v2")
 # Default: False — existing code paths remain active until explicitly switched.
 USE_UNIFIED_ENGINE = False
 
+# ── DD protection feature flag ─────────────────────────────────────────
+# When True, the 3-tier drawdown control layer is active inside decide().
+# Set False to revert to no DD gating (e.g. debugging, stress testing).
+USE_DD_PROTECTION = True
+
+# ── v15: trade compression feature flag ──────────────────────────────
+# Post-gate execution filter: within COMPRESSION_WINDOW_BARS of the last
+# accepted trade, only a strictly higher-priority signal is allowed through.
+# Does NOT modify gate logic, scores, or signal generation.
+USE_TRADE_COMPRESSION = True
+COMPRESSION_WINDOW_BARS = 6  # bars on the signal's own timeframe (1h → 6h, 15m → 1.5h)
+
 # ── Gate constants (v12/v13/v14) ─────────────────────────────────────
 # Mirror of backtest/runner.py — keep in sync. Do NOT change values here
 # without a matching change in runner.py and a full parity validation.
@@ -79,8 +91,15 @@ _MODEL3_MAX_DISTANCE_PCT = 0.015  # entry must be within 1.5% of range midpoint
 _MIN_DISPLACEMENT = 0.50      # minimum local_displacement for any signal
 _MIN_DISPLACEMENT_15M = 0.65  # stricter displacement floor for 15m specifically
 _MIN_SCORE_HARD = 65          # hard score floor — scores 57-64 blocked regardless of threshold
-_MAX_DD_SOFT = 0.04           # halt new signals when current DD exceeds 4%
-_DD_RESET_HOURS = 72          # after this many hours in DD, reset peak to allow trading again
+
+# ── Issue 3: 3-tier drawdown control constants ────────────────────────
+# Mirror in backtest/runner.py. Do NOT change one without changing both.
+_DD_SOFT_THRESHOLD = 0.02     # soft throttle: scale risk to DD_RISK_SCALE when DD ≥ 2%
+_DD_HARD_THRESHOLD = 0.04     # hard block: halt new entries entirely when DD ≥ 4%
+_DD_RISK_SCALE = 0.5          # position size multiplier applied during soft throttle
+_DD_RESET_HOURS = 72          # minimum hours in hard block before reset is even evaluated
+_DD_RECOVERY_PCT = 0.5        # equity must recover ≥ 50% of (peak→trough) gap before reset
+                               # e.g. peak=$10k, trough=$9.6k (4% DD), must recover to $9.8k
 _ENABLE_15M_NY_OVERTRADE_FILTER = False  # optional NY overtrade guard
 
 # Detection window limits (performance)
@@ -131,6 +150,34 @@ def _range_size_pct(range_info, current_price: float) -> float:
     if r_high <= r_low:
         return 0.0
     return (r_high - r_low) / current_price
+
+
+# ── v15: Priority score (single source of truth) ─────────────────────
+
+def compute_priority_score(
+    score: float,
+    rcm_score: float,
+    rr: float,
+    displacement: float,
+) -> float:
+    """
+    Composite quality rank used by the trade compression filter (v15).
+
+    Higher = better setup. Weights:
+        50% — gate score (0–100)
+        20% — RCM quality score (0–1 scaled to 0–100)
+        20% — R:R ratio (scaled by ×10 so a 2.0 R:R contributes 20 pts)
+        10% — local displacement (0–1 scaled to 0–100)
+
+    This function is the single definition of priority_score.
+    Import and call this function from all callers — do not inline the formula.
+    """
+    return (
+        score * 0.5
+        + rcm_score * 100 * 0.2
+        + rr * 10 * 0.2
+        + displacement * 100 * 0.1
+    )
 
 
 # ── Module import cache ───────────────────────────────────────────────
@@ -200,6 +247,14 @@ def decide(
             "stop_price": float,
             "target_price": float,
             "rr": float,
+            "priority_score": float,     # composite quality rank for trade compression (v15)
+            "risk_multiplier": float,    # 1.0 = full risk, 0.5 = soft throttle, 0.0 = hard block
+            "new_peak": float | None,    # caller must store as peak_equity on next call
+            "new_trough": float | None,  # caller must store as dd_trough_equity on next call;
+                                         # None outside hard block; tracks lowest equity since trigger
+            "new_dd_protection_triggered_at": datetime | None,
+                                         # caller must store as dd_protection_triggered_at;
+                                         # set to current_time on first hard crossing, None on reset
             "metadata": {
                 "htf_bias": str,
                 "gate_1a_pass": bool,
@@ -230,6 +285,11 @@ def decide(
         "stop_price": 0.0,
         "target_price": 0.0,
         "rr": 0.0,
+        "priority_score": 0.0,
+        "risk_multiplier": 1.0,
+        "new_peak": None,
+        "new_trough": None,
+        "new_dd_protection_triggered_at": None,
         "metadata": {},
     }
 
@@ -239,13 +299,99 @@ def decide(
     min_rr: float = context.get("min_rr", MIN_RR)
     traded_bos_fingerprints: dict = context.get("traded_bos_fingerprints") or {}
 
-    # DD protection (stateful — omit keys to disable this gate)
+    # DD protection state (stateful — omit keys to disable gate entirely)
     peak_equity: Optional[float] = context.get("peak_equity")
     equity: Optional[float] = context.get("equity")
     dd_protection_triggered_at: Optional[datetime] = context.get("dd_protection_triggered_at")
+    # Lowest equity recorded since hard block first triggered.
+    # Caller must store new_trough from each result and pass it back here.
+    dd_trough_equity: Optional[float] = context.get("dd_trough_equity")
 
     if not current_price or not current_time:
         return {**_PASS, "reason": "missing_required_context (current_price or current_time)"}
+
+    # ── Hybrid DD tier — computed once before scanning ───────────────────
+    # _risk_multiplier flows into every result so callers can scale position size.
+    # _new_peak / _new_trough must be stored by the caller and passed back next call
+    # via context["peak_equity"] / context["dd_trough_equity"] — keeps decide() stateless.
+    _risk_multiplier: float = 1.0
+    _new_peak: Optional[float] = None
+    _new_trough: Optional[float] = None   # None outside hard block
+    # Pass through unchanged by default; set to current_time on first crossing, None on reset.
+    _new_dd_protection_triggered_at: Optional[datetime] = dd_protection_triggered_at
+
+    if USE_DD_PROTECTION and peak_equity is not None and equity is not None and peak_equity > 0:
+        _new_peak = max(peak_equity, equity)  # always propagate equity highs
+
+        if equity > peak_equity:
+            # New equity high — clear all DD protection state unconditionally.
+            # Matching runner.py _close_trade() behaviour: new high cancels the timer.
+            _new_dd_protection_triggered_at = None
+            _new_trough = None
+            # _risk_multiplier stays 1.0
+
+        elif dd_protection_triggered_at is not None:
+            # Hard block is LATCHED — it persists regardless of whether the current
+            # drawdown temporarily recovered above _DD_HARD_THRESHOLD (e.g. bounced
+            # into the soft band).  The only exits are:
+            #   (A) new equity high (handled above), or
+            #   (B) hybrid reset: time elapsed AND sufficient equity recovery.
+            _new_trough = (
+                min(dd_trough_equity, equity)
+                if dd_trough_equity is not None
+                else equity
+            )
+            _hours_in_dd = (current_time - dd_protection_triggered_at).total_seconds() / 3600
+
+            # Recovery fraction: how much of peak→trough gap has been reclaimed.
+            _recovery = 0.0
+            if peak_equity > _new_trough:
+                _recovery = (equity - _new_trough) / (peak_equity - _new_trough)
+
+            if _hours_in_dd >= _DD_RESET_HOURS and _recovery >= _DD_RECOVERY_PCT:
+                # Hybrid condition met — re-baseline and clear trough + trigger.
+                _new_peak = equity
+                _new_trough = None                         # protection fully exited
+                _new_dd_protection_triggered_at = None     # reset — caller must clear this
+                logger.info(
+                    "DD hard reset: %.0fh elapsed, recovery=%.0f%% ≥ %.0f%% "
+                    "(trough=$%.2f) — re-baselining peak $%.2f → $%.2f",
+                    _hours_in_dd, _recovery * 100, _DD_RECOVERY_PCT * 100,
+                    (dd_trough_equity or 0), peak_equity, equity,
+                )
+                # _risk_multiplier stays 1.0 — full risk resumes
+            else:
+                _risk_multiplier = 0.0  # hard block remains
+                if _hours_in_dd >= _DD_RESET_HOURS:
+                    # Time elapsed but recovery not sufficient — stay blocked, log why.
+                    logger.debug(
+                        "DD hard block: %.0fh elapsed but recovery=%.2f%% < %.0f%% "
+                        "(trough=$%.2f equity=$%.2f) — blocked",
+                        _hours_in_dd, _recovery * 100, _DD_RECOVERY_PCT * 100,
+                        _new_trough, equity,
+                    )
+
+        else:
+            # No prior hard block — evaluate fresh DD tiers from current drawdown.
+            _cur_dd = (peak_equity - equity) / peak_equity
+
+            if _cur_dd >= _DD_HARD_THRESHOLD:
+                # First crossing — latch the hard block.
+                _new_trough = equity
+                _risk_multiplier = 0.0
+                _new_dd_protection_triggered_at = current_time
+                logger.info(
+                    "DD hard block triggered: dd=%.2f%% ≥ %.0f%% — trough=$%.2f",
+                    _cur_dd * 100, _DD_HARD_THRESHOLD * 100, equity,
+                )
+
+            elif _cur_dd >= _DD_SOFT_THRESHOLD:
+                # Soft tier — allow the trade but halve position size.
+                _risk_multiplier = _DD_RISK_SCALE
+                logger.debug(
+                    "DD soft throttle: dd=%.2f%% ≥ %.0f%% — scaling risk to %.0f%%",
+                    _cur_dd * 100, _DD_SOFT_THRESHOLD * 100, _DD_RISK_SCALE * 100,
+                )
 
     try:
         mods = _get_modules()
@@ -293,6 +439,11 @@ def decide(
     # ── Scan MTF timeframes ───────────────────────────────────────
     best_signal: Optional[dict] = None
     best_score: float = 0
+    # Track the highest-score PASS candidate for diagnostic PASS returns.
+    # Lets callers inspect which gate fired on the "best" signal that didn't qualify.
+    _best_blocked_score: float = -1.0
+    _best_blocked_code: Optional[str] = None
+    _best_blocked_reason: Optional[str] = None
 
     for tf in MTF_TIMEFRAMES:
         df_tf_full = candles_by_tf.get(tf)
@@ -471,24 +622,27 @@ def decide(
                 skip_reason = f"RR_TOO_LOW ({actual_rr:.2f} < {min_rr:.2f})"
                 failure_code = "FAIL_RR_FILTER"
 
-            # ── v14: soft DD protection (optional — needs equity state) ──
-            elif (
-                peak_equity is not None
-                and equity is not None
-                and peak_equity > 0
-                and (peak_equity - equity) / peak_equity > _MAX_DD_SOFT
-            ):
-                _cur_dd = (peak_equity - equity) / peak_equity * 100
-                # Only block if within the reset window (72h)
-                _in_window = True
-                if dd_protection_triggered_at is not None:
-                    _hours = (current_time - dd_protection_triggered_at).total_seconds() / 3600
-                    if _hours >= _DD_RESET_HOURS:
-                        _in_window = False  # reset elapsed — fall through to next gate
-                if _in_window:
-                    final_decision = "PASS"
-                    skip_reason = f"DD_PROTECTION (dd={_cur_dd:.2f}% > {_MAX_DD_SOFT * 100:.0f}%)"
-                    failure_code = "FAIL_DD_PROTECTION"
+            # ── Issue 3: DD hard block ────────────────────────────────────
+            # _risk_multiplier was computed before the TF loop.
+            # 0.0 → hard block; 0.5 → soft throttle (trade allowed, risk scaled);
+            # 1.0 → no DD concern, full risk.
+            # Soft throttle does NOT set final_decision — it only affects the
+            # risk_multiplier carried in the best_signal result.
+            elif _risk_multiplier == 0.0:
+                final_decision = "PASS"
+                _block_dd = (peak_equity - equity) / peak_equity * 100
+                # Compute recovery for the skip_reason so logs are diagnostic
+                _block_recovery = 0.0
+                if _new_trough is not None and peak_equity > _new_trough:
+                    _block_recovery = (equity - _new_trough) / (peak_equity - _new_trough)
+                skip_reason = (
+                    f"DD_HARD_BLOCK (dd={_block_dd:.2f}% >= {_DD_HARD_THRESHOLD * 100:.0f}%"
+                    f", recovery={_block_recovery:.0%}"
+                    f", trough=${_new_trough:.2f})"
+                    if _new_trough is not None
+                    else f"DD_HARD_BLOCK (dd={_block_dd:.2f}% >= {_DD_HARD_THRESHOLD * 100:.0f}%)"
+                )
+                failure_code = "FAIL_DD_PROTECTION"
 
             # ── v14: global displacement floor ────────────────────
             elif local_displacement < _MIN_DISPLACEMENT:
@@ -626,6 +780,12 @@ def decide(
                 final_decision, failure_code or "ok",
             )
 
+            # Track highest-score blocked candidate (diagnostic: shown in PASS result)
+            if final_decision == "PASS" and score > _best_blocked_score:
+                _best_blocked_score = score
+                _best_blocked_code = failure_code
+                _best_blocked_reason = skip_reason
+
             # ── Keep best TAKE ────────────────────────────────────
             if final_decision == "TAKE" and score > best_score:
                 best_score = score
@@ -641,6 +801,18 @@ def decide(
                     "stop_price": stop_price,
                     "target_price": target_price,
                     "rr": actual_rr if actual_rr > 0 else rr,
+                    # v15: composite quality rank used by compression filter in callers.
+                    "priority_score": compute_priority_score(
+                        score, rcm_score, actual_rr if actual_rr > 0 else rr, local_displacement
+                    ),
+                    # Caller must apply risk_multiplier to position size.
+                    # Caller must store new_peak as peak_equity on the next call.
+                    # Caller must store new_trough as dd_trough_equity on the next call.
+                    # Caller must store new_dd_protection_triggered_at on the next call.
+                    "risk_multiplier": _risk_multiplier,
+                    "new_peak": _new_peak,
+                    "new_trough": _new_trough,
+                    "new_dd_protection_triggered_at": _new_dd_protection_triggered_at,
                     "metadata": {
                         "htf_bias": htf_bias,
                         "gate_1a_pass": gate_1a_pass,
@@ -659,4 +831,16 @@ def decide(
                     },
                 }
 
-    return best_signal if best_signal is not None else _PASS
+    # On PASS: propagate DD state and expose the highest-score blocked candidate's
+    # failure_code so callers can inspect why no trade fired without parsing logs.
+    # risk_multiplier is explicitly overridden so soft-throttle callers see the
+    # correct tier (0.5) even on cycles where no trade qualifies.
+    return best_signal if best_signal is not None else {
+        **_PASS,
+        "failure_code": _best_blocked_code,
+        "reason": _best_blocked_reason or "no_signal",
+        "risk_multiplier": _risk_multiplier,
+        "new_peak": _new_peak,
+        "new_trough": _new_trough,
+        "new_dd_protection_triggered_at": _new_dd_protection_triggered_at,
+    }

@@ -57,6 +57,16 @@ from backtest.db import (
 )
 from backtest.ingest import load_candles
 from backtest.session import get_session
+from decision_engine_v2 import (
+    _DD_SOFT_THRESHOLD,
+    _DD_HARD_THRESHOLD,
+    _DD_RISK_SCALE,
+    _DD_RESET_HOURS,
+    _DD_RECOVERY_PCT,
+    USE_TRADE_COMPRESSION as _USE_TRADE_COMPRESSION,
+    COMPRESSION_WINDOW_BARS as _COMPRESSION_WINDOW_BARS,
+    compute_priority_score,
+)
 
 logger = logging.getLogger("backtest.runner")
 
@@ -79,12 +89,12 @@ _MIN_DISPLACEMENT_15M = 0.65 # stricter displacement floor for 15m specifically
 # v14: hard score floor (below threshold trades are removed before score gate)
 _MIN_SCORE_HARD = 65         # score 57-64 confirmed losers — blocked regardless of threshold
 
-# v14: soft drawdown protection — pause new entries during cluster losses
-_MAX_DD_SOFT = 0.04          # halt new signals when current DD exceeds 4%
-_DD_RESET_HOURS = 72         # after this many hours in DD protection, reset peak to current
-                              # so trading can resume (prevents permanent halt in backtest)
+# DD constants + compression flags imported from decision_engine_v2 (single source of truth).
+# Aliases with leading underscores are set at top-of-file so all existing references continue to work.
+# See decision_engine_v2.py for values and rationale.
 
-# Optional 15m NY overtrade guard — set True for re-run only if trade count > 55
+# Optional 15m NY overtrade guard — backtest-only tuning flag; set True only if trade count > 55.
+# Kept local (not imported) so backtest re-runs can toggle it without touching the live engine.
 _ENABLE_15M_NY_OVERTRADE_FILTER = False
 
 
@@ -198,6 +208,12 @@ class BacktestState:
     trades_15m: int = 0            # resulted in a TAKE trade
     # v14: DD protection state — tracks when protection first triggered
     dd_protection_triggered_at: Optional[datetime] = None  # None = not in protection
+    # Lowest equity recorded since hard block first triggered.
+    # Required for hybrid reset: reset only when time AND partial recovery both met.
+    dd_trough_equity: Optional[float] = None  # None = not in hard block
+    # v15: compression state — tracks the last trade that was actually executed
+    last_accepted_trade_time: Optional[datetime] = None
+    last_accepted_trade_priority: float = 0.0
 
 
 # ── Multi-TF Synchronization ─────────────────────────────────────────
@@ -711,6 +727,64 @@ def run_gate_pipeline(
             if tf == "15m":
                 state.signals_15m_detected += 1
 
+            # ── Hybrid DD tier — computed per schematic, consistent per step ──
+            # Evaluated BEFORE the gate chain so the elif can reference _risk_multiplier.
+            # Reset requires BOTH: time elapsed AND partial equity recovery.
+            _risk_multiplier = 1.0
+            if state.peak_equity > 0:
+                _step_dd = (state.peak_equity - state.equity) / state.peak_equity
+                if _step_dd >= _DD_HARD_THRESHOLD:
+                    # Record first trigger and initialise trough on first crossing.
+                    if state.dd_protection_triggered_at is None:
+                        state.dd_protection_triggered_at = current_time
+                        state.dd_trough_equity = state.equity
+                        logger.info(
+                            "DD_PROTECTION | hard block triggered | dd=%.2f%% | trough=$%.2f",
+                            _step_dd * 100, state.equity,
+                        )
+                    else:
+                        # Keep trough at the lowest point seen since trigger.
+                        if state.dd_trough_equity is None or state.equity < state.dd_trough_equity:
+                            state.dd_trough_equity = state.equity
+
+                    _hours_in_dd = (
+                        current_time - state.dd_protection_triggered_at
+                    ).total_seconds() / 3600
+
+                    # Recovery fraction: how much of peak→trough gap has been reclaimed.
+                    _recovery = 0.0
+                    _trough = state.dd_trough_equity
+                    if _trough is not None and state.peak_equity > _trough:
+                        _recovery = (state.equity - _trough) / (state.peak_equity - _trough)
+
+                    if _hours_in_dd >= _DD_RESET_HOURS and _recovery >= _DD_RECOVERY_PCT:
+                        logger.info(
+                            "DD_PROTECTION | reset: %.0fh elapsed, recovery=%.0f%% ≥ %.0f%% "
+                            "(trough=$%.2f) — resetting peak $%.2f → $%.2f",
+                            _hours_in_dd, _recovery * 100, _DD_RECOVERY_PCT * 100,
+                            (_trough or 0), state.peak_equity, state.equity,
+                        )
+                        state.peak_equity = state.equity
+                        state.dd_protection_triggered_at = None
+                        state.dd_trough_equity = None
+                        # _risk_multiplier stays 1.0 — full risk after reset
+                    else:
+                        _risk_multiplier = 0.0  # hard block remains
+                        if _hours_in_dd >= _DD_RESET_HOURS:
+                            # Time elapsed but recovery not sufficient — log diagnostic.
+                            logger.debug(
+                                "DD_PROTECTION | %.0fh elapsed but recovery=%.2f%% < %.0f%% "
+                                "(trough=$%.2f equity=$%.2f) — blocked",
+                                _hours_in_dd, _recovery * 100, _DD_RECOVERY_PCT * 100,
+                                (_trough or 0), state.equity,
+                            )
+                elif _step_dd >= _DD_SOFT_THRESHOLD:
+                    _risk_multiplier = _DD_RISK_SCALE  # soft throttle: 50% risk
+                    logger.info(
+                        "DD_PROTECTION | soft throttle | dd=%.2f%% — risk scaled to %.0f%%",
+                        _step_dd * 100, _DD_RISK_SCALE * 100,
+                    )
+
             # Determine failure code
             failure_code = None
             skip_reason = None
@@ -735,35 +809,16 @@ def run_gate_pipeline(
                 skip_reason = "RR_TOO_LOW ({:.2f} < {:.2f})".format(actual_rr, min_rr)
                 failure_code = "FAIL_RR_FILTER"
 
-            # ── v14: soft drawdown protection ─────────────────────────
-            # Pauses new entries during loss clusters. Automatically resets after
-            # _DD_RESET_HOURS so a permanent halt cannot occur in backtesting.
-            elif state.peak_equity > 0 and (state.peak_equity - state.equity) / state.peak_equity > _MAX_DD_SOFT:
-                _cur_dd = (state.peak_equity - state.equity) / state.peak_equity * 100
-                # First trigger: record start time
-                if state.dd_protection_triggered_at is None:
-                    state.dd_protection_triggered_at = current_time
-                    logger.info(
-                        "DD_PROTECTION | triggered | current_dd=%.2f%% | pausing new entries",
-                        _cur_dd,
-                    )
-                # Time-based reset: after _DD_RESET_HOURS, re-baseline peak_equity so
-                # trading can resume. This prevents permanent halt when equity stays flat.
-                _hours_in_dd = (current_time - state.dd_protection_triggered_at).total_seconds() / 3600
-                if _hours_in_dd >= _DD_RESET_HOURS:
-                    logger.info(
-                        "DD_PROTECTION | %.0fh elapsed — resetting peak_equity $%.2f -> $%.2f to resume",
-                        _hours_in_dd, state.peak_equity, state.equity,
-                    )
-                    state.peak_equity = state.equity
-                    state.dd_protection_triggered_at = None
-                    # Don't skip — fall through to next gate by not setting failure_code
-                else:
-                    final_decision = "SKIP"
-                    skip_reason = "DD_PROTECTION (dd={:.2f}% > {:.0f}%, {:.0f}h/{:.0f}h)".format(
-                        _cur_dd, _MAX_DD_SOFT * 100, _hours_in_dd, _DD_RESET_HOURS,
-                    )
-                    failure_code = "FAIL_DD_PROTECTION"
+            # ── Issue 3: DD hard block ─────────────────────────────────────
+            # Tier computed above. 0.0 = hard block; 0.5 = soft throttle (trade allowed,
+            # position scaled); 1.0 = no DD concern.
+            elif _risk_multiplier == 0.0:
+                final_decision = "SKIP"
+                skip_reason = (
+                    f"DD_HARD_BLOCK (dd={_step_dd * 100:.2f}%"
+                    f" >= {_DD_HARD_THRESHOLD * 100:.0f}%)"
+                )
+                failure_code = "FAIL_DD_PROTECTION"
 
             # ── v14: global displacement quality gate ──────────────────
             elif local_displacement < _MIN_DISPLACEMENT:
@@ -947,6 +1002,14 @@ def run_gate_pipeline(
                 "final_decision": final_decision,
                 "skip_reason": skip_reason,
                 "failure_code": failure_code,
+                "risk_multiplier": _risk_multiplier,
+                # v15: composite quality rank — single source: decision_engine_v2.compute_priority_score
+                "priority_score": compute_priority_score(
+                    score,
+                    rcm_score,
+                    actual_rr if actual_rr > 0 else rr,
+                    local_displacement,
+                ),
                 "structure_state": structure_state,
                 "entry_price": entry_price,
                 "stop_price": stop_price,
@@ -1207,26 +1270,61 @@ def run_backtest(
                     min_rr=effective_min_rr,
                 )
                 if signal and signal.get("final_decision") == "TAKE":
-                    # Record BOS fingerprint to prevent same-schematic re-entry.
-                    # Use entry_price + BOS price (absolute, stable across window shifts).
-                    sch = signal.get("_schematic") or {}
-                    bos_info_fp = (sch.get("bos_confirmation") or {})
-                    bos_fp = (
-                        signal.get("timeframe"),
-                        signal.get("model"),
-                        signal.get("direction"),
-                        round(float(signal.get("entry_price") or current_price), 0),
-                        round(float(bos_info_fp.get("bos_price") or 0), 0),
-                    )
-                    state.traded_bos_fingerprints[bos_fp] = current_time
-                    _trade_opened = _open_trade(state, signal, current_time, current_price,
-                                               tp1_level_pct=effective_tp1_level_pct)
-                    # v13: funnel trade counters — only increment if trade was actually opened
-                    if _trade_opened:
-                        if "Model_3" in signal.get("model", ""):
-                            state.model3_trades += 1
-                        if signal.get("timeframe") == "15m":
-                            state.trades_15m += 1
+                    # ── v15: compression check (post-gate execution filter) ────────
+                    # Not a gate — does not modify signal["final_decision"].
+                    # Only suppresses execution; signal is still logged to DB as TAKE.
+                    _priority = signal.get("priority_score", 0.0)
+                    _compress_block = False
+                    if _USE_TRADE_COMPRESSION and state.last_accepted_trade_time is not None:
+                        _elapsed = (
+                            current_time - state.last_accepted_trade_time
+                        ).total_seconds()
+                        _bar_secs = timeframe_to_seconds(signal.get("timeframe", "1h"))
+                        _bars_since = _elapsed / _bar_secs
+                        if _bars_since < _COMPRESSION_WINDOW_BARS:
+                            if _priority <= state.last_accepted_trade_priority:
+                                _compress_block = True
+                                logger.info(
+                                    "COMPRESSION_SUPPRESSED | priority=%.1f <= last=%.1f | "
+                                    "bars_since=%.1f/%d | model=%s tf=%s score=%s",
+                                    _priority, state.last_accepted_trade_priority,
+                                    _bars_since, _COMPRESSION_WINDOW_BARS,
+                                    signal.get("model"), signal.get("timeframe"),
+                                    signal.get("score_1d"),
+                                )
+
+                    if _compress_block:
+                        # Suppressed — do not record BOS fingerprint or open trade.
+                        # Signal remains in DB as TAKE (it passed all gates).
+                        pass
+                    else:
+                        # Build BOS fingerprint (entry_price + BOS price — absolute,
+                        # stable across window shifts).  Written ONLY after _open_trade()
+                        # confirms the trade was placed so a failed open doesn't permanently
+                        # dedup the same schematic for 48h.
+                        sch = signal.get("_schematic") or {}
+                        bos_info_fp = (sch.get("bos_confirmation") or {})
+                        bos_fp = (
+                            signal.get("timeframe"),
+                            signal.get("model"),
+                            signal.get("direction"),
+                            round(float(signal.get("entry_price") or current_price), 0),
+                            round(float(bos_info_fp.get("bos_price") or 0), 0),
+                        )
+                        _trade_opened = _open_trade(state, signal, current_time, current_price,
+                                                   tp1_level_pct=effective_tp1_level_pct)
+                        # v13: funnel trade counters — only increment if trade was actually opened
+                        if _trade_opened:
+                            # Record fingerprint only on confirmed open; avoids
+                            # deduping a schematic when _open_trade() fails/returns falsy.
+                            state.traded_bos_fingerprints[bos_fp] = current_time
+                            # v15: update compression state on every executed trade
+                            state.last_accepted_trade_time = current_time
+                            state.last_accepted_trade_priority = _priority
+                            if "Model_3" in signal.get("model", ""):
+                                state.model3_trades += 1
+                            if signal.get("timeframe") == "15m":
+                                state.trades_15m += 1
 
             # Progress logging
             if step_idx > 0 and step_idx % 100 == 0:
@@ -1312,6 +1410,17 @@ def _open_trade(state: BacktestState, signal: dict, current_time: datetime,
 
     position_size, risk_amount = calculate_position_size(state.equity, sl_pct)
 
+    # Issue 3: apply DD risk multiplier (1.0 = full, 0.5 = soft throttle)
+    risk_multiplier = signal.get("risk_multiplier", 1.0)
+    if 0 < risk_multiplier < 1.0:
+        position_size = round(position_size * risk_multiplier, 4)
+        risk_amount = round(risk_amount * risk_multiplier, 4)
+        logger.info(
+            "DD soft throttle: risk_multiplier=%.2f applied — "
+            "position_size=%.4f risk_amount=%.4f",
+            risk_multiplier, position_size, risk_amount,
+        )
+
     # Calculate TP1 price: configurable % of entry→target move
     tp1_price = signal.get("tp1_price")
     if tp1_price is None or tp1_price == 0:
@@ -1389,6 +1498,7 @@ def _close_trade(state: BacktestState, raw_exit_price: float, exit_reason: str,
     if state.equity > state.peak_equity:
         state.peak_equity = state.equity
         state.dd_protection_triggered_at = None  # equity recovered; reset protection
+        state.dd_trough_equity = None            # clear trough — back above previous peak
     current_dd = ((state.peak_equity - state.equity) / state.peak_equity) * 100
     state.drawdown = current_dd
     if current_dd > state.max_drawdown_pct:

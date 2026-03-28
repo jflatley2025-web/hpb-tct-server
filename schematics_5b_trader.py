@@ -37,6 +37,7 @@ from trade_execution import (
 )
 from decision_tree_bridge import DecisionTreeEvaluator
 from jack_tct_evaluator import JackTCTEvaluator
+from backtest.config import timeframe_to_seconds as _tf_seconds
 
 # Reuse MEXC fetch helpers from tensor trader (no duplication)
 from tensor_tct_trader import (
@@ -412,6 +413,13 @@ class Schematics5BTradeState:
         self.last_scan_action: Optional[str] = None
         self.last_error: Optional[str] = None
         self.trading_mode: str = "claude"  # "claude" | "jack"
+        # Issue 3: DD protection state
+        self.peak_balance: float = STARTING_BALANCE  # highest balance seen
+        self.dd_triggered_at: Optional[str] = None   # ISO UTC; None = not in hard block
+        self.dd_trough_balance: Optional[float] = None  # lowest balance since hard block trigger
+        # v15: compression state
+        self.last_accepted_trade_ts: Optional[str] = None  # ISO UTC of last executed trade
+        self.last_accepted_trade_priority: float = 0.0     # priority_score of that trade
         self._load()
 
     def _load(self):
@@ -433,6 +441,13 @@ class Schematics5BTradeState:
                 self.last_scan_time = data.get("last_scan_time")
                 self.last_scan_action = data.get("last_scan_action")
                 self.trading_mode = data.get("trading_mode", "claude")
+                # Issue 3: DD protection state (default to current balance as peak on first load)
+                self.peak_balance = data.get("peak_balance", self.balance)
+                self.dd_triggered_at = data.get("dd_triggered_at")
+                self.dd_trough_balance = data.get("dd_trough_balance")
+                # v15: compression state
+                self.last_accepted_trade_ts = data.get("last_accepted_trade_ts")
+                self.last_accepted_trade_priority = data.get("last_accepted_trade_priority", 0.0)
                 # Validate current_trade — discard if essential fields are missing/zero
                 if self.current_trade:
                     ep = self.current_trade.get("entry_price", 0)
@@ -462,6 +477,13 @@ class Schematics5BTradeState:
                 "last_scan_action": self.last_scan_action,
                 "last_error": self.last_error,
                 "trading_mode": self.trading_mode,
+                # Issue 3: DD protection state
+                "peak_balance": round(self.peak_balance, 2),
+                "dd_triggered_at": self.dd_triggered_at,
+                "dd_trough_balance": round(self.dd_trough_balance, 2) if self.dd_trough_balance is not None else None,
+                # v15: compression state
+                "last_accepted_trade_ts": self.last_accepted_trade_ts,
+                "last_accepted_trade_priority": round(self.last_accepted_trade_priority, 4),
             }
             with open(TRADE_LOG_PATH, "w") as f:
                 json.dump(data, f, indent=2, default=str)
@@ -1127,6 +1149,101 @@ class Schematics5BTrader:
         else:
             logger.info("[5B] MoonDev paper trading DISABLED — using MEXC for price/candle data.")
 
+    def _dd_risk_multiplier(self) -> float:
+        """
+        Hybrid DD risk tier from live balance state.
+
+        Returns:
+            1.0  — no DD concern, full position size
+            0.5  — soft throttle (DD ≥ 2%), halve position size
+            0.0  — hard block (DD ≥ 4%), do NOT enter trade
+
+        Hard-block reset requires BOTH:
+            1. hours_since_trigger >= _DD_RESET_HOURS
+            2. equity recovered >= _DD_RECOVERY_PCT of (peak→trough) gap
+
+        Reads all thresholds from decision_engine_v2 constants so the
+        live bot and backtest are always governed by the same values.
+        Fails open (returns 1.0) if the import is unavailable.
+        """
+        try:
+            from decision_engine_v2 import (
+                USE_DD_PROTECTION,
+                _DD_SOFT_THRESHOLD,
+                _DD_HARD_THRESHOLD,
+                _DD_RISK_SCALE,
+                _DD_RESET_HOURS,
+                _DD_RECOVERY_PCT,
+            )
+        except ImportError as _ie:
+            logger.error(
+                "[5B] _dd_risk_multiplier: cannot import DD constants (%s) — "
+                "failing open (1.0); DD protection is INACTIVE",
+                _ie,
+            )
+            return 1.0
+
+        if not USE_DD_PROTECTION or self.state.peak_balance <= 0:
+            return 1.0
+
+        dd_pct = (self.state.peak_balance - self.state.balance) / self.state.peak_balance
+
+        if dd_pct >= _DD_HARD_THRESHOLD:
+            # Track trough — keep the lowest balance seen since hard block started.
+            if (
+                self.state.dd_trough_balance is None
+                or self.state.balance < self.state.dd_trough_balance
+            ):
+                self.state.dd_trough_balance = self.state.balance
+
+            if self.state.dd_triggered_at is not None:
+                try:
+                    triggered_dt = datetime.fromisoformat(self.state.dd_triggered_at)
+                    hours_in_dd = (
+                        datetime.now(timezone.utc) - triggered_dt
+                    ).total_seconds() / 3600
+
+                    # Compute recovery fraction: what fraction of peak→trough has been regained.
+                    _trough = self.state.dd_trough_balance
+                    _recovery = 0.0
+                    if _trough is not None and self.state.peak_balance > _trough:
+                        _recovery = (
+                            (self.state.balance - _trough)
+                            / (self.state.peak_balance - _trough)
+                        )
+
+                    if hours_in_dd >= _DD_RESET_HOURS and _recovery >= _DD_RECOVERY_PCT:
+                        logger.info(
+                            "[5B] DD hard reset: %.0fh elapsed, recovery=%.0f%% ≥ %.0f%% "
+                            "(trough=$%.2f) — re-baselining peak $%.2f → $%.2f",
+                            hours_in_dd, _recovery * 100, _DD_RECOVERY_PCT * 100,
+                            (_trough or 0), self.state.peak_balance, self.state.balance,
+                        )
+                        self.state.peak_balance = self.state.balance
+                        self.state.dd_triggered_at = None
+                        self.state.dd_trough_balance = None
+                        self.state.save()
+                        return 1.0
+                    else:
+                        if hours_in_dd >= _DD_RESET_HOURS:
+                            # Time elapsed but recovery not sufficient — log diagnostic.
+                            logger.debug(
+                                "[5B] DD hard block: %.0fh elapsed but recovery=%.2f%% < %.0f%% "
+                                "(trough=$%.2f balance=$%.2f) — blocked",
+                                hours_in_dd, _recovery * 100, _DD_RECOVERY_PCT * 100,
+                                (_trough or 0), self.state.balance,
+                            )
+
+                except (ValueError, TypeError):
+                    pass  # malformed timestamp — treat as not yet triggered
+
+            return 0.0  # hard block
+
+        if dd_pct >= _DD_SOFT_THRESHOLD:
+            return _DD_RISK_SCALE  # 0.5
+
+        return 1.0
+
     def get_mode(self) -> str:
         """Return the current trading mode: 'claude' or 'jack'."""
         return self.state.trading_mode
@@ -1247,20 +1364,51 @@ class Schematics5BTrader:
             # USE_UNIFIED_ENGINE = False → shadow only (no behaviour change).
             # USE_UNIFIED_ENGINE = True  → v2 result gates the actual trade.
             try:
-                from decision_engine_v2 import decide as _v2_decide, USE_UNIFIED_ENGINE as _USE_V2
+                from decision_engine_v2 import (
+                    decide as _v2_decide,
+                    USE_UNIFIED_ENGINE as _USE_V2,
+                    USE_TRADE_COMPRESSION as _USE_COMPRESSION,
+                    COMPRESSION_WINDOW_BARS as _COMPRESSION_BARS,
+                    compute_priority_score as _cps,
+                )
                 _v2_available = True
             except ImportError:
                 _v2_available = False
                 _USE_V2 = False
+                _USE_COMPRESSION = False
+                _COMPRESSION_BARS = 6
+                _cps = None
 
             _v2_result: Optional[Dict] = None
             if _v2_available:
                 # Pass all fetched MTF candles (1d/4h/1h/30m) — decide() skips
                 # TFs with insufficient data so missing 15m is handled gracefully.
                 _candles_by_tf = dict(sym_result.get("mtf_dfs") or {})
+                # Guard the ISO timestamp parse — persisted state can be malformed if the
+                # trade log was manually edited or written by an older version of the bot.
+                # A bad value degrades to None (no prior hard-block trigger known).
+                try:
+                    _parsed_dd_triggered_at = (
+                        datetime.fromisoformat(self.state.dd_triggered_at)
+                        if self.state.dd_triggered_at
+                        else None
+                    )
+                except (ValueError, TypeError) as _dte:
+                    logger.warning(
+                        "[5B] malformed dd_triggered_at=%r — treating as not triggered: %s",
+                        self.state.dd_triggered_at, _dte,
+                    )
+                    _parsed_dd_triggered_at = None
                 _v2_ctx = {
                     "current_price": best_current_price,
                     "current_time": datetime.now(timezone.utc),
+                    # Wire live DD state so shadow comparisons reflect actual protection status.
+                    # NOTE: _v2_result DD outputs (new_peak / new_trough) are NOT consumed here
+                    # in shadow mode — _dd_risk_multiplier() manages live state independently.
+                    "peak_equity": self.state.peak_balance,
+                    "equity": self.state.balance,
+                    "dd_protection_triggered_at": _parsed_dd_triggered_at,
+                    "dd_trough_equity": self.state.dd_trough_balance,
                 }
                 try:
                     _v2_result = _v2_decide(_candles_by_tf, _v2_ctx)
@@ -1325,7 +1473,32 @@ class Schematics5BTrader:
                 self.last_debug["rig"] = rig_result
                 self.last_debug["msce"] = msce
 
-            # 4. Enter trade on highest-scoring qualifying setup.
+            # 4. DD hard-block timestamp — start the 72h reset clock as soon as equity
+            #    crosses the hard threshold, REGARDLESS of whether any setup qualifies.
+            #    Previously this only ran inside `if best_setup:` so scan cycles with no
+            #    candidates would never set dd_triggered_at and the clock never started.
+            _dd_mult = self._dd_risk_multiplier()
+            if _dd_mult == 0.0 and self.state.dd_triggered_at is None:
+                # Prefer the timestamp returned by the v2 engine (first-crossing detection
+                # in decide()) if available; fall back to now.
+                _v2_dd_ts = (
+                    _v2_result.get("new_dd_protection_triggered_at")
+                    if _v2_result
+                    else None
+                )
+                self.state.dd_triggered_at = (
+                    _v2_dd_ts.isoformat()
+                    if isinstance(_v2_dd_ts, datetime)
+                    else datetime.now(timezone.utc).isoformat()
+                )
+                self.state.save()
+                logger.info(
+                    "[5B] DD hard block: starting 72h reset clock "
+                    "(balance=$%.2f peak=$%.2f)",
+                    self.state.balance, self.state.peak_balance,
+                )
+
+            # 5. Enter trade on highest-scoring qualifying setup.
             if best_setup:
                 schematic, evaluation = best_setup
                 entry_info = schematic.get("entry", {})
@@ -1444,12 +1617,114 @@ class Schematics5BTrader:
                                 evaluation.get("model"),
                                 best_tf,
                             )
-                        trade = self._enter_trade(
-                            schematic, evaluation, best_current_price, best_htf_bias,
-                            SYMBOL, best_tf,
-                        )
-                        cycle_result["action"] = "trade_entered"
-                        cycle_result["details"] = trade
+
+                        # Issue 3: DD risk multiplier — already computed above before this block
+                        # (_dd_mult = self._dd_risk_multiplier()) so the 72h clock starts even
+                        # on cycles where no schematic reaches this point.
+                        if _dd_mult == 0.0:
+                            logger.info(
+                                "[5B] DD hard block: suppressing legacy TAKE — "
+                                "balance=$%.2f peak=$%.2f",
+                                self.state.balance, self.state.peak_balance,
+                            )
+                            # Record first trigger time so the 72h reset can fire
+                            if self.state.dd_triggered_at is None:
+                                self.state.dd_triggered_at = datetime.now(timezone.utc).isoformat()
+                                self.state.save()
+                            cycle_result["action"] = "dd_hard_blocked"
+                            cycle_result["details"] = {
+                                "balance": self.state.balance,
+                                "peak_balance": self.state.peak_balance,
+                                "dd_pct": round(
+                                    (self.state.peak_balance - self.state.balance)
+                                    / self.state.peak_balance * 100, 2
+                                ),
+                            }
+                        else:
+                            # ── v15: compute priority score ───────────────────────
+                            # Single source: decision_engine_v2.compute_priority_score.
+                            # Falls back to inline formula if module is unavailable.
+                            _p_stop = (schematic.get("stop_loss") or {}).get("price", 0)
+                            _p_tgt = (schematic.get("target") or {}).get("price", 0)
+                            _p_risk = abs(best_current_price - _p_stop) if _p_stop else 0
+                            _p_rr = (
+                                abs(_p_tgt - best_current_price) / _p_risk
+                                if _p_risk > 0 and _p_tgt else 0.0
+                            )
+                            _p_disp = (schematic.get("range") or {}).get("displacement", 0.0)
+                            _p_score = evaluation.get("score", 0)
+                            _p_rcm = schematic.get("quality_score", 0.0)
+                            _priority = (
+                                _cps(_p_score, _p_rcm, _p_rr, _p_disp)
+                                if _cps is not None
+                                else (
+                                    _p_score * 0.5
+                                    + _p_rcm * 100 * 0.2
+                                    + _p_rr * 10 * 0.2
+                                    + _p_disp * 100 * 0.1
+                                )
+                            )
+
+                            # ── v15: compression check (post-gate execution filter) ─
+                            _compress_block = False
+                            if _USE_COMPRESSION and self.state.last_accepted_trade_ts is not None:
+                                try:
+                                    _last_dt = datetime.fromisoformat(
+                                        self.state.last_accepted_trade_ts
+                                    )
+                                    _elapsed = (
+                                        datetime.now(timezone.utc) - _last_dt
+                                    ).total_seconds()
+                                    _bar_secs = _tf_seconds(best_tf) if best_tf else 3600
+                                    _bars_since = _elapsed / _bar_secs
+                                    if (
+                                        _bars_since < _COMPRESSION_BARS
+                                        and _priority <= self.state.last_accepted_trade_priority
+                                    ):
+                                        _compress_block = True
+                                        logger.info(
+                                            "[5B] COMPRESSION_SUPPRESSED | "
+                                            "priority=%.1f <= last=%.1f | "
+                                            "bars_since=%.1f/%d | model=%s tf=%s",
+                                            _priority,
+                                            self.state.last_accepted_trade_priority,
+                                            _bars_since, _COMPRESSION_BARS,
+                                            evaluation.get("model"), best_tf,
+                                        )
+                                        cycle_result["action"] = "compression_suppressed"
+                                        cycle_result["details"] = {
+                                            "compression_blocked": True,
+                                            "priority_score": round(_priority, 2),
+                                            "last_priority": round(
+                                                self.state.last_accepted_trade_priority, 2
+                                            ),
+                                            "bars_since_last": round(_bars_since, 2),
+                                        }
+                                except (ValueError, TypeError):
+                                    pass  # malformed timestamp — skip compression check
+
+                            if not _compress_block:
+                                trade = self._enter_trade(
+                                    schematic, evaluation, best_current_price, best_htf_bias,
+                                    SYMBOL, best_tf, risk_multiplier=_dd_mult,
+                                )
+                                if trade.get("error"):
+                                    # _enter_trade() rejected the setup (bad stop/target, R:R
+                                    # too low at market, etc.) — do NOT update the compression
+                                    # window so a valid future trade is not locked out.
+                                    logger.warning(
+                                        "[5B] _enter_trade failed: %s", trade["error"]
+                                    )
+                                    cycle_result["action"] = "entry_failed"
+                                    cycle_result["details"] = trade
+                                else:
+                                    # v15: only record accepted trade when order was placed
+                                    self.state.last_accepted_trade_ts = (
+                                        datetime.now(timezone.utc).isoformat()
+                                    )
+                                    self.state.last_accepted_trade_priority = _priority
+                                    cycle_result["action"] = "trade_entered"
+                                    cycle_result["details"] = trade
             else:
                 # Legacy: no qualifying setups found.
                 # Log if v2 independently found a signal (informational — not executed).
@@ -1862,7 +2137,17 @@ class Schematics5BTrader:
     # ----------------------------------------------------------------
 
     def _enter_trade(self, schematic: Dict, evaluation: Dict, current_price: float, htf_bias: str,
-                     symbol: str = SYMBOL, timeframe: str = "unknown") -> Dict:
+                     symbol: str = SYMBOL, timeframe: str = "unknown",
+                     risk_multiplier: float = 1.0) -> Dict:
+        """
+        Open a new trade.
+
+        ``risk_multiplier`` is supplied by the DD protection layer:
+            1.0 = full risk (default)
+            0.5 = soft throttle — halve the position size
+        Callers must not pass 0.0 here; hard-blocked trades must be
+        caught before calling _enter_trade.
+        """
         direction = evaluation["direction"]
         stop_info = schematic.get("stop_loss", {})
         target_info = schematic.get("target", {})
@@ -1898,14 +2183,23 @@ class Schematics5BTrader:
         if actual_rr < 1.0:
             return {"error": f"R:R too low at market ({actual_rr:.2f}:1)"}
 
-        # Position sizing (1% risk)
-        risk_amount = self.state.balance * (RISK_PER_TRADE_PCT / 100)
+        # Position sizing — base risk 1%, then apply DD risk_multiplier
+        risk_amount = self.state.balance * (RISK_PER_TRADE_PCT / 100) * risk_multiplier
         if direction == "bullish":
             sl_pct = abs((entry_price - stop_price) / entry_price) * 100
         else:
             sl_pct = abs((stop_price - entry_price) / entry_price) * 100
         if sl_pct <= 0:
             sl_pct = 1.0
+
+        if risk_multiplier < 1.0:
+            logger.info(
+                "[5B] DD soft throttle applied: risk_multiplier=%.2f — "
+                "risk_amount=$%.2f (base would be $%.2f)",
+                risk_multiplier,
+                risk_amount,
+                self.state.balance * (RISK_PER_TRADE_PCT / 100),
+            )
 
         position_size = calculate_position_size(risk_amount, sl_pct)
         margin = calculate_margin(position_size, DEFAULT_LEVERAGE)
@@ -2058,6 +2352,17 @@ class Schematics5BTrader:
         position_size = trade.get("position_size", 0)
         pnl_dollars = position_size * (pnl_pct / 100)
         self.state.balance += pnl_dollars
+
+        # Issue 3: update peak on every close; clear all DD state on new equity high
+        if self.state.balance > self.state.peak_balance:
+            self.state.peak_balance = self.state.balance
+            if self.state.dd_triggered_at is not None:
+                logger.info(
+                    "[5B] DD reset: equity set new high $%.2f — clearing hard-block timer and trough",
+                    self.state.balance,
+                )
+                self.state.dd_triggered_at = None
+            self.state.dd_trough_balance = None  # clear trough — back above previous peak
 
         if is_win:
             self.state.total_wins += 1
