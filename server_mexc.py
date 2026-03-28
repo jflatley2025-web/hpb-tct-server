@@ -9,7 +9,7 @@ import time
 import httpx
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from range_utils import check_equilibrium_touch
@@ -2931,7 +2931,106 @@ def validate_1D(context: Dict) -> Dict:
     except Exception:
         return {"passed": False, "ExecutionConfidence_Total": 0.0}
 
+def _build_candles_by_tf(context: Dict) -> Dict:
+    """Extract HTF (4h) and LTF (15m) DataFrames from a gate context dict.
+
+    Returns only keys whose DataFrames are present so callers can pass the
+    result directly to decision_engine_v2.decide() without extra guards.
+    """
+    out: Dict = {}
+    if context.get("htf_candles") is not None:
+        out["4h"] = context["htf_candles"]
+    if context.get("ltf_candles") is not None:
+        out["15m"] = context["ltf_candles"]
+    return out
+
+
 def validate_gates(context: Dict) -> Dict:
+    # ── Unified engine path (feature-flagged, default OFF) ────────────
+    # When USE_UNIFIED_ENGINE is True, route through decision_engine_v2.decide()
+    # instead of the legacy validate_1A/1B/1C/1D pipeline.  The result is mapped
+    # back to the same gate dict shape so callers see no interface change.
+    # Shadow-mode: when USE_UNIFIED_ENGINE is False, the v2 result is still
+    # computed and logged alongside the legacy result for comparison.
+    try:
+        from decision_engine_v2 import USE_UNIFIED_ENGINE, decide as _v2_decide
+        _v2_available = True
+    except ImportError:
+        USE_UNIFIED_ENGINE = False
+        _v2_available = False
+
+    if USE_UNIFIED_ENGINE and _v2_available:
+        # Build candles_by_tf from whatever the endpoint provided.
+        # htf_candles = 4h, ltf_candles = 15m (from /api/validate fetch).
+        _candles_by_tf: Dict = _build_candles_by_tf(context)
+
+        _v2_ctx = {
+            "current_price": context.get("current_price", 0.0),
+            "current_time": datetime.now(timezone.utc),
+        }
+        _v2_result = _v2_decide(_candles_by_tf, _v2_ctx)
+        _took = _v2_result["decision"] == "TAKE"
+        _meta = _v2_result.get("metadata", {})
+
+        # Map back to legacy gate dict shape so existing consumers are unaffected
+        context["1A"] = {
+            "passed": _meta.get("gate_1a_pass", False),
+            "bias": _meta.get("htf_bias", "neutral"),
+            "confidence": 1.0 if _meta.get("gate_1a_pass") else 0.0,
+        }
+        context["1B"] = {"passed": _took, "confidence": 1.0 if _took else 0.0}
+        context["1C"] = {"passed": _took, "confidence": 1.0 if _took else 0.0}
+        context["RCM"] = {
+            "valid": _meta.get("rcm_valid", False),
+            "confidence": 0.7 if _meta.get("rcm_valid") else 0.0,
+            "range_high": None,
+            "range_low": None,
+            "range_duration": _meta.get("range_duration_hours"),
+            "displacement": _meta.get("local_displacement"),
+        }
+        context["MSCE"] = {
+            "session_bias": "neutral",
+            "session": _meta.get("session", "unknown"),
+            "confidence": 1.0,
+        }
+        context["local_range_displacement"] = _meta.get("local_displacement")
+        context["RIG"] = {
+            "passed": _meta.get("rig_status") != "BLOCK",
+            "status": _meta.get("rig_status", "VALID"),
+            "reason": _meta.get("rig_reason"),
+            "displacement": _meta.get("local_displacement"),
+            "evaluated": True,
+        }
+        context["1D"] = {
+            "passed": _took,
+            "ExecutionConfidence_Total": _v2_result.get("score", 0),
+        }
+        context["Action"] = "EXECUTE" if _took else "NO_TRADE"
+        context["_v2_result"] = _v2_result  # full result for debug/comparison
+        return context
+
+    # ── Shadow mode: compute v2 result alongside legacy (no side effects) ─
+    if _v2_available:
+        try:
+            _candles_by_tf = _build_candles_by_tf(context)
+            _v2_shadow = _v2_decide(
+                _candles_by_tf,
+                {
+                    "current_price": context.get("current_price", 0.0),
+                    "current_time": datetime.now(timezone.utc),
+                },
+            )
+            context["_v2_shadow"] = _v2_shadow
+            logger.debug(
+                "SHADOW v2: decision=%s score=%s failure=%s",
+                _v2_shadow.get("decision"),
+                _v2_shadow.get("score"),
+                _v2_shadow.get("failure_code"),
+            )
+        except Exception as _e:
+            logger.warning("SHADOW v2 error [%s]: %s", type(_e).__name__, _e)
+
+    # ── Legacy gate pipeline (unchanged) ─────────────────────────────
     context["1A"] = validate_1A(context)
     context["1B"] = validate_1B(context)
     context["1C"] = validate_1C(context)
