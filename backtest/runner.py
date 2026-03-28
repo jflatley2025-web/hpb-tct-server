@@ -79,10 +79,12 @@ _MIN_DISPLACEMENT_15M = 0.65 # stricter displacement floor for 15m specifically
 # v14: hard score floor (below threshold trades are removed before score gate)
 _MIN_SCORE_HARD = 65         # score 57-64 confirmed losers — blocked regardless of threshold
 
-# v14: soft drawdown protection — pause new entries during cluster losses
-_MAX_DD_SOFT = 0.04          # halt new signals when current DD exceeds 4%
-_DD_RESET_HOURS = 72         # after this many hours in DD protection, reset peak to current
-                              # so trading can resume (prevents permanent halt in backtest)
+# Issue 3: 3-tier drawdown control (mirror of decision_engine_v2.py constants)
+# DO NOT change these values without a matching change in decision_engine_v2.py.
+_DD_SOFT_THRESHOLD = 0.02    # soft throttle: halve position size when DD ≥ 2%
+_DD_HARD_THRESHOLD = 0.04    # hard block: skip new entries entirely when DD ≥ 4%
+_DD_RISK_SCALE = 0.5         # position size multiplier applied during soft throttle
+_DD_RESET_HOURS = 72         # re-baseline peak equity after this many hours in hard block
 
 # Optional 15m NY overtrade guard — set True for re-run only if trade count > 55
 _ENABLE_15M_NY_OVERTRADE_FILTER = False
@@ -711,6 +713,40 @@ def run_gate_pipeline(
             if tf == "15m":
                 state.signals_15m_detected += 1
 
+            # ── Issue 3: DD tier — computed per schematic, consistent per step ─
+            # Must be evaluated BEFORE the gate chain so the elif can reference
+            # _risk_multiplier without re-computing equity state mid-chain.
+            _risk_multiplier = 1.0
+            if state.peak_equity > 0:
+                _step_dd = (state.peak_equity - state.equity) / state.peak_equity
+                if _step_dd >= _DD_HARD_THRESHOLD:
+                    # Record first trigger time (persists across schematics on same step)
+                    if state.dd_protection_triggered_at is None:
+                        state.dd_protection_triggered_at = current_time
+                        logger.info(
+                            "DD_PROTECTION | hard block triggered | dd=%.2f%%",
+                            _step_dd * 100,
+                        )
+                    _hours_in_dd = (
+                        current_time - state.dd_protection_triggered_at
+                    ).total_seconds() / 3600
+                    if _hours_in_dd >= _DD_RESET_HOURS:
+                        logger.info(
+                            "DD_PROTECTION | %.0fh elapsed — resetting peak $%.2f → $%.2f to resume",
+                            _hours_in_dd, state.peak_equity, state.equity,
+                        )
+                        state.peak_equity = state.equity
+                        state.dd_protection_triggered_at = None
+                        # _risk_multiplier stays 1.0 — full risk after reset
+                    else:
+                        _risk_multiplier = 0.0  # hard block
+                elif _step_dd >= _DD_SOFT_THRESHOLD:
+                    _risk_multiplier = _DD_RISK_SCALE  # soft throttle: 50% risk
+                    logger.info(
+                        "DD_PROTECTION | soft throttle | dd=%.2f%% — risk scaled to %.0f%%",
+                        _step_dd * 100, _DD_RISK_SCALE * 100,
+                    )
+
             # Determine failure code
             failure_code = None
             skip_reason = None
@@ -735,35 +771,16 @@ def run_gate_pipeline(
                 skip_reason = "RR_TOO_LOW ({:.2f} < {:.2f})".format(actual_rr, min_rr)
                 failure_code = "FAIL_RR_FILTER"
 
-            # ── v14: soft drawdown protection ─────────────────────────
-            # Pauses new entries during loss clusters. Automatically resets after
-            # _DD_RESET_HOURS so a permanent halt cannot occur in backtesting.
-            elif state.peak_equity > 0 and (state.peak_equity - state.equity) / state.peak_equity > _MAX_DD_SOFT:
-                _cur_dd = (state.peak_equity - state.equity) / state.peak_equity * 100
-                # First trigger: record start time
-                if state.dd_protection_triggered_at is None:
-                    state.dd_protection_triggered_at = current_time
-                    logger.info(
-                        "DD_PROTECTION | triggered | current_dd=%.2f%% | pausing new entries",
-                        _cur_dd,
-                    )
-                # Time-based reset: after _DD_RESET_HOURS, re-baseline peak_equity so
-                # trading can resume. This prevents permanent halt when equity stays flat.
-                _hours_in_dd = (current_time - state.dd_protection_triggered_at).total_seconds() / 3600
-                if _hours_in_dd >= _DD_RESET_HOURS:
-                    logger.info(
-                        "DD_PROTECTION | %.0fh elapsed — resetting peak_equity $%.2f -> $%.2f to resume",
-                        _hours_in_dd, state.peak_equity, state.equity,
-                    )
-                    state.peak_equity = state.equity
-                    state.dd_protection_triggered_at = None
-                    # Don't skip — fall through to next gate by not setting failure_code
-                else:
-                    final_decision = "SKIP"
-                    skip_reason = "DD_PROTECTION (dd={:.2f}% > {:.0f}%, {:.0f}h/{:.0f}h)".format(
-                        _cur_dd, _MAX_DD_SOFT * 100, _hours_in_dd, _DD_RESET_HOURS,
-                    )
-                    failure_code = "FAIL_DD_PROTECTION"
+            # ── Issue 3: DD hard block ─────────────────────────────────────
+            # Tier computed above. 0.0 = hard block; 0.5 = soft throttle (trade allowed,
+            # position scaled); 1.0 = no DD concern.
+            elif _risk_multiplier == 0.0:
+                final_decision = "SKIP"
+                skip_reason = (
+                    f"DD_HARD_BLOCK (dd={_step_dd * 100:.2f}%"
+                    f" >= {_DD_HARD_THRESHOLD * 100:.0f}%)"
+                )
+                failure_code = "FAIL_DD_PROTECTION"
 
             # ── v14: global displacement quality gate ──────────────────
             elif local_displacement < _MIN_DISPLACEMENT:
@@ -947,6 +964,7 @@ def run_gate_pipeline(
                 "final_decision": final_decision,
                 "skip_reason": skip_reason,
                 "failure_code": failure_code,
+                "risk_multiplier": _risk_multiplier,
                 "structure_state": structure_state,
                 "entry_price": entry_price,
                 "stop_price": stop_price,
@@ -1311,6 +1329,17 @@ def _open_trade(state: BacktestState, signal: dict, current_time: datetime,
         return
 
     position_size, risk_amount = calculate_position_size(state.equity, sl_pct)
+
+    # Issue 3: apply DD risk multiplier (1.0 = full, 0.5 = soft throttle)
+    risk_multiplier = signal.get("risk_multiplier", 1.0)
+    if 0 < risk_multiplier < 1.0:
+        position_size = round(position_size * risk_multiplier, 4)
+        risk_amount = round(risk_amount * risk_multiplier, 4)
+        logger.info(
+            "DD soft throttle: risk_multiplier=%.2f applied — "
+            "position_size=%.4f risk_amount=%.4f",
+            risk_multiplier, position_size, risk_amount,
+        )
 
     # Calculate TP1 price: configurable % of entry→target move
     tp1_price = signal.get("tp1_price")

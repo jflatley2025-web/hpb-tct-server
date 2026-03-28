@@ -412,6 +412,9 @@ class Schematics5BTradeState:
         self.last_scan_action: Optional[str] = None
         self.last_error: Optional[str] = None
         self.trading_mode: str = "claude"  # "claude" | "jack"
+        # Issue 3: DD protection state
+        self.peak_balance: float = STARTING_BALANCE  # highest equity seen
+        self.dd_triggered_at: Optional[str] = None   # ISO UTC string; None = not in hard block
         self._load()
 
     def _load(self):
@@ -433,6 +436,9 @@ class Schematics5BTradeState:
                 self.last_scan_time = data.get("last_scan_time")
                 self.last_scan_action = data.get("last_scan_action")
                 self.trading_mode = data.get("trading_mode", "claude")
+                # Issue 3: DD protection state (default to current balance as peak on first load)
+                self.peak_balance = data.get("peak_balance", self.balance)
+                self.dd_triggered_at = data.get("dd_triggered_at")
                 # Validate current_trade — discard if essential fields are missing/zero
                 if self.current_trade:
                     ep = self.current_trade.get("entry_price", 0)
@@ -462,6 +468,9 @@ class Schematics5BTradeState:
                 "last_scan_action": self.last_scan_action,
                 "last_error": self.last_error,
                 "trading_mode": self.trading_mode,
+                # Issue 3: DD protection state
+                "peak_balance": round(self.peak_balance, 2),
+                "dd_triggered_at": self.dd_triggered_at,
             }
             with open(TRADE_LOG_PATH, "w") as f:
                 json.dump(data, f, indent=2, default=str)
@@ -1127,6 +1136,62 @@ class Schematics5BTrader:
         else:
             logger.info("[5B] MoonDev paper trading DISABLED — using MEXC for price/candle data.")
 
+    def _dd_risk_multiplier(self) -> float:
+        """
+        Issue 3: compute the current DD risk tier from live balance state.
+
+        Returns:
+            1.0  — no DD concern, full position size
+            0.5  — soft throttle (DD ≥ 2%), halve position size
+            0.0  — hard block (DD ≥ 4%), do NOT enter trade
+
+        Reads thresholds from decision_engine_v2 so the live bot and
+        backtest are always governed by the same constants.
+        Fails open (returns 1.0) if the import is unavailable.
+        """
+        try:
+            from decision_engine_v2 import (
+                USE_DD_PROTECTION,
+                _DD_SOFT_THRESHOLD,
+                _DD_HARD_THRESHOLD,
+                _DD_RISK_SCALE,
+                _DD_RESET_HOURS,
+            )
+        except ImportError:
+            return 1.0
+
+        if not USE_DD_PROTECTION or self.state.peak_balance <= 0:
+            return 1.0
+
+        dd_pct = (self.state.peak_balance - self.state.balance) / self.state.peak_balance
+
+        if dd_pct >= _DD_HARD_THRESHOLD:
+            # Check 72h reset window
+            if self.state.dd_triggered_at is not None:
+                try:
+                    triggered_dt = datetime.fromisoformat(self.state.dd_triggered_at)
+                    hours_in_dd = (
+                        datetime.now(timezone.utc) - triggered_dt
+                    ).total_seconds() / 3600
+                    if hours_in_dd >= _DD_RESET_HOURS:
+                        # Re-baseline: allow trading at full risk again
+                        logger.info(
+                            "[5B] DD hard reset: %.0fh elapsed — re-baselining peak $%.2f → $%.2f",
+                            hours_in_dd, self.state.peak_balance, self.state.balance,
+                        )
+                        self.state.peak_balance = self.state.balance
+                        self.state.dd_triggered_at = None
+                        self.state.save()
+                        return 1.0
+                except (ValueError, TypeError):
+                    pass  # malformed timestamp — treat as not yet triggered
+            return 0.0  # hard block
+
+        if dd_pct >= _DD_SOFT_THRESHOLD:
+            return _DD_RISK_SCALE  # 0.5
+
+        return 1.0
+
     def get_mode(self) -> str:
         """Return the current trading mode: 'claude' or 'jack'."""
         return self.state.trading_mode
@@ -1444,12 +1509,38 @@ class Schematics5BTrader:
                                 evaluation.get("model"),
                                 best_tf,
                             )
-                        trade = self._enter_trade(
-                            schematic, evaluation, best_current_price, best_htf_bias,
-                            SYMBOL, best_tf,
-                        )
-                        cycle_result["action"] = "trade_entered"
-                        cycle_result["details"] = trade
+
+                        # Issue 3: compute DD risk multiplier from live balance state.
+                        # When USE_UNIFIED_ENGINE=True the v2 gate already blocked hard-DD
+                        # signals at the PASS level; this independently guards the legacy path.
+                        _dd_mult = self._dd_risk_multiplier()
+
+                        if _dd_mult == 0.0:
+                            logger.info(
+                                "[5B] DD hard block: suppressing legacy TAKE — "
+                                "balance=$%.2f peak=$%.2f",
+                                self.state.balance, self.state.peak_balance,
+                            )
+                            # Record first trigger time so the 72h reset can fire
+                            if self.state.dd_triggered_at is None:
+                                self.state.dd_triggered_at = datetime.now(timezone.utc).isoformat()
+                                self.state.save()
+                            cycle_result["action"] = "dd_hard_blocked"
+                            cycle_result["details"] = {
+                                "balance": self.state.balance,
+                                "peak_balance": self.state.peak_balance,
+                                "dd_pct": round(
+                                    (self.state.peak_balance - self.state.balance)
+                                    / self.state.peak_balance * 100, 2
+                                ),
+                            }
+                        else:
+                            trade = self._enter_trade(
+                                schematic, evaluation, best_current_price, best_htf_bias,
+                                SYMBOL, best_tf, risk_multiplier=_dd_mult,
+                            )
+                            cycle_result["action"] = "trade_entered"
+                            cycle_result["details"] = trade
             else:
                 # Legacy: no qualifying setups found.
                 # Log if v2 independently found a signal (informational — not executed).
@@ -1862,7 +1953,17 @@ class Schematics5BTrader:
     # ----------------------------------------------------------------
 
     def _enter_trade(self, schematic: Dict, evaluation: Dict, current_price: float, htf_bias: str,
-                     symbol: str = SYMBOL, timeframe: str = "unknown") -> Dict:
+                     symbol: str = SYMBOL, timeframe: str = "unknown",
+                     risk_multiplier: float = 1.0) -> Dict:
+        """
+        Open a new trade.
+
+        ``risk_multiplier`` is supplied by the DD protection layer:
+            1.0 = full risk (default)
+            0.5 = soft throttle — halve the position size
+        Callers must not pass 0.0 here; hard-blocked trades must be
+        caught before calling _enter_trade.
+        """
         direction = evaluation["direction"]
         stop_info = schematic.get("stop_loss", {})
         target_info = schematic.get("target", {})
@@ -1898,14 +1999,23 @@ class Schematics5BTrader:
         if actual_rr < 1.0:
             return {"error": f"R:R too low at market ({actual_rr:.2f}:1)"}
 
-        # Position sizing (1% risk)
-        risk_amount = self.state.balance * (RISK_PER_TRADE_PCT / 100)
+        # Position sizing — base risk 1%, then apply DD risk_multiplier
+        risk_amount = self.state.balance * (RISK_PER_TRADE_PCT / 100) * risk_multiplier
         if direction == "bullish":
             sl_pct = abs((entry_price - stop_price) / entry_price) * 100
         else:
             sl_pct = abs((stop_price - entry_price) / entry_price) * 100
         if sl_pct <= 0:
             sl_pct = 1.0
+
+        if risk_multiplier < 1.0:
+            logger.info(
+                "[5B] DD soft throttle applied: risk_multiplier=%.2f — "
+                "risk_amount=$%.2f (base would be $%.2f)",
+                risk_multiplier,
+                risk_amount,
+                self.state.balance * (RISK_PER_TRADE_PCT / 100),
+            )
 
         position_size = calculate_position_size(risk_amount, sl_pct)
         margin = calculate_margin(position_size, DEFAULT_LEVERAGE)
@@ -2058,6 +2168,16 @@ class Schematics5BTrader:
         position_size = trade.get("position_size", 0)
         pnl_dollars = position_size * (pnl_pct / 100)
         self.state.balance += pnl_dollars
+
+        # Issue 3: update peak_balance on every close; clear hard-block trigger on new high
+        if self.state.balance > self.state.peak_balance:
+            self.state.peak_balance = self.state.balance
+            if self.state.dd_triggered_at is not None:
+                logger.info(
+                    "[5B] DD reset: equity set new high $%.2f — clearing hard-block timer",
+                    self.state.balance,
+                )
+                self.state.dd_triggered_at = None
 
         if is_win:
             self.state.total_wins += 1

@@ -67,6 +67,11 @@ logger = logging.getLogger("decision_engine_v2")
 # Default: False — existing code paths remain active until explicitly switched.
 USE_UNIFIED_ENGINE = False
 
+# ── DD protection feature flag ─────────────────────────────────────────
+# When True, the 3-tier drawdown control layer is active inside decide().
+# Set False to revert to no DD gating (e.g. debugging, stress testing).
+USE_DD_PROTECTION = True
+
 # ── Gate constants (v12/v13/v14) ─────────────────────────────────────
 # Mirror of backtest/runner.py — keep in sync. Do NOT change values here
 # without a matching change in runner.py and a full parity validation.
@@ -79,8 +84,13 @@ _MODEL3_MAX_DISTANCE_PCT = 0.015  # entry must be within 1.5% of range midpoint
 _MIN_DISPLACEMENT = 0.50      # minimum local_displacement for any signal
 _MIN_DISPLACEMENT_15M = 0.65  # stricter displacement floor for 15m specifically
 _MIN_SCORE_HARD = 65          # hard score floor — scores 57-64 blocked regardless of threshold
-_MAX_DD_SOFT = 0.04           # halt new signals when current DD exceeds 4%
-_DD_RESET_HOURS = 72          # after this many hours in DD, reset peak to allow trading again
+
+# ── Issue 3: 3-tier drawdown control constants ────────────────────────
+# Mirror in backtest/runner.py. Do NOT change one without changing both.
+_DD_SOFT_THRESHOLD = 0.02     # soft throttle: scale risk to DD_RISK_SCALE when DD ≥ 2%
+_DD_HARD_THRESHOLD = 0.04     # hard block: halt new entries entirely when DD ≥ 4%
+_DD_RISK_SCALE = 0.5          # position size multiplier applied during soft throttle
+_DD_RESET_HOURS = 72          # re-baseline peak equity after this many hours in hard block
 _ENABLE_15M_NY_OVERTRADE_FILTER = False  # optional NY overtrade guard
 
 # Detection window limits (performance)
@@ -200,6 +210,9 @@ def decide(
             "stop_price": float,
             "target_price": float,
             "rr": float,
+            "risk_multiplier": float,    # 1.0 = full risk, 0.5 = soft throttle, 0.0 = hard block
+            "new_peak": float | None,    # caller must store this as peak_equity on next call;
+                                         # None when equity state was not provided
             "metadata": {
                 "htf_bias": str,
                 "gate_1a_pass": bool,
@@ -230,6 +243,8 @@ def decide(
         "stop_price": 0.0,
         "target_price": 0.0,
         "rr": 0.0,
+        "risk_multiplier": 1.0,
+        "new_peak": None,
         "metadata": {},
     }
 
@@ -239,13 +254,50 @@ def decide(
     min_rr: float = context.get("min_rr", MIN_RR)
     traded_bos_fingerprints: dict = context.get("traded_bos_fingerprints") or {}
 
-    # DD protection (stateful — omit keys to disable this gate)
+    # DD protection state (stateful — omit keys to disable gate entirely)
     peak_equity: Optional[float] = context.get("peak_equity")
     equity: Optional[float] = context.get("equity")
     dd_protection_triggered_at: Optional[datetime] = context.get("dd_protection_triggered_at")
 
     if not current_price or not current_time:
         return {**_PASS, "reason": "missing_required_context (current_price or current_time)"}
+
+    # ── Issue 3: 3-tier DD tier — computed once before scanning ──────────
+    # _risk_multiplier flows into every TAKE result so callers can scale
+    # position size without re-implementing DD logic.
+    # _new_peak must be stored back by the caller as peak_equity on the
+    # next call — this keeps decide() stateless.
+    _risk_multiplier: float = 1.0
+    _new_peak: Optional[float] = None
+
+    if USE_DD_PROTECTION and peak_equity is not None and equity is not None and peak_equity > 0:
+        _new_peak = max(peak_equity, equity)  # default: propagate new highs
+        _cur_dd = (peak_equity - equity) / peak_equity
+
+        if _cur_dd >= _DD_HARD_THRESHOLD:
+            # Hard tier — check whether the 72h reset window has elapsed.
+            if dd_protection_triggered_at is not None:
+                _hours_in_dd = (current_time - dd_protection_triggered_at).total_seconds() / 3600
+                if _hours_in_dd >= _DD_RESET_HOURS:
+                    # Reset: re-baseline peak to current equity so trading resumes.
+                    _new_peak = equity
+                    logger.info(
+                        "DD hard reset: %.0fh elapsed — re-baselining peak $%.2f → $%.2f",
+                        _hours_in_dd, peak_equity, equity,
+                    )
+                    # _risk_multiplier stays 1.0 — full risk resumes after reset
+                else:
+                    _risk_multiplier = 0.0   # hard block: signal will be rejected below
+            else:
+                _risk_multiplier = 0.0       # first time crossing hard threshold
+
+        elif _cur_dd >= _DD_SOFT_THRESHOLD:
+            # Soft tier — allow the trade but halve position size.
+            _risk_multiplier = _DD_RISK_SCALE
+            logger.debug(
+                "DD soft throttle: dd=%.2f%% ≥ %.0f%% — scaling risk to %.0f%%",
+                _cur_dd * 100, _DD_SOFT_THRESHOLD * 100, _DD_RISK_SCALE * 100,
+            )
 
     try:
         mods = _get_modules()
@@ -471,24 +523,19 @@ def decide(
                 skip_reason = f"RR_TOO_LOW ({actual_rr:.2f} < {min_rr:.2f})"
                 failure_code = "FAIL_RR_FILTER"
 
-            # ── v14: soft DD protection (optional — needs equity state) ──
-            elif (
-                peak_equity is not None
-                and equity is not None
-                and peak_equity > 0
-                and (peak_equity - equity) / peak_equity > _MAX_DD_SOFT
-            ):
-                _cur_dd = (peak_equity - equity) / peak_equity * 100
-                # Only block if within the reset window (72h)
-                _in_window = True
-                if dd_protection_triggered_at is not None:
-                    _hours = (current_time - dd_protection_triggered_at).total_seconds() / 3600
-                    if _hours >= _DD_RESET_HOURS:
-                        _in_window = False  # reset elapsed — fall through to next gate
-                if _in_window:
-                    final_decision = "PASS"
-                    skip_reason = f"DD_PROTECTION (dd={_cur_dd:.2f}% > {_MAX_DD_SOFT * 100:.0f}%)"
-                    failure_code = "FAIL_DD_PROTECTION"
+            # ── Issue 3: DD hard block ────────────────────────────────────
+            # _risk_multiplier was computed before the TF loop.
+            # 0.0 → hard block; 0.5 → soft throttle (trade allowed, risk scaled);
+            # 1.0 → no DD concern, full risk.
+            # Soft throttle does NOT set final_decision — it only affects the
+            # risk_multiplier carried in the best_signal result.
+            elif _risk_multiplier == 0.0:
+                final_decision = "PASS"
+                skip_reason = (
+                    f"DD_HARD_BLOCK (dd={(peak_equity - equity) / peak_equity * 100:.2f}%"
+                    f" >= {_DD_HARD_THRESHOLD * 100:.0f}%)"
+                )
+                failure_code = "FAIL_DD_PROTECTION"
 
             # ── v14: global displacement floor ────────────────────
             elif local_displacement < _MIN_DISPLACEMENT:
@@ -641,6 +688,10 @@ def decide(
                     "stop_price": stop_price,
                     "target_price": target_price,
                     "rr": actual_rr if actual_rr > 0 else rr,
+                    # Caller must apply risk_multiplier to position size.
+                    # Caller must store new_peak as peak_equity on the next call.
+                    "risk_multiplier": _risk_multiplier,
+                    "new_peak": _new_peak,
                     "metadata": {
                         "htf_bias": htf_bias,
                         "gate_1a_pass": gate_1a_pass,
@@ -659,4 +710,6 @@ def decide(
                     },
                 }
 
-    return best_signal if best_signal is not None else _PASS
+    # On PASS: still return new_peak so callers can track equity highs even
+    # when no trade fires (e.g. equity just set a new high with no signal).
+    return best_signal if best_signal is not None else {**_PASS, "new_peak": _new_peak}
