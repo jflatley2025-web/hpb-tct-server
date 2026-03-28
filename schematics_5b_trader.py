@@ -1175,7 +1175,12 @@ class Schematics5BTrader:
                 _DD_RESET_HOURS,
                 _DD_RECOVERY_PCT,
             )
-        except ImportError:
+        except ImportError as _ie:
+            logger.error(
+                "[5B] _dd_risk_multiplier: cannot import DD constants (%s) — "
+                "failing open (1.0); DD protection is INACTIVE",
+                _ie,
+            )
             return 1.0
 
         if not USE_DD_PROTECTION or self.state.peak_balance <= 0:
@@ -1380,6 +1385,17 @@ class Schematics5BTrader:
                 _v2_ctx = {
                     "current_price": best_current_price,
                     "current_time": datetime.now(timezone.utc),
+                    # Wire live DD state so shadow comparisons reflect actual protection status.
+                    # NOTE: _v2_result DD outputs (new_peak / new_trough) are NOT consumed here
+                    # in shadow mode — _dd_risk_multiplier() manages live state independently.
+                    "peak_equity": self.state.peak_balance,
+                    "equity": self.state.balance,
+                    "dd_protection_triggered_at": (
+                        datetime.fromisoformat(self.state.dd_triggered_at)
+                        if self.state.dd_triggered_at
+                        else None
+                    ),
+                    "dd_trough_equity": self.state.dd_trough_balance,
                 }
                 try:
                     _v2_result = _v2_decide(_candles_by_tf, _v2_ctx)

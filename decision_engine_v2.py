@@ -252,6 +252,9 @@ def decide(
             "new_peak": float | None,    # caller must store as peak_equity on next call
             "new_trough": float | None,  # caller must store as dd_trough_equity on next call;
                                          # None outside hard block; tracks lowest equity since trigger
+            "new_dd_protection_triggered_at": datetime | None,
+                                         # caller must store as dd_protection_triggered_at;
+                                         # set to current_time on first hard crossing, None on reset
             "metadata": {
                 "htf_bias": str,
                 "gate_1a_pass": bool,
@@ -286,6 +289,7 @@ def decide(
         "risk_multiplier": 1.0,
         "new_peak": None,
         "new_trough": None,
+        "new_dd_protection_triggered_at": None,
         "metadata": {},
     }
 
@@ -313,6 +317,8 @@ def decide(
     _risk_multiplier: float = 1.0
     _new_peak: Optional[float] = None
     _new_trough: Optional[float] = None   # None outside hard block
+    # Pass through unchanged by default; set to current_time on first crossing, None on reset.
+    _new_dd_protection_triggered_at: Optional[datetime] = dd_protection_triggered_at
 
     if USE_DD_PROTECTION and peak_equity is not None and equity is not None and peak_equity > 0:
         _new_peak = max(peak_equity, equity)  # always propagate equity highs
@@ -336,9 +342,10 @@ def decide(
                     _recovery = (equity - _new_trough) / (peak_equity - _new_trough)
 
                 if _hours_in_dd >= _DD_RESET_HOURS and _recovery >= _DD_RECOVERY_PCT:
-                    # Hybrid condition met — re-baseline and clear trough.
+                    # Hybrid condition met — re-baseline and clear trough + trigger.
                     _new_peak = equity
-                    _new_trough = None  # protection fully exited
+                    _new_trough = None                         # protection fully exited
+                    _new_dd_protection_triggered_at = None     # reset — caller must clear this
                     logger.info(
                         "DD hard reset: %.0fh elapsed, recovery=%.0f%% ≥ %.0f%% "
                         "(trough=$%.2f) — re-baselining peak $%.2f → $%.2f",
@@ -358,8 +365,9 @@ def decide(
                         )
             else:
                 # First time crossing hard threshold — no trigger timestamp yet in context.
-                # Caller must set dd_protection_triggered_at and pass it next call.
+                # Return current_time so caller can store and pass it back next call.
                 _risk_multiplier = 0.0
+                _new_dd_protection_triggered_at = current_time
 
         elif _cur_dd >= _DD_SOFT_THRESHOLD:
             # Soft tier — allow the trade but halve position size.
@@ -415,6 +423,11 @@ def decide(
     # ── Scan MTF timeframes ───────────────────────────────────────
     best_signal: Optional[dict] = None
     best_score: float = 0
+    # Track the highest-score PASS candidate for diagnostic PASS returns.
+    # Lets callers inspect which gate fired on the "best" signal that didn't qualify.
+    _best_blocked_score: float = -1.0
+    _best_blocked_code: Optional[str] = None
+    _best_blocked_reason: Optional[str] = None
 
     for tf in MTF_TIMEFRAMES:
         df_tf_full = candles_by_tf.get(tf)
@@ -751,6 +764,12 @@ def decide(
                 final_decision, failure_code or "ok",
             )
 
+            # Track highest-score blocked candidate (diagnostic: shown in PASS result)
+            if final_decision == "PASS" and score > _best_blocked_score:
+                _best_blocked_score = score
+                _best_blocked_code = failure_code
+                _best_blocked_reason = skip_reason
+
             # ── Keep best TAKE ────────────────────────────────────
             if final_decision == "TAKE" and score > best_score:
                 best_score = score
@@ -773,9 +792,11 @@ def decide(
                     # Caller must apply risk_multiplier to position size.
                     # Caller must store new_peak as peak_equity on the next call.
                     # Caller must store new_trough as dd_trough_equity on the next call.
+                    # Caller must store new_dd_protection_triggered_at on the next call.
                     "risk_multiplier": _risk_multiplier,
                     "new_peak": _new_peak,
                     "new_trough": _new_trough,
+                    "new_dd_protection_triggered_at": _new_dd_protection_triggered_at,
                     "metadata": {
                         "htf_bias": htf_bias,
                         "gate_1a_pass": gate_1a_pass,
@@ -794,6 +815,13 @@ def decide(
                     },
                 }
 
-    # On PASS: still return new_peak so callers can track equity highs even
-    # when no trade fires (e.g. equity just set a new high with no signal).
-    return best_signal if best_signal is not None else {**_PASS, "new_peak": _new_peak, "new_trough": _new_trough}
+    # On PASS: propagate DD state and expose the highest-score blocked candidate's
+    # failure_code so callers can inspect why no trade fired without parsing logs.
+    return best_signal if best_signal is not None else {
+        **_PASS,
+        "failure_code": _best_blocked_code,
+        "reason": _best_blocked_reason or "no_signal",
+        "new_peak": _new_peak,
+        "new_trough": _new_trough,
+        "new_dd_protection_triggered_at": _new_dd_protection_triggered_at,
+    }
