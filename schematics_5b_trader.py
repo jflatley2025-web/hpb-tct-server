@@ -37,6 +37,7 @@ from trade_execution import (
 )
 from decision_tree_bridge import DecisionTreeEvaluator
 from jack_tct_evaluator import JackTCTEvaluator
+from backtest.config import timeframe_to_seconds as _tf_seconds
 
 # Reuse MEXC fetch helpers from tensor trader (no duplication)
 from tensor_tct_trader import (
@@ -416,6 +417,9 @@ class Schematics5BTradeState:
         self.peak_balance: float = STARTING_BALANCE  # highest balance seen
         self.dd_triggered_at: Optional[str] = None   # ISO UTC; None = not in hard block
         self.dd_trough_balance: Optional[float] = None  # lowest balance since hard block trigger
+        # v15: compression state
+        self.last_accepted_trade_ts: Optional[str] = None  # ISO UTC of last executed trade
+        self.last_accepted_trade_priority: float = 0.0     # priority_score of that trade
         self._load()
 
     def _load(self):
@@ -441,6 +445,9 @@ class Schematics5BTradeState:
                 self.peak_balance = data.get("peak_balance", self.balance)
                 self.dd_triggered_at = data.get("dd_triggered_at")
                 self.dd_trough_balance = data.get("dd_trough_balance")
+                # v15: compression state
+                self.last_accepted_trade_ts = data.get("last_accepted_trade_ts")
+                self.last_accepted_trade_priority = data.get("last_accepted_trade_priority", 0.0)
                 # Validate current_trade — discard if essential fields are missing/zero
                 if self.current_trade:
                     ep = self.current_trade.get("entry_price", 0)
@@ -474,6 +481,9 @@ class Schematics5BTradeState:
                 "peak_balance": round(self.peak_balance, 2),
                 "dd_triggered_at": self.dd_triggered_at,
                 "dd_trough_balance": round(self.dd_trough_balance, 2) if self.dd_trough_balance is not None else None,
+                # v15: compression state
+                "last_accepted_trade_ts": self.last_accepted_trade_ts,
+                "last_accepted_trade_priority": round(self.last_accepted_trade_priority, 4),
             }
             with open(TRADE_LOG_PATH, "w") as f:
                 json.dump(data, f, indent=2, default=str)
@@ -1349,11 +1359,18 @@ class Schematics5BTrader:
             # USE_UNIFIED_ENGINE = False → shadow only (no behaviour change).
             # USE_UNIFIED_ENGINE = True  → v2 result gates the actual trade.
             try:
-                from decision_engine_v2 import decide as _v2_decide, USE_UNIFIED_ENGINE as _USE_V2
+                from decision_engine_v2 import (
+                    decide as _v2_decide,
+                    USE_UNIFIED_ENGINE as _USE_V2,
+                    USE_TRADE_COMPRESSION as _USE_COMPRESSION,
+                    COMPRESSION_WINDOW_BARS as _COMPRESSION_BARS,
+                )
                 _v2_available = True
             except ImportError:
                 _v2_available = False
                 _USE_V2 = False
+                _USE_COMPRESSION = False
+                _COMPRESSION_BARS = 6
 
             _v2_result: Optional[Dict] = None
             if _v2_available:
@@ -1572,12 +1589,73 @@ class Schematics5BTrader:
                                 ),
                             }
                         else:
-                            trade = self._enter_trade(
-                                schematic, evaluation, best_current_price, best_htf_bias,
-                                SYMBOL, best_tf, risk_multiplier=_dd_mult,
+                            # ── v15: compute priority score ───────────────────────
+                            # Mirror of compute_priority_score() in decision_engine_v2.
+                            _p_stop = (schematic.get("stop_loss") or {}).get("price", 0)
+                            _p_tgt = (schematic.get("target") or {}).get("price", 0)
+                            _p_risk = abs(best_current_price - _p_stop) if _p_stop else 0
+                            _p_rr = (
+                                abs(_p_tgt - best_current_price) / _p_risk
+                                if _p_risk > 0 and _p_tgt else 0.0
                             )
-                            cycle_result["action"] = "trade_entered"
-                            cycle_result["details"] = trade
+                            _p_disp = (schematic.get("range") or {}).get("displacement", 0.0)
+                            _priority = (
+                                evaluation.get("score", 0) * 0.5
+                                + schematic.get("quality_score", 0.0) * 100 * 0.2
+                                + _p_rr * 10 * 0.2
+                                + _p_disp * 100 * 0.1
+                            )
+
+                            # ── v15: compression check (post-gate execution filter) ─
+                            _compress_block = False
+                            if _USE_COMPRESSION and self.state.last_accepted_trade_ts is not None:
+                                try:
+                                    _last_dt = datetime.fromisoformat(
+                                        self.state.last_accepted_trade_ts
+                                    )
+                                    _elapsed = (
+                                        datetime.now(timezone.utc) - _last_dt
+                                    ).total_seconds()
+                                    _bar_secs = _tf_seconds(best_tf) if best_tf else 3600
+                                    _bars_since = _elapsed / _bar_secs
+                                    if (
+                                        _bars_since < _COMPRESSION_BARS
+                                        and _priority <= self.state.last_accepted_trade_priority
+                                    ):
+                                        _compress_block = True
+                                        logger.info(
+                                            "[5B] COMPRESSION_SUPPRESSED | "
+                                            "priority=%.1f <= last=%.1f | "
+                                            "bars_since=%.1f/%d | model=%s tf=%s",
+                                            _priority,
+                                            self.state.last_accepted_trade_priority,
+                                            _bars_since, _COMPRESSION_BARS,
+                                            evaluation.get("model"), best_tf,
+                                        )
+                                        cycle_result["action"] = "compression_suppressed"
+                                        cycle_result["details"] = {
+                                            "compression_blocked": True,
+                                            "priority_score": round(_priority, 2),
+                                            "last_priority": round(
+                                                self.state.last_accepted_trade_priority, 2
+                                            ),
+                                            "bars_since_last": round(_bars_since, 2),
+                                        }
+                                except (ValueError, TypeError):
+                                    pass  # malformed timestamp — skip compression check
+
+                            if not _compress_block:
+                                trade = self._enter_trade(
+                                    schematic, evaluation, best_current_price, best_htf_bias,
+                                    SYMBOL, best_tf, risk_multiplier=_dd_mult,
+                                )
+                                # v15: record accepted trade for next compression window
+                                self.state.last_accepted_trade_ts = (
+                                    datetime.now(timezone.utc).isoformat()
+                                )
+                                self.state.last_accepted_trade_priority = _priority
+                                cycle_result["action"] = "trade_entered"
+                                cycle_result["details"] = trade
             else:
                 # Legacy: no qualifying setups found.
                 # Log if v2 independently found a signal (informational — not executed).

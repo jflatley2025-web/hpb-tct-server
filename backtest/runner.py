@@ -88,6 +88,11 @@ _DD_RESET_HOURS = 72         # minimum hours in hard block before reset is even 
 _DD_RECOVERY_PCT = 0.5       # equity must recover ≥ 50% of peak→trough gap before reset
                               # e.g. peak=$10k, trough=$9.6k, must recover to $9.8k
 
+# v15: trade compression (mirror of decision_engine_v2.py — keep in sync)
+# Priority formula: score*0.5 + rcm*100*0.2 + rr*10*0.2 + displacement*100*0.1
+_USE_TRADE_COMPRESSION = True
+_COMPRESSION_WINDOW_BARS = 6  # bars on signal's own timeframe; 1h signal → 6h window
+
 # Optional 15m NY overtrade guard — set True for re-run only if trade count > 55
 _ENABLE_15M_NY_OVERTRADE_FILTER = False
 
@@ -205,6 +210,9 @@ class BacktestState:
     # Lowest equity recorded since hard block first triggered.
     # Required for hybrid reset: reset only when time AND partial recovery both met.
     dd_trough_equity: Optional[float] = None  # None = not in hard block
+    # v15: compression state — tracks the last trade that was actually executed
+    last_accepted_trade_time: Optional[datetime] = None
+    last_accepted_trade_priority: float = 0.0
 
 
 # ── Multi-TF Synchronization ─────────────────────────────────────────
@@ -994,6 +1002,13 @@ def run_gate_pipeline(
                 "skip_reason": skip_reason,
                 "failure_code": failure_code,
                 "risk_multiplier": _risk_multiplier,
+                # v15: composite quality rank — mirrored from compute_priority_score()
+                "priority_score": (
+                    score * 0.5
+                    + rcm_score * 100 * 0.2
+                    + (actual_rr if actual_rr > 0 else rr) * 10 * 0.2
+                    + local_displacement * 100 * 0.1
+                ),
                 "structure_state": structure_state,
                 "entry_price": entry_price,
                 "stop_price": stop_price,
@@ -1254,26 +1269,57 @@ def run_backtest(
                     min_rr=effective_min_rr,
                 )
                 if signal and signal.get("final_decision") == "TAKE":
-                    # Record BOS fingerprint to prevent same-schematic re-entry.
-                    # Use entry_price + BOS price (absolute, stable across window shifts).
-                    sch = signal.get("_schematic") or {}
-                    bos_info_fp = (sch.get("bos_confirmation") or {})
-                    bos_fp = (
-                        signal.get("timeframe"),
-                        signal.get("model"),
-                        signal.get("direction"),
-                        round(float(signal.get("entry_price") or current_price), 0),
-                        round(float(bos_info_fp.get("bos_price") or 0), 0),
-                    )
-                    state.traded_bos_fingerprints[bos_fp] = current_time
-                    _trade_opened = _open_trade(state, signal, current_time, current_price,
-                                               tp1_level_pct=effective_tp1_level_pct)
-                    # v13: funnel trade counters — only increment if trade was actually opened
-                    if _trade_opened:
-                        if "Model_3" in signal.get("model", ""):
-                            state.model3_trades += 1
-                        if signal.get("timeframe") == "15m":
-                            state.trades_15m += 1
+                    # ── v15: compression check (post-gate execution filter) ────────
+                    # Not a gate — does not modify signal["final_decision"].
+                    # Only suppresses execution; signal is still logged to DB as TAKE.
+                    _priority = signal.get("priority_score", 0.0)
+                    _compress_block = False
+                    if _USE_TRADE_COMPRESSION and state.last_accepted_trade_time is not None:
+                        _elapsed = (
+                            current_time - state.last_accepted_trade_time
+                        ).total_seconds()
+                        _bar_secs = timeframe_to_seconds(signal.get("timeframe", "1h"))
+                        _bars_since = _elapsed / _bar_secs
+                        if _bars_since < _COMPRESSION_WINDOW_BARS:
+                            if _priority <= state.last_accepted_trade_priority:
+                                _compress_block = True
+                                logger.info(
+                                    "COMPRESSION_SUPPRESSED | priority=%.1f <= last=%.1f | "
+                                    "bars_since=%.1f/%d | model=%s tf=%s score=%s",
+                                    _priority, state.last_accepted_trade_priority,
+                                    _bars_since, _COMPRESSION_WINDOW_BARS,
+                                    signal.get("model"), signal.get("timeframe"),
+                                    signal.get("score_1d"),
+                                )
+
+                    if _compress_block:
+                        # Suppressed — do not record BOS fingerprint or open trade.
+                        # Signal remains in DB as TAKE (it passed all gates).
+                        pass
+                    else:
+                        # Record BOS fingerprint to prevent same-schematic re-entry.
+                        # Use entry_price + BOS price (absolute, stable across window shifts).
+                        sch = signal.get("_schematic") or {}
+                        bos_info_fp = (sch.get("bos_confirmation") or {})
+                        bos_fp = (
+                            signal.get("timeframe"),
+                            signal.get("model"),
+                            signal.get("direction"),
+                            round(float(signal.get("entry_price") or current_price), 0),
+                            round(float(bos_info_fp.get("bos_price") or 0), 0),
+                        )
+                        state.traded_bos_fingerprints[bos_fp] = current_time
+                        _trade_opened = _open_trade(state, signal, current_time, current_price,
+                                                   tp1_level_pct=effective_tp1_level_pct)
+                        # v13: funnel trade counters — only increment if trade was actually opened
+                        if _trade_opened:
+                            # v15: update compression state on every executed trade
+                            state.last_accepted_trade_time = current_time
+                            state.last_accepted_trade_priority = _priority
+                            if "Model_3" in signal.get("model", ""):
+                                state.model3_trades += 1
+                            if signal.get("timeframe") == "15m":
+                                state.trades_15m += 1
 
             # Progress logging
             if step_idx > 0 and step_idx % 100 == 0:

@@ -72,6 +72,13 @@ USE_UNIFIED_ENGINE = False
 # Set False to revert to no DD gating (e.g. debugging, stress testing).
 USE_DD_PROTECTION = True
 
+# ── v15: trade compression feature flag ──────────────────────────────
+# Post-gate execution filter: within COMPRESSION_WINDOW_BARS of the last
+# accepted trade, only a strictly higher-priority signal is allowed through.
+# Does NOT modify gate logic, scores, or signal generation.
+USE_TRADE_COMPRESSION = True
+COMPRESSION_WINDOW_BARS = 6  # bars on the signal's own timeframe (1h → 6h, 15m → 1.5h)
+
 # ── Gate constants (v12/v13/v14) ─────────────────────────────────────
 # Mirror of backtest/runner.py — keep in sync. Do NOT change values here
 # without a matching change in runner.py and a full parity validation.
@@ -145,6 +152,34 @@ def _range_size_pct(range_info, current_price: float) -> float:
     return (r_high - r_low) / current_price
 
 
+# ── v15: Priority score (single source of truth) ─────────────────────
+
+def compute_priority_score(
+    score: float,
+    rcm_score: float,
+    rr: float,
+    displacement: float,
+) -> float:
+    """
+    Composite quality rank used by the trade compression filter (v15).
+
+    Higher = better setup. Weights:
+        50% — gate score (0–100)
+        20% — RCM quality score (0–1 scaled to 0–100)
+        20% — R:R ratio (scaled by ×10 so a 2.0 R:R contributes 20 pts)
+        10% — local displacement (0–1 scaled to 0–100)
+
+    This function is the single definition of priority_score.
+    backtest/runner.py mirrors it inline — keep in sync if weights change.
+    """
+    return (
+        score * 0.5
+        + rcm_score * 100 * 0.2
+        + rr * 10 * 0.2
+        + displacement * 100 * 0.1
+    )
+
+
 # ── Module import cache ───────────────────────────────────────────────
 
 def _get_modules() -> dict:
@@ -212,6 +247,7 @@ def decide(
             "stop_price": float,
             "target_price": float,
             "rr": float,
+            "priority_score": float,     # composite quality rank for trade compression (v15)
             "risk_multiplier": float,    # 1.0 = full risk, 0.5 = soft throttle, 0.0 = hard block
             "new_peak": float | None,    # caller must store as peak_equity on next call
             "new_trough": float | None,  # caller must store as dd_trough_equity on next call;
@@ -246,6 +282,7 @@ def decide(
         "stop_price": 0.0,
         "target_price": 0.0,
         "rr": 0.0,
+        "priority_score": 0.0,
         "risk_multiplier": 1.0,
         "new_peak": None,
         "new_trough": None,
@@ -729,6 +766,10 @@ def decide(
                     "stop_price": stop_price,
                     "target_price": target_price,
                     "rr": actual_rr if actual_rr > 0 else rr,
+                    # v15: composite quality rank used by compression filter in callers.
+                    "priority_score": compute_priority_score(
+                        score, rcm_score, actual_rr if actual_rr > 0 else rr, local_displacement
+                    ),
                     # Caller must apply risk_multiplier to position size.
                     # Caller must store new_peak as peak_equity on the next call.
                     # Caller must store new_trough as dd_trough_equity on the next call.
