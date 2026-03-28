@@ -58,11 +58,17 @@ _DISABLED_PAGE_HTML = """<!DOCTYPE html>
 <div>
   <h2>This page has been temporarily disabled</h2>
   <p>Development is currently focused on the Schematics-5B trading engine.</p>
-  <p><a href="/schematics-5B">http://localhost:10000/schematics-5B</a></p>
-  <p class="note">Remote: https://hpb-tct-server.onrender.com/schematics-5B</p>
+  <p><a href="/schematics-5B">/schematics-5B</a></p>
+  <p class="note">Available on both local and production servers.</p>
 </div>
 </body>
 </html>"""
+
+_DISABLED_HEADERS = {"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"}
+
+def _disabled_response() -> HTMLResponse:
+    """Return a 503 stub for temporarily-disabled UI pages."""
+    return HTMLResponse(content=_DISABLED_PAGE_HTML, status_code=503, headers=_DISABLED_HEADERS)
 
 # ChromaDB + SentenceTransformer are initialized lazily on first use so the
 # heavy model weights (all-MiniLM-L6-v2 + torch) don't load at startup and
@@ -4632,7 +4638,7 @@ async def schematics_5a_page(symbol: str = "BTCUSDT", timeframe: str = "4h"):
     with full chart overlays mirroring the lecture PDF schematics.
     """
     # PAGE DISABLED — temporarily returning stub while focusing on schematics-5B
-    return HTMLResponse(content=_DISABLED_PAGE_HTML)
+    return _disabled_response()
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -6413,7 +6419,7 @@ async def dashboard():
     Displays: Market Structure, Ranges, Supply/Demand Zones, Liquidity, Deviations, Risk Management.
     """
     # PAGE DISABLED — temporarily returning stub while focusing on schematics-5B
-    return HTMLResponse(content=_DISABLED_PAGE_HTML)
+    return _disabled_response()
     html_content = """
 <!DOCTYPE html>
 <html lang="en">
@@ -15362,7 +15368,7 @@ async def tensor_trade_page():
     reward-based adaptations, and running balance.
     """
     # PAGE DISABLED — temporarily returning stub while focusing on schematics-5B
-    return HTMLResponse(content=_DISABLED_PAGE_HTML)
+    return _disabled_response()
     html = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -19089,7 +19095,7 @@ async def phemex_tct_page():
     Auto-refreshes every 30s — no user input required.
     """
     # PAGE DISABLED — temporarily returning stub while focusing on schematics-5B
-    return HTMLResponse(content=_DISABLED_PAGE_HTML)
+    return _disabled_response()
     html = """<!DOCTYPE html>
 <html lang="en">
 <head>
