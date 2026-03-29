@@ -624,7 +624,9 @@ def run_gate_pipeline(
             score = eval_result.get("score", 0)
             direction = eval_result.get("direction", "unknown")
             model = normalize_model(eval_result.get("model", "unknown"))
-            is_continuation = "_CONTINUATION" in model
+            # Model_2_EXT is the normalized form of the legacy Model_3 continuation label.
+            # It does not carry "_CONTINUATION" in its name, so check explicitly.
+            is_continuation = "_CONTINUATION" in model or model == "Model_2_EXT"
             rr = eval_result.get("rr", 0)
             reasons = eval_result.get("reasons", [])
 

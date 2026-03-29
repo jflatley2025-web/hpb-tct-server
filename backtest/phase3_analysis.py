@@ -26,7 +26,7 @@ from backtest.config import (
     EXECUTION_SLIPPAGE_PCT,
     FEE_PCT,
 )
-from backtest.db import get_connection
+from backtest.db import get_connection, normalize_model
 from backtest.ingest import load_candles
 
 logger = logging.getLogger("backtest.phase3")
@@ -337,6 +337,7 @@ def task2_model_analysis(conn, signals, trades, candles_1h):
     print("="*80)
 
     real = signals[signals["score_1d"] > 0].copy()
+    real["model"] = real["model"].apply(lambda m: normalize_model(m) or m)
 
     print(f"\n  AVAILABLE MODELS IN DETECTION ENGINE:")
     print(f"    Model_1:               Standard 3-tap accumulation/distribution")
