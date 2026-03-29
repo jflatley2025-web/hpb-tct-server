@@ -54,6 +54,7 @@ from backtest.db import (
     get_connection,
     insert_signal,
     insert_trade,
+    normalize_model,
 )
 from backtest.ingest import load_candles
 from backtest.session import get_session
@@ -105,6 +106,11 @@ _MIN_SCORE_HARD = 65         # score 57-64 confirmed losers — blocked regardle
 # Optional 15m NY overtrade guard — backtest-only tuning flag; set True only if trade count > 55.
 # Kept local (not imported) so backtest re-runs can toggle it without touching the live engine.
 _ENABLE_15M_NY_OVERTRADE_FILTER = False
+
+# ── Run 29: symbol constraints ────────────────────────────────────────
+# Only ETH and SOL are tradable. BTC is used ONLY as HTF anchor bias.
+ALLOWED_SYMBOLS = ["ETHUSDT", "SOLUSDT"]
+BTC_ANCHOR_SYMBOL = "BTCUSDT"
 
 
 def _compute_volatility(closes, lookback: int = _TREND_LOOKBACK) -> float:
@@ -223,6 +229,11 @@ class BacktestState:
     # v15: compression state — tracks the last trade that was actually executed
     last_accepted_trade_time: Optional[datetime] = None
     last_accepted_trade_priority: float = 0.0
+    # Run 29: gate diagnostics
+    failure_counts: dict = field(default_factory=dict)  # failure_code -> count
+    dd_trigger_count: int = 0       # times DD hard block first triggered this run
+    dd_hard_blocks: int = 0         # signals blocked by active DD hard block
+    intra_cycle_max_dd: float = 0.0 # max DD% recorded during any DD protection cycle
 
 
 # ── Multi-TF Synchronization ─────────────────────────────────────────
@@ -437,6 +448,7 @@ def run_gate_pipeline(
     replay_mode: bool = False,
     entry_threshold: int = ENTRY_THRESHOLD,
     min_rr: float = MIN_RR,
+    btc_candles_by_tf: Optional[Dict[str, pd.DataFrame]] = None,  # Run 29: BTC HTF anchor
 ) -> Optional[dict]:
     """
     Run the full HPB gate pipeline at the current step.
@@ -507,6 +519,34 @@ def run_gate_pipeline(
         state.last_htf_bias = htf_bias
 
     gate_1a_pass = htf_bias != "neutral"
+
+    # ── Run 29: BTC HTF Anchor Bias ───────────────────────────────
+    # BTC is NEVER traded — used only to compute cross-market structural bias.
+    # Mirrors the same pivot→classify_trend logic used for Gate 1A above.
+    btc_htf_bias = "neutral"
+    if btc_candles_by_tf:
+        for _btc_tf in [HTF_TIMEFRAME, "4h"]:
+            _btc_df = btc_candles_by_tf.get(_btc_tf)
+            if _btc_df is None or len(_btc_df) < MIN_PIVOT_CONFIRM:
+                continue
+            try:
+                from market_structure import find_6cr_pivots, confirm_structure_points, classify_trend
+                _btc_pivots = find_6cr_pivots(_btc_df)
+                _btc_ph = _btc_pivots.get("highs", [])
+                _btc_pl = _btc_pivots.get("lows", [])
+                if len(_btc_ph) < 2 and len(_btc_pl) < 2:
+                    continue
+                _btc_ms = confirm_structure_points(_btc_df, _btc_ph, _btc_pl)
+                btc_htf_bias = classify_trend(
+                    _btc_ms.get("ms_highs", []),
+                    _btc_ms.get("ms_lows", []),
+                )
+                if btc_htf_bias not in ("neutral", "ranging"):
+                    break
+            except Exception as _e:
+                logger.debug("BTC HTF anchor bias error on %s: %s", _btc_tf, _e)
+                continue
+    logger.debug("BTC_ANCHOR | bias=%s", btc_htf_bias)
 
     # ── Scan MTF timeframes for schematics ────────────────────────
     best_signal = None
@@ -583,7 +623,8 @@ def run_gate_pipeline(
 
             score = eval_result.get("score", 0)
             direction = eval_result.get("direction", "unknown")
-            model = eval_result.get("model", "unknown")
+            model = normalize_model(eval_result.get("model", "unknown"))
+            is_continuation = "_CONTINUATION" in model
             rr = eval_result.get("rr", 0)
             reasons = eval_result.get("reasons", [])
 
@@ -731,7 +772,7 @@ def run_gate_pipeline(
             )
 
             # v13 funnel: count every continuation / 15m signal that reaches the gate
-            if "_CONTINUATION" in model:
+            if is_continuation:
                 state.continuation_detected += 1
             if tf == "15m":
                 state.signals_15m_detected += 1
@@ -747,6 +788,7 @@ def run_gate_pipeline(
                     if state.dd_protection_triggered_at is None:
                         state.dd_protection_triggered_at = current_time
                         state.dd_trough_equity = state.equity
+                        state.dd_trigger_count += 1  # Run 29: count first crossings
                         logger.info(
                             "DD_PROTECTION | hard block triggered | dd=%.2f%% | trough=$%.2f",
                             _step_dd * 100, state.equity,
@@ -809,6 +851,14 @@ def run_gate_pipeline(
                 final_decision = "SKIP"
                 skip_reason = "NO_HTF_BIAS"
                 failure_code = "FAIL_1A_BIAS"
+            # ── Run 29: BTC HTF Anchor Gate ───────────────────────────
+            # Hard gate: trade direction must align with BTC HTF structural bias.
+            # Active only when BTC candles were supplied (btc_candles_by_tf not None).
+            # NEUTRAL/RANGING BTC also blocks — no clear directional anchor.
+            elif btc_candles_by_tf is not None and direction != btc_htf_bias:
+                final_decision = "SKIP"
+                skip_reason = "BTC_ANCHOR_CONFLICT (trade={}, btc={})".format(direction, btc_htf_bias)
+                failure_code = "FAIL_BTC_ANCHOR_BIAS"
             elif not rcm_valid:
                 final_decision = "SKIP"
                 skip_reason = "RCM_INVALID"
@@ -914,7 +964,7 @@ def run_gate_pipeline(
                 failure_code = "FAIL_SCORE_HARD_FLOOR"
 
             # ── v12/v13: Continuation model quality gates ──────────────
-            if final_decision == "TAKE" and "_CONTINUATION" in model:
+            if final_decision == "TAKE" and is_continuation:
                 if tf != "1h":
                     final_decision = "SKIP"
                     skip_reason = "CONT_TF_FILTER (tf={}, only 1h allowed)".format(tf)
@@ -994,7 +1044,7 @@ def run_gate_pipeline(
             # model_family: top-level class ("Model_1" | "Model_2")
             # model_variant: "continuation" for re-acc/re-dist, "reversal" otherwise
             _model_family = "Model_2" if "Model_2" in model else "Model_1"
-            _model_variant = "continuation" if "_CONTINUATION" in model else "reversal"
+            _model_variant = "continuation" if is_continuation else "reversal"
 
             signal = {
                 "signal_time": current_time,
@@ -1007,6 +1057,7 @@ def run_gate_pipeline(
                 "model_variant": _model_variant,
                 "gate_1a_bias": htf_bias,
                 "gate_1a_pass": gate_1a_pass,
+                "btc_htf_bias": btc_htf_bias,  # Run 29: BTC anchor context
                 "gate_1b_pass": True,  # placeholder — USDT.D not yet integrated
                 "gate_1c_pass": True,  # placeholder — alt alignment optional
                 "rcm_score": rcm_score,
@@ -1056,6 +1107,14 @@ def run_gate_pipeline(
                     "sweep_type": schematic.get("sweep_type"),
                 } if schematic else None,
             }
+
+            # Run 29: track failure counts and DD hard blocks
+            if failure_code:
+                state.failure_counts[failure_code] = (
+                    state.failure_counts.get(failure_code, 0) + 1
+                )
+                if failure_code == "FAIL_DD_PROTECTION":
+                    state.dd_hard_blocks += 1
 
             # Log the signal
             insert_signal(conn, run_id, signal)
@@ -1138,6 +1197,25 @@ def run_backtest(
     Returns:
         Summary dict with metrics.
     """
+    # Run 29: hard symbol filter — only ALLOWED_SYMBOLS are tradable
+    if symbol not in ALLOWED_SYMBOLS:
+        logger.warning(
+            "Run 29: symbol %s not in ALLOWED_SYMBOLS %s — skipping backtest",
+            symbol, ALLOWED_SYMBOLS,
+        )
+        return {
+            "run_id": None,
+            "final_balance": starting_balance,
+            "total_trades": 0,
+            "wins": 0,
+            "losses": 0,
+            "win_rate": 0.0,
+            "max_drawdown_pct": 0.0,
+            "pnl_pct": 0.0,
+            "skipped": True,
+            "skip_reason": f"symbol not in ALLOWED_SYMBOLS: {ALLOWED_SYMBOLS}",
+        }
+
     # Resolve overrides (fall back to config defaults)
     effective_threshold = entry_threshold if entry_threshold is not None else ENTRY_THRESHOLD
     effective_min_rr = min_rr if min_rr is not None else MIN_RR
@@ -1179,7 +1257,7 @@ def run_backtest(
         "tp1_close_pct": effective_tp1_close_pct,
         "tp1_level_pct": effective_tp1_level_pct,
         "trail_factor": effective_trail_factor,
-        "engine_version": 16,  # v16: candle_timestamp for trade opened_at; Model_3 → Model_1/2_CONTINUATION
+        "engine_version": 17,  # v17: Run 29 eval framework; BTC anchor gate; Model_3 → Model_2_EXT rename
     }
 
     run_id = create_run(
@@ -1200,6 +1278,14 @@ def run_backtest(
         df = load_candles(conn, symbol, tf, lookback_start, end_date)
         candles_all[tf] = df
         logger.info(f"  Loaded {tf}: {len(df)} candles")
+
+    # Run 29: load BTC HTF anchor candles (HTF only — not for detection)
+    btc_candles_all: Dict[str, pd.DataFrame] = {}
+    if symbol != BTC_ANCHOR_SYMBOL:
+        for tf in [HTF_TIMEFRAME, "4h"]:
+            df_btc = load_candles(conn, BTC_ANCHOR_SYMBOL, tf, lookback_start, end_date)
+            btc_candles_all[tf] = df_btc
+            logger.info("  Loaded BTC anchor %s: %d candles (HTF bias only)", tf, len(df_btc))
 
     # Initialize state
     state = BacktestState(
@@ -1281,6 +1367,13 @@ def run_backtest(
                 if df is not None and not df.empty:
                     candles_by_tf[tf] = get_last_closed(df, tf, current_time)
 
+            # Run 29: build BTC anchor candles for this step (HTF only)
+            _btc_candles_by_tf: Dict[str, pd.DataFrame] = {}
+            for tf in [HTF_TIMEFRAME, "4h"]:
+                df_btc = btc_candles_all.get(tf)
+                if df_btc is not None and not df_btc.empty:
+                    _btc_candles_by_tf[tf] = get_last_closed(df_btc, tf, current_time)
+
             # ── Check open trade exit ─────────────────────────────
             if state.open_trade is not None:
                 # Use the step interval candle for TP/SL checking
@@ -1312,6 +1405,7 @@ def run_backtest(
                     run_id, conn, replay_mode=replay_mode,
                     entry_threshold=effective_threshold,
                     min_rr=effective_min_rr,
+                    btc_candles_by_tf=_btc_candles_by_tf if _btc_candles_by_tf else None,
                 )
                 if signal and signal.get("final_decision") == "TAKE":
                     # ── v15: compression check (post-gate execution filter) ────────
@@ -1368,7 +1462,7 @@ def run_backtest(
                             # v15: update compression state on every executed trade
                             state.last_accepted_trade_time = current_time
                             state.last_accepted_trade_priority = _priority
-                            if "_CONTINUATION" in signal.get("model", ""):
+                            if signal.get("model_variant") == "continuation":
                                 state.continuation_trades += 1
                             if signal.get("timeframe") == "15m":
                                 state.trades_15m += 1
@@ -1420,6 +1514,16 @@ def run_backtest(
             "pnl_pct": ((state.equity - starting_balance) / starting_balance) * 100,
         }
         logger.info(f"Backtest complete: {json.dumps(summary, indent=2)}")
+
+        # Run 29: compute evaluation + write report
+        try:
+            _r29 = _compute_run29_evaluation(state, starting_balance)
+            _generate_run29_report(_r29, output_path="run29_evaluation.json")
+            summary["run29_result"] = _r29["result"]
+            summary["run29_gates"] = _r29["gates"]
+        except Exception as _r29_err:
+            logger.warning("Run 29 evaluation failed: %s", _r29_err, exc_info=True)
+
         return summary
 
     except Exception as e:
@@ -1602,6 +1706,9 @@ def _close_trade(state: BacktestState, raw_exit_price: float, exit_reason: str,
     state.drawdown = current_dd
     if current_dd > state.max_drawdown_pct:
         state.max_drawdown_pct = current_dd
+    # Run 29: track max DD seen during any active DD protection cycle
+    if state.dd_protection_triggered_at is not None and current_dd > state.intra_cycle_max_dd:
+        state.intra_cycle_max_dd = current_dd
 
     # Record trade
     trade_record = {
@@ -1642,6 +1749,262 @@ def _close_trade(state: BacktestState, raw_exit_price: float, exit_reason: str,
         f"CLOSE #{trade.trade_num}: {exit_reason} @ {effective_exit:.2f} "
         f"P&L=${pnl_dollars:.2f} ({pnl_pct:+.2f}%) — balance=${state.equity:.2f}"
     )
+
+
+# ── Run 29 Evaluation ─────────────────────────────────────────────────
+
+def _compute_run29_evaluation(state: "BacktestState", starting_balance: float) -> dict:
+    """Compute all Run 29 metrics and gate pass/fail evaluations."""
+    trades = state.trade_history
+    total = len(trades)
+
+    wins = [t for t in trades if t.get("is_win")]
+    loss_list = [t for t in trades if not t.get("is_win")]
+
+    gross_profit = sum(t["pnl_dollars"] for t in wins)
+    gross_loss = abs(sum(t["pnl_dollars"] for t in loss_list))
+    pf_raw = gross_profit / gross_loss if gross_loss > 0 else float("inf")
+    pf = round(pf_raw, 4) if pf_raw != float("inf") else float("inf")
+
+    wr = round(len(wins) / total * 100, 2) if total > 0 else 0.0
+    avg_win = round(gross_profit / len(wins), 2) if wins else 0.0
+    avg_loss = round(gross_loss / len(loss_list), 2) if loss_list else 0.0
+    expectancy = round((wr / 100 * avg_win) - ((1 - wr / 100) * avg_loss), 2)
+    net_profit = round(sum(t["pnl_dollars"] for t in trades), 2)
+    avg_rr = round(sum(t.get("rr", 0) for t in trades) / total, 3) if total > 0 else 0.0
+
+    def _agg(key_fn):
+        out: dict = {}
+        for t in trades:
+            k = key_fn(t)
+            if k not in out:
+                out[k] = {"trades": 0, "wins": 0, "gross_profit": 0.0, "gross_loss": 0.0}
+            out[k]["trades"] += 1
+            out[k]["wins"] += 1 if t.get("is_win") else 0
+            pnl = t["pnl_dollars"]
+            if pnl > 0:
+                out[k]["gross_profit"] += pnl
+            else:
+                out[k]["gross_loss"] += abs(pnl)
+        return out
+
+    by_symbol = _agg(lambda t: t["symbol"])
+    by_tf = _agg(lambda t: t["timeframe"])
+    by_model = _agg(lambda t: t["model"])
+
+    def _wr(d):
+        return round(d["wins"] / d["trades"] * 100, 1) if d["trades"] > 0 else 0.0
+
+    def _pf(d):
+        return round(d["gross_profit"] / d["gross_loss"], 3) if d["gross_loss"] > 0 else float("inf")
+
+    gates: dict = {}
+    notes: list = []
+
+    # Primary gate 1: trade count 40–80
+    gates["trade_count"] = "PASS" if 40 <= total <= 80 else "FAIL"
+    if gates["trade_count"] == "FAIL":
+        notes.append(f"Trade count {total} outside [40, 80]")
+
+    # Primary gate 2: PF >= 2.5
+    gates["profit_factor"] = "PASS" if pf == float("inf") or pf >= 2.5 else "FAIL"
+    if gates["profit_factor"] == "FAIL":
+        notes.append(f"PF {pf} < 2.5")
+
+    # Primary gate 3: expectancy >= $40
+    gates["expectancy"] = "PASS" if expectancy >= 40 else "FAIL"
+    if gates["expectancy"] == "FAIL":
+        notes.append(f"Expectancy ${expectancy:.2f} < $40")
+
+    # Primary gate 4: max DD <= 3.5%
+    gates["max_dd"] = "PASS" if state.max_drawdown_pct <= 3.5 else "FAIL"
+    if gates["max_dd"] == "FAIL":
+        notes.append(f"Max DD {state.max_drawdown_pct:.2f}% > 3.5%")
+
+    # Primary gate 5: win rate >= 70%
+    gates["win_rate"] = "PASS" if wr >= 70 else "FAIL"
+    if gates["win_rate"] == "FAIL":
+        notes.append(f"Win rate {wr:.1f}% < 70%")
+
+    # Distribution gate 6: symbol balance (ETH >= 30%, SOL >= 30%)
+    _eth = by_symbol.get("ETHUSDT", {}).get("trades", 0)
+    _sol = by_symbol.get("SOLUSDT", {}).get("trades", 0)
+    _sym_total = _eth + _sol
+    if _sym_total > 0:
+        _eth_pct = _eth / _sym_total * 100
+        _sol_pct = _sol / _sym_total * 100
+        _sym_ok = _eth_pct >= 30 and _sol_pct >= 30
+    else:
+        _eth_pct = _sol_pct = 0.0
+        _sym_ok = False
+    gates["symbol_distribution"] = "PASS" if _sym_ok else "FAIL"
+    if not _sym_ok:
+        notes.append(f"Symbol imbalance — ETH={_eth_pct:.0f}% ({_eth}t), SOL={_sol_pct:.0f}% ({_sol}t)")
+
+    # Distribution gate 7: timeframe quality
+    _tf_pass = True
+    for _tf_chk, _wr_req, _net_req, _pf_req in [
+        ("15m", 60, True,  None),
+        ("1h",  70, None,  None),
+        ("4h",  None, None, 2.5),
+    ]:
+        _d = by_tf.get(_tf_chk)
+        if not _d or _d["trades"] == 0:
+            continue
+        _t_wr = _wr(_d)
+        _t_pf = _pf(_d)
+        _t_net = _d["gross_profit"] - _d["gross_loss"]
+        if _wr_req and _t_wr < _wr_req:
+            _tf_pass = False
+            notes.append(f"{_tf_chk} WR {_t_wr:.1f}% < {_wr_req}%")
+        if _net_req and _t_net <= 0:
+            _tf_pass = False
+            notes.append(f"{_tf_chk} net negative (${_t_net:.2f})")
+        if _pf_req and _t_pf != float("inf") and _t_pf < _pf_req:
+            _tf_pass = False
+            notes.append(f"{_tf_chk} PF {_t_pf:.2f} < {_pf_req}")
+    gates["timeframe_quality"] = "PASS" if _tf_pass else "FAIL"
+
+    # Model gate 8: all active models net positive AND PF >= 1.5
+    _model_pass = True
+    for _m, _md in by_model.items():
+        _m_net = _md["gross_profit"] - _md["gross_loss"]
+        _m_pf = _pf(_md)
+        if _m_net <= 0:
+            _model_pass = False
+            notes.append(f"Model {_m} net negative (${_m_net:.2f})")
+        elif _m_pf != float("inf") and _m_pf < 1.5:
+            _model_pass = False
+            notes.append(f"Model {_m} PF {_m_pf:.2f} < 1.5")
+    gates["model_quality"] = "PASS" if _model_pass else "FAIL"
+
+    # DD gate 9: system engaged (>0 hard blocks) AND intra-cycle max DD <= 4.5%
+    _dd_ok = state.dd_hard_blocks > 0 and state.intra_cycle_max_dd <= 4.5
+    gates["dd_behavior"] = "PASS" if _dd_ok else "FAIL"
+    if not _dd_ok:
+        if state.dd_hard_blocks == 0:
+            notes.append("DD system never engaged (0 hard blocks fired)")
+        if state.intra_cycle_max_dd > 4.5:
+            notes.append(f"Intra-cycle max DD {state.intra_cycle_max_dd:.2f}% > 4.5%")
+
+    # Final result: all primary required + max 1 secondary failure
+    _primary = ["trade_count", "profit_factor", "expectancy", "max_dd", "win_rate"]
+    _secondary = ["symbol_distribution", "timeframe_quality", "model_quality", "dd_behavior"]
+    _primary_ok = all(gates[g] == "PASS" for g in _primary)
+    _sec_fails = sum(1 for g in _secondary if gates[g] == "FAIL")
+    overall = "PASS" if (_primary_ok and _sec_fails <= 1) else "FAIL"
+
+    if overall == "PASS":
+        _passing = sum(1 for g in _primary + _secondary if gates[g] == "PASS")
+        notes.append(f"Run 29 PASSED — {_passing}/9 gates")
+
+    def _fmt_pf(v):
+        return "inf" if v == float("inf") else v
+
+    return {
+        "result": overall,
+        "summary": {
+            "trades": total,
+            "wins": len(wins),
+            "losses": len(loss_list),
+            "win_rate": wr,
+            "gross_profit": round(gross_profit, 2),
+            "gross_loss": round(gross_loss, 2),
+            "pf": _fmt_pf(pf),
+            "expectancy": expectancy,
+            "net_profit": net_profit,
+            "max_dd": round(state.max_drawdown_pct, 4),
+            "avg_rr": avg_rr,
+            "avg_win": avg_win,
+            "avg_loss": avg_loss,
+        },
+        "gates": gates,
+        "distributions": {
+            "by_symbol": {
+                sym: {
+                    "trades": d["trades"],
+                    "wins": d["wins"],
+                    "wr_pct": _wr(d),
+                    "pf": _fmt_pf(_pf(d)),
+                    "net_pnl": round(d["gross_profit"] - d["gross_loss"], 2),
+                }
+                for sym, d in by_symbol.items()
+            },
+            "by_tf": {
+                tf: {
+                    "trades": d["trades"],
+                    "wins": d["wins"],
+                    "wr_pct": _wr(d),
+                    "pf": _fmt_pf(_pf(d)),
+                    "net_pnl": round(d["gross_profit"] - d["gross_loss"], 2),
+                }
+                for tf, d in by_tf.items()
+            },
+            "by_model": {
+                m: {
+                    "trades": d["trades"],
+                    "wins": d["wins"],
+                    "wr_pct": _wr(d),
+                    "pf": _fmt_pf(_pf(d)),
+                    "net_pnl": round(d["gross_profit"] - d["gross_loss"], 2),
+                }
+                for m, d in by_model.items()
+            },
+        },
+        "risk": {
+            "dd_trigger_count": state.dd_trigger_count,
+            "dd_hard_blocks": state.dd_hard_blocks,
+            "intra_cycle_max_dd": round(state.intra_cycle_max_dd, 4),
+        },
+        "gate_diagnostics": {
+            k: v
+            for k, v in sorted(state.failure_counts.items(), key=lambda x: -x[1])
+        },
+        "notes": notes,
+    }
+
+
+def _generate_run29_report(
+    eval_result: dict,
+    output_path: str = "run29_evaluation.json",
+) -> None:
+    """Write run29_evaluation.json and print structured console summary."""
+    with open(output_path, "w") as _fh:
+        json.dump(eval_result, _fh, indent=2, default=str)
+
+    s = eval_result["summary"]
+    g = eval_result["gates"]
+    result = eval_result["result"]
+
+    print()
+    print("=" * 44)
+    print("===== RUN 29 EVALUATION =====")
+    print("=" * 44)
+    print(f"Trades:      {s['trades']}")
+    print(f"Win Rate:    {s['win_rate']:.1f}%")
+    print(f"PF:          {s['pf']}")
+    print(f"Expectancy:  ${s['expectancy']:.2f}")
+    print(f"Max DD:      {s['max_dd']:.2f}%")
+    print(f"Net Profit:  ${s['net_profit']:.2f}")
+    print()
+    print("PRIMARY GATES (all required):")
+    for _gate in ["trade_count", "profit_factor", "expectancy", "max_dd", "win_rate"]:
+        _mark = "[PASS]" if g.get(_gate) == "PASS" else "[FAIL]"
+        print(f"  {_mark}  {_gate}")
+    print()
+    print("SECONDARY GATES (max 1 failure allowed):")
+    for _gate in ["symbol_distribution", "timeframe_quality", "model_quality", "dd_behavior"]:
+        _mark = "[PASS]" if g.get(_gate) == "PASS" else "[FAIL]"
+        print(f"  {_mark}  {_gate}")
+    print()
+    print(f"RESULT: {result}")
+    print("=" * 44)
+    if eval_result.get("notes"):
+        print()
+        for note in eval_result["notes"]:
+            print(f"  -> {note}")
+    print()
+    logger.info("Run 29 evaluation written to %s | result=%s", output_path, result)
 
 
 # ── CLI Entrypoint ────────────────────────────────────────────────────
@@ -1755,6 +2118,17 @@ def main():
 
     # Resolve effective symbol list
     effective_symbols = args.symbols or [args.symbol]
+
+    # Run 29: enforce ALLOWED_SYMBOLS — filter non-tradable symbols at CLI entry
+    _rejected = [s for s in effective_symbols if s not in ALLOWED_SYMBOLS]
+    if _rejected:
+        for _s in _rejected:
+            print(f"[Run 29] WARNING: {_s} not in ALLOWED_SYMBOLS {ALLOWED_SYMBOLS} — skipped")
+        effective_symbols = [s for s in effective_symbols if s in ALLOWED_SYMBOLS]
+        if not effective_symbols:
+            print(f"[Run 29] ERROR: No valid symbols after filter. Allowed: {ALLOWED_SYMBOLS}")
+            sys.exit(1)
+
     multi_symbol = len(effective_symbols) > 1
 
     try:

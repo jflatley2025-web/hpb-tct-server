@@ -125,7 +125,7 @@ l('')
 l('  Key Observations:')
 l('  - 15m: lowest WR (69.2%) and lowest avg PnL ($41/trade) -- primary target for v12/v13 hardening')
 l('  - Model_2/15m: 8 trades, 62.5% WR, -$13 net -- only net-negative model x TF bucket')
-l('  - Model_3/4h: 10 trades, 70% WR, $25 avg -- low edge; eliminated by FAIL_MODEL3_TF_FILTER in v12')
+l('  - Model_2_EXT/4h: 10 trades, 70% WR, $25 avg -- low edge; eliminated by FAIL_MODEL3_TF_FILTER in v12')
 l('  - 4h TF: highest avg PnL ($152/trade), 29 trades -- best edge quality')
 l('  - Model_1_from_M2_failure: 7/7 wins (100% WR, $85/trade) -- strongest sub-pattern')
 if avg_loss:
