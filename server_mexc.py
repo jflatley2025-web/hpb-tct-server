@@ -2804,6 +2804,7 @@ def validate_1C(context: Dict) -> Dict:
 
 def validate_RCM(context: Dict) -> Dict:
     try:
+        from hpb_rig_validator import compute_displacement  # noqa: PLC0415
         r = context.get("detected_range")
         if not r or r["duration_hours"] < 24:
             return {"valid": False, "confidence": 0.0, "displacement": None,

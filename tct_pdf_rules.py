@@ -27,7 +27,10 @@ import sys
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    import chromadb
 
 from pypdf import PdfReader
 
@@ -237,7 +240,7 @@ def _get_or_create_collection(client: "chromadb.Client") -> "chromadb.Collection
 
 
 def _populate_collection(
-    collection: chromadb.Collection,
+    collection: "chromadb.Collection",
     force_repopulate: bool = False,
 ) -> None:
     """
@@ -291,7 +294,7 @@ def _populate_collection(
 # ---------------------------------------------------------------------------
 
 def _query_layer_rules(
-    collection: chromadb.Collection,
+    collection: "chromadb.Collection",
     layer: int,
     n_results: int = 3,
 ) -> LayerRules:
