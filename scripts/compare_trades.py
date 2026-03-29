@@ -117,7 +117,7 @@ def load_backtest_trades(conn, run_id: int) -> List[Dict]:
         (run_id,),
     )
     cols = [d[0] for d in cur.description]
-    rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+    rows = [dict(zip(cols, row, strict=True)) for row in cur.fetchall()]
     cur.close()
     logger.info("Loaded %d backtest trades for run_id=%d", len(rows), run_id)
     return rows
@@ -315,7 +315,7 @@ def _print_report(r: Dict) -> None:
 
     print()
     if r["pass"]:
-        print(f"  RESULT: ✅ PASS  — Trade-level alignment confirmed")
+        print("  RESULT: ✅ PASS  — Trade-level alignment confirmed")
     else:
         print(f"  RESULT: ❌ FAIL  {status} — Unmatched trades require investigation")
     print("=" * 60)

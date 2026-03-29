@@ -34,7 +34,7 @@ import os
 import sys
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -56,13 +56,13 @@ PASS_THRESHOLD = 0.99  # 99% match rate required
 
 # ── Loading ───────────────────────────────────────────────────────────────────
 
-def load_records(log_path: str, limit: int) -> List[Dict]:
+def load_records(log_path: str, limit: int) -> list[dict]:
     """Load the last `limit` records from the JSONL parity log."""
     if not os.path.exists(log_path):
         logger.error("Parity log not found: %s", log_path)
         return []
 
-    records: List[Dict] = []
+    records: list[dict] = []
     with open(log_path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()

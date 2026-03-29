@@ -168,12 +168,6 @@ def run_replay(
     tfs = list(dict.fromkeys(MTF_TIMEFRAMES + ["1d", "4h", "1h", "30m"]))
     _load_full_history(symbol, tfs, start_time)
 
-    state = BacktestState(
-        current_time=replay_start,
-        equity=STARTING_BALANCE,
-        peak_equity=STARTING_BALANCE,
-    )
-
     results: Dict = {
         "run_id": run_id,
         "symbol": symbol,
@@ -192,8 +186,15 @@ def run_replay(
 
     try:
         while current_time <= end_time:
-            state.current_time = current_time
-            state.current_step = step_num
+            # Fresh state each step — ensures run_gate_pipeline() sees no
+            # accumulated fields (traded_bos_fingerprints, last_htf_bias, etc.)
+            # from prior iterations so each comparison is truly stateless.
+            state = BacktestState(
+                current_time=current_time,
+                current_step=step_num,
+                equity=STARTING_BALANCE,
+                peak_equity=STARTING_BALANCE,
+            )
 
             # Build candles_by_tf snapshot — no future leakage
             candles_by_tf: Dict[str, pd.DataFrame] = {}
@@ -300,8 +301,7 @@ def run_replay(
                         v2_failure_code, v2_tf,
                     )
 
-            # Advance step (do NOT update state.open_trade — stateless replay)
-            state.last_signal_time = current_time
+            # Advance step — state is recreated fresh each iteration above
             current_time += step_delta
             step_num += 1
 

@@ -1657,7 +1657,7 @@ class Schematics5BTrader:
                     # Build unified parity entry (Steps 1 + 5).
                     # Includes all fields required by analyze_parity.py and the
                     # gate_debug block on mismatch for root-cause triage.
-                    _parity_match = _v2_decision == "TAKE" or _v2_decision == "not_run"
+                    _parity_match = _v2_decision in {"TAKE", "not_run"}
                     _v2_meta = (_v2_result.get("metadata") or {}) if _v2_result else {}
                     _parity_entry = {
                         "type": "decision_parity",
