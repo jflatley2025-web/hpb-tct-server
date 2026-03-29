@@ -3022,7 +3022,7 @@ def validate_gates(context: Dict) -> Dict:
                 },
             )
             context["_v2_shadow"] = _v2_shadow
-            logger.debug(
+            logger.info(
                 "SHADOW v2: decision=%s score=%s failure=%s",
                 _v2_shadow.get("decision"),
                 _v2_shadow.get("score"),
@@ -3078,6 +3078,13 @@ def validate_gates(context: Dict) -> Dict:
     context["1D"] = validate_1D(context)
 
     context["Action"] = "EXECUTE" if context["1D"]["passed"] else "NO_TRADE"
+    logger.info(
+        "LIVE_DECISION: action=%s | SHADOW_DECISION: decision=%s score=%s failure=%s",
+        context["Action"],
+        context.get("_v2_shadow", {}).get("decision"),
+        context.get("_v2_shadow", {}).get("score"),
+        context.get("_v2_shadow", {}).get("failure_code"),
+    )
     return context
 
 # ================================================================
