@@ -1,0 +1,50 @@
+{
+  "result": "FAIL",
+  "summary": {
+    "trades": 0,
+    "wins": 0,
+    "losses": 0,
+    "win_rate": 0.0,
+    "gross_profit": 0,
+    "gross_loss": 0,
+    "pf": "inf",
+    "expectancy": 0.0,
+    "net_profit": 0,
+    "max_dd": 0.0,
+    "avg_rr": 0.0,
+    "avg_win": 0.0,
+    "avg_loss": 0.0
+  },
+  "gates": {
+    "trade_count": "FAIL",
+    "profit_factor": "PASS",
+    "expectancy": "FAIL",
+    "max_dd": "PASS",
+    "win_rate": "FAIL",
+    "symbol_distribution": "FAIL",
+    "timeframe_quality": "PASS",
+    "model_quality": "PASS",
+    "dd_behavior": "FAIL"
+  },
+  "distributions": {
+    "by_symbol": {},
+    "by_tf": {},
+    "by_model": {}
+  },
+  "risk": {
+    "dd_trigger_count": 0,
+    "dd_hard_blocks": 0,
+    "intra_cycle_max_dd": 0.0
+  },
+  "gate_diagnostics": {
+    "FAIL_BTC_ANCHOR_BIAS": 736,
+    "FAIL_RIG_COUNTER_BIAS": 562
+  },
+  "notes": [
+    "Trade count 0 < 30",
+    "Expectancy $0.00 <= $0",
+    "Win rate 0.0% < 55%",
+    "Symbol imbalance \u2014 ETH=0% (0t), SOL=0% (0t)",
+    "DD system never engaged (0 triggers fired)"
+  ]
+}

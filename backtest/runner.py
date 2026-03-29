@@ -234,6 +234,7 @@ class BacktestState:
     dd_trigger_count: int = 0       # times DD hard block first triggered this run
     dd_hard_blocks: int = 0         # signals blocked by active DD hard block
     intra_cycle_max_dd: float = 0.0 # max DD% recorded during any DD protection cycle
+    total_signals: int = 0          # total signals reaching score evaluation
 
 
 # ── Multi-TF Synchronization ─────────────────────────────────────────
@@ -633,6 +634,8 @@ def run_gate_pipeline(
             # Normalize model once and derive is_continuation flag
             normalized_model = normalize_model(model) or model
             is_continuation = "_CONTINUATION" in normalized_model
+
+            state.total_signals += 1
 
             # TEMP DIAGNOSTIC: log why score=0 for first N signals
             if score == 0 and not hasattr(state, '_diag_count'):
@@ -1263,7 +1266,7 @@ def run_backtest(
         "tp1_close_pct": effective_tp1_close_pct,
         "tp1_level_pct": effective_tp1_level_pct,
         "trail_factor": effective_trail_factor,
-        "engine_version": 17,  # v17: Run 29 eval framework; BTC anchor gate; Model_3 → Model_2_EXT rename
+        "engine_version": 18,  # v18: L2 counter-structure gate removed (100% blocker on ETH/SOL)
     }
 
     run_id = create_run(
@@ -1403,6 +1406,22 @@ def run_backtest(
                         _close_trade(state, raw_exit_price, exit_reason,
                                      current_time, conn, run_id,
                                      portfolio=_portfolio)
+
+            # ── Step checkpoint every 500 steps ───────────────────
+            if step_idx > 0 and step_idx % 500 == 0:
+                logger.info(
+                    "CHECKPOINT step=%d | total_signals=%d | trades=%d | time=%s",
+                    step_idx, state.total_signals, len(state.trade_history),
+                    current_time.strftime("%Y-%m-%d %H:%M"),
+                )
+                if step_idx == 1000 and len(state.trade_history) == 0:
+                    logger.warning(
+                        "CRITICAL: 0 trades at step 1000 — check gate diagnostics",
+                    )
+                    print(
+                        f"!!! WARNING: 0 trades at step 1000. "
+                        f"signals={state.total_signals} — check gate failure distribution. !!!"
+                    )
 
             # ── Run gate pipeline (skip during warmup) ─────────────
             if state.open_trade is None and current_time >= warmup_end:
