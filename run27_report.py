@@ -1,4 +1,5 @@
 import psycopg2, json, os
+from backtest.db import normalize_model
 
 conn = psycopg2.connect(
     host=os.environ.get("BACKTEST_DB_HOST", "localhost"),
@@ -85,6 +86,7 @@ l(f'  {"Model":<35} {"Trades":>6} {"Wins":>5} {"WR%":>6} {"Net PnL":>11} {"Avg P
 l('  ' + '-'*98)
 for ms in model_stats:
     mn, n, mw, mwr, mpnl, mavg, mgw, mgl = ms
+    mn = normalize_model(mn) or mn  # map legacy labels (e.g. Model_3 -> Model_2_EXT)
     mpf = float(mgw)/float(mgl) if mgl else 9999
     pf_s = f'{mpf:.2f}' if mpf < 9999 else 'inf'
     l(f'  {mn:<35} {n:>6} {mw:>5} {float(mwr):>5.1f}% {float(mpnl):>11,.2f} {float(mavg):>10,.2f} {float(mgw):>11,.2f} {float(mgl):>11,.2f} {pf_s:>6}')
@@ -113,6 +115,7 @@ l(f'  {"Model":<35} {"WR%":>6}  {"Net PnL":>11}  {"PnL/Trade":>10}')
 l('  ' + '-'*70)
 for ms in sorted(model_stats, key=lambda x: float(x[3]), reverse=True):
     mn, n, mw, mwr, mpnl, mavg, mgw, mgl = ms
+    mn = normalize_model(mn) or mn
     l(f'  {mn:<35} {float(mwr):>5.1f}%  ${float(mpnl):>10,.2f}  ${float(mavg):>9,.2f}/trade')
 l('')
 l('  Timeframe PnL vs WR (sorted by avg PnL descending):')

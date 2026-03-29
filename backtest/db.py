@@ -459,9 +459,6 @@ def model_family(model: Optional[str]) -> Optional[str]:
     """Return the top-level family ("Model_1" or "Model_2") for a model string."""
     if not model:
         return None
-    # Model_2_EXT is re-accumulation continuation — belongs to Model_1 family.
-    if model == "Model_2_EXT":
-        return "Model_1"
     if "Model_2" in model:
         return "Model_2"
     if "Model_1" in model:

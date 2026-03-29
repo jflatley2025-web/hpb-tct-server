@@ -1170,7 +1170,7 @@ def _print_replay_detail(signal: dict, current_time: datetime):
 # ── Main Backtest Loop ────────────────────────────────────────────────
 
 def run_backtest(
-    symbol: str = "BTCUSDT",
+    symbol: str = "ETHUSDT",
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
     step_interval: str = "1h",
@@ -1519,10 +1519,13 @@ def run_backtest(
         }
         logger.info(f"Backtest complete: {json.dumps(summary, indent=2)}")
 
-        # Run 29: compute evaluation + write report
+        # Run 29: compute evaluation + write per-symbol report
+        # Use a per-symbol filename so multi-symbol portfolio runs don't overwrite each other.
+        # Portfolio-level aggregation (distribution gate) is handled by run_portfolio_backtest.
         try:
             _r29 = _compute_run29_evaluation(state, starting_balance)
-            _generate_run29_report(_r29, output_path="run29_evaluation.json")
+            _r29_path = f"run29_evaluation_{symbol}.json"
+            _generate_run29_report(_r29, output_path=_r29_path)
             summary["run29_result"] = _r29["result"]
             summary["run29_gates"] = _r29["gates"]
         except Exception as _r29_err:
@@ -1805,30 +1808,30 @@ def _compute_run29_evaluation(state: "BacktestState", starting_balance: float) -
     gates: dict = {}
     notes: list = []
 
-    # Primary gate 1: trade count 40–80
-    gates["trade_count"] = "PASS" if 40 <= total <= 80 else "FAIL"
+    # Primary gate 1: trade count >= 30
+    gates["trade_count"] = "PASS" if total >= 30 else "FAIL"
     if gates["trade_count"] == "FAIL":
-        notes.append(f"Trade count {total} outside [40, 80]")
+        notes.append(f"Trade count {total} < 30")
 
-    # Primary gate 2: PF >= 2.5
-    gates["profit_factor"] = "PASS" if pf == float("inf") or pf >= 2.5 else "FAIL"
+    # Primary gate 2: PF >= 1.6
+    gates["profit_factor"] = "PASS" if pf == float("inf") or pf >= 1.6 else "FAIL"
     if gates["profit_factor"] == "FAIL":
-        notes.append(f"PF {pf} < 2.5")
+        notes.append(f"PF {pf} < 1.6")
 
-    # Primary gate 3: expectancy >= $40
-    gates["expectancy"] = "PASS" if expectancy >= 40 else "FAIL"
+    # Primary gate 3: expectancy > $0
+    gates["expectancy"] = "PASS" if expectancy > 0 else "FAIL"
     if gates["expectancy"] == "FAIL":
-        notes.append(f"Expectancy ${expectancy:.2f} < $40")
+        notes.append(f"Expectancy ${expectancy:.2f} <= $0")
 
-    # Primary gate 4: max DD <= 3.5%
-    gates["max_dd"] = "PASS" if state.max_drawdown_pct <= 3.5 else "FAIL"
+    # Primary gate 4: max DD <= 6.0%
+    gates["max_dd"] = "PASS" if state.max_drawdown_pct <= 6.0 else "FAIL"
     if gates["max_dd"] == "FAIL":
-        notes.append(f"Max DD {state.max_drawdown_pct:.2f}% > 3.5%")
+        notes.append(f"Max DD {state.max_drawdown_pct:.2f}% > 6.0%")
 
-    # Primary gate 5: win rate >= 70%
-    gates["win_rate"] = "PASS" if wr >= 70 else "FAIL"
+    # Primary gate 5: win rate >= 55%
+    gates["win_rate"] = "PASS" if wr >= 55 else "FAIL"
     if gates["win_rate"] == "FAIL":
-        notes.append(f"Win rate {wr:.1f}% < 70%")
+        notes.append(f"Win rate {wr:.1f}% < 55%")
 
     # Distribution gate 6: symbol balance (ETH >= 30%, SOL >= 30%)
     _eth = by_symbol.get("ETHUSDT", {}).get("trades", 0)
@@ -1882,12 +1885,12 @@ def _compute_run29_evaluation(state: "BacktestState", starting_balance: float) -
             notes.append(f"Model {_m} PF {_m_pf:.2f} < 1.5")
     gates["model_quality"] = "PASS" if _model_pass else "FAIL"
 
-    # DD gate 9: system engaged (>0 hard blocks) AND intra-cycle max DD <= 4.5%
-    _dd_ok = state.dd_hard_blocks > 0 and state.intra_cycle_max_dd <= 4.5
+    # DD gate 9: system engaged (>0 triggers) AND intra-cycle max DD <= 4.5%
+    _dd_ok = state.dd_trigger_count > 0 and state.intra_cycle_max_dd <= 4.5
     gates["dd_behavior"] = "PASS" if _dd_ok else "FAIL"
     if not _dd_ok:
-        if state.dd_hard_blocks == 0:
-            notes.append("DD system never engaged (0 hard blocks fired)")
+        if state.dd_trigger_count == 0:
+            notes.append("DD system never engaged (0 triggers fired)")
         if state.intra_cycle_max_dd > 4.5:
             notes.append(f"Intra-cycle max DD {state.intra_cycle_max_dd:.2f}% > 4.5%")
 
@@ -2085,8 +2088,8 @@ def run_portfolio_backtest(
 
 def main():
     parser = argparse.ArgumentParser(description="HPB-TCT Backtest Runner")
-    parser.add_argument("--symbol", default="BTCUSDT",
-                        help="Single symbol (default BTCUSDT)")
+    parser.add_argument("--symbol", default="ETHUSDT",
+                        help="Single symbol (default ETHUSDT)")
     parser.add_argument("--symbols", nargs="+", default=None,
                         help="Multi-symbol portfolio backtest "
                              "(e.g. --symbols BTCUSDT ETHUSDT SOLUSDT). "

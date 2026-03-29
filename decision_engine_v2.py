@@ -58,6 +58,7 @@ from backtest.config import (
     MTF_TIMEFRAMES,
     timeframe_to_seconds,
 )
+from backtest.db import normalize_model
 
 logger = logging.getLogger("decision_engine_v2")
 
@@ -540,7 +541,7 @@ def decide(
 
             score: float = eval_result.get("score", 0)
             direction: str = eval_result.get("direction", "unknown")
-            model: str = eval_result.get("model", "unknown")
+            model: str = normalize_model(eval_result.get("model", "unknown")) or "unknown"
             rr: float = eval_result.get("rr", 0)
 
             # ── RCM (Range Context) ───────────────────────────────
