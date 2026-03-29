@@ -868,6 +868,11 @@ def run_gate_pipeline(
                 final_decision = "SKIP"
                 skip_reason = "BTC_ANCHOR_CONFLICT (trade={}, btc={})".format(direction, btc_htf_bias)
                 failure_code = "FAIL_BTC_ANCHOR_BIAS"
+                logger.debug(
+                    "btc_eth_bias_mismatch btc_bias=%s signal_dir=%s tf=%s model=%s time=%s",
+                    btc_htf_bias, direction, tf, model,
+                    current_time.strftime("%Y-%m-%d %H:%M"),
+                )
             elif not rcm_valid:
                 final_decision = "SKIP"
                 skip_reason = "RCM_INVALID"
