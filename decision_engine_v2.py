@@ -66,6 +66,28 @@ logger = logging.getLogger("decision_engine_v2")
 # Set True to activate the unified engine in live trading.
 # The backtest runner has its own independent copy of this flag in runner.py.
 # Default: False — existing code paths remain active until explicitly switched.
+#
+# ── CANARY MODE ACTIVATION CHECKLIST ─────────────────────────────────
+# Before setting USE_UNIFIED_ENGINE = True:
+#   1. Confirm signal parity   >= 99%   (python -m scripts.analyze_parity)
+#   2. Confirm replay parity   >= 99.5% (python -m scripts.replay_parity_test)
+#   3. Confirm trade alignment          (python -m scripts.compare_trades --run-id N)
+#   4. Reduce risk for 24–48h canary run:
+#        schematics_5b_trader.py → RISK_PER_TRADE_PCT = 0.25   (from 1.0)
+#   5. Set this flag to True below.
+#   6. Monitor for 24–48h:
+#        - Trade count vs expected
+#        - Win rate
+#        - Any abnormal clustering
+#        - DD behaviour (STOP if DD > 3% within canary window)
+#   7. After ~20–30 clean trades restore RISK_PER_TRADE_PCT = 1.0.
+#
+# STOP CONDITIONS (revert immediately if any triggered):
+#   - Match rate < 99%
+#   - Trade in live missing from replay
+#   - Model_3 appearing on 4h
+#   - 15m spike
+#   - DD > 3% early
 USE_UNIFIED_ENGINE = False
 
 # ── DD protection feature flag ─────────────────────────────────────────
