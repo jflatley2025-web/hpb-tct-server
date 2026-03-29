@@ -20,15 +20,17 @@ def test_once() -> bool:
 
     print("\n--- RESPONSE CHECK ---")
 
-    # Core checks
-    has_decision = "decision" in data
+    # Core checks — API returns "Action" (legacy gate output), not "decision"
+    has_action = "Action" in data
     has_shadow = "_v2_shadow" in data
 
-    print(f"decision present: {has_decision}")
+    print(f"Action present:    {has_action}")
     print(f"_v2_shadow present: {has_shadow}")
 
     if not has_shadow:
         print("❌ ERROR: _v2_shadow missing")
+        top_keys = list(data.keys())[:20]
+        print(f"   Response keys: {top_keys}")
         return False
 
     shadow = data["_v2_shadow"]
