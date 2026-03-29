@@ -27,7 +27,10 @@ import sys
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    import chromadb
 
 from pypdf import PdfReader
 
@@ -219,7 +222,7 @@ def _import_chromadb():
     import chromadb  # noqa: PLC0415
     return chromadb
 
-def _get_or_create_collection(client: "chromadb.Client") -> "chromadb.Collection":
+def _get_or_create_collection(client: chromadb.Client) -> chromadb.Collection:
     """Return the tct_lectures collection, creating it if it doesn't exist."""
     # Lazy imports: chromadb + onnxruntime are heavy (~200-300 MB).
     # Importing here instead of at module level prevents the memory spike from

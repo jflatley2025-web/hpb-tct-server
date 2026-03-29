@@ -445,13 +445,13 @@ def insert_signal(conn, run_id: int, signal: dict) -> int:
 def normalize_model(model: Optional[str]) -> Optional[str]:
     """Map legacy model names from historical DB rows to current taxonomy.
 
-    Historical rows written before the Model_3 → continuation rename contain
-    the string "Model_3".  New rows use "Model_1_CONTINUATION" or
-    "Model_2_CONTINUATION".  Call this wherever model names are read from DB
-    for display, grouping, or analysis so both old and new rows behave the same.
+    Historical rows written before the Run 29 rename contain "Model_3".
+    "Model_3" → "Model_2_EXT" (continuation / re-accumulation logic).
+    Call this wherever model names are read from DB for display, grouping,
+    or analysis so legacy and current rows produce consistent labels.
     """
     if model == "Model_3":
-        return "Model_1_CONTINUATION"
+        return "Model_2_EXT"
     return model
 
 
@@ -461,7 +461,7 @@ def model_family(model: Optional[str]) -> Optional[str]:
         return None
     if "Model_2" in model:
         return "Model_2"
-    if "Model_1" in model or model == "Model_3":
+    if "Model_1" in model:
         return "Model_1"
     return None
 

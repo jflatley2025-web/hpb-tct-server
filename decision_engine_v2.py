@@ -58,6 +58,7 @@ from backtest.config import (
     MTF_TIMEFRAMES,
     timeframe_to_seconds,
 )
+from backtest.db import normalize_model
 
 logger = logging.getLogger("decision_engine_v2")
 
@@ -307,6 +308,13 @@ def decide(
     # Caller must store new_trough from each result and pass it back here.
     dd_trough_equity: Optional[float] = context.get("dd_trough_equity")
 
+    # Run 29: BTC HTF anchor (optional — omit key to disable gate)
+    # Caller may pass btc_candles_by_tf (dict) OR pre-computed btc_htf_bias (str).
+    # If btc_candles_by_tf is supplied, bias is computed here using the same
+    # market_structure logic as Gate 1A. If absent, the anchor gate is skipped.
+    _btc_candles_by_tf: Optional[dict] = context.get("btc_candles_by_tf")
+    _btc_htf_bias_override: Optional[str] = context.get("btc_htf_bias")
+
     if not current_price or not current_time:
         return {**_PASS, "reason": "missing_required_context (current_price or current_time)"}
 
@@ -436,6 +444,35 @@ def decide(
 
     gate_1a_pass: bool = htf_bias != "neutral"
 
+    # ── Run 29: BTC HTF Anchor Bias ───────────────────────────────
+    # Mirrors the same pivot → classify_trend logic used for Gate 1A.
+    # Only active when caller passes btc_candles_by_tf or btc_htf_bias in context.
+    btc_htf_bias: str = _btc_htf_bias_override or "neutral"
+    if _btc_candles_by_tf and not _btc_htf_bias_override:
+        for _btc_tf_cand in [HTF_TIMEFRAME, "4h"]:
+            _btc_df = _btc_candles_by_tf.get(_btc_tf_cand)
+            if _btc_df is None or len(_btc_df) < MIN_PIVOT_CONFIRM:
+                continue
+            try:
+                from market_structure import find_6cr_pivots, confirm_structure_points, classify_trend as _ct
+                _btc_piv = find_6cr_pivots(_btc_df)
+                _btc_ph = _btc_piv.get("highs", [])
+                _btc_pl = _btc_piv.get("lows", [])
+                if len(_btc_ph) < 2 and len(_btc_pl) < 2:
+                    continue
+                _btc_ms = confirm_structure_points(_btc_df, _btc_ph, _btc_pl)
+                btc_htf_bias = _ct(
+                    _btc_ms.get("ms_highs", []),
+                    _btc_ms.get("ms_lows", []),
+                )
+                if btc_htf_bias not in ("neutral", "ranging"):
+                    break
+            except Exception as _btc_e:
+                logger.debug("decide(): BTC HTF bias error on %s: %s", _btc_tf_cand, _btc_e)
+                continue
+    # Whether gate is active: True when caller supplied BTC context
+    _btc_gate_active: bool = _btc_candles_by_tf is not None or _btc_htf_bias_override is not None
+
     # ── Scan MTF timeframes ───────────────────────────────────────
     best_signal: Optional[dict] = None
     best_score: float = 0
@@ -504,7 +541,7 @@ def decide(
 
             score: float = eval_result.get("score", 0)
             direction: str = eval_result.get("direction", "unknown")
-            model: str = eval_result.get("model", "unknown")
+            model: str = normalize_model(eval_result.get("model", "unknown")) or "unknown"
             rr: float = eval_result.get("rr", 0)
 
             # ── RCM (Range Context) ───────────────────────────────
@@ -609,6 +646,14 @@ def decide(
                 final_decision = "PASS"
                 skip_reason = "NO_HTF_BIAS"
                 failure_code = "FAIL_1A_BIAS"
+
+            # ── Run 29: BTC Anchor Gate ───────────────────────────
+            # Hard gate: trade direction must align with BTC HTF bias.
+            # NEUTRAL/RANGING BTC blocks all trades — no clear anchor.
+            elif _btc_gate_active and direction != btc_htf_bias:
+                final_decision = "PASS"
+                skip_reason = "BTC_ANCHOR_CONFLICT (trade={}, btc={})".format(direction, btc_htf_bias)
+                failure_code = "FAIL_BTC_ANCHOR_BIAS"
 
             # ── RCM: range quality ────────────────────────────────
             elif not rcm_valid:
@@ -816,6 +861,7 @@ def decide(
                     "metadata": {
                         "htf_bias": htf_bias,
                         "gate_1a_pass": gate_1a_pass,
+                        "btc_htf_bias": btc_htf_bias,  # Run 29: BTC anchor context
                         "rcm_valid": rcm_valid,
                         "rcm_score": rcm_score,
                         "range_duration_hours": range_duration_hours,

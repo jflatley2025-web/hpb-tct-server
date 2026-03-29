@@ -1610,7 +1610,7 @@ def compute_composite_score_v2(
 
     model_str = schematic.get("model", "")
 
-    if "_CONTINUATION" in model_str or model_str == "Model_3":
+    if "_CONTINUATION" in model_str or model_str in ("Model_3", "Model_2_EXT"):
         model_type = "_CONTINUATION"
     elif "Model_1" in model_str:
         model_type = "Model_1"

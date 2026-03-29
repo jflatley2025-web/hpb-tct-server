@@ -26,7 +26,7 @@ from backtest.config import (
     EXECUTION_SLIPPAGE_PCT,
     FEE_PCT,
 )
-from backtest.db import get_connection
+from backtest.db import get_connection, normalize_model
 from backtest.ingest import load_candles
 
 logger = logging.getLogger("backtest.phase3")
@@ -337,12 +337,13 @@ def task2_model_analysis(conn, signals, trades, candles_1h):
     print("="*80)
 
     real = signals[signals["score_1d"] > 0].copy()
+    real["model"] = real["model"].apply(lambda m: normalize_model(m) or m)
 
     print(f"\n  AVAILABLE MODELS IN DETECTION ENGINE:")
     print(f"    Model_1:               Standard 3-tap accumulation/distribution")
     print(f"    Model_2:               Higher-low / lower-high variant")
     print(f"    Model_1_from_M2_fail:  M2 fails, but M1 pattern found in same range")
-    print(f"    Model_3 (continuation): NOT IMPLEMENTED")
+    print(f"    Model_2_EXT (continuation/re-accumulation): legacy label was Model_3")
     print(f"    Model_4 (expansion):    NOT IMPLEMENTED")
 
     print(f"\n  MODEL PERFORMANCE (Run #14, score > 0):")
@@ -378,7 +379,7 @@ def task2_model_analysis(conn, signals, trades, candles_1h):
     print(f"    - Only Model_1 and Model_2 exist in the codebase")
     print(f"    - Model_1_from_M2_failure is a fallback, not independent")
     print(f"    - Re-accumulation / Re-distribution mentioned in docs but NOT implemented")
-    print(f"    - No Model_3 (continuation) or Model_4 (expansion) exists to activate")
+    print(f"    - No Model_2_EXT (continuation) or Model_4 (expansion) exists to activate")
     print(f"\n  VERDICT: EXPLORE FURTHER")
     print(f"    To add new models, you would need to implement:")
     print(f"    1. Re-accumulation: Trend up -> range -> breaks upside (continuation)")
