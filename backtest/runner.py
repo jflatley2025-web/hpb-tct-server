@@ -54,6 +54,7 @@ from backtest.db import (
     get_connection,
     insert_signal,
     insert_trade,
+    normalize_model,
 )
 from backtest.ingest import load_candles
 from backtest.session import get_session
@@ -85,7 +86,7 @@ _MIN_RR_15M = 0.8            # tighter RR for 15m entries
 _MIN_RR_15M_RELAXED = 0.7    # fallback for re-run if 15m trade count < 3
 _MIN_RANGE_PCT_15M = 0.003   # range must be >= 0.3% of price on 15m
 
-# Model 3 quality gates
+# Continuation model quality gates
 _TREND_LOOKBACK = 50         # candles to measure slope and volatility over
 _TREND_SLOPE_FLOOR = 0.003   # v14: raised from 0.0015 — filters weaker continuation trends
 _TREND_VOL_MULTIPLIER = 0.5  # slope threshold = max(floor, vol * multiplier)
@@ -208,10 +209,10 @@ class BacktestState:
     # Key: (tf, model, direction, bos_idx) — cleared after 48h or when BOS changes
     traded_bos_fingerprints: dict = field(default_factory=dict)  # fp -> timestamp traded
     # v13 funnel diagnostics — accumulated across the full run
-    model3_detected: int = 0    # Model_3 schematics that entered gate pipeline
-    model3_tf_pass: int = 0     # passed TF restriction (1h only)
-    model3_trend_pass: int = 0  # passed adaptive trend gate
-    model3_trades: int = 0      # resulted in a TAKE trade
+    continuation_detected: int = 0    # continuation schematics that entered gate pipeline
+    continuation_tf_pass: int = 0     # passed TF restriction (1h only)
+    continuation_trend_pass: int = 0  # passed adaptive trend gate
+    continuation_trades: int = 0      # resulted in a TAKE trade
     signals_15m_detected: int = 0  # 15m schematics that entered gate pipeline
     signals_15m_passed: int = 0    # survived all 15m-specific gates
     trades_15m: int = 0            # resulted in a TAKE trade
@@ -587,6 +588,10 @@ def run_gate_pipeline(
             rr = eval_result.get("rr", 0)
             reasons = eval_result.get("reasons", [])
 
+            # Normalize model once and derive is_continuation flag
+            normalized_model = normalize_model(model) or model
+            is_continuation = "_CONTINUATION" in normalized_model
+
             # TEMP DIAGNOSTIC: log why score=0 for first N signals
             if score == 0 and not hasattr(state, '_diag_count'):
                 state._diag_count = 0
@@ -730,9 +735,9 @@ def run_gate_pipeline(
                 f"rig_status={rig_status} rig_should_block={rig_should_block}"
             )
 
-            # v13 funnel: count every Model_3 / 15m signal that reaches the gate
-            if "Model_3" in model:
-                state.model3_detected += 1
+            # v13 funnel: count every continuation / 15m signal that reaches the gate
+            if is_continuation:
+                state.continuation_detected += 1
             if tf == "15m":
                 state.signals_15m_detected += 1
 
@@ -899,45 +904,45 @@ def run_gate_pipeline(
 
             # ── v14: block Model_2 on 15m (3C) — confirmed weak ───────
             # Standalone if-guard: runs even when the location check above passed.
-            if final_decision == "TAKE" and tf == "15m" and model == "Model_2":
+            if final_decision == "TAKE" and tf == "15m" and normalized_model == "Model_2":
                 final_decision = "SKIP"
                 skip_reason = "MODEL2_15M_BLOCK"
                 failure_code = "FAIL_MODEL2_15M_BLOCK"
                 logger.info("15M_FILTER | Model_2 blocked on 15m | session=%s", session_name)
 
             # ── v14: hard score floor (BEFORE model-specific branches) ──
-            # Standalone guard so it applies to ALL models including Model_3,
+            # Standalone guard so it applies to ALL models including continuation,
             # which previously bypassed it via the elif chain.
             if final_decision == "TAKE" and score < _MIN_SCORE_HARD:
                 final_decision = "SKIP"
                 skip_reason = "SCORE_HARD_FLOOR ({} < {})".format(score, _MIN_SCORE_HARD)
                 failure_code = "FAIL_SCORE_HARD_FLOOR"
 
-            # ── v12/v13: Model 3 quality gates ────────────────────────
-            if final_decision == "TAKE" and "Model_3" in model:
+            # ── v12/v13: Continuation model quality gates ──────────────
+            if final_decision == "TAKE" and is_continuation:
                 if tf != "1h":
                     final_decision = "SKIP"
-                    skip_reason = "MODEL3_TF_FILTER (tf={}, only 1h allowed)".format(tf)
+                    skip_reason = "CONT_TF_FILTER (tf={}, only 1h allowed)".format(tf)
                     failure_code = "FAIL_MODEL3_TF_FILTER"
                     logger.info(
-                        "MODEL3_CHECK | tf=%s BLOCKED (1h only) | trend not evaluated", tf,
+                        "CONT_CHECK | tf=%s BLOCKED (1h only) | trend not evaluated", tf,
                     )
                 else:
-                    state.model3_tf_pass += 1
+                    state.continuation_tf_pass += 1
                     _closes = df_tf["close"].values if df_tf is not None and len(df_tf) > 0 else []
                     _trend_ok, _slope, _min_slope = _is_trending_environment(_closes)
                     logger.info(
-                        "MODEL3_CHECK | tf=%s | trend_ok=%s | slope=%.4f | min_slope=%.4f",
-                        tf, _trend_ok, _slope, _min_slope,
+                        "CONT_CHECK | model=%s tf=%s | trend_ok=%s | slope=%.4f | min_slope=%.4f",
+                        normalized_model, tf, _trend_ok, _slope, _min_slope,
                     )
                     if not _trend_ok:
                         final_decision = "SKIP"
-                        skip_reason = "MODEL3_NO_TREND (slope={:.4f} < adaptive {:.4f})".format(
+                        skip_reason = "CONT_NO_TREND (slope={:.4f} < adaptive {:.4f})".format(
                             abs(_slope), _min_slope
                         )
                         failure_code = "FAIL_MODEL3_NO_TREND"
                     else:
-                        state.model3_trend_pass += 1
+                        state.continuation_trend_pass += 1
                         # Entry distance gate: reject if entry is > 1.5% from range midpoint
                         _r_high = range_info.get("high", 0) if isinstance(range_info, dict) else 0
                         _r_low = range_info.get("low", 0) if isinstance(range_info, dict) else 0
@@ -946,13 +951,13 @@ def run_gate_pipeline(
                             _dist_pct = abs(entry_price - _range_mid) / _range_mid
                             if _dist_pct > _MODEL3_MAX_DISTANCE_PCT:
                                 final_decision = "SKIP"
-                                skip_reason = "MODEL3_EXTENDED (dist={:.4f} > {:.4f})".format(
+                                skip_reason = "CONT_EXTENDED (dist={:.4f} > {:.4f})".format(
                                     _dist_pct, _MODEL3_MAX_DISTANCE_PCT
                                 )
                                 failure_code = "FAIL_MODEL3_EXTENDED"
                                 logger.info(
-                                    "MODEL3_CHECK | tf=%s | EXTENDED dist=%.4f (max %.4f)",
-                                    tf, _dist_pct, _MODEL3_MAX_DISTANCE_PCT,
+                                    "CONT_CHECK | model=%s tf=%s | EXTENDED dist=%.4f (max %.4f)",
+                                    normalized_model, tf, _dist_pct, _MODEL3_MAX_DISTANCE_PCT,
                                 )
 
             # ── score threshold ────────────────────────────────────────
@@ -970,7 +975,7 @@ def run_gate_pipeline(
                 entry_snap = round(float(
                     schematic.get("entry", {}).get("price") or current_price
                 ), 0)
-                fp = (tf, model, direction, entry_snap, bos_price)
+                fp = (tf, normalized_model, direction, entry_snap, bos_price)
                 fp_traded_at = state.traded_bos_fingerprints.get(fp)
                 # Expire fingerprints older than 48 hours so valid re-entries are allowed
                 if fp_traded_at is not None:
@@ -984,12 +989,27 @@ def run_gate_pipeline(
             if tf == "15m" and final_decision == "TAKE":
                 state.signals_15m_passed += 1
 
+            # Use the last closed candle's open_time as the canonical signal
+            # candle timestamp — this is what gets stamped on the trade as
+            # opened_at, ensuring trades reflect when the setup actually formed
+            # rather than the loop iteration time.
+            _candle_ts = df_tf.iloc[-1]["open_time"] if len(df_tf) > 0 else current_time
+
+            # Derive model taxonomy fields for downstream grouping/analysis.
+            # model_family: top-level class ("Model_1" | "Model_2")
+            # model_variant: "continuation" for re-acc/re-dist, "reversal" otherwise
+            _model_family = "Model_2" if "Model_2" in normalized_model else "Model_1"
+            _model_variant = "continuation" if is_continuation else "reversal"
+
             signal = {
                 "signal_time": current_time,
+                "candle_timestamp": _candle_ts,
                 "price_at_signal": current_price,
                 "timeframe": tf,
                 "direction": direction,
-                "model": model,
+                "model": normalized_model,
+                "model_family": _model_family,
+                "model_variant": _model_variant,
                 "gate_1a_bias": htf_bias,
                 "gate_1a_pass": gate_1a_pass,
                 "gate_1b_pass": True,  # placeholder — USDT.D not yet integrated
@@ -1164,7 +1184,7 @@ def run_backtest(
         "tp1_close_pct": effective_tp1_close_pct,
         "tp1_level_pct": effective_tp1_level_pct,
         "trail_factor": effective_trail_factor,
-        "engine_version": 15,  # v15: gate-chain elif→if fix (score floor now runs for Model_3), DD time-reset (72h), schematic_json real keys
+        "engine_version": 16,  # v16: candle_timestamp for trade opened_at; Model_3 → Model_1/2_CONTINUATION
     }
 
     run_id = create_run(
@@ -1353,8 +1373,8 @@ def run_backtest(
                             # v15: update compression state on every executed trade
                             state.last_accepted_trade_time = current_time
                             state.last_accepted_trade_priority = _priority
-                            if "Model_3" in signal.get("model", ""):
-                                state.model3_trades += 1
+                            if "_CONTINUATION" in signal.get("model", ""):
+                                state.continuation_trades += 1
                             if signal.get("timeframe") == "15m":
                                 state.trades_15m += 1
 
@@ -1375,9 +1395,9 @@ def run_backtest(
 
         # v13: emit funnel diagnostics before finalizing
         logger.info(
-            "MODEL3_FUNNEL | detected=%d | passed_tf=%d | passed_trend=%d | trades=%d",
-            state.model3_detected, state.model3_tf_pass,
-            state.model3_trend_pass, state.model3_trades,
+            "CONT_FUNNEL | detected=%d | passed_tf=%d | passed_trend=%d | trades=%d",
+            state.continuation_detected, state.continuation_tf_pass,
+            state.continuation_trend_pass, state.continuation_trades,
         )
         logger.info(
             "15M_FUNNEL | detected=%d | passed_filters=%d | trades=%d",
@@ -1506,7 +1526,7 @@ def _open_trade(state: BacktestState, signal: dict, current_time: datetime,
         entry_reasons=signal.get("_eval_result", {}).get("reasons", []),
         mfe=0.0,
         mae=0.0,
-        opened_at=current_time,
+        opened_at=signal.get("candle_timestamp", current_time),
         effective_entry=effective_entry,
         original_stop_price=stop_price,
     )
@@ -1526,7 +1546,7 @@ def _open_trade(state: BacktestState, signal: dict, current_time: datetime,
             entry_price=effective_entry,
             model=signal.get("model", "unknown"),
             timeframe=signal["timeframe"],
-            opened_at=current_time,
+            opened_at=signal.get("candle_timestamp", current_time),
         )
 
     return True
