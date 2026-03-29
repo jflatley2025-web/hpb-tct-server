@@ -59,9 +59,18 @@ from backtest.config import (
     MTF_TIMEFRAMES,
     timeframe_to_seconds,
 )
-from backtest.db import normalize_model
 
 logger = logging.getLogger("decision_engine_v2")
+
+
+def normalize_model(model):
+    """Map legacy model names to current taxonomy (inlined from backtest.db).
+    Kept here so this module has no dependency on psycopg2 / backtest.db.
+    """
+    if model == "Model_3":
+        return "Model_2_EXT"
+    return model
+
 
 # ── Feature flag ──────────────────────────────────────────────────────
 # Set True to activate the unified engine in live trading.
