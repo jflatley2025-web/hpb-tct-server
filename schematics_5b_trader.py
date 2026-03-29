@@ -134,6 +134,12 @@ _DIR = os.path.dirname(os.path.abspath(__file__))
 TRADE_LOG_PATH = os.path.join(_DIR, "schematics_5b_trade_log.json")
 TRADE_LOG_BACKUP_PATH = os.path.join(_DIR, "schematics_5b_trade_log_backup.json")
 
+# Parity validation log (JSONL) — persistent storage for live vs backtest decision comparison.
+# Written every cycle that reaches the decision gate; never overwritten (append-only).
+# Read by scripts/analyze_parity.py and scripts/replay_parity_test.py.
+_PARITY_LOG_DIR = os.path.join(_DIR, "logs")
+_PARITY_LOG_PATH = os.path.join(_PARITY_LOG_DIR, "decision_parity.jsonl")
+
 # Deduplication
 DUPLICATE_COOLDOWN_SECONDS = 300
 DUPLICATE_PRICE_TOLERANCE = 0.002
@@ -177,6 +183,24 @@ def _5b_audit_log(entry: Dict) -> None:
         _audit_logger.debug(json.dumps(entry, default=str))
     except Exception as _e:
         logger.warning("[5B-AUDIT] Write failed: %s", _e)
+
+
+def _log_decision_parity(entry: Dict) -> None:
+    """Append one JSON-encoded parity record to logs/decision_parity.jsonl.
+
+    Written on every cycle that reaches the decision gate — regardless of match/mismatch.
+    On mismatch (match=False), the entry also contains a ``gate_debug`` key with the
+    full v2 metadata dict (RIG result, RR check, displacement, model gates, session
+    filters) for root-cause analysis.
+
+    Read by: scripts/analyze_parity.py, scripts/replay_parity_test.py
+    """
+    try:
+        os.makedirs(_PARITY_LOG_DIR, exist_ok=True)
+        with open(_PARITY_LOG_PATH, "a", encoding="utf-8") as _pf:
+            _pf.write(json.dumps(entry, default=str) + "\n")
+    except Exception as _pe:
+        logger.warning("[5B-PARITY] Write failed: %s", _pe)
 
 
 def _get_entry_session_context(base_score: float) -> Dict:
@@ -1630,22 +1654,43 @@ class Schematics5BTrader:
                     _v2_decision = _v2_result.get("decision", "PASS") if _v2_result else "not_run"
                     _v2_blocks = _USE_V2 and _v2_result is not None and _v2_decision != "TAKE"
 
-                    _5b_audit_log({
-                        "symbol": SYMBOL,
+                    # Build unified parity entry (Steps 1 + 5).
+                    # Includes all fields required by analyze_parity.py and the
+                    # gate_debug block on mismatch for root-cause triage.
+                    _parity_match = _v2_decision == "TAKE" or _v2_decision == "not_run"
+                    _v2_meta = (_v2_result.get("metadata") or {}) if _v2_result else {}
+                    _parity_entry = {
+                        "type": "decision_parity",
                         "timestamp": cycle_result["timestamp"],
+                        "symbol": SYMBOL,
+                        "timeframe": best_tf,
+                        "model": evaluation.get("model", "unknown"),
+                        # Decision comparison
                         "legacy_decision": "TAKE",
                         "v2_decision": _v2_decision,
-                        "match": _v2_decision == "TAKE" or _v2_decision == "not_run",
-                        "model": evaluation.get("model", "unknown"),
-                        "timeframe": best_tf,
+                        "match": _parity_match,
+                        # v2 scores / reason
+                        "score_v2": _v2_result.get("score", 0) if _v2_result else None,
+                        "reason_v2": _v2_result.get("reason") if _v2_result else None,
+                        # Critical debug fields for mismatch analysis
+                        "rr": _v2_result.get("rr") if _v2_result else None,
+                        "displacement": _v2_meta.get("local_displacement"),
+                        "session": _v2_meta.get("session"),
+                        "htf_bias": best_htf_bias,
+                        # Legacy audit fields (backward compat)
                         "score": evaluation.get("score", 0),
                         "v2_score": _v2_result.get("score", 0) if _v2_result else None,
                         "v2_failure_code": _v2_result.get("failure_code") if _v2_result else None,
                         "v2_reason": _v2_result.get("reason") if _v2_result else None,
-                        "htf_bias": best_htf_bias,
                         "entry_price": candidate_price,
                         "use_unified_engine": _USE_V2,
-                    })
+                    }
+                    # Step 5 — gate-level debug on mismatch only (avoids log bloat on matches).
+                    # Includes: RIG result, RR check, displacement, model gates, session filters.
+                    if not _parity_match:
+                        _parity_entry["gate_debug"] = _v2_meta
+                    _5b_audit_log(_parity_entry)
+                    _log_decision_parity(_parity_entry)
 
                     if _v2_blocks:
                         # v2 gate fired — trade blocked by unified engine
