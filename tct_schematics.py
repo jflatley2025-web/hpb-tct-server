@@ -710,7 +710,7 @@ class TCTSchematicDetector:
                         schematics.append(schematic)
 
             except Exception as e:
-                logger.debug(f"Continuation re-accumulation error: {e}")
+                logger.debug("Continuation re-accumulation error: %s", e)
                 continue
 
         # --- Re-distribution (bearish continuation) ---
@@ -776,7 +776,7 @@ class TCTSchematicDetector:
                         schematics.append(schematic)
 
             except Exception as e:
-                logger.debug(f"Continuation re-distribution error: {e}")
+                logger.debug("Continuation re-distribution error: %s", e)
                 continue
 
         # Partition by direction, sort/cap each side independently

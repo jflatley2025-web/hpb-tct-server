@@ -1016,9 +1016,12 @@ def build_5a_inputs(schematic: Dict, range_eval: RangeEvaluation) -> TCTSchemati
 
     # Determine model type
     if "_CONTINUATION" in model or model == "Model_3":
-        # Continuation models use same tap structure — map to MODEL_1
-        # for the 5A decision tree which only knows MODEL_1/MODEL_2.
-        model_type = MT5A.MODEL_1
+        # Continuation models preserve base family: check Model_2 first,
+        # otherwise default to MODEL_1 for the 5A decision tree.
+        if "Model_2" in model:
+            model_type = MT5A.MODEL_2
+        else:
+            model_type = MT5A.MODEL_1
     elif "Model_1" in model:
         model_type = MT5A.MODEL_1
     elif "Model_2" in model:
@@ -1081,7 +1084,12 @@ def build_5b_inputs(schematic: Dict, eval_5a: TCTSchematicEvaluation,
     sch_dir = Dir5B.ACCUMULATION if is_acc else Dir5B.DISTRIBUTION
 
     if "_CONTINUATION" in model or model == "Model_3":
-        model_type = MT5B.MODEL_1  # continuation uses same structure as MODEL_1
+        # Continuation models preserve base family: check Model_2 first,
+        # otherwise default to MODEL_1 for the 5B decision tree.
+        if "Model_2" in model:
+            model_type = MT5B.MODEL_2
+        else:
+            model_type = MT5B.MODEL_1
     elif "Model_1" in model:
         model_type = MT5B.MODEL_1
     elif "Model_2" in model:
@@ -1627,10 +1635,17 @@ def compute_composite_score_v2(
             tap_valid = tap3["price"] < tap2["price"]
 
     elif model_type == "_CONTINUATION":
-        # Continuation models use same tap structure as Model_1 or Model_2 —
-        # already validated by _build_accumulation/distribution_schematic.
-        # Accept both deviation patterns (M1-style lower/higher OR M2-style HL/LH).
-        tap_valid = True
+        # Continuation models use same tap structure as Model_1 or Model_2.
+        # Accept both deviation patterns: M1-style (tap3 lower/higher than tap2)
+        # OR M2-style (tap3 HL/LH relative to tap2).
+        if direction == "bullish":
+            # Accept either M1 pattern (tap3 < tap2) or M2 pattern (tap3 > tap2)
+            tap_valid = (tap3["price"] < tap2["price"]) or (tap3["price"] > tap2["price"])
+        else:
+            # Accept either M1 pattern (tap3 > tap2) or M2 pattern (tap3 < tap2)
+            tap_valid = (tap3["price"] > tap2["price"]) or (tap3["price"] < tap2["price"])
+        # Simplify: any tap3 != tap2 is valid for continuation
+        tap_valid = tap3["price"] != tap2["price"]
 
     if not tap_valid:
         phase_results["tap_structure"] = {"passed": False}

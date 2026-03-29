@@ -463,7 +463,7 @@ def model_family(model: Optional[str]) -> Optional[str]:
         return "Model_2"
     if "Model_1" in model or model == "Model_3":
         return "Model_1"
-    return model
+    return None
 
 
 # ── Entrypoint ────────────────────────────────────────────────────────
