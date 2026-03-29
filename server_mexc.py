@@ -2954,13 +2954,13 @@ def validate_gates(context: Dict) -> Dict:
     # Shadow-mode: when USE_UNIFIED_ENGINE is False, the v2 result is still
     # computed and logged alongside the legacy result for comparison.
     try:
-        from decision_engine_v2 import USE_UNIFIED_ENGINE, decide as _v2_decide
+        from decision_engine_v2 import decide as _v2_decide, should_use_v2
         _v2_available = True
     except ImportError:
-        USE_UNIFIED_ENGINE = False
         _v2_available = False
+        should_use_v2 = lambda: False  # noqa: E731
 
-    if USE_UNIFIED_ENGINE and _v2_available:
+    if _v2_available and should_use_v2():
         # Build candles_by_tf from whatever the endpoint provided.
         # htf_candles = 4h, ltf_candles = 15m (from /api/validate fetch).
         _candles_by_tf: Dict = _build_candles_by_tf(context)
@@ -3008,6 +3008,7 @@ def validate_gates(context: Dict) -> Dict:
         }
         context["Action"] = "EXECUTE" if _took else "NO_TRADE"
         context["_v2_result"] = _v2_result  # full result for debug/comparison
+        logger.info("ENGINE_USED: v2 | action=%s", context["Action"])
         return context
 
     # ── Shadow mode: compute v2 result alongside legacy (no side effects) ─
@@ -3078,6 +3079,14 @@ def validate_gates(context: Dict) -> Dict:
     context["1D"] = validate_1D(context)
 
     context["Action"] = "EXECUTE" if context["1D"]["passed"] else "NO_TRADE"
+    logger.info("ENGINE_USED: v1")
+    logger.info(
+        "LIVE_DECISION: action=%s | SHADOW_DECISION: decision=%s score=%s failure=%s",
+        context["Action"],
+        context.get("_v2_shadow", {}).get("decision"),
+        context.get("_v2_shadow", {}).get("score"),
+        context.get("_v2_shadow", {}).get("failure_code"),
+    )
     return context
 
 # ================================================================

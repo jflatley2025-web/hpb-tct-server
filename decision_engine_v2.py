@@ -47,6 +47,7 @@ DO NOT modify gate values here without updating runner.py to match.
 
 import concurrent.futures
 import logging
+import random
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -89,6 +90,28 @@ logger = logging.getLogger("decision_engine_v2")
 #   - 15m spike
 #   - DD > 3% early
 USE_UNIFIED_ENGINE = False
+
+# ── Canary rollout fraction ───────────────────────────────────────────
+# When USE_UNIFIED_ENGINE is True, only this fraction of live requests
+# are routed through the unified engine.  The rest continue on the legacy
+# path, keeping shadow mode active for comparison.
+#
+# 0.1  → 10% canary (default; use during initial activation)
+# 1.0  → full rollout (set after canary period passes)
+ROLLOUT_FRACTION = 0.1
+
+
+def should_use_v2() -> bool:
+    """Return True when the unified engine should handle this request.
+
+    Both conditions must hold:
+      1. USE_UNIFIED_ENGINE is True (global activation flag)
+      2. The random rollout gate passes (ROLLOUT_FRACTION chance)
+    """
+    if not USE_UNIFIED_ENGINE:
+        return False
+    return random.random() < ROLLOUT_FRACTION
+
 
 # ── DD protection feature flag ─────────────────────────────────────────
 # When True, the 3-tier drawdown control layer is active inside decide().
