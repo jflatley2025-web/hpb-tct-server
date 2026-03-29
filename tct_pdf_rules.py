@@ -222,7 +222,7 @@ def _import_chromadb():
     import chromadb  # noqa: PLC0415
     return chromadb
 
-def _get_or_create_collection(client: "chromadb.Client") -> "chromadb.Collection":
+def _get_or_create_collection(client: chromadb.Client) -> chromadb.Collection:
     """Return the tct_lectures collection, creating it if it doesn't exist."""
     # Lazy imports: chromadb + onnxruntime are heavy (~200-300 MB).
     # Importing here instead of at module level prevents the memory spike from
@@ -240,7 +240,7 @@ def _get_or_create_collection(client: "chromadb.Client") -> "chromadb.Collection
 
 
 def _populate_collection(
-    collection: "chromadb.Collection",
+    collection: chromadb.Collection,
     force_repopulate: bool = False,
 ) -> None:
     """
@@ -294,7 +294,7 @@ def _populate_collection(
 # ---------------------------------------------------------------------------
 
 def _query_layer_rules(
-    collection: "chromadb.Collection",
+    collection: chromadb.Collection,
     layer: int,
     n_results: int = 3,
 ) -> LayerRules:
