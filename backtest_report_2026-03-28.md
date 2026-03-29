@@ -87,7 +87,10 @@ Run 29 (v14) is still in progress and will be the subject of the next report.
 **Legacy Taxonomy Note:**
 - **Model_3** in this report corresponds to continuation variants in v14 (renamed to `Model_1_CONTINUATION` or `Model_2_CONTINUATION`). Model_3 is not a new model but a legacy label for continuation entries.
 - **Model_1_from_M2_failure** represents fallback entries triggered when a Model_2 setup fails gate qualification but the structure still supports a Model_1 entry.
-- **v13 → v14 mapping:** Model_3 → v14 continuation variant (Model_1_CONTINUATION or Model_2_CONTINUATION depending on base family).
+## Model Breakdown
+
+> Note: In v14 taxonomy, legacy `Model_3` entries are continuation structures
+> (`Model_1_CONTINUATION` / `Model_2_CONTINUATION`) depending on family context.
 
 | Model | Trades | Wins | Win Rate | Total PnL | Avg R:R |
 |-------|--------|------|----------|-----------|---------|
@@ -101,7 +104,6 @@ Run 29 (v14) is still in progress and will be the subject of the next report.
 - Model_1 generates the most trades (54) and the most total PnL ($6,310.60)
 - `Model_1_from_M2_failure` (fallback entries when M2 setup fails) went 7-for-7 — small sample but notable
 - Model_3 has decent edge but lowest PnL contribution; may be entering at lower conviction setups
-
 ---
 
 ## Direction Breakdown
