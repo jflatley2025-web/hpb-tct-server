@@ -84,6 +84,14 @@ Run 29 (v14) is still in progress and will be the subject of the next report.
 
 ## Model Breakdown
 
+**Legacy Taxonomy Note:**
+- **Model_3** in this report corresponds to continuation variants in v14 (renamed to `Model_1_CONTINUATION` or `Model_2_CONTINUATION`). Model_3 is not a new model but a legacy label for continuation entries.
+- **Model_1_from_M2_failure** represents fallback entries triggered when a Model_2 setup fails gate qualification but the structure still supports a Model_1 entry.
+## Model Breakdown
+
+> Note: In v14 taxonomy, legacy `Model_3` entries are continuation structures
+> (`Model_1_CONTINUATION` / `Model_2_CONTINUATION`) depending on family context.
+
 | Model | Trades | Wins | Win Rate | Total PnL | Avg R:R |
 |-------|--------|------|----------|-----------|---------|
 | Model_1 | 54 | 42 | 78% | $6,310.60 | 2.10 |
@@ -96,7 +104,6 @@ Run 29 (v14) is still in progress and will be the subject of the next report.
 - Model_1 generates the most trades (54) and the most total PnL ($6,310.60)
 - `Model_1_from_M2_failure` (fallback entries when M2 setup fails) went 7-for-7 — small sample but notable
 - Model_3 has decent edge but lowest PnL contribution; may be entering at lower conviction setups
-
 ---
 
 ## Direction Breakdown
@@ -178,7 +185,7 @@ Run 29 uses engine v14 and has already generated 131 trades with ~16 days of per
 
 - **Max drawdown of 5.72%** is well within typical institutional tolerance (<15%)
 - **Profit factor of 5.77** is exceptional — for every $1 lost, $5.77 was made
-- **Sharpe of ~10** is unusually high; likely reflects the low-drawdown, high-win-rate regime during a trending bull market. Should be stress-tested in sideways/bear periods
+- **A Sharpe of ~10** is unusually high and likely reflects the low-drawdown, high-win-rate regime during a trending bull market; it should be stress-tested in sideways and bear periods
 - **Only 4 max consecutive losses** — the system handles losing streaks gracefully
 - **Low avg trade duration (5.9h)** minimizes overnight gap and event risk
 

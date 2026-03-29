@@ -628,6 +628,10 @@ def run_gate_pipeline(
             rr = eval_result.get("rr", 0)
             reasons = eval_result.get("reasons", [])
 
+            # Normalize model once and derive is_continuation flag
+            normalized_model = normalize_model(model) or model
+            is_continuation = "_CONTINUATION" in normalized_model
+
             # TEMP DIAGNOSTIC: log why score=0 for first N signals
             if score == 0 and not hasattr(state, '_diag_count'):
                 state._diag_count = 0
@@ -949,7 +953,7 @@ def run_gate_pipeline(
 
             # ── v14: block Model_2 on 15m (3C) — confirmed weak ───────
             # Standalone if-guard: runs even when the location check above passed.
-            if final_decision == "TAKE" and tf == "15m" and model == "Model_2":
+            if final_decision == "TAKE" and tf == "15m" and normalized_model == "Model_2":
                 final_decision = "SKIP"
                 skip_reason = "MODEL2_15M_BLOCK"
                 failure_code = "FAIL_MODEL2_15M_BLOCK"
@@ -978,7 +982,7 @@ def run_gate_pipeline(
                     _trend_ok, _slope, _min_slope = _is_trending_environment(_closes)
                     logger.info(
                         "CONT_CHECK | model=%s tf=%s | trend_ok=%s | slope=%.4f | min_slope=%.4f",
-                        model, tf, _trend_ok, _slope, _min_slope,
+                        normalized_model, tf, _trend_ok, _slope, _min_slope,
                     )
                     if not _trend_ok:
                         final_decision = "SKIP"
@@ -1002,7 +1006,7 @@ def run_gate_pipeline(
                                 failure_code = "FAIL_MODEL3_EXTENDED"
                                 logger.info(
                                     "CONT_CHECK | model=%s tf=%s | EXTENDED dist=%.4f (max %.4f)",
-                                    model, tf, _dist_pct, _MODEL3_MAX_DISTANCE_PCT,
+                                    normalized_model, tf, _dist_pct, _MODEL3_MAX_DISTANCE_PCT,
                                 )
 
             # ── score threshold ────────────────────────────────────────
@@ -1020,7 +1024,7 @@ def run_gate_pipeline(
                 entry_snap = round(float(
                     schematic.get("entry", {}).get("price") or current_price
                 ), 0)
-                fp = (tf, model, direction, entry_snap, bos_price)
+                fp = (tf, normalized_model, direction, entry_snap, bos_price)
                 fp_traded_at = state.traded_bos_fingerprints.get(fp)
                 # Expire fingerprints older than 48 hours so valid re-entries are allowed
                 if fp_traded_at is not None:
@@ -1043,7 +1047,7 @@ def run_gate_pipeline(
             # Derive model taxonomy fields for downstream grouping/analysis.
             # model_family: top-level class ("Model_1" | "Model_2")
             # model_variant: "continuation" for re-acc/re-dist, "reversal" otherwise
-            _model_family = "Model_2" if "Model_2" in model else "Model_1"
+            _model_family = "Model_2" if "Model_2" in normalized_model else "Model_1"
             _model_variant = "continuation" if is_continuation else "reversal"
 
             signal = {
@@ -1052,7 +1056,7 @@ def run_gate_pipeline(
                 "price_at_signal": current_price,
                 "timeframe": tf,
                 "direction": direction,
-                "model": model,
+                "model": normalized_model,
                 "model_family": _model_family,
                 "model_variant": _model_variant,
                 "gate_1a_bias": htf_bias,
