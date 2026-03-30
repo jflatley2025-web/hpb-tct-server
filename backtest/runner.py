@@ -625,11 +625,9 @@ def run_gate_pipeline(
             score = eval_result.get("score", 0)
             direction = eval_result.get("direction", "unknown")
             model = normalize_model(eval_result.get("model", "unknown"))
-            # backtest/db.py normalize_model maps "Model_3" → "Model_2_EXT".
-            # decision_engine_v2 maps "Model_3" → "CONTINUATION".
-            # Check both so is_continuation is correct regardless of which path created the signal.
-            is_continuation = model in ("CONTINUATION", "Model_2_EXT",
-                                       "Model_1_CONTINUATION", "Model_2_CONTINUATION")
+            # After db.normalize_model: "Model_3"/"Model_2_CONTINUATION" → "Model_2_EXT",
+            # "Model_1_CONTINUATION" passes through unchanged.
+            is_continuation = model in ("Model_2_EXT", "Model_1_CONTINUATION")
             rr = eval_result.get("rr", 0)
             reasons = eval_result.get("reasons", [])
 
@@ -964,10 +962,12 @@ def run_gate_pipeline(
                 failure_code = "FAIL_MODEL2_15M_BLOCK"
                 logger.info("15M_FILTER | Model_2 blocked on 15m | session=%s", session_name)
 
-            # ── v14: hard score floor (BEFORE model-specific branches) ──
-            # Standalone guard so it applies to ALL models including continuation,
-            # which previously bypassed it via the elif chain.
-            if final_decision == "TAKE" and score < _MIN_SCORE_HARD:
+            # ── v14: hard score floor (schematic models only) ──────
+            # CONTINUATION models get score=0 from the evaluator because the
+            # decision-tree gates (FVG, market structure) aren't designed for
+            # continuation patterns.  Their quality is validated by the
+            # continuation-specific gates below (trend, TF, distance).
+            if final_decision == "TAKE" and not is_continuation and score < _MIN_SCORE_HARD:
                 final_decision = "SKIP"
                 skip_reason = "SCORE_HARD_FLOOR ({} < {})".format(score, _MIN_SCORE_HARD)
                 failure_code = "FAIL_SCORE_HARD_FLOOR"
@@ -1015,7 +1015,8 @@ def run_gate_pipeline(
                                 )
 
             # ── score threshold ────────────────────────────────────────
-            if final_decision == "TAKE" and score < entry_threshold:
+            # CONTINUATION models bypass — score is not meaningful (see hard floor comment).
+            if final_decision == "TAKE" and not is_continuation and score < entry_threshold:
                 final_decision = "SKIP"
                 skip_reason = "SCORE_BELOW_THRESHOLD ({} < {})".format(score, entry_threshold)
                 failure_code = "FAIL_1D_SCORE"

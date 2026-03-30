@@ -63,16 +63,24 @@ from backtest.config import (
 logger = logging.getLogger("decision_engine_v2")
 
 
-def normalize_model(model):
-    """Map legacy model names to current taxonomy (inlined from backtest.db).
-    Kept here so this module has no dependency on psycopg2 / backtest.db.
+# All model name variants that map to the canonical "CONTINUATION" label.
+# Kept here (not imported from backtest.db) to avoid psycopg2 dependency.
+_CONTINUATION_ALIASES = frozenset({
+    "Model_3", "MODEL_3", "model_3",   # legacy DB labels
+    "Model_2_EXT",                      # intermediate taxonomy (backtest.db output)
+    "Model_1_CONTINUATION",             # current detector: Model_1 subtype
+    "Model_2_CONTINUATION",             # current detector: Model_2 subtype
+})
 
-    "Model_3" was the legacy label for continuation / re-accumulation logic.
+
+def normalize_model(model):
+    """Map legacy / detector model names to the canonical "CONTINUATION" label.
+
+    Kept here so this module has no dependency on psycopg2 / backtest.db.
     All internal decision logic uses "CONTINUATION"; DB/backtest rows are not
     modified — the mapping happens only at the entry point of decide().
     """
-    if model in ("Model_3", "MODEL_3", "model_3", "Model_2_EXT",
-                  "Model_1_CONTINUATION", "Model_2_CONTINUATION"):
+    if model in _CONTINUATION_ALIASES:
         return "CONTINUATION"
     return model
 
@@ -387,6 +395,11 @@ def decide(
     # or timeframe. Used by validate_engine_parity to compare like-for-like.
     _model_filter: Optional[str] = context.get("model_filter")
     _tf_filter: Optional[str] = context.get("tf_filter")
+    # Pre-evaluated schematics (parity/replay only).  When set, detection +
+    # evaluation are skipped and these schematics feed directly into the gate
+    # chain.  Each entry: {"tf": str, "schematic": dict, "eval_result": dict}.
+    # The schematic must carry nested range/entry/stop_loss/target/bos dicts.
+    _pre_evaluated: Optional[list] = context.get("pre_evaluated")
 
     if not current_price or not current_time:
         return {**_PASS, "reason": "missing_required_context (current_price or current_time)"}
@@ -548,7 +561,7 @@ def decide(
 
     # ── Scan MTF timeframes ───────────────────────────────────────
     best_signal: Optional[dict] = None
-    best_score: float = 0
+    best_score: float = -1  # -1 so score=0 signals (e.g. CONTINUATION) can be selected
     # Track the highest-score PASS candidate for diagnostic PASS returns.
     # Lets callers inspect which gate fired on the "best" signal that didn't qualify.
     _best_blocked_score: float = -1.0
@@ -564,55 +577,70 @@ def decide(
 
         df_tf = df_tf_full.tail(_DETECTION_WINDOW).reset_index(drop=True)
 
-        # ── Schematic detection (with timeout) ───────────────────
-        try:
-            pc = PivotCache(df_tf, lookback=3)
-
-            def _run_detect(df=df_tf, p=pc):
-                return detect_tct_schematics(df, [], pivot_cache=p)
-
-            _fut = _DETECT_EXECUTOR.submit(_run_detect)
+        # ── Schematics: pre-evaluated (parity) or live detection ─
+        if _pre_evaluated is not None:
+            # Parity/replay: caller supplies schematics + eval results.
+            # Skip detection, dedup, and evaluation entirely.
+            deduped_schematics = []
+            for pe in _pre_evaluated:
+                if pe.get("tf") == tf:
+                    sch = pe["schematic"]
+                    sch["_cached_eval"] = pe["eval_result"]
+                    deduped_schematics.append(sch)
+        else:
+            # Normal mode: detect + dedup.
             try:
-                det = _fut.result(timeout=_STEP_TIMEOUT_SECONDS)
-            except concurrent.futures.TimeoutError:
-                logger.debug("decide(): detection timeout on %s", tf)
-                continue
-            if det is None:
+                pc = PivotCache(df_tf, lookback=3)
+
+                def _run_detect(df=df_tf, p=pc):
+                    return detect_tct_schematics(df, [], pivot_cache=p)
+
+                _fut = _DETECT_EXECUTOR.submit(_run_detect)
+                try:
+                    det = _fut.result(timeout=_STEP_TIMEOUT_SECONDS)
+                except concurrent.futures.TimeoutError:
+                    logger.debug("decide(): detection timeout on %s", tf)
+                    continue
+                if det is None:
+                    continue
+
+                all_schematics = (
+                    det.get("accumulation_schematics", [])
+                    + det.get("distribution_schematics", [])
+                )
+            except Exception as e:
+                logger.debug("decide(): detection error on %s: %s", tf, e)
                 continue
 
-            all_schematics = (
-                det.get("accumulation_schematics", [])
-                + det.get("distribution_schematics", [])
-            )
-        except Exception as e:
-            logger.debug("decide(): detection error on %s: %s", tf, e)
-            continue
-
-        # ── Per-key dedup: keep most-recent BOS per model/direction ──
-        best_by_key: dict[str, dict] = {}
-        for s in all_schematics:
-            if not isinstance(s, dict) or not s.get("is_confirmed"):
-                continue
-            key = f"{s.get('direction', '')}_{s.get('model', s.get('schematic_type', ''))}"
-            bos_info = s.get("bos_confirmation") or {}
-            bos_idx = bos_info.get("bos_idx", -1) or -1
-            existing_bos_idx = (best_by_key.get(key, {}).get("bos_confirmation") or {}).get("bos_idx", -1)
-            if key not in best_by_key or bos_idx > existing_bos_idx:
-                best_by_key[key] = s
-        deduped_schematics = list(best_by_key.values())
+            # ── Per-key dedup: keep most-recent BOS per model/direction ──
+            best_by_key: dict[str, dict] = {}
+            for s in all_schematics:
+                if not isinstance(s, dict) or not s.get("is_confirmed"):
+                    continue
+                key = f"{s.get('direction', '')}_{s.get('model', s.get('schematic_type', ''))}"
+                bos_info = s.get("bos_confirmation") or {}
+                bos_idx = bos_info.get("bos_idx", -1) or -1
+                existing_bos_idx = (best_by_key.get(key, {}).get("bos_confirmation") or {}).get("bos_idx", -1)
+                if key not in best_by_key or bos_idx > existing_bos_idx:
+                    best_by_key[key] = s
+            deduped_schematics = list(best_by_key.values())
 
         for schematic in deduped_schematics:
 
-            # ── Score via decision tree ───────────────────────────
-            try:
-                eval_result = evaluator.evaluate_schematic(
-                    schematic, htf_bias, current_price,
-                    total_candles=len(df_tf),
-                    candle_df=df_tf,
-                )
-            except Exception as e:
-                logger.debug("decide(): evaluation error: %s", e)
-                continue
+            # ── Score via decision tree (or cached from pre_evaluated) ──
+            _cached = schematic.pop("_cached_eval", None)
+            if _cached is not None:
+                eval_result = _cached
+            else:
+                try:
+                    eval_result = evaluator.evaluate_schematic(
+                        schematic, htf_bias, current_price,
+                        total_candles=len(df_tf),
+                        candle_df=df_tf,
+                    )
+                except Exception as e:
+                    logger.debug("decide(): evaluation error: %s", e)
+                    continue
 
             score: float = eval_result.get("score", 0)
             direction: str = eval_result.get("direction", "unknown")
@@ -845,8 +873,12 @@ def decide(
                 skip_reason = "MODEL2_15M_BLOCK"
                 failure_code = "FAIL_MODEL2_15M_BLOCK"
 
-            # ── v14: hard score floor (ALL models) ───────────────
-            if final_decision == "TAKE" and score < _MIN_SCORE_HARD:
+            # ── v14: hard score floor (schematic models only) ────
+            # CONTINUATION models get score=0 from the evaluator because the
+            # decision-tree gates (FVG, market structure) aren't designed for
+            # continuation patterns.  Their quality is validated by the
+            # continuation-specific gates below (trend, TF, distance).
+            if final_decision == "TAKE" and model not in CONTINUATION_MODELS and score < _MIN_SCORE_HARD:
                 final_decision = "PASS"
                 skip_reason = f"SCORE_HARD_FLOOR ({score} < {_MIN_SCORE_HARD})"
                 failure_code = "FAIL_SCORE_HARD_FLOOR"
@@ -876,7 +908,8 @@ def decide(
                                 failure_code = "FAIL_MODEL3_EXTENDED"
 
             # ── Score threshold ───────────────────────────────────
-            if final_decision == "TAKE" and score < entry_threshold:
+            # CONTINUATION models bypass — score is not meaningful (see hard floor comment).
+            if final_decision == "TAKE" and model not in CONTINUATION_MODELS and score < entry_threshold:
                 final_decision = "PASS"
                 skip_reason = f"SCORE_BELOW_THRESHOLD ({score} < {entry_threshold})"
                 failure_code = "FAIL_1D_SCORE"
