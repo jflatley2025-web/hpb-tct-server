@@ -946,7 +946,6 @@ def decide(
         "new_trough": _new_trough,
         "new_dd_protection_triggered_at": _new_dd_protection_triggered_at,
     }
-    # Defensive: ensure status is always present and in sync with decision.
-    if "status" not in result:
-        result["status"] = result.get("decision", "PASS")
+    # Always sync status from decision so they cannot diverge.
+    result["status"] = result.get("decision", "PASS")
     return result

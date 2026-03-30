@@ -39,11 +39,13 @@ def test_once() -> bool:
     required_fields = ["status", "score", "model", "timeframe"]
     missing = [f for f in required_fields if f not in shadow]
 
-    if missing:
-        print(f"❌ Shadow missing fields: {missing}")
-    else:
-        print("✅ Shadow structure valid")
-        print(f"   status={shadow.get('status')}  decision={shadow.get('decision')}  score={shadow.get('score')}")
+    assert not missing, f"Shadow missing fields: {missing}"
+    assert "decision" in shadow, "Shadow missing 'decision' field"
+    assert shadow["decision"] == shadow.get("status"), (
+        f"Alias contract broken: decision={shadow['decision']!r} != status={shadow.get('status')!r}"
+    )
+    print("✅ Shadow structure valid")
+    print(f"   status={shadow['status']}  decision={shadow['decision']}  score={shadow.get('score')}")
 
     print("\nSample shadow output:")
     print(json.dumps(shadow, indent=2, default=str))
