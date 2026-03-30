@@ -625,7 +625,10 @@ def run_gate_pipeline(
             score = eval_result.get("score", 0)
             direction = eval_result.get("direction", "unknown")
             model = normalize_model(eval_result.get("model", "unknown"))
-            is_continuation = model == "CONTINUATION"
+            # backtest/db.py normalize_model maps "Model_3" → "Model_2_EXT".
+            # decision_engine_v2 maps "Model_3" → "CONTINUATION".
+            # Check both so is_continuation is correct regardless of which path created the signal.
+            is_continuation = model in ("CONTINUATION", "Model_2_EXT")
             rr = eval_result.get("rr", 0)
             reasons = eval_result.get("reasons", [])
 
@@ -883,7 +886,8 @@ def run_gate_pipeline(
                 failure_code = "FAIL_DD_PROTECTION"
 
             # ── v14: global displacement quality gate ──────────────────
-            elif local_displacement < _MIN_DISPLACEMENT:
+            # Continuation models use trend/context logic — displacement not applicable.
+            elif not is_continuation and local_displacement < _MIN_DISPLACEMENT:
                 final_decision = "SKIP"
                 skip_reason = "LOW_DISPLACEMENT ({:.3f} < {:.2f})".format(local_displacement, _MIN_DISPLACEMENT)
                 failure_code = "FAIL_LOW_DISPLACEMENT"
@@ -920,7 +924,8 @@ def run_gate_pipeline(
                 logger.info("15M_FILTER | NY overtrade guard active | rr=%.2f", actual_rr)
 
             # ── v14: 15m stricter displacement gate (3A) ──────────────
-            elif tf == "15m" and local_displacement < _MIN_DISPLACEMENT_15M:
+            # Continuation models use trend/context logic — displacement not applicable.
+            elif not is_continuation and tf == "15m" and local_displacement < _MIN_DISPLACEMENT_15M:
                 final_decision = "SKIP"
                 skip_reason = "15M_LOW_DISPLACEMENT ({:.3f} < {:.2f})".format(local_displacement, _MIN_DISPLACEMENT_15M)
                 failure_code = "FAIL_15M_LOW_DISPLACEMENT"
