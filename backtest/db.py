@@ -450,7 +450,7 @@ def normalize_model(model: Optional[str]) -> Optional[str]:
     Call this wherever model names are read from DB for display, grouping,
     or analysis so legacy and current rows produce consistent labels.
     """
-    if model in ("Model_3", "Model_1_CONTINUATION", "Model_2_CONTINUATION"):
+    if model in ("Model_3", "Model_2_CONTINUATION"):
         return "Model_2_EXT"
     return model
 

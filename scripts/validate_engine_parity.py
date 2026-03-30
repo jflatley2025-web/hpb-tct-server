@@ -24,9 +24,9 @@ Pass criteria: decision_match_rate >= 99%.
 Output:
     PASS/FAIL summary with:
       - Total signals compared
-      - Exact matches (TAKE→TAKE, PASS→PASS)
-      - TAKE→PASS mismatches (new engine is stricter — expected)
-      - PASS→TAKE mismatches (new engine is looser — investigate)
+      - Exact matches (TAKE->TAKE, PASS->PASS)
+      - TAKE->PASS mismatches (new engine is stricter — expected)
+      - PASS->TAKE mismatches (new engine is looser — investigate)
       - Failure code distribution for mismatches
 
 NOTE: This script re-runs schematic detection on live candle data, not
@@ -170,10 +170,10 @@ def load_candles_for_time(conn, symbol: str, tf: str, signal_time: datetime) -> 
 def _classify_mismatch(orig: str, v2: str) -> str:
     """Classify the direction of a mismatch."""
     if orig == "TAKE" and v2 == "PASS":
-        return "TAKE→PASS (v2 stricter)"
+        return "TAKE->PASS (v2 stricter)"
     if orig == "SKIP" and v2 == "TAKE":
-        return "PASS→TAKE (v2 looser)"
-    return f"{orig}→{v2}"
+        return "PASS->TAKE (v2 looser)"
+    return f"{orig}->{v2}"
 
 
 class NoSignalsFound(Exception):
@@ -264,6 +264,43 @@ def run_parity_check(
             if ctx["current_price"] == 0 and sig.get("stop_price"):
                 ctx["current_price"] = float(sig["stop_price"])
 
+            # CONTINUATION schematics cannot be reliably re-detected because the
+            # BOS recency gate (30 candles) makes them stale when the parity script
+            # runs days after the backtest.  Inject stored signal data directly so
+            # the gate chain evaluates the same inputs the backtest used.
+            if stored_model == "CONTINUATION":
+                sj = sig.get("schematic_json") or {}
+                if isinstance(sj, str):
+                    sj = json.loads(sj)
+                ctx["pre_evaluated"] = [{
+                    "tf": sig.get("timeframe"),
+                    "eval_result": {
+                        "score": sig.get("score_1d", 0) or 0,
+                        "direction": sig.get("direction", "unknown"),
+                        "model": stored_model,
+                        "rr": float(sig.get("rr", 0) or 0),
+                    },
+                    "schematic": {
+                        "direction": sig.get("direction"),
+                        "model": stored_model,
+                        "is_confirmed": True,
+                        "quality_score": float(sig.get("rcm_score", 0) or 0),
+                        "range": {
+                            "high": sj.get("range_high", 0),
+                            "low": sj.get("range_low", 0),
+                            "displacement": float(sig.get("local_displacement", 0) or 0),
+                            "duration_hours": float(sig.get("range_duration_hours", 0) or 0),
+                        },
+                        "entry": {"price": float(sig.get("entry_price", 0) or 0)},
+                        "stop_loss": {"price": float(sig.get("stop_price", 0) or 0)},
+                        "target": {"price": float(sig.get("target_price", 0) or 0)},
+                        "bos_confirmation": {
+                            "bos_idx": sj.get("bos_idx"),
+                            "bos_price": sj.get("bos_price"),
+                        },
+                    },
+                }]
+
             try:
                 v2_result = decide(candles_by_tf, ctx)
             except Exception as e:
@@ -336,8 +373,8 @@ def _print_report(r: Dict):
     print(f"  Run ID:           {r['run_id']}")
     print(f"  Signals compared: {total}")
     print(f"  Exact matches:    {r['exact_matches']} ({r['match_rate']:.2f}%)")
-    print(f"  TAKE→PASS:        {r['take_to_pass']}  (v2 stricter — expected)")
-    print(f"  PASS→TAKE:        {r['pass_to_take']}  (v2 looser  — investigate)")
+    print(f"  TAKE->PASS:        {r['take_to_pass']}  (v2 stricter -- expected)")
+    print(f"  PASS->TAKE:        {r['pass_to_take']}  (v2 looser  -- investigate)")
     print(f"  Errors:           {r['errors']}")
     print()
 
@@ -351,15 +388,15 @@ def _print_report(r: Dict):
     min_signals = 100
     total = r["signals_compared"]
     if total < min_signals:
-        print(f"  RESULT: ✗ FAIL  (insufficient signals: {total} compared < {min_signals} required)")
+        print(f"  RESULT: XX FAIL  (insufficient signals: {total} compared < {min_signals} required)")
         print(f"           Increase --limit or ensure the run has >= {min_signals} signals.")
     elif r["match_rate"] >= pass_threshold:
-        print(f"  RESULT: ✓ PASS  (match_rate={r['match_rate']:.2f}% >= {pass_threshold}%)")
+        print(f"  RESULT: OK PASS  (match_rate={r['match_rate']:.2f}% >= {pass_threshold}%)")
     else:
-        print(f"  RESULT: ✗ FAIL  (match_rate={r['match_rate']:.2f}% < {pass_threshold}%)")
+        print(f"  RESULT: XX FAIL  (match_rate={r['match_rate']:.2f}% < {pass_threshold}%)")
         print()
         if r["pass_to_take"]:
-            print("  ACTION REQUIRED: PASS→TAKE mismatches mean v2 is accepting signals")
+            print("  ACTION REQUIRED: PASS->TAKE mismatches mean v2 is accepting signals")
             print("  the backtest would have blocked. These need investigation before")
             print("  enabling USE_UNIFIED_ENGINE = True.")
     print("=" * 60 + "\n")
