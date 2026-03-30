@@ -154,11 +154,15 @@ def load_candles_for_time(conn, symbol: str, tf: str, signal_time: datetime) -> 
     if full_df.empty:
         return None
 
-    # Return only candles closed before signal_time
-    if "open_time" in full_df.columns:
+    # Return only fully-closed candles before signal_time.
+    # Prefer close_time (exact); fall back to open_time only if absent.
+    if "close_time" in full_df.columns:
+        sliced = full_df[full_df["close_time"] < signal_time].copy()
+    elif "open_time" in full_df.columns:
         sliced = full_df[full_df["open_time"] < signal_time].copy()
-        return sliced if len(sliced) >= 10 else None
-    return full_df
+    else:
+        return full_df
+    return sliced if len(sliced) >= 10 else None
 
 
 # ── Comparison logic ──────────────────────────────────────────────────
@@ -172,144 +176,144 @@ def _classify_mismatch(orig: str, v2: str) -> str:
     return f"{orig}→{v2}"
 
 
+class NoSignalsFound(Exception):
+    pass
+
+
 def run_parity_check(
     run_id: int,
     limit: int = 200,
     verbose: bool = False,
-    symbol: Optional[str] = None,
+    symbol: str = "BTCUSDT",
 ) -> Dict:
     """
     Main parity check entry point.
 
     Returns a result dict with match_rate, mismatch details, etc.
-
-    ``symbol`` is optional — when omitted the run's stored symbol from
-    backtest_runs is used. Pass an explicit value only to override.
+    Raises NoSignalsFound if the run exists but has no signals in the DB.
+    Raises ValueError if the run_id is not found.
     """
     from decision_engine_v2 import decide
 
     conn = get_conn()
-    run_info = fetch_run_info(conn, run_id)
-    if not run_info:
-        conn.close()
-        raise ValueError(f"Run ID {run_id} not found in backtest_runs")
+    try:
+        run_info = fetch_run_info(conn, run_id)
+        if not run_info:
+            raise ValueError(f"Run ID {run_id} not found in backtest_runs")
 
-    # Use the run's own symbol unless the caller explicitly overrides it.
-    symbol = symbol or run_info.get("symbol") or "BTCUSDT"
+        logger.info(
+            "Parity check: run_id=%d symbol=%s status=%s trades=%s — fetching %d signals",
+            run_id, symbol, run_info.get("status"),
+            run_info.get("total_trades"), limit,
+        )
 
-    logger.info(
-        "Parity check: run_id=%d symbol=%s status=%s trades=%s — fetching %d signals",
-        run_id, symbol, run_info.get("status"),
-        run_info.get("total_trades"), limit,
-    )
+        signals = fetch_signals(conn, run_id, limit)
 
-    signals = fetch_signals(conn, run_id, limit)
+        if not signals:
+            raise NoSignalsFound(f"No signals found for run_id={run_id}")
 
-    if not signals:
-        conn.close()
-        return {"error": f"No signals found for run_id={run_id}"}
+        logger.info("Fetched %d signals — loading candle history...", len(signals))
 
-    logger.info("Fetched %d signals — loading candle history...", len(signals))
-
-    results = {
-        "run_id": run_id,
-        "signals_compared": 0,
-        "exact_matches": 0,
-        "take_to_pass": 0,          # v2 is stricter (expected)
-        "pass_to_take": 0,          # v2 is looser (investigate)
-        "errors": 0,
-        "match_rate": 0.0,
-        "mismatch_details": [],
-        "failure_code_counts": {},
-    }
-
-    for sig in signals:
-        signal_time = sig["signal_time"]
-        if signal_time.tzinfo is None:
-            signal_time = signal_time.replace(tzinfo=timezone.utc)
-
-        orig_decision = sig["final_decision"]  # "TAKE" or "SKIP"
-        orig_score = sig.get("score_1d", 0) or 0
-
-        # Build candles_by_tf from stored history at signal_time
-        candles_by_tf: Dict[str, pd.DataFrame] = {}
-        for tf in MTF_TIMEFRAMES + ["1d", "4h"]:
-            df = load_candles_for_time(conn, symbol, tf, signal_time)
-            if df is not None:
-                candles_by_tf[tf] = df
-
-        if not candles_by_tf:
-            results["errors"] += 1
-            continue
-
-        # Build context (stateless — no DD protection or BOS dedup for parity test)
-        ctx = {
-            "current_price": float(sig.get("entry_price") or 0) or 0.0,
-            "current_time": signal_time,
-            "entry_threshold": ENTRY_THRESHOLD,
-            "min_rr": MIN_RR,
+        results = {
+            "run_id": run_id,
+            "signals_compared": 0,
+            "exact_matches": 0,
+            "take_to_pass": 0,          # v2 is stricter (expected)
+            "pass_to_take": 0,          # v2 is looser (investigate)
+            "errors": 0,
+            "match_rate": 0.0,
+            "mismatch_details": [],
+            "failure_code_counts": {},
         }
-        # Use stored entry price as current_price proxy; fall back to 0
-        if ctx["current_price"] == 0 and sig.get("stop_price"):
-            ctx["current_price"] = float(sig["stop_price"])
 
-        try:
-            v2_result = decide(candles_by_tf, ctx)
-        except Exception as e:
-            logger.warning("decide() error for signal @ %s: %s", signal_time, e)
-            results["errors"] += 1
-            continue
+        for sig in signals:
+            signal_time = sig["signal_time"]
+            if signal_time.tzinfo is None:
+                signal_time = signal_time.replace(tzinfo=timezone.utc)
 
-        v2_decision = v2_result["decision"]  # "TAKE" or "PASS"
-        # Normalise: backtest uses "SKIP", engine uses "PASS"
-        orig_normalised = "TAKE" if orig_decision == "TAKE" else "PASS"
+            orig_decision = sig["final_decision"]  # "TAKE" or "SKIP"
+            orig_score = sig.get("score_1d", 0) or 0
 
-        results["signals_compared"] += 1
+            # Build candles_by_tf from stored history at signal_time
+            candles_by_tf: Dict[str, pd.DataFrame] = {}
+            for tf in MTF_TIMEFRAMES + ["1d", "4h"]:
+                df = load_candles_for_time(conn, symbol, tf, signal_time)
+                if df is not None:
+                    candles_by_tf[tf] = df
 
-        if orig_normalised == v2_decision:
-            results["exact_matches"] += 1
-        else:
-            mismatch_type = _classify_mismatch(orig_normalised, v2_decision)
-            if orig_normalised == "TAKE" and v2_decision == "PASS":
-                results["take_to_pass"] += 1
-            else:
-                results["pass_to_take"] += 1
+            if not candles_by_tf:
+                results["errors"] += 1
+                continue
 
-            fc = v2_result.get("failure_code") or "none"
-            results["failure_code_counts"][fc] = results["failure_code_counts"].get(fc, 0) + 1
-
-            detail = {
-                "signal_time": signal_time.isoformat(),
-                "tf": sig.get("timeframe"),
-                "model": sig.get("model"),
-                "direction": sig.get("direction"),
-                "orig_decision": orig_normalised,
-                "v2_decision": v2_decision,
-                "mismatch_type": mismatch_type,
-                "orig_score": orig_score,
-                "v2_score": v2_result.get("score", 0),
-                "v2_failure_code": fc,
-                "v2_reason": v2_result.get("reason"),
-                "orig_failure_code": sig.get("failure_code"),
+            # Build context (stateless — no DD protection or BOS dedup for parity test)
+            ctx = {
+                "current_price": float(sig.get("entry_price") or 0) or 0.0,
+                "current_time": signal_time,
+                "entry_threshold": ENTRY_THRESHOLD,
+                "min_rr": MIN_RR,
             }
-            results["mismatch_details"].append(detail)
+            # Use stored entry price as current_price proxy; fall back to 0
+            if ctx["current_price"] == 0 and sig.get("stop_price"):
+                ctx["current_price"] = float(sig["stop_price"])
 
-            if verbose:
-                logger.warning(
-                    "MISMATCH @ %s | %s %s %s | orig=%s v2=%s | "
-                    "orig_score=%s v2_score=%s | v2_fc=%s",
-                    signal_time.isoformat(),
-                    sig.get("timeframe"), sig.get("model"), sig.get("direction"),
-                    orig_normalised, v2_decision,
-                    orig_score, v2_result.get("score", 0), fc,
-                )
+            try:
+                v2_result = decide(candles_by_tf, ctx)
+            except Exception as e:
+                logger.warning("decide() error for signal @ %s: %s", signal_time, e)
+                results["errors"] += 1
+                continue
 
-    total = results["signals_compared"]
-    if total > 0:
-        results["match_rate"] = round(results["exact_matches"] / total * 100, 2)
+            v2_decision = v2_result["decision"]  # "TAKE" or "PASS"
+            # Normalise: backtest uses "SKIP", engine uses "PASS"
+            orig_normalised = "TAKE" if orig_decision == "TAKE" else "PASS"
 
-    conn.close()
-    return results
+            results["signals_compared"] += 1
+
+            if orig_normalised == v2_decision:
+                results["exact_matches"] += 1
+            else:
+                mismatch_type = _classify_mismatch(orig_normalised, v2_decision)
+                if orig_normalised == "TAKE" and v2_decision == "PASS":
+                    results["take_to_pass"] += 1
+                else:
+                    results["pass_to_take"] += 1
+
+                fc = v2_result.get("failure_code") or "none"
+                results["failure_code_counts"][fc] = results["failure_code_counts"].get(fc, 0) + 1
+
+                detail = {
+                    "signal_time": signal_time.isoformat(),
+                    "tf": sig.get("timeframe"),
+                    "model": sig.get("model"),
+                    "direction": sig.get("direction"),
+                    "orig_decision": orig_normalised,
+                    "v2_decision": v2_decision,
+                    "mismatch_type": mismatch_type,
+                    "orig_score": orig_score,
+                    "v2_score": v2_result.get("score", 0),
+                    "v2_failure_code": fc,
+                    "v2_reason": v2_result.get("reason"),
+                    "orig_failure_code": sig.get("failure_code"),
+                }
+                results["mismatch_details"].append(detail)
+
+                if verbose:
+                    logger.warning(
+                        "MISMATCH @ %s | %s %s %s | orig=%s v2=%s | "
+                        "orig_score=%s v2_score=%s | v2_fc=%s",
+                        signal_time.isoformat(),
+                        sig.get("timeframe"), sig.get("model"), sig.get("direction"),
+                        orig_normalised, v2_decision,
+                        orig_score, v2_result.get("score", 0), fc,
+                    )
+
+        total = results["signals_compared"]
+        if total > 0:
+            results["match_rate"] = round(results["exact_matches"] / total * 100, 2)
+
+        return results
+    finally:
+        conn.close()
 
 
 def _print_report(r: Dict):
@@ -373,12 +377,16 @@ def main():
             sys.exit(1)
         logger.info("No --run-id specified, using latest: run_id=%d", run_id)
 
-    result = run_parity_check(
-        run_id=run_id,
-        limit=args.limit,
-        verbose=args.verbose,
-        symbol=args.symbol,
-    )
+    try:
+        result = run_parity_check(
+            run_id=run_id,
+            limit=args.limit,
+            verbose=args.verbose,
+            symbol=args.symbol,
+        )
+    except NoSignalsFound as e:
+        logger.error("%s", e)
+        sys.exit(1)
 
     if args.as_json:
         # Serialize datetimes for JSON output
