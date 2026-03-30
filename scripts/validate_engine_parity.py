@@ -101,7 +101,7 @@ def fetch_signals(conn, run_id: int, limit: int) -> List[Dict]:
 def fetch_run_info(conn, run_id: int) -> Dict:
     cur = conn.cursor()
     cur.execute(
-        "SELECT symbol, start_date, end_date, status, total_trades FROM backtest_runs WHERE id = %s",
+        "SELECT start_date, end_date, status, total_trades FROM backtest_runs WHERE id = %s",
         (run_id,),
     )
     row = cur.fetchone()
@@ -109,8 +109,8 @@ def fetch_run_info(conn, run_id: int) -> Dict:
     if not row:
         return {}
     return {
-        "symbol": row[0], "start_date": row[1], "end_date": row[2],
-        "status": row[3], "total_trades": row[4],
+        "start_date": row[0], "end_date": row[1],
+        "status": row[2], "total_trades": row[3],
     }
 
 
