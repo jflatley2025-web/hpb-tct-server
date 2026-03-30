@@ -1466,6 +1466,12 @@ def run_backtest(
                         # confirms the trade was placed so a failed open doesn't permanently
                         # dedup the same schematic for 48h.
                         sch = signal.get("_schematic") or {}
+                        # Stamp the current backtest symbol onto the schematic so
+                        # _open_trade records the correct symbol in OpenTrade.
+                        # detect_tct_schematics is symbol-agnostic, so this field
+                        # is never set by the detector itself.
+                        if signal.get("_schematic") is not None:
+                            signal["_schematic"]["symbol"] = symbol
                         bos_info_fp = (sch.get("bos_confirmation") or {})
                         bos_fp = (
                             signal.get("timeframe"),
