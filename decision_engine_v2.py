@@ -71,7 +71,8 @@ def normalize_model(model):
     All internal decision logic uses "CONTINUATION"; DB/backtest rows are not
     modified — the mapping happens only at the entry point of decide().
     """
-    if model in ("Model_3", "MODEL_3", "model_3", "Model_2_EXT"):
+    if model in ("Model_3", "MODEL_3", "model_3", "Model_2_EXT",
+                  "Model_1_CONTINUATION", "Model_2_CONTINUATION"):
         return "CONTINUATION"
     return model
 
