@@ -628,7 +628,8 @@ def run_gate_pipeline(
             # backtest/db.py normalize_model maps "Model_3" → "Model_2_EXT".
             # decision_engine_v2 maps "Model_3" → "CONTINUATION".
             # Check both so is_continuation is correct regardless of which path created the signal.
-            is_continuation = model in ("CONTINUATION", "Model_2_EXT")
+            is_continuation = model in ("CONTINUATION", "Model_2_EXT",
+                                       "Model_1_CONTINUATION", "Model_2_CONTINUATION")
             rr = eval_result.get("rr", 0)
             reasons = eval_result.get("reasons", [])
 
