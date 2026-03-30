@@ -1,0 +1,131 @@
+{
+  "result": "FAIL",
+  "summary": {
+    "trades": 85,
+    "wins": 84,
+    "losses": 1,
+    "win_rate": 98.82,
+    "gross_profit": 9543.0,
+    "gross_loss": 149.39,
+    "pf": 63.8798,
+    "expectancy": 110.51,
+    "net_profit": 9393.61,
+    "max_dd": 1.3242,
+    "avg_rr": 1.652,
+    "avg_win": 113.61,
+    "avg_loss": 149.39
+  },
+  "gates": {
+    "trade_count": "PASS",
+    "profit_factor": "PASS",
+    "expectancy": "PASS",
+    "max_dd": "PASS",
+    "win_rate": "PASS",
+    "symbol_distribution": "FAIL",
+    "timeframe_quality": "PASS",
+    "model_quality": "PASS",
+    "dd_behavior": "FAIL"
+  },
+  "distributions": {
+    "by_symbol": {
+      "BTCUSDT": {
+        "trades": 85,
+        "wins": 84,
+        "wr_pct": 98.8,
+        "pf": 63.88,
+        "net_pnl": 9393.61
+      }
+    },
+    "by_tf": {
+      "15m": {
+        "trades": 13,
+        "wins": 13,
+        "wr_pct": 100.0,
+        "pf": "inf",
+        "net_pnl": 2560.85
+      },
+      "1h": {
+        "trades": 26,
+        "wins": 26,
+        "wr_pct": 100.0,
+        "pf": "inf",
+        "net_pnl": 2455.98
+      },
+      "30m": {
+        "trades": 34,
+        "wins": 33,
+        "wr_pct": 97.1,
+        "pf": 19.686,
+        "net_pnl": 2791.47
+      },
+      "4h": {
+        "trades": 12,
+        "wins": 12,
+        "wr_pct": 100.0,
+        "pf": "inf",
+        "net_pnl": 1585.31
+      }
+    },
+    "by_model": {
+      "Model_1": {
+        "trades": 49,
+        "wins": 48,
+        "wr_pct": 98.0,
+        "pf": 38.693,
+        "net_pnl": 5630.89
+      },
+      "Model_2": {
+        "trades": 19,
+        "wins": 19,
+        "wr_pct": 100.0,
+        "pf": "inf",
+        "net_pnl": 2065.76
+      },
+      "Model_1_CONTINUATION": {
+        "trades": 6,
+        "wins": 6,
+        "wr_pct": 100.0,
+        "pf": "inf",
+        "net_pnl": 332.54
+      },
+      "Model_2_CONTINUATION": {
+        "trades": 6,
+        "wins": 6,
+        "wr_pct": 100.0,
+        "pf": "inf",
+        "net_pnl": 847.65
+      },
+      "Model_1_from_M2_failure": {
+        "trades": 5,
+        "wins": 5,
+        "wr_pct": 100.0,
+        "pf": "inf",
+        "net_pnl": 516.77
+      }
+    }
+  },
+  "risk": {
+    "dd_trigger_count": 0,
+    "dd_hard_blocks": 0,
+    "intra_cycle_max_dd": 0.0
+  },
+  "gate_diagnostics": {
+    "FAIL_RIG_COUNTER_BIAS": 19264,
+    "FAIL_BTC_ANCHOR_BIAS": 18438,
+    "FAIL_SCORE_HARD_FLOOR": 4404,
+    "FAIL_LOW_DISPLACEMENT": 2486,
+    "FAIL_RR_FILTER": 777,
+    "FAIL_15M_ASIA_FILTER": 368,
+    "FAIL_RR_15M_STRICT": 187,
+    "FAIL_15M_LOW_DISPLACEMENT": 131,
+    "FAIL_DUPLICATE_BOS": 115,
+    "FAIL_MODEL2_15M_BLOCK": 98,
+    "FAIL_15M_POOR_ENTRY_LOCATION": 92,
+    "FAIL_MODEL3_TF_FILTER": 83,
+    "FAIL_MODEL3_NO_TREND": 2
+  },
+  "notes": [
+    "Symbol imbalance \u2014 ETH=0% (0t), SOL=0% (0t)",
+    "DD system never engaged (0 triggers fired)"
+  ]
+}
