@@ -43,9 +43,10 @@ def test_once() -> bool:
         print(f"❌ Shadow missing fields: {missing}")
     else:
         print("✅ Shadow structure valid")
+        print(f"   status={shadow.get('status')}  decision={shadow.get('decision')}  score={shadow.get('score')}")
 
     print("\nSample shadow output:")
-    print(json.dumps(shadow, indent=2))
+    print(json.dumps(shadow, indent=2, default=str))
 
     return not missing
 

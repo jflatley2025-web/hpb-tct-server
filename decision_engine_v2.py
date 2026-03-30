@@ -330,6 +330,7 @@ def decide(
     """
     _PASS = {
         "decision": "PASS",
+        "status": "PASS",   # API alias — kept in sync with "decision"
         "reason": "no_signal",
         "failure_code": None,
         "score": 0,
@@ -890,6 +891,7 @@ def decide(
                 best_score = score
                 best_signal = {
                     "decision": "TAKE",
+                    "status": "TAKE",   # API alias — kept in sync with "decision"
                     "reason": "all_gates_passed",
                     "failure_code": None,
                     "score": score,
@@ -935,7 +937,7 @@ def decide(
     # failure_code so callers can inspect why no trade fired without parsing logs.
     # risk_multiplier is explicitly overridden so soft-throttle callers see the
     # correct tier (0.5) even on cycles where no trade qualifies.
-    return best_signal if best_signal is not None else {
+    result = best_signal if best_signal is not None else {
         **_PASS,
         "failure_code": _best_blocked_code,
         "reason": _best_blocked_reason or "no_signal",
@@ -944,3 +946,7 @@ def decide(
         "new_trough": _new_trough,
         "new_dd_protection_triggered_at": _new_dd_protection_triggered_at,
     }
+    # Defensive: ensure status is always present and in sync with decision.
+    if "status" not in result:
+        result["status"] = result.get("decision", "PASS")
+    return result
