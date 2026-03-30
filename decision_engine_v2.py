@@ -701,7 +701,7 @@ def decide(
             final_decision = "TAKE"
 
             logger.debug(
-                "[DISP] model=%s tf=%s displacement=%.4f schematic=%s",
+                "[DISP] model=%s tf=%s displacement=%.4f is_schematic=%s",
                 model, tf, local_displacement, model in SCHEMATIC_MODELS,
             )
             if model in CONTINUATION_MODELS:
