@@ -145,6 +145,10 @@ _TREND_VOL_MULTIPLIER = 0.5   # slope threshold = max(floor, vol * multiplier)
 _MODEL3_MAX_DISTANCE_PCT = 0.015  # entry must be within 1.5% of range midpoint
 _MIN_DISPLACEMENT = 0.50      # minimum local_displacement for any signal
 _MIN_DISPLACEMENT_15M = 0.65  # stricter displacement floor for 15m specifically
+
+# Models that require displacement validation (schematic-based entry logic).
+# Model_3 uses continuation / trend logic and is NOT displacement-dependent.
+SCHEMATIC_MODELS = {"Model_1", "Model_2", "Model_1_from_M2_failure"}
 _MIN_SCORE_HARD = 65          # hard score floor — scores 57-64 blocked regardless of threshold
 
 # ── Issue 3: 3-tier drawdown control constants ────────────────────────
@@ -689,6 +693,11 @@ def decide(
             skip_reason: Optional[str] = None
             final_decision = "TAKE"
 
+            logger.debug(
+                "[DISP] model=%s tf=%s displacement=%.4f schematic=%s",
+                model, tf, local_displacement, model in SCHEMATIC_MODELS,
+            )
+
             # ── RIG ───────────────────────────────────────────────
             if rig_status == "BLOCK":
                 final_decision = "PASS"
@@ -745,7 +754,8 @@ def decide(
                 failure_code = "FAIL_DD_PROTECTION"
 
             # ── v14: global displacement floor ────────────────────
-            elif local_displacement < _MIN_DISPLACEMENT:
+            # Model_3 is continuation logic (not schematic-based) — skip.
+            elif model in SCHEMATIC_MODELS and local_displacement < _MIN_DISPLACEMENT:
                 final_decision = "PASS"
                 skip_reason = f"LOW_DISPLACEMENT ({local_displacement:.3f} < {_MIN_DISPLACEMENT:.2f})"
                 failure_code = "FAIL_LOW_DISPLACEMENT"
@@ -776,7 +786,8 @@ def decide(
                 failure_code = "FAIL_15M_NY_OVERTRADE"
 
             # ── v14: 15m stricter displacement (3A) ──────────────
-            elif tf == "15m" and local_displacement < _MIN_DISPLACEMENT_15M:
+            # Model_3 is continuation logic (not schematic-based) — skip.
+            elif model in SCHEMATIC_MODELS and tf == "15m" and local_displacement < _MIN_DISPLACEMENT_15M:
                 final_decision = "PASS"
                 skip_reason = f"15M_LOW_DISPLACEMENT ({local_displacement:.3f} < {_MIN_DISPLACEMENT_15M:.2f})"
                 failure_code = "FAIL_15M_LOW_DISPLACEMENT"
