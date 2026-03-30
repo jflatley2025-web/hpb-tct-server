@@ -101,7 +101,7 @@ def fetch_signals(conn, run_id: int, limit: int) -> List[Dict]:
 def fetch_run_info(conn, run_id: int) -> Dict:
     cur = conn.cursor()
     cur.execute(
-        "SELECT symbol, start_date, end_date, status, total_trades FROM backtest_runs WHERE id = %s",
+        "SELECT start_date, end_date, status, total_trades FROM backtest_runs WHERE id = %s",
         (run_id,),
     )
     row = cur.fetchone()
@@ -109,8 +109,8 @@ def fetch_run_info(conn, run_id: int) -> Dict:
     if not row:
         return {}
     return {
-        "symbol": row[0], "start_date": row[1], "end_date": row[2],
-        "status": row[3], "total_trades": row[4],
+        "start_date": row[0], "end_date": row[1],
+        "status": row[2], "total_trades": row[3],
     }
 
 
@@ -127,7 +127,7 @@ def get_latest_run_id(conn) -> Optional[int]:
 _candle_cache: Dict[str, pd.DataFrame] = {}
 
 
-def load_candles_for_time(symbol: str, tf: str, signal_time: datetime) -> Optional[pd.DataFrame]:
+def load_candles_for_time(conn, symbol: str, tf: str, signal_time: datetime) -> Optional[pd.DataFrame]:
     """
     Load candles up to (but not including) signal_time for a given TF.
     Uses a per-TF cache — loads once and slices per signal_time.
@@ -136,6 +136,7 @@ def load_candles_for_time(symbol: str, tf: str, signal_time: datetime) -> Option
     if cache_key not in _candle_cache:
         try:
             df = load_candles(
+                conn,
                 symbol=symbol,
                 timeframe=tf,
                 start_date=None,  # full history
@@ -203,9 +204,9 @@ def run_parity_check(
     )
 
     signals = fetch_signals(conn, run_id, limit)
-    conn.close()
 
     if not signals:
+        conn.close()
         return {"error": f"No signals found for run_id={run_id}"}
 
     logger.info("Fetched %d signals — loading candle history...", len(signals))
@@ -233,7 +234,7 @@ def run_parity_check(
         # Build candles_by_tf from stored history at signal_time
         candles_by_tf: Dict[str, pd.DataFrame] = {}
         for tf in MTF_TIMEFRAMES + ["1d", "4h"]:
-            df = load_candles_for_time(symbol, tf, signal_time)
+            df = load_candles_for_time(conn, symbol, tf, signal_time)
             if df is not None:
                 candles_by_tf[tf] = df
 
@@ -307,6 +308,7 @@ def run_parity_check(
     if total > 0:
         results["match_rate"] = round(results["exact_matches"] / total * 100, 2)
 
+    conn.close()
     return results
 
 
