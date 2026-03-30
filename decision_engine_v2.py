@@ -381,6 +381,12 @@ def decide(
     _btc_candles_by_tf: Optional[dict] = context.get("btc_candles_by_tf")
     _btc_htf_bias_override: Optional[str] = context.get("btc_htf_bias")
 
+    # Parity / replay filters (optional — omit to evaluate all schematics).
+    # When set, decide() skips schematics that don't match the specified model
+    # or timeframe. Used by validate_engine_parity to compare like-for-like.
+    _model_filter: Optional[str] = context.get("model_filter")
+    _tf_filter: Optional[str] = context.get("tf_filter")
+
     if not current_price or not current_time:
         return {**_PASS, "reason": "missing_required_context (current_price or current_time)"}
 
@@ -549,6 +555,8 @@ def decide(
     _best_blocked_reason: Optional[str] = None
 
     for tf in MTF_TIMEFRAMES:
+        if _tf_filter and tf != _tf_filter:
+            continue
         df_tf_full = candles_by_tf.get(tf)
         if df_tf_full is None or len(df_tf_full) < MIN_PIVOT_CONFIRM:
             continue
@@ -608,6 +616,8 @@ def decide(
             score: float = eval_result.get("score", 0)
             direction: str = eval_result.get("direction", "unknown")
             model: str = normalize_model(eval_result.get("model", "unknown")) or "unknown"
+            if _model_filter and model != _model_filter:
+                continue
             rr: float = eval_result.get("rr", 0)
 
             # ── RCM (Range Context) ───────────────────────────────

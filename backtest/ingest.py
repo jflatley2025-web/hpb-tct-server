@@ -289,7 +289,12 @@ def load_candles(
 
     query += " ORDER BY open_time"
 
-    df = pd.read_sql(query, conn, params=params)
+    cur = conn.cursor()
+    cur.execute(query, params)
+    rows = cur.fetchall()
+    cols = [d[0] for d in cur.description]
+    cur.close()
+    df = pd.DataFrame(rows, columns=cols)
     if not df.empty:
         df["open_time"] = pd.to_datetime(df["open_time"], utc=True)
         if "close_time" in df.columns:

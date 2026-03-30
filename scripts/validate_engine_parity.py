@@ -193,7 +193,7 @@ def run_parity_check(
     Raises NoSignalsFound if the run exists but has no signals in the DB.
     Raises ValueError if the run_id is not found.
     """
-    from decision_engine_v2 import decide
+    from decision_engine_v2 import decide, normalize_model as _v2_normalize
 
     conn = get_conn()
     try:
@@ -245,12 +245,20 @@ def run_parity_check(
                 results["errors"] += 1
                 continue
 
-            # Build context (stateless — no DD protection or BOS dedup for parity test)
+            # Normalize the stored model so parity filters use canonical names.
+            stored_model = _v2_normalize(sig.get("model") or "unknown")
+
+            # Build context (stateless — no DD protection or BOS dedup for parity test).
+            # model_filter / tf_filter ensure decide() evaluates only the same model/TF
+            # combination that the original backtest evaluated — prevents false mismatches
+            # caused by decide() detecting a different schematic on the same candle data.
             ctx = {
                 "current_price": float(sig.get("entry_price") or 0) or 0.0,
                 "current_time": signal_time,
                 "entry_threshold": ENTRY_THRESHOLD,
                 "min_rr": MIN_RR,
+                "model_filter": stored_model,
+                "tf_filter": sig.get("timeframe"),
             }
             # Use stored entry price as current_price proxy; fall back to 0
             if ctx["current_price"] == 0 and sig.get("stop_price"):
@@ -284,7 +292,7 @@ def run_parity_check(
                 detail = {
                     "signal_time": signal_time.isoformat(),
                     "tf": sig.get("timeframe"),
-                    "model": sig.get("model"),
+                    "model": stored_model,
                     "direction": sig.get("direction"),
                     "orig_decision": orig_normalised,
                     "v2_decision": v2_decision,
@@ -302,7 +310,7 @@ def run_parity_check(
                         "MISMATCH @ %s | %s %s %s | orig=%s v2=%s | "
                         "orig_score=%s v2_score=%s | v2_fc=%s",
                         signal_time.isoformat(),
-                        sig.get("timeframe"), sig.get("model"), sig.get("direction"),
+                        sig.get("timeframe"), stored_model, sig.get("direction"),
                         orig_normalised, v2_decision,
                         orig_score, v2_result.get("score", 0), fc,
                     )
