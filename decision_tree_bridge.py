@@ -1493,31 +1493,11 @@ def compute_composite_score_v2(
     # ── Phase 1: HTF Context ──
     phase_results["htf_context"] = {"bias": htf_bias}
 
-    # ============================================================
-    # MARKET STRUCTURE ENGINE INIT
-    # ============================================================
-    from decision_trees.market_structure_engine import MarketStructureEngine
-    mse = MarketStructureEngine()
-
-    # ============================================================
-    # L2 STRUCTURE BLOCK (COUNTER-STRUCTURE FILTER)
-    # ============================================================
-    l2 = mse.detect_l2_structure(df, htf_bias)
-
-    if l2.get("exists"):
-        phase_results["l2"] = {
-            "passed": False,
-            "reason": "L2 counter-structure (internal reversal active)",
-            "data": l2
-        }
-        # RIG block has not run yet — guarantee "rig" key is present for debug consumers
-        phase_results.setdefault("rig", {"zone": "unknown", "displacement_pct": 0.0, "penalty": 0})
-        fail["failure_context"] = "L2"
-        return {**fail,
-                "reasons": ["L2 counter-structure (internal reversal active)"],
-                "phase_results": phase_results}
-
-    phase_results["l2"] = {"passed": True}
+    # L2 counter-structure gate removed (v17 → v18):
+    # detect_l2_structure() used raw sequential candle comparisons (>=2 LH/LL in 30 candles).
+    # On ETH/SOL this produced lh=10–23, ll=8–18 consistently → 100% block rate.
+    # The gate is structurally invalid for crypto volatility. RIG + HTF bias + BOS
+    # confirmation already enforce structural quality without a broken L2 check.
 
     # ── Phase 2: Range Detection ──
     range_info = schematic.get("range") or {}
