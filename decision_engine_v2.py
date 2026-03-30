@@ -66,9 +66,13 @@ logger = logging.getLogger("decision_engine_v2")
 def normalize_model(model):
     """Map legacy model names to current taxonomy (inlined from backtest.db).
     Kept here so this module has no dependency on psycopg2 / backtest.db.
+
+    "Model_3" was the legacy label for continuation / re-accumulation logic.
+    All internal decision logic uses "CONTINUATION"; DB/backtest rows are not
+    modified — the mapping happens only at the entry point of decide().
     """
-    if model == "Model_3":
-        return "Model_2_EXT"
+    if model in ("Model_3", "MODEL_3", "model_3", "Model_2_EXT"):
+        return "CONTINUATION"
     return model
 
 
@@ -95,7 +99,7 @@ def normalize_model(model):
 # STOP CONDITIONS (revert immediately if any triggered):
 #   - Match rate < 99%
 #   - Trade in live missing from replay
-#   - Model_3 appearing on 4h
+#   - CONTINUATION appearing on 4h
 #   - 15m spike
 #   - DD > 3% early
 USE_UNIFIED_ENGINE = False
@@ -147,8 +151,11 @@ _MIN_DISPLACEMENT = 0.50      # minimum local_displacement for any signal
 _MIN_DISPLACEMENT_15M = 0.65  # stricter displacement floor for 15m specifically
 
 # Models that require displacement validation (schematic-based entry logic).
-# Model_3 uses continuation / trend logic and is NOT displacement-dependent.
 SCHEMATIC_MODELS = {"Model_1", "Model_2", "Model_1_from_M2_failure"}
+
+# Continuation models use trend/context logic — NOT schematic-based entry
+# location. They bypass displacement gates and get their own quality gates.
+CONTINUATION_MODELS = {"CONTINUATION"}
 _MIN_SCORE_HARD = 65          # hard score floor — scores 57-64 blocked regardless of threshold
 
 # ── Issue 3: 3-tier drawdown control constants ────────────────────────
@@ -697,6 +704,8 @@ def decide(
                 "[DISP] model=%s tf=%s displacement=%.4f schematic=%s",
                 model, tf, local_displacement, model in SCHEMATIC_MODELS,
             )
+            if model in CONTINUATION_MODELS:
+                logger.debug("[MODEL] CONTINUATION detected — skipping displacement gates")
 
             # ── RIG ───────────────────────────────────────────────
             if rig_status == "BLOCK":
@@ -754,7 +763,7 @@ def decide(
                 failure_code = "FAIL_DD_PROTECTION"
 
             # ── v14: global displacement floor ────────────────────
-            # Model_3 is continuation logic (not schematic-based) — skip.
+            # CONTINUATION uses trend/context logic — displacement not applicable.
             elif model in SCHEMATIC_MODELS and local_displacement < _MIN_DISPLACEMENT:
                 final_decision = "PASS"
                 skip_reason = f"LOW_DISPLACEMENT ({local_displacement:.3f} < {_MIN_DISPLACEMENT:.2f})"
@@ -786,7 +795,7 @@ def decide(
                 failure_code = "FAIL_15M_NY_OVERTRADE"
 
             # ── v14: 15m stricter displacement (3A) ──────────────
-            # Model_3 is continuation logic (not schematic-based) — skip.
+            # CONTINUATION uses trend/context logic — displacement not applicable.
             elif model in SCHEMATIC_MODELS and tf == "15m" and local_displacement < _MIN_DISPLACEMENT_15M:
                 final_decision = "PASS"
                 skip_reason = f"15M_LOW_DISPLACEMENT ({local_displacement:.3f} < {_MIN_DISPLACEMENT_15M:.2f})"
@@ -832,7 +841,7 @@ def decide(
                 failure_code = "FAIL_SCORE_HARD_FLOOR"
 
             # ── v12/v13: Continuation model quality gates ─────────
-            if final_decision == "TAKE" and "_CONTINUATION" in model:
+            if final_decision == "TAKE" and model in CONTINUATION_MODELS:
                 if tf != "1h":
                     final_decision = "PASS"
                     skip_reason = f"CONT_TF_FILTER (tf={tf}, only 1h allowed)"
