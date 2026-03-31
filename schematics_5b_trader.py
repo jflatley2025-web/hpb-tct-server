@@ -1650,7 +1650,7 @@ class Schematics5BTrader:
             # 5. Enter trade on highest-scoring qualifying setup.
             if best_setup:
                 schematic, evaluation = best_setup
-                entry_info = schematic.get("entry", {})
+                entry_info = schematic.get("entry") or {}
                 candidate_price = entry_info.get("price", best_current_price)
 
                 # Re-evaluate RIG with the actual schematic range (more precise)
@@ -2246,15 +2246,15 @@ class Schematics5BTrader:
                     _eval_model = eval_result.get("model", s.get("model", "unknown"))
                     _eval_dir = eval_result.get("direction", "unknown")
                     _eval_action = "PASS" if eval_result.get("pass") else "BLOCKED"
-                    _eval_entry = s.get("entry", {}).get("price", 0)
+                    _eval_entry = (s.get("entry") or {}).get("price", 0)
                     _eval_stop = (s.get("stop_loss") or {}).get("price", 0)
                     _eval_tp1 = (s.get("target") or {}).get("price", 0)
                     _eval_rr = _compute_rr(_eval_entry, _eval_stop, _eval_tp1)
                     logger.info(
                         "[5B] [%s] HTF=%s Model=%s Direction=%s Decision=%s "
-                        "Score=%d TF=%s Entry=%.4f Stop=%.4f TP1=%.4f RR=%.2f",
+                        "Score=%s TF=%s Entry=%.4f Stop=%.4f TP1=%.4f RR=%.2f",
                         symbol, htf_bias, _eval_model, _eval_dir, _eval_action,
-                        eval_result.get("score", 0), effective_tf,
+                        int(eval_result.get("score") or 0), effective_tf,
                         _eval_entry, _eval_stop, _eval_tp1, _eval_rr,
                     )
 
