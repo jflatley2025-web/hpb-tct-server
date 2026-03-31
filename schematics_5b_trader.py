@@ -1538,6 +1538,26 @@ class Schematics5BTrader:
                     logger.warning("[5B] V2 shadow error: %s", _ve)
                     _v2_result = None
 
+            # ── Sync v2 DD state when unified engine is active ────────────
+            # When USE_UNIFIED_ENGINE=True, v2's 3-tier DD protection (hard block /
+            # soft throttle / clear) is authoritative. Persist its outputs so the
+            # next cycle receives accurate DD context.
+            if _USE_V2 and _v2_result is not None:
+                _v2_new_peak = _v2_result.get("new_peak")
+                _v2_new_trough = _v2_result.get("new_trough")
+                _v2_new_dd_ts = _v2_result.get("new_dd_protection_triggered_at")
+                if _v2_new_peak is not None:
+                    self.state.peak_balance = _v2_new_peak
+                if _v2_new_trough is not None:
+                    self.state.dd_trough_balance = _v2_new_trough
+                if _v2_new_dd_ts is not None and self.state.dd_triggered_at is None:
+                    self.state.dd_triggered_at = (
+                        _v2_new_dd_ts.isoformat()
+                        if isinstance(_v2_new_dd_ts, datetime)
+                        else str(_v2_new_dd_ts)
+                    )
+                self.state.save()
+
             # 3. RIG: Build real MSCE context and evaluate globally.
             #    Uses canonical rig_engine — no fake session/RCM inputs.
             from rig_engine import evaluate_rig_global

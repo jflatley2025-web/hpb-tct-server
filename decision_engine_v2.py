@@ -111,7 +111,7 @@ def normalize_model(model):
 #   - CONTINUATION appearing on 4h
 #   - 15m spike
 #   - DD > 3% early
-USE_UNIFIED_ENGINE = False
+USE_UNIFIED_ENGINE = True
 
 # ── Canary rollout fraction ───────────────────────────────────────────
 # When USE_UNIFIED_ENGINE is True, only this fraction of live requests
@@ -120,7 +120,7 @@ USE_UNIFIED_ENGINE = False
 #
 # 0.1  → 10% canary (default; use during initial activation)
 # 1.0  → full rollout (set after canary period passes)
-ROLLOUT_FRACTION = 0.1
+ROLLOUT_FRACTION = 1.0
 
 
 def should_use_v2() -> bool:
