@@ -1753,8 +1753,8 @@ class Schematics5BTrader:
                     _log_decision_parity(_parity_entry)
 
                     # ── Trade-level INFO with v2 shadow ───────────────
-                    _td_stop = (schematic.get("stop_loss") or {}).get("price", 0)
-                    _td_tp1 = (schematic.get("target") or {}).get("price", 0)
+                    _td_stop = (schematic.get("stop_loss") or {}).get("price") or 0
+                    _td_tp1 = (schematic.get("target") or {}).get("price") or 0
                     _td_rr = _compute_rr(candidate_price, _td_stop, _td_tp1)
                     logger.info(
                         "[5B] [%s] TRADE_EVAL HTF=%s Model=%s Decision=%s "
@@ -1830,8 +1830,8 @@ class Schematics5BTrader:
                             # ── v15: compute priority score ───────────────────────
                             # Single source: decision_engine_v2.compute_priority_score.
                             # Falls back to inline formula if module is unavailable.
-                            _p_stop = (schematic.get("stop_loss") or {}).get("price", 0)
-                            _p_tgt = (schematic.get("target") or {}).get("price", 0)
+                            _p_stop = (schematic.get("stop_loss") or {}).get("price") or 0
+                            _p_tgt = (schematic.get("target") or {}).get("price") or 0
                             _p_risk = abs(best_current_price - _p_stop) if _p_stop else 0
                             _p_rr = (
                                 abs(_p_tgt - best_current_price) / _p_risk
@@ -2246,9 +2246,9 @@ class Schematics5BTrader:
                     _eval_model = eval_result.get("model", s.get("model", "unknown"))
                     _eval_dir = eval_result.get("direction", "unknown")
                     _eval_action = "PASS" if eval_result.get("pass") else "BLOCKED"
-                    _eval_entry = (s.get("entry") or {}).get("price", 0)
-                    _eval_stop = (s.get("stop_loss") or {}).get("price", 0)
-                    _eval_tp1 = (s.get("target") or {}).get("price", 0)
+                    _eval_entry = (s.get("entry") or {}).get("price") or 0
+                    _eval_stop = (s.get("stop_loss") or {}).get("price") or 0
+                    _eval_tp1 = (s.get("target") or {}).get("price") or 0
                     _eval_rr = _compute_rr(_eval_entry, _eval_stop, _eval_tp1)
                     logger.info(
                         "[5B] [%s] HTF=%s Model=%s Direction=%s Decision=%s "
