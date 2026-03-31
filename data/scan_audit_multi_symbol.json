@@ -1,0 +1,219 @@
+{
+  "timestamp": "2026-03-31T00:22:36.961829+00:00",
+  "symbols": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT"
+  ],
+  "summary": {
+    "total_symbols_scanned": 3,
+    "total_forming_schematics": 15,
+    "total_qualifying_setups": 0,
+    "gate_block_distribution": {
+      "GATE_1A_NEUTRAL_BIAS": 3
+    },
+    "errors_count": 0,
+    "anomalies": []
+  },
+  "per_symbol": {
+    "BTCUSDT": {
+      "scan_duration_s": 35.0,
+      "current_price": 66662.49,
+      "htf_bias": "neutral",
+      "session": {
+        "timestamp": "2026-03-31T00:23:11.987889+00:00",
+        "active_session": "asia",
+        "multiplier": 1.05,
+        "is_manipulation_window": true
+      },
+      "total_forming": 5,
+      "qualifying_setup": null,
+      "gate_block_reason": "GATE_1A_NEUTRAL_BIAS",
+      "forming_schematics": [
+        {
+          "direction": "bullish",
+          "model": "Model_1_CONTINUATION",
+          "is_confirmed": false,
+          "range_high": null,
+          "range_low": null,
+          "tap1": 67361.59,
+          "tap2": 67229.96,
+          "tap3": 67096.63
+        },
+        {
+          "direction": "bullish",
+          "model": "Model_2_CONTINUATION",
+          "is_confirmed": false,
+          "range_high": null,
+          "range_low": null,
+          "tap1": 67361.59,
+          "tap2": 67229.96,
+          "tap3": 67361.59
+        },
+        {
+          "direction": "bearish",
+          "model": "Model_1",
+          "is_confirmed": false,
+          "range_high": null,
+          "range_low": null,
+          "tap1": 66521.56,
+          "tap2": 66531.13,
+          "tap3": 66755.14
+        },
+        {
+          "direction": "bearish",
+          "model": "Model_1_CONTINUATION",
+          "is_confirmed": false,
+          "range_high": null,
+          "range_low": null,
+          "tap1": 71092.9,
+          "tap2": 71461.67,
+          "tap3": 71954.81
+        },
+        {
+          "direction": "bearish",
+          "model": "Model_1",
+          "is_confirmed": false,
+          "range_high": null,
+          "range_low": null,
+          "tap1": 71092.9,
+          "tap2": 71461.67,
+          "tap3": 72024.14
+        }
+      ]
+    },
+    "ETHUSDT": {
+      "scan_duration_s": 39.5,
+      "current_price": 2023.8,
+      "htf_bias": "neutral",
+      "session": {
+        "timestamp": "2026-03-31T00:23:51.509946+00:00",
+        "active_session": "asia",
+        "multiplier": 1.05,
+        "is_manipulation_window": true
+      },
+      "total_forming": 5,
+      "qualifying_setup": null,
+      "gate_block_reason": "GATE_1A_NEUTRAL_BIAS",
+      "forming_schematics": [
+        {
+          "direction": "bullish",
+          "model": "Model_2_CONTINUATION",
+          "is_confirmed": false,
+          "range_high": null,
+          "range_low": null,
+          "tap1": 2048.51,
+          "tap2": 2041.19,
+          "tap3": 2048.51
+        },
+        {
+          "direction": "bearish",
+          "model": "Model_1",
+          "is_confirmed": false,
+          "range_high": null,
+          "range_low": null,
+          "tap1": 2004.65,
+          "tap2": 2007.42,
+          "tap3": 2009.12
+        },
+        {
+          "direction": "bullish",
+          "model": "Model_1",
+          "is_confirmed": false,
+          "range_high": null,
+          "range_low": null,
+          "tap1": 1992.55,
+          "tap2": 1989.46,
+          "tap3": 1984.05
+        },
+        {
+          "direction": "bullish",
+          "model": "Model_1_from_M2_failure",
+          "is_confirmed": false,
+          "range_high": null,
+          "range_low": null,
+          "tap1": 1992.55,
+          "tap2": 1989.46,
+          "tap3": 1984.05
+        },
+        {
+          "direction": "bullish",
+          "model": "Model_1",
+          "is_confirmed": false,
+          "range_high": null,
+          "range_low": null,
+          "tap1": 1991.84,
+          "tap2": 1989.46,
+          "tap3": 1984.05
+        }
+      ]
+    },
+    "SOLUSDT": {
+      "scan_duration_s": 33.0,
+      "current_price": 82.17,
+      "htf_bias": "neutral",
+      "session": {
+        "timestamp": "2026-03-31T00:24:24.501029+00:00",
+        "active_session": "asia",
+        "multiplier": 1.05,
+        "is_manipulation_window": true
+      },
+      "total_forming": 5,
+      "qualifying_setup": null,
+      "gate_block_reason": "GATE_1A_NEUTRAL_BIAS",
+      "forming_schematics": [
+        {
+          "direction": "bullish",
+          "model": "Model_1_CONTINUATION",
+          "is_confirmed": false,
+          "range_high": null,
+          "range_low": null,
+          "tap1": 83.35,
+          "tap2": 83.09,
+          "tap3": 82.68
+        },
+        {
+          "direction": "bullish",
+          "model": "Model_2_CONTINUATION",
+          "is_confirmed": false,
+          "range_high": null,
+          "range_low": null,
+          "tap1": 83.66,
+          "tap2": 83.59,
+          "tap3": 83.66
+        },
+        {
+          "direction": "bullish",
+          "model": "Model_2_CONTINUATION",
+          "is_confirmed": false,
+          "range_high": null,
+          "range_low": null,
+          "tap1": 83.66,
+          "tap2": 83.35,
+          "tap3": 83.59
+        },
+        {
+          "direction": "bearish",
+          "model": "Model_1_from_M2_failure",
+          "is_confirmed": false,
+          "range_high": null,
+          "range_low": null,
+          "tap1": 88.69,
+          "tap2": 92.22,
+          "tap3": 93.42
+        },
+        {
+          "direction": "bearish",
+          "model": "Model_1_CONTINUATION",
+          "is_confirmed": false,
+          "range_high": null,
+          "range_low": null,
+          "tap1": 92.19,
+          "tap2": 92.22,
+          "tap3": 92.95
+        }
+      ]
+    }
+  },
+  "errors": []
+}
