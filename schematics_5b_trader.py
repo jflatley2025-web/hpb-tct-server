@@ -2165,20 +2165,25 @@ class Schematics5BTrader:
                     ex.submit(fetch_candles_sync, symbol, tf, lim): tf
                     for tf, lim in all_tfs.items()
                 }
-                for future in as_completed(futures):
-                    tf = futures[future]
-                    try:
-                        df_result = future.result()
-                        if tf in active_mtf_tfs:
-                            mtf_dfs[tf] = df_result
-                        if tf in LTF_BOS_TIMEFRAMES:
-                            ltf_dfs[tf] = df_result
-                    except Exception as e:
-                        logger.warning(f"[5B] Fetch failed for {symbol}/{tf}: {e}")
-                        if tf in active_mtf_tfs:
-                            mtf_dfs[tf] = None
-                        if tf in LTF_BOS_TIMEFRAMES:
-                            ltf_dfs[tf] = None
+                try:
+                    for future in as_completed(futures, timeout=120):
+                        tf = futures[future]
+                        try:
+                            df_result = future.result(timeout=30)
+                            if tf in active_mtf_tfs:
+                                mtf_dfs[tf] = df_result
+                            if tf in LTF_BOS_TIMEFRAMES:
+                                ltf_dfs[tf] = df_result
+                        except Exception as e:
+                            logger.warning(f"[5B] Fetch failed for {symbol}/{tf}: {e}")
+                            if tf in active_mtf_tfs:
+                                mtf_dfs[tf] = None
+                            if tf in LTF_BOS_TIMEFRAMES:
+                                ltf_dfs[tf] = None
+                except TimeoutError:
+                    logger.error(f"[5B] Parallel candle fetch timed out for {symbol} — cancelling remaining futures")
+                    for f in futures:
+                        f.cancel()
 
             logger.info(f"[5B] parallel candle fetch done ({time.time()-_t0:.1f}s)")
             # Expose fetched MTF DataFrames so the caller can pass them to
