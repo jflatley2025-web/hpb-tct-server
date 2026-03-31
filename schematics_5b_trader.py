@@ -1741,6 +1741,26 @@ class Schematics5BTrader:
                     _5b_audit_log(_parity_entry)
                     _log_decision_parity(_parity_entry)
 
+                    # ── Trade-level INFO with v2 shadow ───────────────
+                    _td_stop = (schematic.get("stop_loss") or {}).get("price", 0)
+                    _td_tp1 = (schematic.get("target") or {}).get("price", 0)
+                    _td_rr = 0.0
+                    if candidate_price and _td_stop and _td_tp1:
+                        _td_sl_d = abs(candidate_price - _td_stop)
+                        if _td_sl_d > 0:
+                            _td_rr = abs(_td_tp1 - candidate_price) / _td_sl_d
+                    logger.info(
+                        "[5B] [%s] TRADE_EVAL HTF=%s Model=%s Decision=%s "
+                        "Entry=%.4f Stop=%.4f TP1=%.4f RR=%.2f "
+                        "v2_shadow=%s v2_failure=%s",
+                        best_symbol, best_htf_bias,
+                        evaluation.get("model", "unknown"),
+                        "V2_BLOCK" if _v2_blocks else "TAKE",
+                        candidate_price, _td_stop, _td_tp1, _td_rr,
+                        _v2_decision,
+                        _v2_result.get("failure_code") if _v2_result else "n/a",
+                    )
+
                     if _v2_blocks:
                         # v2 gate fired — trade blocked by unified engine
                         logger.info(
@@ -2214,6 +2234,27 @@ class Schematics5BTrader:
                         eval_result["htf_upgraded"] = True
 
                     tf_evals.append(eval_result)
+
+                    # ── Per-schematic INFO log (all pairs) ────────────
+                    _eval_model = eval_result.get("model", s.get("model", "unknown"))
+                    _eval_dir = eval_result.get("direction", "unknown")
+                    _eval_action = "PASS" if eval_result.get("pass") else "BLOCKED"
+                    _eval_entry = s.get("entry", {}).get("price", 0)
+                    _eval_stop = (s.get("stop_loss") or {}).get("price", 0)
+                    _eval_tp1 = (s.get("target") or {}).get("price", 0)
+                    _eval_rr = 0.0
+                    if _eval_entry and _eval_stop and _eval_tp1:
+                        _sl_d = abs(_eval_entry - _eval_stop)
+                        if _sl_d > 0:
+                            _eval_rr = abs(_eval_tp1 - _eval_entry) / _sl_d
+                    logger.info(
+                        "[5B] [%s] HTF=%s Model=%s Direction=%s Decision=%s "
+                        "Score=%d TF=%s Entry=%.4f Stop=%.4f TP1=%.4f RR=%.2f",
+                        symbol, htf_bias, _eval_model, _eval_dir, _eval_action,
+                        eval_result.get("score", 0), effective_tf,
+                        _eval_entry, _eval_stop, _eval_tp1, _eval_rr,
+                    )
+
                     # Gate metrics — _scan_lock is held so no race condition.
                     _fc = eval_result.get("failure_context")
                     _fc_map = {
