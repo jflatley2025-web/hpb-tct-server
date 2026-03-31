@@ -18674,11 +18674,13 @@ async def schematics_5b_auto_scan_loop():
                 # BTCUSDT only — no multi-symbol scanning.
                 # Cap each scan cycle at 90s; a hung thread would otherwise
                 # hold the lock and stall both auto-scan loops indefinitely.
+                # Timeout raised from 90s to 300s to accommodate multi-symbol
+                # scanning (3 symbols × ~40s each).
                 _scan_start = time.time()
                 logger.info("[5B-TRADE] Dispatching scan_and_trade to thread executor")
                 result = await asyncio.wait_for(
                     loop.run_in_executor(None, trader.scan_and_trade),
-                    timeout=90,
+                    timeout=300,
                 )
                 _scan_dur = time.time() - _scan_start
                 logger.info(f"[5B-TRADE] scan_and_trade returned in {_scan_dur:.1f}s")
@@ -18694,11 +18696,12 @@ async def schematics_5b_auto_scan_loop():
                 from tct_snapshot import tct_store
                 _5b_debug_raw = trader.last_debug if hasattr(trader, "last_debug") else {}
                 _5b_debug = convert_numpy_types(_5b_debug_raw)
-                _5b_htf_bias = _5b_debug.get("per_symbol", {}).get("BTCUSDT", {}).get("htf_bias")
+                _5b_best_symbol = _5b_debug.get("best_symbol", "BTCUSDT")
+                _5b_htf_bias = _5b_debug.get("per_symbol", {}).get(_5b_best_symbol, {}).get("htf_bias")
                 _5b_signal = _normalize_tct_signal(_5b_htf_bias) if action == "trade_entered" else "NO_TRADE"
 
                 # ── Extract gate data from best_setup evaluation ──
-                _5b_sym = _5b_debug.get("per_symbol", {}).get("BTCUSDT", {})
+                _5b_sym = _5b_debug.get("per_symbol", {}).get(_5b_best_symbol, {})
                 _5b_best_setup = _5b_sym.get("best_setup")
                 _5b_liq = None
                 _5b_mkt_struct = None
