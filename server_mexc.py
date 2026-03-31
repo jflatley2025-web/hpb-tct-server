@@ -16326,6 +16326,18 @@ async def schematics_5b_test_telegram():
     return {"ok": sent, "chat_id_prefix": chat_id[:6] + "…", "token_set": bool(token)}
 
 
+@app.get("/api/schematics-5b-trader/test-telegram-summary")
+async def schematics_5b_test_telegram_summary():
+    """Send a test status summary to Telegram."""
+    from schematics_5b_trader import get_5b_trader
+    trader = get_5b_trader()
+    try:
+        _send_telegram_status_summary(trader)
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 @app.get("/schematics-5B", response_class=HTMLResponse)
 async def schematics_5b_page():
     """
@@ -18667,6 +18679,8 @@ async def schematics_5b_auto_scan_loop():
     consecutive_errors = 0
     _last_github_push = time.time()
     GITHUB_PUSH_INTERVAL = 3600
+    _last_telegram_summary = time.time()
+    TELEGRAM_SUMMARY_INTERVAL = 34 * 60  # 34 minutes
 
     while True:
         try:
@@ -18879,7 +18893,69 @@ async def schematics_5b_auto_scan_loop():
             await loop.run_in_executor(None, github_push_5b_log, LOG_5B)
             _last_github_push = now
 
+        # ── Periodic Telegram summary (every 34 min) ──────────────────
+        if now - _last_telegram_summary >= TELEGRAM_SUMMARY_INTERVAL:
+            try:
+                _send_telegram_status_summary(trader)
+                _last_telegram_summary = now
+            except Exception as _tg_err:
+                logger.warning("[5B-TRADE] Telegram summary failed: %s", _tg_err)
+
         await asyncio.sleep(AUTO_SCAN_INTERVAL)
+
+
+def _send_telegram_status_summary(trader) -> None:
+    """Send a periodic status summary to Telegram with open trades and BTC HTF bias."""
+    from schematics_5b_trader import _telegram_5b_send
+
+    state = trader.state
+    snap = state.snapshot()
+
+    # BTC HTF bias from the trader's cache
+    btc_htf = trader._htf_bias_cache.get("BTCUSDT", "unknown")
+    btc_htf_icon = {"bullish": "\U0001f7e2", "bearish": "\U0001f534", "neutral": "\U0001f7e1"}.get(btc_htf, "\u2753")
+
+    # Open trade info
+    trade = snap.get("current_trade")
+    if trade:
+        direction = trade.get("direction", "?")
+        arrow = "\U0001f7e2 LONG" if direction == "bullish" else "\U0001f534 SHORT"
+        pnl_pct = trade.get("live_pnl_pct", 0) or 0
+        pnl_sign = "+" if pnl_pct >= 0 else ""
+        tp1_status = " (TP1 \u2713)" if trade.get("tp1_hit") else ""
+        trade_block = (
+            f"\n<b>Open Trade:</b> {arrow} {trade.get('symbol', 'BTCUSDT')} "
+            f"({trade.get('timeframe', '?')}) — {trade.get('model', '?')}\n"
+            f"  Entry: ${trade.get('entry_price', 0):,.2f}\n"
+            f"  Stop: ${trade.get('stop_price', 0):,.2f}\n"
+            f"  Target: ${trade.get('target_price', 0):,.2f}\n"
+            f"  P&amp;L: {pnl_sign}{pnl_pct:.2f}%{tp1_status}\n"
+        )
+    else:
+        trade_block = "\n<b>Open Trade:</b> None — scanning for setups\n"
+
+    # Account summary
+    balance = snap.get("balance", 0)
+    pnl_total = snap.get("pnl_total", 0)
+    pnl_pct_total = snap.get("pnl_pct", 0)
+    wins = snap.get("wins", 0)
+    losses = snap.get("losses", 0)
+    total = snap.get("total_trades", 0)
+
+    text = (
+        f"\U0001f4ca <b>5B Status Summary</b>\n"
+        f"\n"
+        f"{btc_htf_icon} <b>BTC HTF Bias:</b> {btc_htf.upper()}\n"
+        f"{trade_block}\n"
+        f"<b>Account:</b>\n"
+        f"  Balance: ${balance:,.2f}\n"
+        f"  Total P&amp;L: {'+'if pnl_total>=0 else ''}{pnl_pct_total:.2f}% "
+        f"({'+'if pnl_total>=0 else ''}${pnl_total:,.2f})\n"
+        f"  Record: {wins}W / {losses}L ({total} trades)\n"
+    )
+
+    _telegram_5b_send(text)
+
 
 # ================================================================
 # TCT SNAPSHOT AUDIT LAYER — API + DASHBOARD
