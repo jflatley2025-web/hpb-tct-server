@@ -529,7 +529,7 @@ def decide(
             logger.debug("HTF bias error on %s: %s", htf_candidate, e)
             continue
 
-    gate_1a_pass: bool = htf_bias != "neutral"
+    gate_1a_pass: bool = htf_bias in ("bullish", "bearish")
 
     # ── Run 29: BTC HTF Anchor Bias ───────────────────────────────
     # Mirrors the same pivot → classify_trend logic used for Gate 1A.

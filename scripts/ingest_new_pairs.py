@@ -86,8 +86,14 @@ def main():
             results[symbol] = {"status": "ok", "rows": rows}
             logger.info("Ingestion complete for %s: %d rows", symbol, rows)
         except Exception as e:
-            logger.error("FAILED ingestion for %s: %s", symbol, e, exc_info=True)
+            logger.exception("FAILED ingestion for %s", symbol)
             results[symbol] = {"status": "error", "error": str(e)}
+            # Reset the connection so the next symbol doesn't fail with
+            # InFailedSqlTransaction from a lingering aborted transaction.
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             # Continue with remaining pairs per requirement #8
 
     conn.close()

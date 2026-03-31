@@ -133,6 +133,12 @@ class TestHTFModelDirectionGate:
         assert result["decision"] == "PASS"
         assert result["failure_code"] == "FAIL_1A_BIAS"
 
+    def test_ranging_htf_blocked_by_1a_not_1ab(self):
+        """Ranging HTF → treated as non-directional, blocked by Gate 1A, not 1A-b."""
+        result = _call_decide("ranging", "bullish", "Model_1")
+        assert result["decision"] == "PASS"
+        assert result["failure_code"] == "FAIL_1A_BIAS"
+
     def test_bullish_htf_blocks_bearish_continuation(self):
         """Bullish HTF + bearish CONTINUATION → FAIL_HTF_MODEL_DIRECTION."""
         result = _call_decide("bullish", "bearish", "CONTINUATION")
@@ -154,6 +160,23 @@ class TestHTFModelDirectionGate:
         """Bullish HTF + bullish Model_1_from_M2_failure → allowed."""
         result = _call_decide("bullish", "bullish", "Model_1_from_M2_failure")
         assert result.get("failure_code") != "FAIL_HTF_MODEL_DIRECTION"
+
+    def test_accumulation_direction_treated_as_non_matching(self):
+        """Direction='accumulation' (range-level label) would be blocked by 1A-b.
+
+        Confirmed schematics always use 'bullish'/'bearish' — this test
+        documents that non-binary direction strings do NOT match HTF bias
+        values and would be correctly blocked if they ever leaked through.
+        """
+        result = _call_decide("bullish", "accumulation", "Model_1")
+        assert result["decision"] == "PASS"
+        assert result["failure_code"] == "FAIL_HTF_MODEL_DIRECTION"
+
+    def test_distribution_direction_treated_as_non_matching(self):
+        """Symmetric test: 'distribution' direction does not match bearish HTF."""
+        result = _call_decide("bearish", "distribution", "Model_2")
+        assert result["decision"] == "PASS"
+        assert result["failure_code"] == "FAIL_HTF_MODEL_DIRECTION"
 
 
 class TestRolloutFraction:

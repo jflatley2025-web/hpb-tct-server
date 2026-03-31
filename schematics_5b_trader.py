@@ -84,6 +84,17 @@ def fetch_live_price(symbol: str = "BTCUSDT"):
 
 logger = logging.getLogger("Schematics5B")
 
+
+def _compute_rr(entry: float, stop: float, target: float) -> float:
+    """Compute reward-to-risk ratio from price levels. Returns 0.0 on invalid inputs."""
+    if not entry or not stop or not target:
+        return 0.0
+    sl_dist = abs(entry - stop)
+    if sl_dist == 0:
+        return 0.0
+    return abs(target - entry) / sl_dist
+
+
 # ================================================================
 # CONFIGURATION
 # ================================================================
@@ -1744,11 +1755,7 @@ class Schematics5BTrader:
                     # ── Trade-level INFO with v2 shadow ───────────────
                     _td_stop = (schematic.get("stop_loss") or {}).get("price", 0)
                     _td_tp1 = (schematic.get("target") or {}).get("price", 0)
-                    _td_rr = 0.0
-                    if candidate_price and _td_stop and _td_tp1:
-                        _td_sl_d = abs(candidate_price - _td_stop)
-                        if _td_sl_d > 0:
-                            _td_rr = abs(_td_tp1 - candidate_price) / _td_sl_d
+                    _td_rr = _compute_rr(candidate_price, _td_stop, _td_tp1)
                     logger.info(
                         "[5B] [%s] TRADE_EVAL HTF=%s Model=%s Decision=%s "
                         "Entry=%.4f Stop=%.4f TP1=%.4f RR=%.2f "
@@ -2242,11 +2249,7 @@ class Schematics5BTrader:
                     _eval_entry = s.get("entry", {}).get("price", 0)
                     _eval_stop = (s.get("stop_loss") or {}).get("price", 0)
                     _eval_tp1 = (s.get("target") or {}).get("price", 0)
-                    _eval_rr = 0.0
-                    if _eval_entry and _eval_stop and _eval_tp1:
-                        _sl_d = abs(_eval_entry - _eval_stop)
-                        if _sl_d > 0:
-                            _eval_rr = abs(_eval_tp1 - _eval_entry) / _sl_d
+                    _eval_rr = _compute_rr(_eval_entry, _eval_stop, _eval_tp1)
                     logger.info(
                         "[5B] [%s] HTF=%s Model=%s Direction=%s Decision=%s "
                         "Score=%d TF=%s Entry=%.4f Stop=%.4f TP1=%.4f RR=%.2f",
