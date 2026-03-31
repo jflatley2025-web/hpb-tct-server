@@ -1650,7 +1650,7 @@ class Schematics5BTrader:
             # 5. Enter trade on highest-scoring qualifying setup.
             if best_setup:
                 schematic, evaluation = best_setup
-                entry_info = schematic.get("entry", {})
+                entry_info = schematic.get("entry") or {}
                 candidate_price = entry_info.get("price", best_current_price)
 
                 # Re-evaluate RIG with the actual schematic range (more precise)

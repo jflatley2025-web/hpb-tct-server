@@ -18673,7 +18673,7 @@ async def schematics_5b_auto_scan_loop():
                 loop = asyncio.get_event_loop()
                 # Cap each scan cycle so a hung thread doesn't hold the lock
                 # and stall both auto-scan loops indefinitely.
-                # 12 symbols × ~50s each = ~600s worst case.
+                # 12 symbols x ~50s each = ~600s worst case.
                 _scan_start = time.time()
                 logger.info("[5B-TRADE] Dispatching scan_and_trade to thread executor")
                 result = await asyncio.wait_for(
