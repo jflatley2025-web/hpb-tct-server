@@ -1542,20 +1542,19 @@ class Schematics5BTrader:
             # When USE_UNIFIED_ENGINE=True, v2's 3-tier DD protection (hard block /
             # soft throttle / clear) is authoritative. Persist its outputs so the
             # next cycle receives accurate DD context.
+            # IMPORTANT: always persist including explicit None — v2 returns
+            # new_trough=None and new_dd_protection_triggered_at=None on DD
+            # recovery to signal "clear the state."  Guarding on `is not None`
+            # would leave stale hard-block state and prevent recovery.
             if _USE_V2 and _v2_result is not None:
-                _v2_new_peak = _v2_result.get("new_peak")
-                _v2_new_trough = _v2_result.get("new_trough")
+                self.state.peak_balance = _v2_result.get("new_peak") or self.state.peak_balance
+                self.state.dd_trough_balance = _v2_result.get("new_trough")  # None = cleared
                 _v2_new_dd_ts = _v2_result.get("new_dd_protection_triggered_at")
-                if _v2_new_peak is not None:
-                    self.state.peak_balance = _v2_new_peak
-                if _v2_new_trough is not None:
-                    self.state.dd_trough_balance = _v2_new_trough
-                if _v2_new_dd_ts is not None and self.state.dd_triggered_at is None:
-                    self.state.dd_triggered_at = (
-                        _v2_new_dd_ts.isoformat()
-                        if isinstance(_v2_new_dd_ts, datetime)
-                        else str(_v2_new_dd_ts)
-                    )
+                self.state.dd_triggered_at = (
+                    _v2_new_dd_ts.isoformat()
+                    if isinstance(_v2_new_dd_ts, datetime)
+                    else (str(_v2_new_dd_ts) if _v2_new_dd_ts is not None else None)
+                )
                 self.state.save()
 
             # 3. RIG: Build real MSCE context and evaluate globally.
