@@ -16042,6 +16042,15 @@ async def schematics_5b_scan():
     return convert_numpy_types(result)
 
 
+@app.get("/api/schematics-5b-trader/force-unlock")
+async def schematics_5b_force_unlock():
+    """Force-release a stuck scan lock (safety valve for zombie threads)."""
+    from schematics_5b_trader import get_5b_trader
+    trader = get_5b_trader()
+    released = trader.force_release_scan_lock(max_age_seconds=0)
+    return {"released": released}
+
+
 @app.get("/api/schematics-5b-trader/state")
 async def schematics_5b_state():
     """Return current 5B trading state for the dashboard."""
@@ -18685,6 +18694,14 @@ async def schematics_5b_auto_scan_loop():
 
             action = result.get("action", "unknown")
             ts = result.get("timestamp", "")
+
+            # If the scan couldn't run because the lock is stuck, try to
+            # force-release it so the *next* cycle can proceed.
+            if action == "scan_in_progress":
+                held = (result.get("details") or {}).get("held_seconds")
+                if held and held > 900:
+                    logger.warning("[5B-TRADE] Scan lock held %ds — force-releasing", held)
+                    trader.force_release_scan_lock(max_age_seconds=900)
 
             # Attach MSCE context to the result for dashboard visibility
             result["msce"] = msce

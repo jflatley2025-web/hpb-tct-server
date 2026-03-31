@@ -1188,7 +1188,10 @@ class Schematics5BTrader:
         # cancels the *await* but cannot kill the executor thread, so a
         # timed-out scan keeps running while the loop dispatches a new one.
         # This lock ensures only one thread mutates state at a time.
+        # _scan_lock_acquired_at tracks when the lock was taken so callers
+        # can force-release a zombie lock after a timeout (see force_release_scan_lock).
         self._scan_lock = threading.Lock()
+        self._scan_lock_acquired_at: Optional[float] = None
 
         # ── Issue 5: portfolio layer ───────────────────────────────────
         # Equity is synced from self.state.balance before every can_open_trade()
@@ -1394,17 +1397,49 @@ class Schematics5BTrader:
         this call returns immediately with action="scan_in_progress".
         """
         if not self._scan_lock.acquire(blocking=False):
-            logger.warning("[5B] scan_and_trade skipped — previous scan still in progress")
+            held_for = (time.time() - self._scan_lock_acquired_at
+                        if self._scan_lock_acquired_at else None)
+            logger.warning(
+                "[5B] scan_and_trade skipped — previous scan still in progress"
+                " (held %.0fs)" % (held_for or 0,))
             return {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "action": "scan_in_progress",
-                "details": {"reason": "Previous scan cycle still running"},
+                "details": {
+                    "reason": "Previous scan cycle still running",
+                    "held_seconds": round(held_for) if held_for else None,
+                },
             }
 
+        self._scan_lock_acquired_at = time.time()
         try:
             return self._scan_and_trade_locked()
         finally:
+            self._scan_lock_acquired_at = None
             self._scan_lock.release()
+
+    def force_release_scan_lock(self, max_age_seconds: float = 900) -> bool:
+        """Force-release _scan_lock if it has been held longer than max_age_seconds.
+
+        Returns True if the lock was force-released, False otherwise.
+        This is a safety valve for zombie threads left behind by asyncio.wait_for
+        cancelling the executor wrapper while the thread keeps running.
+        """
+        acquired_at = self._scan_lock_acquired_at
+        if acquired_at is None:
+            return False
+        held_for = time.time() - acquired_at
+        if held_for < max_age_seconds:
+            return False
+        logger.warning(
+            "[5B] Force-releasing _scan_lock held for %.0fs (limit %.0fs)",
+            held_for, max_age_seconds)
+        try:
+            self._scan_lock.release()
+        except RuntimeError:
+            pass  # already released
+        self._scan_lock_acquired_at = None
+        return True
 
     def _scan_and_trade_locked(self) -> Dict:
         """Actual scan logic, called only while self._scan_lock is held."""
