@@ -1657,7 +1657,7 @@ class Schematics5BTrader:
                     cycle_result["action"] = "rig_blocked"
                     cycle_result["details"] = {
                         "price": best_current_price,
-                        "symbol": DEFAULT_SYMBOL,
+                        "symbol": best_symbol,
                         "rig_status": rig_result.get("status"),
                         "rig_reason": rig_result.get("reason"),
                         "displacement": rig_result.get("displacement"),
@@ -1666,7 +1666,7 @@ class Schematics5BTrader:
                     cycle_result["action"] = "duplicate_setup_skipped"
                     cycle_result["details"] = {
                         "price": best_current_price,
-                        "symbol": DEFAULT_SYMBOL,
+                        "symbol": best_symbol,
                         "skipped_entry": candidate_price,
                         "reason": "Same setup as recent trade — cooldown active",
                     }
@@ -1687,7 +1687,7 @@ class Schematics5BTrader:
                     _parity_entry = {
                         "type": "decision_parity",
                         "timestamp": cycle_result["timestamp"],
-                        "symbol": DEFAULT_SYMBOL,
+                        "symbol": best_symbol,
                         "timeframe": best_tf,
                         "model": evaluation.get("model", "unknown"),
                         # Decision comparison
@@ -1731,7 +1731,7 @@ class Schematics5BTrader:
                         cycle_result["action"] = "v2_gate_blocked"
                         cycle_result["details"] = {
                             "price": best_current_price,
-                            "symbol": DEFAULT_SYMBOL,
+                            "symbol": best_symbol,
                             "legacy_would_take": True,
                             "v2_decision": _v2_decision,
                             "v2_failure_code": _v2_result.get("failure_code"),
@@ -1904,7 +1904,7 @@ class Schematics5BTrader:
                                     if self._portfolio is not None:
                                         _pm_open_position(
                                             self._portfolio,
-                                            symbol=DEFAULT_SYMBOL,
+                                            symbol=best_symbol,
                                             direction=evaluation["direction"],
                                             notional_risk=trade.get("risk_amount", 0.0),
                                             entry_price=trade.get("entry_price", 0.0),
@@ -1923,7 +1923,7 @@ class Schematics5BTrader:
                         _v2_result.get("score"),
                     )
                     _5b_audit_log({
-                        "symbol": DEFAULT_SYMBOL,
+                        "symbol": best_symbol,
                         "timestamp": cycle_result["timestamp"],
                         "legacy_decision": "PASS",
                         "v2_decision": "TAKE",
