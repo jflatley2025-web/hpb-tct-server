@@ -87,7 +87,8 @@ logger = logging.getLogger("Schematics5B")
 # ================================================================
 # CONFIGURATION
 # ================================================================
-SYMBOL = "BTCUSDT"
+TRADING_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+DEFAULT_SYMBOL = "BTCUSDT"  # backward-compat fallback for single-symbol contexts
 STARTING_BALANCE = 5000.0
 RISK_PER_TRADE_PCT = 1.0  # 1% of balance per trade
 DEFAULT_LEVERAGE = 10
@@ -1211,7 +1212,7 @@ class Schematics5BTrader:
                 if _ct_risk is not None and _ct_risk > 0:
                     _pm_open_position(
                         self._portfolio,
-                        symbol=_ct.get("symbol", SYMBOL),
+                        symbol=_ct.get("symbol", DEFAULT_SYMBOL),
                         direction=_ct.get("direction", "bullish"),
                         notional_risk=_ct_risk,
                         entry_price=float(_ct["entry_price"]),
@@ -1222,7 +1223,7 @@ class Schematics5BTrader:
                     logger.info(
                         "[5B] Portfolio layer: reconstructed open position "
                         "from current_trade (symbol=%s risk=$%.2f)",
-                        _ct.get("symbol", SYMBOL), _ct_risk,
+                        _ct.get("symbol", DEFAULT_SYMBOL), _ct_risk,
                     )
             logger.info(
                 "[5B] Portfolio layer ENABLED — %s",
@@ -1400,7 +1401,8 @@ class Schematics5BTrader:
         try:
             # 1. Manage open trade first
             if self.state.current_trade:
-                df_price = fetch_candles_sync(SYMBOL, "1m", 10)
+                _trade_sym = self.state.current_trade.get("symbol", DEFAULT_SYMBOL)
+                df_price = fetch_candles_sync(_trade_sym, "1m", 10)
                 if df_price is None or len(df_price) == 0:
                     self.state.last_error = "Could not fetch price data"
                     self.state.save()
@@ -1417,32 +1419,54 @@ class Schematics5BTrader:
                 self.state.save()
                 return cycle_result
 
-            # 2. Scan BTCUSDT for qualifying TCT setups.
+            # 2. Scan all trading symbols for qualifying TCT setups.
             # Snapshot mode here (under _scan_lock) so the entire scan cycle uses
             # one consistent evaluator even if set_mode() is called concurrently.
             scan_mode = self.state.trading_mode
             scan_tfs = ["4h"] if scan_mode == "jack" else None
-            sym_result = self._scan_single_symbol(SYMBOL, mode=scan_mode, timeframes=scan_tfs)
-            best_setup = sym_result.get("best_setup")
-            best_score = sym_result.get("best_score", 0)
-            best_tf = sym_result.get("best_tf")
-            best_current_price = sym_result.get("current_price", 0.0)
-            best_htf_bias = sym_result.get("htf_bias", "neutral")
-            all_forming = sym_result.get("forming", [])
-            all_forming_ranges = sym_result.get("forming_all_ranges", [])
+
+            best_setup = None
+            best_score = 0
+            best_tf = None
+            best_current_price = 0.0
+            best_htf_bias = "neutral"
+            best_symbol = DEFAULT_SYMBOL
+            all_forming = []
+            all_forming_ranges = []
+            all_symbol_results: Dict[str, Dict] = {}
+
+            for _sym in TRADING_SYMBOLS:
+                sym_result = self._scan_single_symbol(_sym, mode=scan_mode, timeframes=scan_tfs)
+                all_symbol_results[_sym] = sym_result
+                sym_best = sym_result.get("best_setup")
+                sym_score = sym_result.get("best_score", 0)
+                if sym_best and sym_score > best_score:
+                    best_setup = sym_best
+                    best_score = sym_score
+                    best_tf = sym_result.get("best_tf")
+                    best_current_price = sym_result.get("current_price", 0.0)
+                    best_htf_bias = sym_result.get("htf_bias", "neutral")
+                    best_symbol = _sym
+                all_forming.extend(sym_result.get("forming", []))
+                all_forming_ranges.extend(sym_result.get("forming_all_ranges", []))
+
+            # If no setup found, use the first symbol's price for debug display
+            if best_current_price == 0.0 and all_symbol_results:
+                _first = all_symbol_results.get(DEFAULT_SYMBOL) or next(iter(all_symbol_results.values()))
+                best_current_price = _first.get("current_price", 0.0)
 
             with self._lock:
                 self.last_debug = {
                     "timestamp": cycle_result["timestamp"],
                     "trading_mode": scan_mode,
-                    "symbols_scanned": [SYMBOL],
+                    "symbols_scanned": list(TRADING_SYMBOLS),
                     "current_price": best_current_price,
-                    "best_symbol": SYMBOL,
+                    "best_symbol": best_symbol,
                     "best_tf": best_tf,
                     "best_score": best_score,
                     "htf_cascade_active": True,
                     "forming_schematics": all_forming[:5],
-                    "per_symbol": {SYMBOL: sym_result},
+                    "per_symbol": all_symbol_results,
                     # Lifetime gate-block counters (since process start).
                     "gate_metrics": dict(self._gate_metrics),
                 }
@@ -1472,7 +1496,8 @@ class Schematics5BTrader:
             if _v2_available:
                 # Pass all fetched MTF candles (1d/4h/1h/30m) — decide() skips
                 # TFs with insufficient data so missing 15m is handled gracefully.
-                _candles_by_tf = dict(sym_result.get("mtf_dfs") or {})
+                _best_sym_result = all_symbol_results.get(best_symbol, {})
+                _candles_by_tf = dict(_best_sym_result.get("mtf_dfs") or {})
                 # Guard the ISO timestamp parse — persisted state can be malformed if the
                 # trade log was manually edited or written by an older version of the bot.
                 # A bad value degrades to None (no prior hard-block trigger known).
@@ -1632,7 +1657,7 @@ class Schematics5BTrader:
                     cycle_result["action"] = "rig_blocked"
                     cycle_result["details"] = {
                         "price": best_current_price,
-                        "symbol": SYMBOL,
+                        "symbol": best_symbol,
                         "rig_status": rig_result.get("status"),
                         "rig_reason": rig_result.get("reason"),
                         "displacement": rig_result.get("displacement"),
@@ -1641,7 +1666,7 @@ class Schematics5BTrader:
                     cycle_result["action"] = "duplicate_setup_skipped"
                     cycle_result["details"] = {
                         "price": best_current_price,
-                        "symbol": SYMBOL,
+                        "symbol": best_symbol,
                         "skipped_entry": candidate_price,
                         "reason": "Same setup as recent trade — cooldown active",
                     }
@@ -1662,7 +1687,7 @@ class Schematics5BTrader:
                     _parity_entry = {
                         "type": "decision_parity",
                         "timestamp": cycle_result["timestamp"],
-                        "symbol": SYMBOL,
+                        "symbol": best_symbol,
                         "timeframe": best_tf,
                         "model": evaluation.get("model", "unknown"),
                         # Decision comparison
@@ -1706,7 +1731,7 @@ class Schematics5BTrader:
                         cycle_result["action"] = "v2_gate_blocked"
                         cycle_result["details"] = {
                             "price": best_current_price,
-                            "symbol": SYMBOL,
+                            "symbol": best_symbol,
                             "legacy_would_take": True,
                             "v2_decision": _v2_decision,
                             "v2_failure_code": _v2_result.get("failure_code"),
@@ -1828,7 +1853,7 @@ class Schematics5BTrader:
                                     self.state.balance * (RISK_PER_TRADE_PCT / 100) * _dd_mult
                                 )
                                 _pm_result = _pm_can_open_trade(
-                                    SYMBOL, _base_risk, self._portfolio
+                                    best_symbol, _base_risk, self._portfolio
                                 )
                                 if not _pm_result["allowed"]:
                                     logger.info(
@@ -1854,7 +1879,7 @@ class Schematics5BTrader:
                             if not _compress_block and not _portfolio_block:
                                 trade = self._enter_trade(
                                     schematic, evaluation, best_current_price, best_htf_bias,
-                                    SYMBOL, best_tf,
+                                    best_symbol, best_tf,
                                     risk_multiplier=_dd_mult * _pm_scaling,
                                 )
                                 if trade.get("error"):
@@ -1879,7 +1904,7 @@ class Schematics5BTrader:
                                     if self._portfolio is not None:
                                         _pm_open_position(
                                             self._portfolio,
-                                            symbol=SYMBOL,
+                                            symbol=best_symbol,
                                             direction=evaluation["direction"],
                                             notional_risk=trade.get("risk_amount", 0.0),
                                             entry_price=trade.get("entry_price", 0.0),
@@ -1898,7 +1923,7 @@ class Schematics5BTrader:
                         _v2_result.get("score"),
                     )
                     _5b_audit_log({
-                        "symbol": SYMBOL,
+                        "symbol": best_symbol,
                         "timestamp": cycle_result["timestamp"],
                         "legacy_decision": "PASS",
                         "v2_decision": "TAKE",
@@ -1915,10 +1940,10 @@ class Schematics5BTrader:
 
                 cycle_result["action"] = "no_qualifying_setups"
                 cycle_result["details"] = {
-                    "symbols": [SYMBOL],
+                    "symbols": list(TRADING_SYMBOLS),
                     "best_score": best_score,
+                    "best_symbol": best_symbol,
                     "htf_bias": best_htf_bias,
-                    "error": sym_result.get("error"),
                 }
 
             self.state.last_scan_time = cycle_result["timestamp"]
@@ -2298,7 +2323,7 @@ class Schematics5BTrader:
     # ----------------------------------------------------------------
 
     def _enter_trade(self, schematic: Dict, evaluation: Dict, current_price: float, htf_bias: str,
-                     symbol: str = SYMBOL, timeframe: str = "unknown",
+                     symbol: str = DEFAULT_SYMBOL, timeframe: str = "unknown",
                      risk_multiplier: float = 1.0) -> Dict:
         """
         Open a new trade.
@@ -2516,7 +2541,7 @@ class Schematics5BTrader:
 
         # ── Issue 5: deregister from portfolio on close ────────────────
         if self._portfolio is not None:
-            _pm_close_position(self._portfolio, trade.get("symbol", SYMBOL))
+            _pm_close_position(self._portfolio, trade.get("symbol", DEFAULT_SYMBOL))
 
         # Issue 3: update peak on every close; clear all DD state on new equity high
         if self.state.balance > self.state.peak_balance:
@@ -2581,7 +2606,7 @@ class Schematics5BTrader:
     def force_close(self) -> Dict:
         if not self.state.current_trade:
             return {"action": "no_trade"}
-        trade_sym = self.state.current_trade.get("symbol", SYMBOL)
+        trade_sym = self.state.current_trade.get("symbol", DEFAULT_SYMBOL)
         price = fetch_live_price(trade_sym)
         if not price:
             return {"action": "error", "details": "Could not fetch live price"}
