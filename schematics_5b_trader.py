@@ -84,10 +84,26 @@ def fetch_live_price(symbol: str = "BTCUSDT"):
 
 logger = logging.getLogger("Schematics5B")
 
+
+def _compute_rr(entry: float, stop: float, target: float) -> float:
+    """Compute reward-to-risk ratio from price levels. Returns 0.0 on invalid inputs."""
+    if not entry or not stop or not target:
+        return 0.0
+    sl_dist = abs(entry - stop)
+    if sl_dist == 0:
+        return 0.0
+    return abs(target - entry) / sl_dist
+
+
 # ================================================================
 # CONFIGURATION
 # ================================================================
-TRADING_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+TRADING_SYMBOLS = [
+    "BTCUSDT", "ETHUSDT", "SOLUSDT",
+    # ── New pairs (added 2026-03-31) ──
+    "BCHUSDT", "WIFUSDT", "DOGEUSDT", "HBARUSDT", "FETUSDT",
+    "XMRUSDT", "FARTCOINUSDT", "PEPEUSDT", "XRPUSDT",
+]
 DEFAULT_SYMBOL = "BTCUSDT"  # backward-compat fallback for single-symbol contexts
 STARTING_BALANCE = 5000.0
 RISK_PER_TRADE_PCT = 1.0  # 1% of balance per trade
@@ -1736,6 +1752,22 @@ class Schematics5BTrader:
                     _5b_audit_log(_parity_entry)
                     _log_decision_parity(_parity_entry)
 
+                    # ── Trade-level INFO with v2 shadow ───────────────
+                    _td_stop = (schematic.get("stop_loss") or {}).get("price", 0)
+                    _td_tp1 = (schematic.get("target") or {}).get("price", 0)
+                    _td_rr = _compute_rr(candidate_price, _td_stop, _td_tp1)
+                    logger.info(
+                        "[5B] [%s] TRADE_EVAL HTF=%s Model=%s Decision=%s "
+                        "Entry=%.4f Stop=%.4f TP1=%.4f RR=%.2f "
+                        "v2_shadow=%s v2_failure=%s",
+                        best_symbol, best_htf_bias,
+                        evaluation.get("model", "unknown"),
+                        "V2_BLOCK" if _v2_blocks else "TAKE",
+                        candidate_price, _td_stop, _td_tp1, _td_rr,
+                        _v2_decision,
+                        _v2_result.get("failure_code") if _v2_result else "n/a",
+                    )
+
                     if _v2_blocks:
                         # v2 gate fired — trade blocked by unified engine
                         logger.info(
@@ -2209,6 +2241,23 @@ class Schematics5BTrader:
                         eval_result["htf_upgraded"] = True
 
                     tf_evals.append(eval_result)
+
+                    # ── Per-schematic INFO log (all pairs) ────────────
+                    _eval_model = eval_result.get("model", s.get("model", "unknown"))
+                    _eval_dir = eval_result.get("direction", "unknown")
+                    _eval_action = "PASS" if eval_result.get("pass") else "BLOCKED"
+                    _eval_entry = s.get("entry", {}).get("price", 0)
+                    _eval_stop = (s.get("stop_loss") or {}).get("price", 0)
+                    _eval_tp1 = (s.get("target") or {}).get("price", 0)
+                    _eval_rr = _compute_rr(_eval_entry, _eval_stop, _eval_tp1)
+                    logger.info(
+                        "[5B] [%s] HTF=%s Model=%s Direction=%s Decision=%s "
+                        "Score=%d TF=%s Entry=%.4f Stop=%.4f TP1=%.4f RR=%.2f",
+                        symbol, htf_bias, _eval_model, _eval_dir, _eval_action,
+                        eval_result.get("score", 0), effective_tf,
+                        _eval_entry, _eval_stop, _eval_tp1, _eval_rr,
+                    )
+
                     # Gate metrics — _scan_lock is held so no race condition.
                     _fc = eval_result.get("failure_context")
                     _fc_map = {

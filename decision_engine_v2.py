@@ -12,6 +12,7 @@ Gate pipeline (in order):
   ELIF chain:
     RIG          → FAIL_RIG_COUNTER_BIAS      (range integrity, counter-bias block)
     1A           → FAIL_1A_BIAS               (HTF market structure bias)
+    1A-b         → FAIL_HTF_MODEL_DIRECTION   (HTF bias ↔ model direction mismatch)
     RCM          → FAIL_RCM_DURATION          (range context / quality gate)
     RR global    → FAIL_RR_FILTER             (minimum R:R for any signal)
     DD soft      → FAIL_DD_PROTECTION         (drawdown protection, optional)
@@ -120,7 +121,7 @@ USE_UNIFIED_ENGINE = True
 #
 # 0.1  → 10% canary (default; use during initial activation)
 # 1.0  → full rollout (set after canary period passes)
-ROLLOUT_FRACTION = 1.0
+ROLLOUT_FRACTION = 0.1
 
 
 def should_use_v2() -> bool:
@@ -528,7 +529,7 @@ def decide(
             logger.debug("HTF bias error on %s: %s", htf_candidate, e)
             continue
 
-    gate_1a_pass: bool = htf_bias != "neutral"
+    gate_1a_pass: bool = htf_bias in ("bullish", "bearish")
 
     # ── Run 29: BTC HTF Anchor Bias ───────────────────────────────
     # Mirrors the same pivot → classify_trend logic used for Gate 1A.
@@ -758,6 +759,21 @@ def decide(
                 final_decision = "PASS"
                 skip_reason = "NO_HTF_BIAS"
                 failure_code = "FAIL_1A_BIAS"
+
+            # ── 1A-b: HTF bias → model direction alignment ───────
+            # When HTF bias is directional, only allow models whose
+            # direction matches:
+            #   Bullish HTF → Accumulation only (direction=bullish)
+            #   Bearish HTF → Distribution only (direction=bearish)
+            # Neutral HTF already blocked above (1A). CONTINUATION
+            # models must also align with HTF direction.
+            elif gate_1a_pass and htf_bias in ("bullish", "bearish") and direction != htf_bias:
+                final_decision = "PASS"
+                skip_reason = (
+                    f"HTF_MODEL_MISMATCH (htf={htf_bias}, "
+                    f"direction={direction}, model={model})"
+                )
+                failure_code = "FAIL_HTF_MODEL_DIRECTION"
 
             # ── Run 29: BTC Anchor Gate ───────────────────────────
             # Hard gate: trade direction must align with BTC HTF bias.
