@@ -87,7 +87,12 @@ logger = logging.getLogger("Schematics5B")
 # ================================================================
 # CONFIGURATION
 # ================================================================
-TRADING_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+TRADING_SYMBOLS = [
+    "BTCUSDT", "ETHUSDT", "SOLUSDT",
+    # ── New pairs (added 2026-03-31) ──
+    "BCHUSDT", "WIFUSDT", "DOGEUSDT", "HBARUSDT", "FETUSDT",
+    "XMRUSDT", "FARTCOINUSDT", "PEPEUSDT", "XRPUSDT",
+]
 DEFAULT_SYMBOL = "BTCUSDT"  # backward-compat fallback for single-symbol contexts
 STARTING_BALANCE = 5000.0
 RISK_PER_TRADE_PCT = 1.0  # 1% of balance per trade

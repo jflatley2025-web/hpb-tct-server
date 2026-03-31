@@ -47,6 +47,15 @@ _SYMBOL_MAP = {
     "BTCUSDT": "BTCUSDT",
     "ETHUSDT": "ETHUSDT",
     "SOLUSDT": "SOLUSDT",
+    "BCHUSDT": "BCHUSDT",
+    "WIFUSDT": "WIFUSDT",
+    "DOGEUSDT": "DOGEUSDT",
+    "HBARUSDT": "HBARUSDT",
+    "FETUSDT": "FETUSDT",
+    "XMRUSDT": "XMRUSDT",
+    "FARTCOINUSDT": "FARTCOINUSDT",
+    "PEPEUSDT": "PEPEUSDT",
+    "XRPUSDT": "XRPUSDT",
 }
 
 # Map TCT / MEXC timeframe strings → MoonDev interval strings.
@@ -74,6 +83,15 @@ _PRICE_TICKER_MAP = {
     "BTCUSDT": "BTC",
     "ETHUSDT": "ETH",
     "SOLUSDT": "SOL",
+    "BCHUSDT": "BCH",
+    "WIFUSDT": "WIF",
+    "DOGEUSDT": "DOGE",
+    "HBARUSDT": "HBAR",
+    "FETUSDT": "FET",
+    "XMRUSDT": "XMR",
+    "FARTCOINUSDT": "FARTCOIN",
+    "PEPEUSDT": "PEPE",
+    "XRPUSDT": "XRP",
 }
 
 
