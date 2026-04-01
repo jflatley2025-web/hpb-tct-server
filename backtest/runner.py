@@ -394,7 +394,11 @@ def check_trade_exit(
     if sl_hit and tp_hit:
         # Worst case: SL first
         if trade.tp1_hit:
-            return "breakeven_after_tp1", trade.stop_price
+            # Distinguish true breakeven (stop ≈ entry) from trailed stop
+            if abs(trade.stop_price - trade.effective_entry) < 0.01:
+                return "breakeven_after_tp1", trade.stop_price
+            else:
+                return "trailing_stop", trade.stop_price
         return "stop_hit", trade.stop_price
 
     if sl_hit:
