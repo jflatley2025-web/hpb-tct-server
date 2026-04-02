@@ -18683,12 +18683,34 @@ async def schematics_5b_auto_scan_loop():
     logger.info(f"[5B-TRADE] Auto-scan loop started — interval: {AUTO_SCAN_INTERVAL}s")
 
     consecutive_errors = 0
+    _5b_last_successful_cycle = time.time()
     _last_github_push = time.time()
     GITHUB_PUSH_INTERVAL = 3600
     _last_telegram_summary = time.time()
     TELEGRAM_SUMMARY_INTERVAL = 34 * 60  # 34 minutes
 
     while True:
+        # ── Deadlock watchdog ─────────────────────────────────────────
+        since_last = time.time() - _5b_last_successful_cycle
+        if since_last > 180:
+            logger.warning(
+                "[5B-TRADE] No successful scan for %.0fs — potential stall forming",
+                since_last,
+            )
+            # Automatic recovery: force-release scan lock if zombie thread is holding it
+            try:
+                _wd_trader = get_5b_trader()
+                _wd_released = _wd_trader.force_release_scan_lock(max_age_seconds=0)
+                if _wd_released:
+                    logger.warning("[5B-TRADE] Watchdog force-released zombie scan lock")
+                else:
+                    logger.debug("[5B-TRADE] Watchdog: scan lock not held")
+            except Exception as _wd_err:
+                logger.error("[5B-TRADE] Watchdog force-release failed: %s", _wd_err)
+
+        # Scan timeout — referenced in both the wait_for call and the TimeoutError handler.
+        _SCAN_TIMEOUT = 720
+
         try:
             # Apply MSCE session weighting before each scan cycle
             msce_ctx: Dict = {}
@@ -18707,7 +18729,7 @@ async def schematics_5b_auto_scan_loop():
                 logger.info("[5B-TRADE] Dispatching scan_and_trade to thread executor")
                 result = await asyncio.wait_for(
                     loop.run_in_executor(None, trader.scan_and_trade),
-                    timeout=720,
+                    timeout=_SCAN_TIMEOUT,
                 )
                 _scan_dur = time.time() - _scan_start
                 logger.info(f"[5B-TRADE] scan_and_trade returned in {_scan_dur:.1f}s")
@@ -18719,9 +18741,12 @@ async def schematics_5b_auto_scan_loop():
             # force-release it so the *next* cycle can proceed.
             if action == "scan_in_progress":
                 held = (result.get("details") or {}).get("held_seconds")
-                if held and held > 900:
-                    logger.warning("[5B-TRADE] Scan lock held %ds — force-releasing", held)
-                    trader.force_release_scan_lock(max_age_seconds=900)
+                if held and held > 60:
+                    logger.warning(
+                        "[5B-TRADE] Scan lock held >60s (%.2fs) — forcing release",
+                        held,
+                    )
+                    trader.force_release_scan_lock(max_age_seconds=60)
 
             # Attach MSCE context to the result for dashboard visibility
             result["msce"] = msce
@@ -18887,6 +18912,32 @@ async def schematics_5b_auto_scan_loop():
 
             logger.info(f"[5B-TRADE] Auto-scan result: {action} @ {ts} (MSCE {msce['session']} w={msce['weight']})")
             consecutive_errors = 0
+            _5b_last_successful_cycle = time.time()
+        except asyncio.TimeoutError:
+            consecutive_errors += 1
+            logger.error(
+                "[5B-TRADE] scan_and_trade TIMED OUT after %ds — "
+                "force-releasing zombie scan lock (errors: %d)",
+                _SCAN_TIMEOUT, consecutive_errors,
+            )
+            try:
+                trader = get_5b_trader()
+                released = trader.force_release_scan_lock(max_age_seconds=0)
+                if released:
+                    logger.warning(
+                        "[5B-TRADE] Zombie scan lock force-released (thread will self-terminate)"
+                    )
+                else:
+                    logger.info(
+                        "[5B-TRADE] Lock not held or already released (thread likely exited)"
+                    )
+            except Exception as _rel_err:
+                logger.error("[5B-TRADE] Force-release failed: %s", _rel_err)
+            if consecutive_errors >= 5:
+                logger.critical(
+                    "[5B-TRADE] %d consecutive failures — investigate thread starvation",
+                    consecutive_errors,
+                )
         except Exception as e:
             consecutive_errors += 1
             logger.error(f"[5B-TRADE] Auto-scan error ({consecutive_errors}): {e}", exc_info=True)
