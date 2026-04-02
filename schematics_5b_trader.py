@@ -177,7 +177,15 @@ WARMUP_REQUIRED_TFS = ["1h", "4h"]  # TFs that must have sufficient data
 WARMUP_MAX_CYCLES = 10              # log warning if warmup stuck beyond this
 # Symbols validated during warmup — core liquidity pairs that must have data
 # before trading is enabled.  Not all 12 to avoid fragile alt-coin API failures.
-WARMUP_VALIDATION_SYMBOLS = TRADING_SYMBOLS[:3]  # BTC, ETH, SOL
+# Override via env: WARMUP_VALIDATION_SYMBOLS_OVERRIDE="BTCUSDT,ETHUSDT,SOLUSDT"
+_warmup_sym_override = os.getenv("WARMUP_VALIDATION_SYMBOLS_OVERRIDE", "")
+WARMUP_VALIDATION_SYMBOLS = (
+    [s.strip() for s in _warmup_sym_override.split(",") if s.strip()]
+    if _warmup_sym_override
+    else ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+)
+# Validate configured symbols exist in TRADING_SYMBOLS
+WARMUP_VALIDATION_SYMBOLS = [s for s in WARMUP_VALIDATION_SYMBOLS if s in TRADING_SYMBOLS]
 
 
 # ================================================================
@@ -1582,11 +1590,27 @@ class Schematics5BTrader:
                 self._warmup_total_attempts += 1
 
                 # Validate data quality for core symbols (BTC, ETH, SOL)
+                # In Jack mode only "4h" is fetched, so skip checks for TFs
+                # that weren't requested — otherwise warmup never advances.
                 _warmup_data_ok = True
                 for _vsym in WARMUP_VALIDATION_SYMBOLS:
                     _vsym_result = all_symbol_results.get(_vsym, {})
                     _warmup_mtf = _vsym_result.get("mtf_dfs") or {}
-                    for _wtf in WARMUP_REQUIRED_TFS:
+                    _effective_tfs = [
+                        tf for tf in WARMUP_REQUIRED_TFS if tf in _warmup_mtf
+                    ]
+                    if not _effective_tfs:
+                        # None of the required TFs were fetched (shouldn't happen)
+                        logger.warning(
+                            "[WARMUP] Cycle %d/%d — no required TFs fetched for %s "
+                            "(mode=%s) — not advancing",
+                            self._warmup_cycles_completed,
+                            WARMUP_CYCLES_REQUIRED,
+                            _vsym, scan_mode,
+                        )
+                        _warmup_data_ok = False
+                        continue
+                    for _wtf in _effective_tfs:
                         _wdf = _warmup_mtf.get(_wtf)
                         if _wdf is None or len(_wdf) < WARMUP_MIN_CANDLES_PER_TF:
                             _wcount = 0 if _wdf is None else len(_wdf)
@@ -2262,6 +2286,16 @@ class Schematics5BTrader:
                     "status": "insufficient_data",
                     "candles": 0 if df_htf is None else len(df_htf),
                 }
+                # Don't overwrite a valid cached bias with "neutral" fallback —
+                # preserve existing cache entry if we have one.
+                if symbol in self._htf_bias_cache:
+                    htf_bias = self._htf_bias_cache[symbol]
+                    logger.info(
+                        "[5B] HTF insufficient data for %s — retaining cached bias '%s'",
+                        symbol, htf_bias,
+                    )
+                # Don't persist insufficient-data results to disk
+                return htf_bias, htf_debug
         except Exception as e:
             logger.warning(f"[5B] HTF gate error for {symbol}: {e}", exc_info=True)
             htf_debug = {"status": "error", "error": str(e), "fetch_error": True}
