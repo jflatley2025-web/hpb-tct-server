@@ -1452,41 +1452,26 @@ class Schematics5BTrader:
             scan_mode = self.state.trading_mode
             scan_tfs = ["4h"] if scan_mode == "jack" else None
 
-            best_setup = None
-            best_score = 0
-            best_tf = None
-            best_current_price = 0.0
-            best_htf_bias = "neutral"
-            best_symbol = SYMBOL
-            all_forming = []
-            all_forming_ranges = []
-            all_symbol_results: Dict[str, Dict] = {}
-
-            # When multi-position is active, skip symbols that already have an
-            # open trade — no point scanning if we'd block on duplicate_symbol.
+            # Single-symbol scan (this branch).  When multi-symbol support
+            # lands from master, this becomes a loop over TRADING_SYMBOLS with
+            # _open_syms skipping.  For now: scan SYMBOL only.
             _open_syms = {t.get("symbol") for t in self.state.open_trades} if _USE_PORTFOLIO_LAYER else set()
 
-            for _sym in TRADING_SYMBOLS:
-                if _sym in _open_syms:
-                    continue
-                sym_result = self._scan_single_symbol(_sym, mode=scan_mode, timeframes=scan_tfs)
-                all_symbol_results[_sym] = sym_result
-                sym_best = sym_result.get("best_setup")
-                sym_score = sym_result.get("best_score", 0)
-                if sym_best and sym_score > best_score:
-                    best_setup = sym_best
-                    best_score = sym_score
-                    best_tf = sym_result.get("best_tf")
-                    best_current_price = sym_result.get("current_price", 0.0)
-                    best_htf_bias = sym_result.get("htf_bias", "neutral")
-                    best_symbol = _sym
-                all_forming.extend(sym_result.get("forming", []))
-                all_forming_ranges.extend(sym_result.get("forming_all_ranges", []))
+            # Skip scan entirely if this symbol already has an open trade
+            # in multi-position mode (portfolio_manager would block anyway).
+            if SYMBOL not in _open_syms:
+                sym_result = self._scan_single_symbol(SYMBOL, mode=scan_mode, timeframes=scan_tfs)
+            else:
+                sym_result = {"best_setup": None, "best_score": 0}
 
-            # If no setup found, use the first symbol's price for debug display
-            if best_current_price == 0.0 and all_symbol_results:
-                _first = all_symbol_results.get(SYMBOL) or next(iter(all_symbol_results.values()))
-                best_current_price = _first.get("current_price", 0.0)
+            best_setup = sym_result.get("best_setup")
+            best_score = sym_result.get("best_score", 0)
+            best_tf = sym_result.get("best_tf")
+            best_current_price = sym_result.get("current_price", 0.0)
+            best_htf_bias = sym_result.get("htf_bias", "neutral")
+            best_symbol = SYMBOL
+            all_forming = sym_result.get("forming", [])
+            all_forming_ranges = sym_result.get("forming_all_ranges", [])
 
             with self._lock:
                 self.last_debug = {
