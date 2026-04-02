@@ -165,6 +165,16 @@ _PARITY_LOG_PATH = os.path.join(_PARITY_LOG_DIR, "decision_parity.jsonl")
 DUPLICATE_COOLDOWN_SECONDS = 300
 DUPLICATE_PRICE_TOLERANCE = 0.002
 
+# ── Startup warmup gate ──────────────────────────────────────────
+# Prevents premature trades on cold start by requiring N clean scan
+# cycles with valid data before enabling trade execution.
+# Set to False for instant rollback (no warmup, original behavior).
+ENABLE_STARTUP_WARMUP = True
+WARMUP_CYCLES_REQUIRED = 2          # observation-only cycles before trading
+WARMUP_MIN_CANDLES_PER_TF = 50      # minimum candles per required TF
+WARMUP_REQUIRED_TFS = ["1h", "4h"]  # TFs that must have sufficient data
+WARMUP_MAX_CYCLES = 10              # log warning if warmup stuck beyond this
+
 
 # ================================================================
 # DECISION ENGINE AUDIT LOG
@@ -1197,6 +1207,18 @@ class Schematics5BTrader:
         self._scan_lock = threading.Lock()
         self._scan_lock_acquired_at: Optional[float] = None
 
+        # ── Startup warmup gate ───────────────────────────────────────
+        self._warmup_cycles_completed = 0
+        self._warmup_total_attempts = 0   # monotonic — never decremented (for stuck detection)
+        self._is_ready = not ENABLE_STARTUP_WARMUP  # True if warmup disabled
+        if ENABLE_STARTUP_WARMUP:
+            logger.info(
+                "[WARMUP] Startup warmup ENABLED — %d observation cycles "
+                "required before trading (TFs: %s, min candles: %d)",
+                WARMUP_CYCLES_REQUIRED, WARMUP_REQUIRED_TFS,
+                WARMUP_MIN_CANDLES_PER_TF,
+            )
+
         # ── Issue 5: portfolio layer ───────────────────────────────────
         # Equity is synced from self.state.balance before every can_open_trade()
         # call so this object never drifts silently.  open_positions is
@@ -1422,28 +1444,45 @@ class Schematics5BTrader:
             self._scan_lock_acquired_at = None
             self._scan_lock.release()
 
-    def force_release_scan_lock(self, max_age_seconds: float = 900) -> bool:
-        """Force-release _scan_lock if it has been held longer than max_age_seconds.
+    def force_release_scan_lock(self, max_age_seconds: int = 0) -> bool:
+        """Force-release _scan_lock if held (idempotent, safe).
+
+        Args:
+            max_age_seconds: If >0, only release if lock held longer than this.
+                             If 0 (default), release unconditionally.
 
         Returns True if the lock was force-released, False otherwise.
         This is a safety valve for zombie threads left behind by asyncio.wait_for
         cancelling the executor wrapper while the thread keeps running.
         """
-        acquired_at = self._scan_lock_acquired_at
-        if acquired_at is None:
-            return False
-        held_for = time.time() - acquired_at
-        if held_for < max_age_seconds:
-            return False
-        logger.warning(
-            "[5B] Force-releasing _scan_lock held for %.0fs (limit %.0fs)",
-            held_for, max_age_seconds)
         try:
+            if not self._scan_lock.locked():
+                return False
+
+            if max_age_seconds > 0:
+                acquired_at = self._scan_lock_acquired_at
+                if acquired_at is not None:
+                    held = time.time() - acquired_at
+                    if held < max_age_seconds:
+                        return False
+                    logger.warning(
+                        "[5B] Force-releasing _scan_lock held for %.0fs (limit %ds)",
+                        held, max_age_seconds,
+                    )
+                else:
+                    logger.warning(
+                        "[5B] Force-releasing _scan_lock (no acquisition timestamp)",
+                    )
+            else:
+                logger.warning("[5B] Force-releasing _scan_lock (unconditional)")
+
             self._scan_lock.release()
+            self._scan_lock_acquired_at = None
+            return True
+
         except RuntimeError:
-            pass  # already released
-        self._scan_lock_acquired_at = None
-        return True
+            # Lock already released or invalid state
+            return False
 
     def _scan_and_trade_locked(self) -> Dict:
         """Actual scan logic, called only while self._scan_lock is held."""
@@ -1525,6 +1564,85 @@ class Schematics5BTrader:
                     # Lifetime gate-block counters (since process start).
                     "gate_metrics": dict(self._gate_metrics),
                 }
+
+            # ── STARTUP WARMUP GATE ───────────────────────────────────────
+            # Block trade evaluation for the first N cycles after cold start.
+            # Data is fetched and scanned (proving connectivity + context build),
+            # but no decision engine runs and no trades are entered.
+            # Open-trade management (step 1 above) is NOT blocked — we always
+            # manage exits even during warmup.
+            if not self._is_ready:
+                self._warmup_cycles_completed += 1
+                self._warmup_total_attempts += 1
+
+                # Validate data quality from the scan results
+                _warmup_data_ok = True
+                _default_sym_result = all_symbol_results.get(DEFAULT_SYMBOL, {})
+                _warmup_mtf = _default_sym_result.get("mtf_dfs") or {}
+                for _wtf in WARMUP_REQUIRED_TFS:
+                    _wdf = _warmup_mtf.get(_wtf)
+                    if _wdf is None or len(_wdf) < WARMUP_MIN_CANDLES_PER_TF:
+                        _wcount = 0 if _wdf is None else len(_wdf)
+                        logger.warning(
+                            "[WARMUP] Cycle %d/%d — insufficient data for "
+                            "%s/%s: %d candles (need %d) — not advancing",
+                            self._warmup_cycles_completed,
+                            WARMUP_CYCLES_REQUIRED,
+                            DEFAULT_SYMBOL, _wtf, _wcount,
+                            WARMUP_MIN_CANDLES_PER_TF,
+                        )
+                        _warmup_data_ok = False
+
+                if not _warmup_data_ok:
+                    # Data incomplete — don't count this cycle toward readiness
+                    self._warmup_cycles_completed -= 1
+                    # Stuck detection (uses monotonic counter that is never decremented)
+                    if self._warmup_total_attempts >= WARMUP_MAX_CYCLES:
+                        logger.error(
+                            "[WARMUP] STUCK — %d total attempts, %d successful. "
+                            "Check data feeds. Warmup will NOT auto-advance.",
+                            self._warmup_total_attempts,
+                            self._warmup_cycles_completed,
+                        )
+                    cycle_result["action"] = "warmup_data_incomplete"
+                    cycle_result["details"] = {
+                        "warmup_cycle": self._warmup_cycles_completed,
+                        "required": WARMUP_CYCLES_REQUIRED,
+                    }
+                    self.state.last_scan_time = cycle_result["timestamp"]
+                    self.state.last_scan_action = cycle_result["action"]
+                    self.state.save()
+                    return cycle_result
+
+                logger.info(
+                    "[WARMUP] Cycle %d/%d — observation mode "
+                    "(data OK, %d symbols scanned, price=$%.2f)",
+                    self._warmup_cycles_completed,
+                    WARMUP_CYCLES_REQUIRED,
+                    len(all_symbol_results),
+                    best_current_price,
+                )
+
+                if self._warmup_cycles_completed >= WARMUP_CYCLES_REQUIRED:
+                    self._is_ready = True
+                    logger.info(
+                        "[WARMUP COMPLETE] Trading ENABLED after %d clean cycles "
+                        "— engine is ready",
+                        self._warmup_cycles_completed,
+                    )
+                else:
+                    cycle_result["action"] = "warmup_observation"
+                    cycle_result["details"] = {
+                        "warmup_cycle": self._warmup_cycles_completed,
+                        "required": WARMUP_CYCLES_REQUIRED,
+                        "symbols_scanned": len(all_symbol_results),
+                        "best_price": best_current_price,
+                    }
+                    self.state.last_scan_time = cycle_result["timestamp"]
+                    self.state.last_scan_action = cycle_result["action"]
+                    self.state.save()
+                    return cycle_result
+            # ── END WARMUP GATE ───────────────────────────────────────────
 
             # ── Unified engine shadow run ──────────────────────────────────
             # Always run decision_engine_v2.decide() in parallel with the legacy
