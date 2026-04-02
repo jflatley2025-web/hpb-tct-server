@@ -15,6 +15,7 @@ Public API
 ----------
 USE_PORTFOLIO_LAYER    — bool flag (set to True to activate)
 MAX_PORTFOLIO_RISK_PCT — hard cap on total correlated risk
+MAX_CONCURRENT_TRADES  — hard cap on simultaneous open positions
 
 PortfolioPosition  — one open position (dataclass)
 PortfolioState     — shared account pool (dataclass)
@@ -35,7 +36,9 @@ PORTFOLIO_OPEN   — position registered after successful order
 PORTFOLIO_CLOSE  — position deregistered after trade closes
 """
 
+import json
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
@@ -48,6 +51,42 @@ USE_PORTFOLIO_LAYER: bool = False
 
 # ── Constants ─────────────────────────────────────────────────────────
 MAX_PORTFOLIO_RISK_PCT: float = 2.0   # % of equity; cap on total correlated risk
+MAX_CONCURRENT_TRADES: int = 2        # hard cap on simultaneous open positions
+
+
+def _load_risk_config() -> None:
+    """Load risk config from config/risk_profile.json (if present).
+
+    Updates module-level MAX_PORTFOLIO_RISK_PCT and MAX_CONCURRENT_TRADES
+    from the JSON file.  Silently no-ops if the file is missing or corrupt
+    so hardcoded defaults remain in effect.
+    """
+    global MAX_PORTFOLIO_RISK_PCT, MAX_CONCURRENT_TRADES
+    config_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "config", "risk_profile.json"
+    )
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        if "risk_per_trade_pct" in cfg:
+            # risk_per_trade_pct is per-trade; portfolio cap is separate
+            pass
+        if "max_open_positions" in cfg:
+            MAX_CONCURRENT_TRADES = int(cfg["max_open_positions"])
+        # risk_profile.json doesn't have a portfolio risk field yet;
+        # MAX_PORTFOLIO_RISK_PCT stays at the hardcoded default (2.0%).
+        logger.debug(
+            "Risk config loaded: MAX_CONCURRENT_TRADES=%d, "
+            "MAX_PORTFOLIO_RISK_PCT=%.1f%%",
+            MAX_CONCURRENT_TRADES, MAX_PORTFOLIO_RISK_PCT,
+        )
+    except FileNotFoundError:
+        logger.debug("risk_profile.json not found — using defaults")
+    except Exception as e:
+        logger.warning("Failed to load risk_profile.json: %s — using defaults", e)
+
+
+_load_risk_config()
 
 # ── Correlation matrix ────────────────────────────────────────────────
 # Pairwise Pearson-like coefficients (monthly, crypto bull-market regime).
@@ -187,16 +226,79 @@ def adjusted_portfolio_risk(
     return correlated_risk, details
 
 
+_CORRELATION_BLOCK_THRESHOLD: float = 0.70  # block same-direction if corr ≥ this
+
+
+def _check_correlated_direction_conflict(
+    new_symbol: str,
+    new_direction: str,
+    portfolio: PortfolioState,
+) -> Optional[str]:
+    """Return a block reason if an open position conflicts, else None.
+
+    A conflict exists when:
+      - An existing position is on a highly correlated pair (≥ threshold)
+      - AND it is in the same direction as the proposed trade
+
+    This prevents doubling up on essentially the same directional bet
+    (e.g. long BTC + long ETH when corr=0.85).
+    """
+    if not new_direction:
+        return None  # direction not provided — skip check
+    base_new = _base_asset(new_symbol)
+    for pos in portfolio.open_positions:
+        base_existing = _base_asset(pos.symbol)
+        if base_new == base_existing:
+            return (
+                f"duplicate_symbol ({new_symbol} already open)"
+            )
+        corr = get_correlation(new_symbol, pos.symbol)
+        if corr >= _CORRELATION_BLOCK_THRESHOLD and pos.direction == new_direction:
+            return (
+                f"correlated_same_direction "
+                f"({new_symbol}<->{pos.symbol} corr={corr:.2f}, "
+                f"both {new_direction})"
+            )
+    return None
+
+
+def _log_portfolio_decision(
+    action: str,
+    symbol: str,
+    reason: str,
+    open_count: int,
+    portfolio_risk_pct: float,
+) -> None:
+    """Emit a structured portfolio decision log entry."""
+    entry = {
+        "event": "portfolio_decision",
+        "action": action,
+        "symbol": symbol,
+        "reason": reason,
+        "open_positions": open_count,
+        "max_allowed": MAX_CONCURRENT_TRADES,
+        "portfolio_risk_pct": round(portfolio_risk_pct, 4),
+    }
+    if action == "BLOCK":
+        logger.warning("PORTFOLIO_BLOCK | %s", entry)
+    else:
+        logger.info("PORTFOLIO_ALLOW | %s", entry)
+
+
 def can_open_trade(
     symbol: str,
     effective_risk: float,
     portfolio: PortfolioState,
+    direction: str = "",
 ) -> dict:
     """Check whether the portfolio can absorb a new position.
 
-    Computes the correlation-weighted risk the new trade adds on top
-    of existing exposure.  When the projected total would exceed
-    MAX_PORTFOLIO_RISK_PCT:
+    Enforces three gates in order:
+      1. Max concurrent positions (MAX_CONCURRENT_TRADES)
+      2. Correlated same-direction blocking (correlation ≥ 0.70)
+      3. Correlation-weighted portfolio risk cap (MAX_PORTFOLIO_RISK_PCT)
+
+    When the risk cap would be exceeded:
       - If enough headroom remains → scale position to fill it exactly
       - If scaling < 5% of intended size → hard block
 
@@ -206,6 +308,8 @@ def can_open_trade(
                         The portfolio cap is evaluated against this value.
         portfolio:      Current state.  portfolio.equity must be current
                         before this call (callers are responsible for sync).
+        direction:      "bullish" or "bearish" — used for correlated-pair
+                        same-direction blocking.
 
     Returns dict:
         allowed (bool)
@@ -236,18 +340,52 @@ def can_open_trade(
             "correlation_details": {},
         }
 
+    # ── Gate 1: max concurrent positions ──────────────────────────────
+    if len(portfolio.open_positions) >= MAX_CONCURRENT_TRADES:
+        _log_portfolio_decision(
+            "BLOCK", symbol, "max_concurrent_reached",
+            len(portfolio.open_positions), portfolio.total_risk_pct,
+        )
+        return {
+            "allowed": False,
+            "adjusted_risk": effective_risk,
+            "scaling_factor": 0.0,
+            "adjusted_portfolio_risk": portfolio.total_risk_pct,
+            "reason": (
+                f"max_concurrent_trades ({len(portfolio.open_positions)}"
+                f"/{MAX_CONCURRENT_TRADES})"
+            ),
+            "correlation_details": {},
+        }
+
+    # ── Gate 2: correlated same-direction blocking ────────────────────
+    # Block if an open position on a highly correlated pair (≥ 0.70)
+    # is already open in the same direction — prevents doubling up on
+    # essentially the same bet.
+    corr_block = _check_correlated_direction_conflict(symbol, direction, portfolio)
+    if corr_block is not None:
+        _log_portfolio_decision(
+            "BLOCK", symbol, corr_block,
+            len(portfolio.open_positions), portfolio.total_risk_pct,
+        )
+        return {
+            "allowed": False,
+            "adjusted_risk": effective_risk,
+            "scaling_factor": 0.0,
+            "adjusted_portfolio_risk": portfolio.total_risk_pct,
+            "reason": corr_block,
+            "correlation_details": {},
+        }
+
     adj_risk, details = adjusted_portfolio_risk(symbol, effective_risk, portfolio)
     current_risk_pct = portfolio.total_risk_pct
     adj_risk_pct = (adj_risk / portfolio.equity) * 100
     projected_total_pct = current_risk_pct + adj_risk_pct
 
     if projected_total_pct <= MAX_PORTFOLIO_RISK_PCT:
-        logger.info(
-            "PORTFOLIO_ALLOW | symbol=%s | adj_risk_pct=%.2f%% | "
-            "projected_total=%.2f%% | max=%.2f%% | current=%.2f%% | "
-            "corr_details=%s",
-            symbol, adj_risk_pct, projected_total_pct,
-            MAX_PORTFOLIO_RISK_PCT, current_risk_pct, details,
+        _log_portfolio_decision(
+            "OPEN", symbol, "within_limit",
+            len(portfolio.open_positions), projected_total_pct,
         )
         return {
             "allowed": True,
@@ -322,21 +460,19 @@ def open_position(
     Must be called AFTER the order has been successfully placed —
     never speculatively before the trade is confirmed.
 
-    Duplicate prevention: if a position for the same base asset is already
-    registered, a warning is logged and the new entry is NOT added.  The
-    system currently supports at most one trade per symbol at a time
-    (BacktestState.open_trade / Schematics5BTradeState.current_trade are
-    both single-trade fields), so a duplicate here always indicates a caller
-    bug (e.g., open_position called twice without a matching close_position).
+    Duplicate prevention: if the exact same symbol is already registered,
+    a warning is logged and the new entry is NOT added (caller bug).
+    Different correlated symbols (e.g. BTCUSDT + ETHUSDT) are allowed —
+    the correlation check in can_open_trade() handles blocking those
+    before we reach this point.
     """
-    base_new = _base_asset(symbol)
     for existing in portfolio.open_positions:
-        if _base_asset(existing.symbol) == base_new:
+        if existing.symbol == symbol:
             logger.warning(
-                "PORTFOLIO_OPEN | symbol=%s — duplicate position detected "
-                "(base_asset=%s already open with risk=$%.2f); "
+                "PORTFOLIO_OPEN | symbol=%s — duplicate symbol detected "
+                "(already open with risk=$%.2f); "
                 "skipping registration to prevent double-counting",
-                symbol, base_new, existing.notional_risk,
+                symbol, existing.notional_risk,
             )
             return existing  # return the existing position, do not append
 
@@ -418,6 +554,7 @@ def debug_snapshot(portfolio: PortfolioState) -> dict:
         "peak_equity": round(portfolio.peak_equity, 2),
         "total_risk_pct": round(portfolio.total_risk_pct, 4),
         "max_portfolio_risk_pct": MAX_PORTFOLIO_RISK_PCT,
+        "max_concurrent_trades": MAX_CONCURRENT_TRADES,
         "use_portfolio_layer": USE_PORTFOLIO_LAYER,
         "n_open_positions": len(portfolio.open_positions),
         "open_positions": [

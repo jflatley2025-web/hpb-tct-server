@@ -40,6 +40,7 @@ from jack_tct_evaluator import JackTCTEvaluator
 from backtest.config import timeframe_to_seconds as _tf_seconds
 from portfolio_manager import (
     USE_PORTFOLIO_LAYER as _USE_PORTFOLIO_LAYER,
+    MAX_CONCURRENT_TRADES as _MAX_CONCURRENT_TRADES,
     PortfolioState as _PortfolioState,
     PortfolioPosition as _PortfolioPosition,
     can_open_trade as _pm_can_open_trade,
@@ -415,6 +416,7 @@ class Schematics5BTradeState:
         self.balance = STARTING_BALANCE
         self.starting_balance = STARTING_BALANCE
         self.current_trade: Optional[Dict] = None
+        self.open_trades: List[Dict] = []  # multi-position list (USE_PORTFOLIO_LAYER=True)
         self.trade_history: List[Dict] = []
         self.total_wins = 0
         self.total_losses = 0
@@ -444,6 +446,7 @@ class Schematics5BTradeState:
                 self.balance = data.get("balance", STARTING_BALANCE)
                 self.starting_balance = data.get("starting_balance", STARTING_BALANCE)
                 self.current_trade = data.get("current_trade")
+                self.open_trades = data.get("open_trades", [])
                 self.trade_history = data.get("trade_history", [])
                 self.total_wins = data.get("total_wins", 0)
                 self.total_losses = data.get("total_losses", 0)
@@ -465,7 +468,25 @@ class Schematics5BTradeState:
                     if not ep or not sp or not tp:
                         logger.error(f"[5B-STATE] Discarding corrupt current_trade on load: entry={ep}, stop={sp}, target={tp}")
                         self.current_trade = None
-                logger.info(f"[5B-STATE] Loaded — balance=${self.balance:.2f}, trades={len(self.trade_history)}")
+                # Validate open_trades — discard entries with missing essential fields
+                valid_trades = []
+                for ot in self.open_trades:
+                    ep = ot.get("entry_price", 0)
+                    sp = ot.get("stop_price", 0)
+                    tp = ot.get("target_price", 0)
+                    if ep and sp and tp:
+                        valid_trades.append(ot)
+                    else:
+                        logger.error(
+                            "[5B-STATE] Discarding corrupt open_trade on load: "
+                            "symbol=%s entry=%s stop=%s target=%s",
+                            ot.get("symbol", "?"), ep, sp, tp,
+                        )
+                self.open_trades = valid_trades
+                logger.info(
+                    "[5B-STATE] Loaded — balance=$%.2f, trades=%d, open_trades=%d",
+                    self.balance, len(self.trade_history), len(self.open_trades),
+                )
         except Exception as e:
             logger.warning(f"[5B-STATE] Could not load trade state: {e}")
 
@@ -479,6 +500,7 @@ class Schematics5BTradeState:
                 "balance": round(self.balance, 2),
                 "starting_balance": self.starting_balance,
                 "current_trade": self.current_trade,
+                "open_trades": self.open_trades,
                 "trade_history": self.trade_history,
                 "total_wins": self.total_wins,
                 "total_losses": self.total_losses,
@@ -513,6 +535,7 @@ class Schematics5BTradeState:
             "losses": self.total_losses,
             "win_rate": round(win_rate, 2),
             "current_trade": self.current_trade,
+            "open_trades": self.open_trades,
             "trade_history": self.trade_history[-50:],
             "last_scan_time": self.last_scan_time,
             "last_scan_action": self.last_scan_action,
@@ -1152,53 +1175,61 @@ class Schematics5BTrader:
         # ── Issue 5: portfolio layer ───────────────────────────────────
         # Equity is synced from self.state.balance before every can_open_trade()
         # call so this object never drifts silently.  open_positions is
-        # reconstructed from current_trade (at most one) on startup.
+        # reconstructed from open_trades (multi-position) or current_trade
+        # (legacy single-trade) on startup.
         self._portfolio: Optional[_PortfolioState] = None
         if _USE_PORTFOLIO_LAYER:
             self._portfolio = _PortfolioState(
                 equity=self.state.balance,
                 peak_equity=self.state.peak_balance,
             )
-            # Reconstruct any open position so the risk cap is correct
+            # Reconstruct open positions so the risk cap is correct
             # immediately — avoids a stale-zero total_risk_pct on the
-            # first cycle after a restart with an open trade.
-            _ct = self.state.current_trade
-            if _ct and _ct.get("entry_price"):
-                # Prefer the stored risk_amount (exact).  Fall back to
-                # position_size * RISK_PER_TRADE_PCT / leverage as a best-effort
-                # estimate so old-format trades (pre-risk_amount field) still
-                # register a non-zero exposure in the portfolio.
+            # first cycle after a restart with open trades.
+            #
+            # Migration path: if open_trades is empty but current_trade
+            # exists (pre-multi-position state file), migrate it.
+            _trades_to_reconstruct = list(self.state.open_trades)
+            if not _trades_to_reconstruct and self.state.current_trade:
+                _ct = self.state.current_trade
+                if _ct.get("entry_price"):
+                    _trades_to_reconstruct = [_ct]
+                    self.state.open_trades = [_ct]
+                    self.state.current_trade = None
+                    logger.info(
+                        "[5B] Portfolio layer: migrated current_trade → open_trades[0]"
+                    )
+
+            for _ct in _trades_to_reconstruct:
+                if not _ct.get("entry_price"):
+                    continue
                 _ct_risk: Optional[float] = None
                 if _ct.get("risk_amount"):
                     _ct_risk = float(_ct["risk_amount"])
                 elif _ct.get("position_size") and _ct.get("entry_price"):
-                    # position_size is denominated in the base asset (contracts).
-                    # Notional risk ≈ balance × RISK_PER_TRADE_PCT / 100 as a
-                    # conservative floor; use that rather than leaving it zero.
                     _ct_risk = self.state.balance * (RISK_PER_TRADE_PCT / 100)
                     logger.warning(
-                        "[5B] Portfolio layer: current_trade missing "
+                        "[5B] Portfolio layer: trade %s missing "
                         "'risk_amount' — using balance-based fallback "
-                        "$%.2f for position registration; "
-                        "this may be an old-format trade record",
-                        _ct_risk,
+                        "$%.2f for position registration",
+                        _ct.get("symbol", "?"), _ct_risk,
                     )
 
                 if _ct_risk is not None and _ct_risk > 0:
                     _pm_open_position(
                         self._portfolio,
-                        symbol=_ct.get("symbol", SYMBOL),
+                        symbol=_ct.get("symbol", DEFAULT_SYMBOL),
                         direction=_ct.get("direction", "bullish"),
                         notional_risk=_ct_risk,
                         entry_price=float(_ct["entry_price"]),
                         model=_ct.get("model", "unknown"),
                         timeframe=_ct.get("timeframe", "unknown"),
-                        opened_at=None,  # exact timestamp unavailable after reload
+                        opened_at=None,
                     )
                     logger.info(
                         "[5B] Portfolio layer: reconstructed open position "
-                        "from current_trade (symbol=%s risk=$%.2f)",
-                        _ct.get("symbol", SYMBOL), _ct_risk,
+                        "(symbol=%s risk=$%.2f)",
+                        _ct.get("symbol", DEFAULT_SYMBOL), _ct_risk,
                     )
             logger.info(
                 "[5B] Portfolio layer ENABLED — %s",
@@ -1374,9 +1405,31 @@ class Schematics5BTrader:
         }
 
         try:
-            # 1. Manage open trade first
-            if self.state.current_trade:
-                df_price = fetch_candles_sync(SYMBOL, "1m", 10)
+            # 1. Manage open trades
+            if _USE_PORTFOLIO_LAYER and self.state.open_trades:
+                # Multi-position path: manage each open trade, then continue
+                # to scan for new setups (portfolio_manager enforces limits).
+                _managed_results = []
+                # Snapshot the list — _close_trade mutates open_trades via _remove_trade
+                for _ot in list(self.state.open_trades):
+                    _ot_sym = _ot.get("symbol", DEFAULT_SYMBOL)
+                    _ot_df = fetch_candles_sync(_ot_sym, "1m", 10)
+                    if _ot_df is None or len(_ot_df) == 0:
+                        logger.warning("[5B] Could not fetch price for open trade %s", _ot_sym)
+                        continue
+                    _ot_price = float(_ot_df.iloc[-1]["close"])
+                    _ot_result = self._manage_open_trade(_ot_price, _ot)
+                    _managed_results.append({_ot_sym: _ot_result})
+                    if _ot_result.get("action") == "trade_closed":
+                        logger.info("[5B] Multi-pos: closed %s — %d remaining",
+                                    _ot_sym, len(self.state.open_trades))
+                if _managed_results:
+                    cycle_result["details"]["managed_trades"] = _managed_results
+                # Fall through to scan for new setups
+            elif self.state.current_trade:
+                # Legacy single-trade path — manage and return (no scanning)
+                _trade_sym = self.state.current_trade.get("symbol", DEFAULT_SYMBOL)
+                df_price = fetch_candles_sync(_trade_sym, "1m", 10)
                 if df_price is None or len(df_price) == 0:
                     self.state.last_error = "Could not fetch price data"
                     self.state.save()
@@ -1398,14 +1451,42 @@ class Schematics5BTrader:
             # one consistent evaluator even if set_mode() is called concurrently.
             scan_mode = self.state.trading_mode
             scan_tfs = ["4h"] if scan_mode == "jack" else None
-            sym_result = self._scan_single_symbol(SYMBOL, mode=scan_mode, timeframes=scan_tfs)
-            best_setup = sym_result.get("best_setup")
-            best_score = sym_result.get("best_score", 0)
-            best_tf = sym_result.get("best_tf")
-            best_current_price = sym_result.get("current_price", 0.0)
-            best_htf_bias = sym_result.get("htf_bias", "neutral")
-            all_forming = sym_result.get("forming", [])
-            all_forming_ranges = sym_result.get("forming_all_ranges", [])
+
+            best_setup = None
+            best_score = 0
+            best_tf = None
+            best_current_price = 0.0
+            best_htf_bias = "neutral"
+            best_symbol = DEFAULT_SYMBOL
+            all_forming = []
+            all_forming_ranges = []
+            all_symbol_results: Dict[str, Dict] = {}
+
+            # When multi-position is active, skip symbols that already have an
+            # open trade — no point scanning if we'd block on duplicate_symbol.
+            _open_syms = {t.get("symbol") for t in self.state.open_trades} if _USE_PORTFOLIO_LAYER else set()
+
+            for _sym in TRADING_SYMBOLS:
+                if _sym in _open_syms:
+                    continue
+                sym_result = self._scan_single_symbol(_sym, mode=scan_mode, timeframes=scan_tfs)
+                all_symbol_results[_sym] = sym_result
+                sym_best = sym_result.get("best_setup")
+                sym_score = sym_result.get("best_score", 0)
+                if sym_best and sym_score > best_score:
+                    best_setup = sym_best
+                    best_score = sym_score
+                    best_tf = sym_result.get("best_tf")
+                    best_current_price = sym_result.get("current_price", 0.0)
+                    best_htf_bias = sym_result.get("htf_bias", "neutral")
+                    best_symbol = _sym
+                all_forming.extend(sym_result.get("forming", []))
+                all_forming_ranges.extend(sym_result.get("forming_all_ranges", []))
+
+            # If no setup found, use the first symbol's price for debug display
+            if best_current_price == 0.0 and all_symbol_results:
+                _first = all_symbol_results.get(DEFAULT_SYMBOL) or next(iter(all_symbol_results.values()))
+                best_current_price = _first.get("current_price", 0.0)
 
             with self._lock:
                 self.last_debug = {
@@ -1783,7 +1864,8 @@ class Schematics5BTrader:
                                     self.state.balance * (RISK_PER_TRADE_PCT / 100) * _dd_mult
                                 )
                                 _pm_result = _pm_can_open_trade(
-                                    SYMBOL, _base_risk, self._portfolio
+                                    best_symbol, _base_risk, self._portfolio,
+                                    direction=evaluation.get("direction", ""),
                                 )
                                 if not _pm_result["allowed"]:
                                     logger.info(
@@ -2249,6 +2331,34 @@ class Schematics5BTrader:
     # No per-class RIG methods needed.
 
     # ----------------------------------------------------------------
+    # TRADE LIFECYCLE HELPERS
+    # ----------------------------------------------------------------
+
+    def _add_trade(self, trade: Dict) -> None:
+        """Register a new trade in the appropriate state container.
+
+        When USE_PORTFOLIO_LAYER is on, appends to open_trades list.
+        When off, sets current_trade (legacy single-trade path).
+        """
+        if _USE_PORTFOLIO_LAYER:
+            self.state.open_trades.append(trade)
+        else:
+            self.state.current_trade = trade
+
+    def _remove_trade(self, trade: Dict) -> None:
+        """Remove a trade from the appropriate state container.
+
+        When USE_PORTFOLIO_LAYER is on, removes from open_trades by identity.
+        When off, sets current_trade to None (legacy path).
+        """
+        if _USE_PORTFOLIO_LAYER:
+            self.state.open_trades = [
+                t for t in self.state.open_trades if t is not trade
+            ]
+        else:
+            self.state.current_trade = None
+
+    # ----------------------------------------------------------------
     # TRADE ENTRY
     # ----------------------------------------------------------------
 
@@ -2357,14 +2467,15 @@ class Schematics5BTrader:
             "session_context": _get_entry_session_context(evaluation["score"]),
         }
 
-        self.state.current_trade = trade
+        self._add_trade(trade)
         self.state.save()
         logger.info(f"[5B] Entered {direction} @ {entry_price} | {symbol} {timeframe} | SL={stop_price} | TP={target_price} | Score={evaluation['score']}")
         _notify_5b_entry(trade)
         return trade
 
-    def _manage_open_trade(self, current_price: float) -> Dict:
-        trade = self.state.current_trade
+    def _manage_open_trade(self, current_price: float, trade: Optional[Dict] = None) -> Dict:
+        if trade is None:
+            trade = self.state.current_trade
         if not trade:
             return {"action": "no_trade"}
 
@@ -2372,7 +2483,7 @@ class Schematics5BTrader:
         entry_price = trade.get("entry_price", 0)
         if not entry_price:
             logger.error(f"[5B] Discarding corrupt trade with entry_price={entry_price!r}: {trade}")
-            self.state.current_trade = None
+            self._remove_trade(trade)
             self.state.save()
             return {"action": "corrupt_trade_discarded", "details": "entry_price was 0 or missing"}
 
@@ -2396,20 +2507,67 @@ class Schematics5BTrader:
         trade["live_pnl_pct"] = round(pnl_pct, 2)
         trade["current_price"] = round(current_price, 2)
 
-        if hit_target:
-            return self._close_trade(current_price, "target_hit")
-        elif hit_tp1:
-            # Take half off at TP1, slide SL to break-even, keep trade open
-            return self._take_partial_profit(current_price)
-        elif hit_stop:
-            return self._close_trade(current_price, "stop_hit")
-        else:
-            return {"action": "holding", "pnl_pct": round(pnl_pct, 2),
-                    "current_price": current_price, "direction": direction}
+        # ── Step 1: SL priority — if SL hit before TP1, stop takes precedence ──
+        if not tp1_hit and hit_stop and hit_tp1:
+            return self._close_trade(current_price, "stop_hit", trade)
 
-    def _take_partial_profit(self, exit_price: float) -> Dict:
+        # ── Step 2: Check TP1 trigger ──
+        if hit_tp1:
+            return self._take_partial_profit(current_price, trade)
+
+        # ── Step 3: Update trailing stop after TP1 ──
+        if tp1_hit:
+            trail_distance = abs(target_price - entry_price) * TRAIL_FACTOR
+            if direction == "bullish":
+                best = trade.get("highest_since_tp1", current_price)
+                best = max(best, current_price)
+                trade["highest_since_tp1"] = best
+                new_trail = round(best - trail_distance, 2)
+                if new_trail > stop_price:
+                    trade["stop_price"] = new_trail
+                    stop_price = new_trail  # update local var for exit check below
+            else:
+                best = trade.get("lowest_since_tp1", current_price)
+                best = min(best, current_price)
+                trade["lowest_since_tp1"] = best
+                new_trail = round(best + trail_distance, 2)
+                if new_trail < stop_price:
+                    trade["stop_price"] = new_trail
+                    stop_price = new_trail
+
+            # Re-check SL after trailing update
+            if direction == "bullish":
+                hit_stop = current_price <= stop_price
+            else:
+                hit_stop = current_price >= stop_price
+
+        # ── Step 4: Final exit checks (dual-hit: SL takes priority) ──
+        if hit_stop and hit_target:
+            if tp1_hit:
+                if abs(stop_price - entry_price) < 0.01:
+                    return self._close_trade(stop_price, "breakeven_after_tp1", trade)
+                else:
+                    return self._close_trade(stop_price, "trailing_stop", trade)
+            return self._close_trade(stop_price, "stop_hit", trade)
+
+        if hit_target:
+            return self._close_trade(current_price, "target_hit", trade)
+
+        if hit_stop:
+            if tp1_hit:
+                if abs(stop_price - entry_price) < 0.01:
+                    return self._close_trade(stop_price, "breakeven_after_tp1", trade)
+                else:
+                    return self._close_trade(stop_price, "trailing_stop", trade)
+            return self._close_trade(current_price, "stop_hit", trade)
+
+        return {"action": "holding", "pnl_pct": round(pnl_pct, 2),
+                "current_price": current_price, "direction": direction}
+
+    def _take_partial_profit(self, exit_price: float, trade: Optional[Dict] = None) -> Dict:
         """Close half the position at TP1 and move the stop to break-even."""
-        trade = self.state.current_trade
+        if trade is None:
+            trade = self.state.current_trade
         if not trade:
             return {"action": "no_trade"}
 
@@ -2448,8 +2606,9 @@ class Schematics5BTrader:
             "new_stop": round(entry_price, 2),
         }
 
-    def _close_trade(self, exit_price: float, reason: str) -> Dict:
-        trade = self.state.current_trade
+    def _close_trade(self, exit_price: float, reason: str, trade: Optional[Dict] = None) -> Dict:
+        if trade is None:
+            trade = self.state.current_trade
         if not trade:
             return {"action": "no_trade"}
 
@@ -2471,7 +2630,7 @@ class Schematics5BTrader:
 
         # ── Issue 5: deregister from portfolio on close ────────────────
         if self._portfolio is not None:
-            _pm_close_position(self._portfolio, trade.get("symbol", SYMBOL))
+            _pm_close_position(self._portfolio, trade.get("symbol", DEFAULT_SYMBOL))
 
         # Issue 3: update peak on every close; clear all DD state on new equity high
         if self.state.balance > self.state.peak_balance:
@@ -2502,7 +2661,7 @@ class Schematics5BTrader:
         }
 
         self.state.trade_history.append(closed_trade)
-        self.state.current_trade = None
+        self._remove_trade(trade)
         self.state.save()
 
         logger.info(f"[5B] Closed: {reason} | P&L={pnl_pct:.2f}% (${pnl_dollars:.2f}) | Balance=${self.state.balance:.2f}")
@@ -2533,14 +2692,38 @@ class Schematics5BTrader:
                     return True
         return False
 
-    def force_close(self) -> Dict:
-        if not self.state.current_trade:
-            return {"action": "no_trade"}
-        trade_sym = self.state.current_trade.get("symbol", SYMBOL)
-        price = fetch_live_price(trade_sym)
-        if not price:
-            return {"action": "error", "details": "Could not fetch live price"}
-        return self._close_trade(price, "force_closed")
+    def force_close(self, symbol: Optional[str] = None) -> Dict:
+        """Force-close open trades.
+
+        Args:
+            symbol: If provided, close only the trade on this symbol.
+                    If None, close the first/only open trade (legacy compat).
+        """
+        if _USE_PORTFOLIO_LAYER:
+            if not self.state.open_trades:
+                return {"action": "no_trade"}
+            results = []
+            trades_to_close = list(self.state.open_trades)  # snapshot — list mutates during close
+            if symbol:
+                trades_to_close = [t for t in trades_to_close if t.get("symbol") == symbol]
+            if not trades_to_close:
+                return {"action": "no_trade", "details": f"No open trade for {symbol}"}
+            for trade in trades_to_close:
+                trade_sym = trade.get("symbol", DEFAULT_SYMBOL)
+                price = fetch_live_price(trade_sym)
+                if not price:
+                    results.append({"action": "error", "symbol": trade_sym, "details": "Could not fetch live price"})
+                    continue
+                results.append(self._close_trade(price, "force_closed", trade))
+            return results[0] if len(results) == 1 else {"action": "multi_close", "results": results}
+        else:
+            if not self.state.current_trade:
+                return {"action": "no_trade"}
+            trade_sym = self.state.current_trade.get("symbol", DEFAULT_SYMBOL)
+            price = fetch_live_price(trade_sym)
+            if not price:
+                return {"action": "error", "details": "Could not fetch live price"}
+            return self._close_trade(price, "force_closed")
 
 
 # ================================================================

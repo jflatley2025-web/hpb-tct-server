@@ -15451,7 +15451,7 @@ async def tensor_trade_debug():
     debug["msce"] = validate_MSCE(msce_ctx)
     debug["state_summary"] = {
         "balance": trader.state.balance,
-        "has_open_trade": trader.state.current_trade is not None,
+        "has_open_trade": trader.state.current_trade is not None or len(trader.state.open_trades) > 0,
         "total_trades": len(trader.state.trade_history),
         "last_scan_time": trader.state.last_scan_time,
         "last_scan_action": trader.state.last_scan_action,
