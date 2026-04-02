@@ -154,6 +154,7 @@ _LTF_CANDLE_LIMITS = {"5m": 200, "1m": 100}  # 200×5m ≈ 17h; 100×1m ≈ 1.7h
 _DIR = os.path.dirname(os.path.abspath(__file__))
 TRADE_LOG_PATH = os.path.join(_DIR, "schematics_5b_trade_log.json")
 TRADE_LOG_BACKUP_PATH = os.path.join(_DIR, "schematics_5b_trade_log_backup.json")
+HTF_BIAS_CACHE_PATH = os.path.join(_DIR, "htf_bias_cache.json")
 
 # Parity validation log (JSONL) — persistent storage for live vs backtest decision comparison.
 # Written every cycle that reaches the decision gate; never overwritten (append-only).
@@ -174,6 +175,9 @@ WARMUP_CYCLES_REQUIRED = 2          # observation-only cycles before trading
 WARMUP_MIN_CANDLES_PER_TF = 50      # minimum candles per required TF
 WARMUP_REQUIRED_TFS = ["1h", "4h"]  # TFs that must have sufficient data
 WARMUP_MAX_CYCLES = 10              # log warning if warmup stuck beyond this
+# Symbols validated during warmup — core liquidity pairs that must have data
+# before trading is enabled.  Not all 12 to avoid fragile alt-coin API failures.
+WARMUP_VALIDATION_SYMBOLS = TRADING_SYMBOLS[:3]  # BTC, ETH, SOL
 
 
 # ================================================================
@@ -1198,6 +1202,8 @@ class Schematics5BTrader:
         # Per-symbol HTF bias cache: symbol → (bias_str, expiry_timestamp)
         self._htf_bias_cache: Dict[str, str] = {}
         self._htf_bias_expiry: Dict[str, float] = {}
+        self._load_htf_cache()  # restore from disk if available
+
         # Guard against overlapping scan_and_trade runs.  asyncio.wait_for
         # cancels the *await* but cannot kill the executor thread, so a
         # timed-out scan keeps running while the loop dispatches a new one.
@@ -1575,23 +1581,24 @@ class Schematics5BTrader:
                 self._warmup_cycles_completed += 1
                 self._warmup_total_attempts += 1
 
-                # Validate data quality from the scan results
+                # Validate data quality for core symbols (BTC, ETH, SOL)
                 _warmup_data_ok = True
-                _default_sym_result = all_symbol_results.get(DEFAULT_SYMBOL, {})
-                _warmup_mtf = _default_sym_result.get("mtf_dfs") or {}
-                for _wtf in WARMUP_REQUIRED_TFS:
-                    _wdf = _warmup_mtf.get(_wtf)
-                    if _wdf is None or len(_wdf) < WARMUP_MIN_CANDLES_PER_TF:
-                        _wcount = 0 if _wdf is None else len(_wdf)
-                        logger.warning(
-                            "[WARMUP] Cycle %d/%d — insufficient data for "
-                            "%s/%s: %d candles (need %d) — not advancing",
-                            self._warmup_cycles_completed,
-                            WARMUP_CYCLES_REQUIRED,
-                            DEFAULT_SYMBOL, _wtf, _wcount,
-                            WARMUP_MIN_CANDLES_PER_TF,
-                        )
-                        _warmup_data_ok = False
+                for _vsym in WARMUP_VALIDATION_SYMBOLS:
+                    _vsym_result = all_symbol_results.get(_vsym, {})
+                    _warmup_mtf = _vsym_result.get("mtf_dfs") or {}
+                    for _wtf in WARMUP_REQUIRED_TFS:
+                        _wdf = _warmup_mtf.get(_wtf)
+                        if _wdf is None or len(_wdf) < WARMUP_MIN_CANDLES_PER_TF:
+                            _wcount = 0 if _wdf is None else len(_wdf)
+                            logger.warning(
+                                "[WARMUP] Cycle %d/%d — insufficient data for "
+                                "%s/%s: %d candles (need %d) — not advancing",
+                                self._warmup_cycles_completed,
+                                WARMUP_CYCLES_REQUIRED,
+                                _vsym, _wtf, _wcount,
+                                WARMUP_MIN_CANDLES_PER_TF,
+                            )
+                            _warmup_data_ok = False
 
                 if not _warmup_data_ok:
                     # Data incomplete — don't count this cycle toward readiness
@@ -2170,6 +2177,50 @@ class Schematics5BTrader:
         return cycle_result
 
     # ----------------------------------------------------------------
+    # HTF BIAS CACHE PERSISTENCE
+    # ----------------------------------------------------------------
+
+    def _load_htf_cache(self) -> None:
+        """Load HTF bias cache from disk if available, skipping expired entries."""
+        try:
+            if not os.path.exists(HTF_BIAS_CACHE_PATH):
+                logger.info("[5B] HTF bias cache not found — starting fresh")
+                return
+            with open(HTF_BIAS_CACHE_PATH, "r") as f:
+                data = json.load(f)
+            now_ts = time.time()
+            loaded = 0
+            expired = 0
+            for symbol, entry in data.items():
+                expiry = entry.get("expiry", 0.0)
+                if expiry > now_ts:
+                    self._htf_bias_cache[symbol] = entry.get("bias", "neutral")
+                    self._htf_bias_expiry[symbol] = expiry
+                    loaded += 1
+                else:
+                    expired += 1
+            logger.info(
+                "[5B] HTF bias cache loaded: %d/%d symbols cached (%d expired)",
+                loaded, loaded + expired, expired,
+            )
+        except Exception as e:
+            logger.warning("[5B] HTF bias cache load failed — starting fresh: %s", e)
+
+    def _save_htf_cache(self) -> None:
+        """Persist current HTF bias cache to disk (atomic write)."""
+        try:
+            data = {}
+            for symbol, bias in self._htf_bias_cache.items():
+                expiry = self._htf_bias_expiry.get(symbol, 0.0)
+                data[symbol] = {"bias": bias, "expiry": expiry}
+            tmp_path = HTF_BIAS_CACHE_PATH + ".tmp"
+            with open(tmp_path, "w") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp_path, HTF_BIAS_CACHE_PATH)
+        except Exception as e:
+            logger.warning("[5B] HTF bias cache save failed: %s", e)
+
+    # ----------------------------------------------------------------
     # HTF BIAS HELPER — per-symbol TTL cache
     # ----------------------------------------------------------------
 
@@ -2219,6 +2270,7 @@ class Schematics5BTrader:
 
         self._htf_bias_cache[symbol] = htf_bias
         self._htf_bias_expiry[symbol] = now_ts + self._HTF_CACHE_TTL.get(htf_bias, 900)
+        self._save_htf_cache()
         return htf_bias, htf_debug
 
     # ----------------------------------------------------------------
