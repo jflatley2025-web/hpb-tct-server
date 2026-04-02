@@ -1218,7 +1218,7 @@ class Schematics5BTrader:
                 if _ct_risk is not None and _ct_risk > 0:
                     _pm_open_position(
                         self._portfolio,
-                        symbol=_ct.get("symbol", DEFAULT_SYMBOL),
+                        symbol=_ct.get("symbol", SYMBOL),
                         direction=_ct.get("direction", "bullish"),
                         notional_risk=_ct_risk,
                         entry_price=float(_ct["entry_price"]),
@@ -1229,7 +1229,7 @@ class Schematics5BTrader:
                     logger.info(
                         "[5B] Portfolio layer: reconstructed open position "
                         "(symbol=%s risk=$%.2f)",
-                        _ct.get("symbol", DEFAULT_SYMBOL), _ct_risk,
+                        _ct.get("symbol", SYMBOL), _ct_risk,
                     )
             logger.info(
                 "[5B] Portfolio layer ENABLED — %s",
@@ -1412,7 +1412,7 @@ class Schematics5BTrader:
                 _managed_results = []
                 # Snapshot the list — _close_trade mutates open_trades via _remove_trade
                 for _ot in list(self.state.open_trades):
-                    _ot_sym = _ot.get("symbol", DEFAULT_SYMBOL)
+                    _ot_sym = _ot.get("symbol", SYMBOL)
                     _ot_df = fetch_candles_sync(_ot_sym, "1m", 10)
                     if _ot_df is None or len(_ot_df) == 0:
                         logger.warning("[5B] Could not fetch price for open trade %s", _ot_sym)
@@ -1428,7 +1428,7 @@ class Schematics5BTrader:
                 # Fall through to scan for new setups
             elif self.state.current_trade:
                 # Legacy single-trade path — manage and return (no scanning)
-                _trade_sym = self.state.current_trade.get("symbol", DEFAULT_SYMBOL)
+                _trade_sym = self.state.current_trade.get("symbol", SYMBOL)
                 df_price = fetch_candles_sync(_trade_sym, "1m", 10)
                 if df_price is None or len(df_price) == 0:
                     self.state.last_error = "Could not fetch price data"
@@ -1457,7 +1457,7 @@ class Schematics5BTrader:
             best_tf = None
             best_current_price = 0.0
             best_htf_bias = "neutral"
-            best_symbol = DEFAULT_SYMBOL
+            best_symbol = SYMBOL
             all_forming = []
             all_forming_ranges = []
             all_symbol_results: Dict[str, Dict] = {}
@@ -1485,7 +1485,7 @@ class Schematics5BTrader:
 
             # If no setup found, use the first symbol's price for debug display
             if best_current_price == 0.0 and all_symbol_results:
-                _first = all_symbol_results.get(DEFAULT_SYMBOL) or next(iter(all_symbol_results.values()))
+                _first = all_symbol_results.get(SYMBOL) or next(iter(all_symbol_results.values()))
                 best_current_price = _first.get("current_price", 0.0)
 
             with self._lock:
@@ -2630,7 +2630,7 @@ class Schematics5BTrader:
 
         # ── Issue 5: deregister from portfolio on close ────────────────
         if self._portfolio is not None:
-            _pm_close_position(self._portfolio, trade.get("symbol", DEFAULT_SYMBOL))
+            _pm_close_position(self._portfolio, trade.get("symbol", SYMBOL))
 
         # Issue 3: update peak on every close; clear all DD state on new equity high
         if self.state.balance > self.state.peak_balance:
@@ -2709,7 +2709,7 @@ class Schematics5BTrader:
             if not trades_to_close:
                 return {"action": "no_trade", "details": f"No open trade for {symbol}"}
             for trade in trades_to_close:
-                trade_sym = trade.get("symbol", DEFAULT_SYMBOL)
+                trade_sym = trade.get("symbol", SYMBOL)
                 price = fetch_live_price(trade_sym)
                 if not price:
                     results.append({"action": "error", "symbol": trade_sym, "details": "Could not fetch live price"})
@@ -2719,7 +2719,7 @@ class Schematics5BTrader:
         else:
             if not self.state.current_trade:
                 return {"action": "no_trade"}
-            trade_sym = self.state.current_trade.get("symbol", DEFAULT_SYMBOL)
+            trade_sym = self.state.current_trade.get("symbol", SYMBOL)
             price = fetch_live_price(trade_sym)
             if not price:
                 return {"action": "error", "details": "Could not fetch live price"}
