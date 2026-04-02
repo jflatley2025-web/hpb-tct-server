@@ -1,0 +1,1 @@
+{"symbol": "BTCUSDT", "timestamp": "2026-04-02T12:22:14.186480+00:00", "legacy_decision": "PASS", "v2_decision": "TAKE", "match": false, "model": "Model_2", "timeframe": "1h", "score": 90, "v2_failure_code": null, "v2_reason": "v2_found_setup_legacy_missed", "htf_bias": "bearish", "entry_price": 68000.0, "use_unified_engine": false}
