@@ -108,6 +108,10 @@ DEFAULT_SYMBOL = "BTCUSDT"  # backward-compat fallback for single-symbol context
 STARTING_BALANCE = 5000.0
 RISK_PER_TRADE_PCT = 1.0  # 1% of balance per trade
 DEFAULT_LEVERAGE = 10
+# Trailing stop — activated after TP1 hit.  Ratchets the stop in the
+# profit direction by (target-entry)*TRAIL_FACTOR from the best price
+# seen since TP1.  Matches backtest/config.py for parity with Run 40.
+TRAIL_FACTOR = 0.50
 # HTF bias gate — daily candle tells us the dominant directional context.
 # 4h was too narrow; 1d changes once a day so the cache TTL matches.
 HTF_TIMEFRAME = "1d"
@@ -2574,16 +2578,62 @@ class Schematics5BTrader:
         trade["live_pnl_pct"] = round(pnl_pct, 2)
         trade["current_price"] = round(current_price, 2)
 
+        # ── Step 1: SL priority — if SL hit before TP1, stop takes precedence ──
+        if not tp1_hit and hit_stop and hit_tp1:
+            return self._close_trade(current_price, "stop_hit")
+
+        # ── Step 2: Check TP1 trigger ──
+        if hit_tp1:
+            return self._take_partial_profit(current_price)
+
+        # ── Step 3: Update trailing stop after TP1 ──
+        if tp1_hit:
+            trail_distance = abs(target_price - entry_price) * TRAIL_FACTOR
+            if direction == "bullish":
+                best = trade.get("highest_since_tp1", current_price)
+                best = max(best, current_price)
+                trade["highest_since_tp1"] = best
+                new_trail = round(best - trail_distance, 2)
+                if new_trail > stop_price:
+                    trade["stop_price"] = new_trail
+                    stop_price = new_trail  # update local var for exit check below
+            else:
+                best = trade.get("lowest_since_tp1", current_price)
+                best = min(best, current_price)
+                trade["lowest_since_tp1"] = best
+                new_trail = round(best + trail_distance, 2)
+                if new_trail < stop_price:
+                    trade["stop_price"] = new_trail
+                    stop_price = new_trail
+
+            # Re-check SL after trailing update
+            if direction == "bullish":
+                hit_stop = current_price <= stop_price
+            else:
+                hit_stop = current_price >= stop_price
+
+        # ── Step 4: Final exit checks (dual-hit: SL takes priority) ──
+        if hit_stop and hit_target:
+            if tp1_hit:
+                if abs(stop_price - entry_price) < 0.01:
+                    return self._close_trade(stop_price, "breakeven_after_tp1")
+                else:
+                    return self._close_trade(stop_price, "trailing_stop")
+            return self._close_trade(stop_price, "stop_hit")
+
         if hit_target:
             return self._close_trade(current_price, "target_hit")
-        elif hit_tp1:
-            # Take half off at TP1, slide SL to break-even, keep trade open
-            return self._take_partial_profit(current_price)
-        elif hit_stop:
+
+        if hit_stop:
+            if tp1_hit:
+                if abs(stop_price - entry_price) < 0.01:
+                    return self._close_trade(stop_price, "breakeven_after_tp1")
+                else:
+                    return self._close_trade(stop_price, "trailing_stop")
             return self._close_trade(current_price, "stop_hit")
-        else:
-            return {"action": "holding", "pnl_pct": round(pnl_pct, 2),
-                    "current_price": current_price, "direction": direction}
+
+        return {"action": "holding", "pnl_pct": round(pnl_pct, 2),
+                "current_price": current_price, "direction": direction}
 
     def _take_partial_profit(self, exit_price: float) -> Dict:
         """Close half the position at TP1 and move the stop to break-even."""
@@ -2610,6 +2660,11 @@ class Schematics5BTrader:
         trade["tp1_pnl_dollars"] = round(pnl_dollars, 2)
         trade["position_size"] = round(half_size, 2)   # remaining half
         trade["stop_price"] = round(entry_price, 2)    # slide SL to break-even
+        # Initialize trailing stop tracker — best price seen since TP1
+        if direction == "bullish":
+            trade["highest_since_tp1"] = exit_price
+        else:
+            trade["lowest_since_tp1"] = exit_price
 
         self.state.save()
         logger.info(
@@ -2639,8 +2694,10 @@ class Schematics5BTrader:
         else:
             pnl_pct = ((entry_price - exit_price) / entry_price) * 100
 
-        # A stop hit after TP1 lands at break-even — still a net win overall
-        is_win = reason == "target_hit" or (
+        # A stop hit after TP1 lands at break-even or trailing — still a net win
+        # from the TP1 partial profit.  New exit reasons from trailing stop logic:
+        # "breakeven_after_tp1", "trailing_stop" are both post-TP1 exits.
+        is_win = reason in ("target_hit", "breakeven_after_tp1", "trailing_stop") or (
             reason == "stop_hit" and trade.get("tp1_hit", False)
         )
         position_size = trade.get("position_size", 0)
