@@ -3012,25 +3012,31 @@ def validate_gates(context: Dict) -> Dict:
         return context
 
     # ── Shadow mode: compute v2 result alongside legacy (no side effects) ─
+    # Controlled by ENABLE_SHADOW_MODE; disabled post-promotion to save compute.
     if _v2_available:
         try:
-            _candles_by_tf = _build_candles_by_tf(context)
-            _v2_shadow = _v2_decide(
-                _candles_by_tf,
-                {
-                    "current_price": context.get("current_price", 0.0),
-                    "current_time": datetime.now(timezone.utc),
-                },
-            )
-            context["_v2_shadow"] = _v2_shadow
-            logger.debug(
-                "SHADOW v2: decision=%s score=%s failure=%s",
-                _v2_shadow.get("decision"),
-                _v2_shadow.get("score"),
-                _v2_shadow.get("failure_code"),
-            )
-        except Exception as _e:
-            logger.warning("SHADOW v2 error [%s]: %s", type(_e).__name__, _e)
+            from decision_engine_v2 import ENABLE_SHADOW_MODE as _shadow_on
+        except ImportError:
+            _shadow_on = False
+        if _shadow_on:
+            try:
+                _candles_by_tf = _build_candles_by_tf(context)
+                _v2_shadow = _v2_decide(
+                    _candles_by_tf,
+                    {
+                        "current_price": context.get("current_price", 0.0),
+                        "current_time": datetime.now(timezone.utc),
+                    },
+                )
+                context["_v2_shadow"] = _v2_shadow
+                logger.debug(
+                    "SHADOW v2: decision=%s score=%s failure=%s",
+                    _v2_shadow.get("decision"),
+                    _v2_shadow.get("score"),
+                    _v2_shadow.get("failure_code"),
+                )
+            except Exception as _e:
+                logger.warning("SHADOW v2 error [%s]: %s", type(_e).__name__, _e)
 
     # ── Legacy gate pipeline (unchanged) ─────────────────────────────
     context["1A"] = validate_1A(context)

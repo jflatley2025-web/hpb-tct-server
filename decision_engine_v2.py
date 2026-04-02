@@ -119,21 +119,36 @@ USE_UNIFIED_ENGINE = True
 # are routed through the unified engine.  The rest continue on the legacy
 # path, keeping shadow mode active for comparison.
 #
-# 0.1  → 10% canary (default; use during initial activation)
+# 0.1  → 10% canary (use during initial activation)
 # 1.0  → full rollout (set after canary period passes)
-ROLLOUT_FRACTION = 0.1
+ROLLOUT_FRACTION = 1.0  # promoted to 100% on 2026-04-02
+
+# ── Canary mode master switch ────────────────────────────────────────
+# When True, revert to 10% canary routing regardless of ROLLOUT_FRACTION.
+# Use as instant rollback if issues are detected post-promotion.
+ENABLE_CANARY_MODE = False
+
+# ── Shadow mode switch ───────────────────────────────────────────────
+# When True, the legacy pipeline still runs in shadow alongside v2 for
+# comparison logging.  Disabled by default post-promotion to reduce
+# compute overhead; re-enable for debugging if needed.
+ENABLE_SHADOW_MODE = False
+
+_CANARY_ROLLOUT_FRACTION = 0.1  # fraction used when ENABLE_CANARY_MODE is True
 
 
 def should_use_v2() -> bool:
     """Return True when the unified engine should handle this request.
 
-    Both conditions must hold:
-      1. USE_UNIFIED_ENGINE is True (global activation flag)
-      2. The random rollout gate passes (ROLLOUT_FRACTION chance)
+    Routing logic:
+      1. USE_UNIFIED_ENGINE must be True (global activation flag)
+      2. If ENABLE_CANARY_MODE is True → use _CANARY_ROLLOUT_FRACTION (10%)
+      3. Otherwise → use ROLLOUT_FRACTION (100% post-promotion)
     """
     if not USE_UNIFIED_ENGINE:
         return False
-    return random.random() < ROLLOUT_FRACTION
+    fraction = _CANARY_ROLLOUT_FRACTION if ENABLE_CANARY_MODE else ROLLOUT_FRACTION
+    return random.random() < fraction
 
 
 # ── DD protection feature flag ─────────────────────────────────────────

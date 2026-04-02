@@ -180,12 +180,24 @@ class TestHTFModelDirectionGate:
 
 
 class TestRolloutFraction:
-    """Verify ROLLOUT_FRACTION is set to 0.1 for canary validation."""
+    """Verify ROLLOUT_FRACTION is set to 1.0 for full production rollout."""
 
-    def test_rollout_fraction_is_canary(self):
+    def test_rollout_fraction_is_production(self):
         from decision_engine_v2 import ROLLOUT_FRACTION
-        assert ROLLOUT_FRACTION == 0.1, (
-            f"ROLLOUT_FRACTION should be 0.1 for canary, got {ROLLOUT_FRACTION}"
+        assert ROLLOUT_FRACTION == 1.0, (
+            f"ROLLOUT_FRACTION should be 1.0 for production, got {ROLLOUT_FRACTION}"
+        )
+
+    def test_canary_mode_disabled(self):
+        from decision_engine_v2 import ENABLE_CANARY_MODE
+        assert ENABLE_CANARY_MODE is False, (
+            "ENABLE_CANARY_MODE should be False in production"
+        )
+
+    def test_canary_rollback_fraction_preserved(self):
+        from decision_engine_v2 import _CANARY_ROLLOUT_FRACTION
+        assert _CANARY_ROLLOUT_FRACTION == 0.1, (
+            "Canary rollback fraction should remain 0.1 for safe rollback"
         )
 
 
