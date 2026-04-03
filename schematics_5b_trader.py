@@ -1526,6 +1526,13 @@ class Schematics5BTrader:
             "details": {},
         }
 
+        # Reset forming-schematics flag at cycle start so it can't remain
+        # latched from a prior sweep through early-return branches (open-trade
+        # management, fetch errors, warmup gate).  The flag is set to the
+        # actual result after the full symbol sweep completes.
+        with self._lock:
+            self._has_forming_schematics = False
+
         try:
             # 1. Manage open trade first
             if self.state.current_trade:
