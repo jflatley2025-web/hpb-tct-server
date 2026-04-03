@@ -70,10 +70,10 @@ class TestSchematics5BEvaluator:
         from decision_tree_bridge import DecisionTreeEvaluator
         return DecisionTreeEvaluator()
 
-    def test_fixed_threshold_is_60(self, evaluator):
-        """Threshold must always be 60 (v2 pipeline)."""
+    def test_fixed_threshold_is_50(self, evaluator):
+        """Threshold must always be 50 (aligned with backtest Run 38)."""
         from schematics_5b_trader import ENTRY_THRESHOLD
-        assert ENTRY_THRESHOLD == 60
+        assert ENTRY_THRESHOLD == 50
 
     def test_no_adapt_methods(self):
         """5B evaluator must NOT have adapt_after_loss/win methods."""
