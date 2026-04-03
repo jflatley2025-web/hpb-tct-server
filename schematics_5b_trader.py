@@ -2568,16 +2568,40 @@ class Schematics5BTrader:
         stop_info = schematic.get("stop_loss", {})
         target_info = schematic.get("target", {})
 
+        # Capture a fresh price snapshot at entry time so stale-entry checks
+        # and market_price_at_entry reflect the actual moment of execution,
+        # not the scan-start price that may be minutes old.
+        try:
+            _fresh_df = fetch_candles_sync(symbol, "1m", 2)
+            entry_snapshot_price = float(_fresh_df.iloc[-1]["close"]) if _fresh_df is not None and len(_fresh_df) > 0 else current_price
+        except Exception:
+            entry_snapshot_price = current_price
+
         # Use the schematic's BOS level as entry (where a limit order would fill)
         # instead of current_price which may have displaced past the entry zone.
-        # Falls back to current_price if no schematic entry price is available.
+        # Falls back to entry_snapshot_price if no schematic entry price is available.
         schematic_entry = (schematic.get("entry") or {}).get("price")
-        entry_price = schematic_entry if schematic_entry else current_price
+        entry_price = schematic_entry if schematic_entry else entry_snapshot_price
         stop_price = stop_info.get("price")
         target_price = target_info.get("price")
 
         if not stop_price or not target_price:
             return {"error": "Missing stop or target price"}
+
+        # Reject entries where the market has already breached the stop.
+        # This prevents retroactive fills that are DOA (dead on arrival).
+        if direction == "bullish" and entry_snapshot_price <= stop_price:
+            logger.warning(
+                "[5B] Rejecting long: market %.4f already at/below stop %.4f",
+                entry_snapshot_price, stop_price,
+            )
+            return {"error": "Market already at/below stop — entry DOA"}
+        if direction == "bearish" and entry_snapshot_price >= stop_price:
+            logger.warning(
+                "[5B] Rejecting short: market %.4f already at/above stop %.4f",
+                entry_snapshot_price, stop_price,
+            )
+            return {"error": "Market already at/above stop — entry DOA"}
 
         # Validate direction consistency
         if direction == "bearish":
@@ -2636,10 +2660,11 @@ class Schematics5BTrader:
 
         # Stale entry guard — if market already displaced past TP1, the trade
         # has played out and entering retroactively would be inaccurate.
-        if direction == "bearish" and current_price < tp1_price:
-            return {"error": f"Stale entry: price {current_price:.2f} already below TP1 {tp1_price:.2f}"}
-        if direction == "bullish" and current_price > tp1_price:
-            return {"error": f"Stale entry: price {current_price:.2f} already above TP1 {tp1_price:.2f}"}
+        # Uses entry_snapshot_price (fresh) instead of current_price (scan-start).
+        if direction == "bearish" and entry_snapshot_price < tp1_price:
+            return {"error": "Stale entry: price %.4f already below TP1 %.4f" % (entry_snapshot_price, tp1_price)}
+        if direction == "bullish" and entry_snapshot_price > tp1_price:
+            return {"error": "Stale entry: price %.4f already above TP1 %.4f" % (entry_snapshot_price, tp1_price)}
 
         trade = {
             "id": len(self.state.trade_history) + 1,
@@ -2647,10 +2672,10 @@ class Schematics5BTrader:
             "timeframe": timeframe,
             "direction": direction,
             "model": evaluation.get("model", "unknown"),
-            "entry_price": round(entry_price, 2),
-            "market_price_at_entry": round(current_price, 2),
-            "stop_price": round(stop_price, 2),
-            "target_price": round(target_price, 2),
+            "entry_price": entry_price,
+            "market_price_at_entry": entry_snapshot_price,
+            "stop_price": stop_price,
+            "target_price": target_price,
             "tp1_price": tp1_price,
             "tp1_hit": False,
             "position_size": round(position_size, 2),
@@ -2671,8 +2696,12 @@ class Schematics5BTrader:
 
         self.state.current_trade = trade
         self.state.save()
-        _mkt_delta = f" (mkt={current_price:.2f})" if abs(current_price - entry_price) > 0.01 else ""
-        logger.info(f"[5B] Entered {direction} @ {entry_price}{_mkt_delta} | {symbol} {timeframe} | SL={stop_price} | TP={target_price} | Score={evaluation['score']}")
+        _mkt_delta = " (mkt=%.4f)" % entry_snapshot_price if abs(entry_snapshot_price - entry_price) > 0.01 else ""
+        logger.info(
+            "[5B] Entered %s @ %.4f%s | %s %s | SL=%.4f | TP=%.4f | Score=%s",
+            direction, entry_price, _mkt_delta, symbol, timeframe,
+            stop_price, target_price, evaluation["score"],
+        )
         _notify_5b_entry(trade)
         return trade
 
