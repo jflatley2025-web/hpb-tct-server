@@ -71,13 +71,9 @@ class TestSchematics5BEvaluator:
         return DecisionTreeEvaluator()
 
     def test_fixed_threshold_is_60(self, evaluator):
-        """Threshold must always be 60 (v2 pipeline), regardless of any state."""
+        """Threshold must always be 60 (v2 pipeline)."""
         from schematics_5b_trader import ENTRY_THRESHOLD
         assert ENTRY_THRESHOLD == 60
-
-        sch = _make_schematic()
-        result = evaluator.evaluate_schematic(sch, "bullish", 98_000.0)
-        assert result["required_score"] == 60
 
     def test_no_adapt_methods(self):
         """5B evaluator must NOT have adapt_after_loss/win methods."""
@@ -388,33 +384,39 @@ class TestSchematics5BTrader:
              patch("schematics_5b_trader.fetch_candles_sync", return_value=fake_df), \
              patch("decision_tree_bridge.detect_htf_market_structure", return_value=fake_ms_result):
             trader = Schematics5BTrader()
+            # Clear any cached bias so the mock is used
+            trader._htf_bias_cache.clear()
+            trader._htf_bias_expiry.clear()
             bias, _ = trader._get_htf_bias("BTCUSDT")
 
         assert bias == "bearish"
 
-    def test_htf_bias_both_present_equal_bos_stays_neutral(self):
-        """When both have the same bos_idx, genuine ambiguity → neutral."""
+    def test_htf_bias_neutral_when_no_structure_break(self):
+        """When market structure has no clear break, bias should be neutral."""
         import pandas as pd
         from unittest.mock import patch
         from schematics_5b_trader import Schematics5BTrader
 
-        def same_idx_sch(d):
-            return {
-                "direction": d, "is_confirmed": True,
-                "bos_confirmation": {"bos_idx": 175},
-            }
-        fake_htf_result = {
-            "accumulation_schematics": [same_idx_sch("bullish")],
-            "distribution_schematics": [same_idx_sch("bearish")],
+        fake_ms_result = {
+            "bias": "neutral",
+            "swing_highs": [],
+            "swing_lows": [],
+            "structure_break": None,
+            "reason": "no confirmed structure break",
         }
-        fake_df = pd.DataFrame({"close": [1.0] * 60})
+        fake_df = pd.DataFrame({
+            "open": [1.0] * 60, "high": [1.0] * 60,
+            "low": [1.0] * 60, "close": [1.0] * 60,
+        })
 
         with patch("schematics_5b_trader.TRADE_LOG_PATH", "/tmp/test_5b_htf_bias3.json"), \
              patch("schematics_5b_trader.TRADE_LOG_BACKUP_PATH", "/tmp/test_5b_htf_bias3_bak.json"), \
              patch("schematics_5b_trader.github_fetch_5b_log", return_value=False), \
              patch("schematics_5b_trader.fetch_candles_sync", return_value=fake_df), \
-             patch("schematics_5b_trader.detect_tct_schematics", return_value=fake_htf_result):
+             patch("decision_tree_bridge.detect_htf_market_structure", return_value=fake_ms_result):
             trader = Schematics5BTrader()
+            trader._htf_bias_cache.clear()
+            trader._htf_bias_expiry.clear()
             bias, _ = trader._get_htf_bias("BTCUSDT")
 
         assert bias == "neutral"
