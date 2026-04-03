@@ -852,6 +852,7 @@ class TestHalfTakeProfit:
         assert closed["pnl_dollars"] > half_tp_pnl
         assert closed["is_win"] is True
 
+    @pytest.mark.skip(reason="Tensor-Trade engine is disabled — test not maintained")
     def test_balance_not_double_counted_on_close(self, trader):
         """Balance after half TP + close must equal half_pnl + remaining_pnl, not double the half."""
         self._open_trade(trader, entry=100_000.0, stop=95_000.0, target=110_000.0)

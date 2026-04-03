@@ -135,7 +135,7 @@ def test_preflight_fails_when_model_cache_missing(tmp_path):
     """SystemExit is raised when the model cache directory does not exist."""
     with patch("tct_pdf_rules.Path.home", return_value=tmp_path):
         # tmp_path has no sentence_transformers cache
-        with pytest.raises(SystemExit, match="Embedding model not cached"):
+        with pytest.raises(RuntimeError, match="Embedding model not cached"):
             _check_embedding_model_cached()
 
 
@@ -383,7 +383,7 @@ def test_load_tct_rules_raises_on_missing_pdf_dir(tmp_path):
 
     with patch("tct_pdf_rules.PDF_DIR", missing_dir), \
          patch("tct_pdf_rules.Path.home", return_value=tmp_path):
-        with pytest.raises(SystemExit, match="PDF directory not found"):
+        with pytest.raises(RuntimeError, match="PDF directory not found"):
             load_tct_rules()
 
 

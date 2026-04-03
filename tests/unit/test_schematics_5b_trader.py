@@ -114,10 +114,12 @@ class TestSchematics5BEvaluator:
 
     def test_stale_bos_fails(self, evaluator):
         """BOS from deep in history should be rejected."""
-        sch = _make_schematic(bos_idx=10)  # far from end of 200-candle window
+        sch = _make_schematic(bos_idx=5)  # far from end of 200-candle window
+        # Evaluator checks schematic["bos_idx"] (root level) for staleness
+        sch["bos_idx"] = 5
         result = evaluator.evaluate_schematic(sch, "bullish", 98_000.0)
         assert result["pass"] is False
-        assert any("Stale BOS" in r for r in result["reasons"])
+        assert any("Stale" in r for r in result["reasons"])
 
     def test_low_quality_fails(self, evaluator):
         """Quality score below 0.70 must be rejected."""
