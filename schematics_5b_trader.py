@@ -105,6 +105,10 @@ TRADING_SYMBOLS = [
     "XMRUSDT", "FARTCOINUSDT", "PEPEUSDT", "XRPUSDT",
 ]
 DEFAULT_SYMBOL = "BTCUSDT"  # backward-compat fallback for single-symbol contexts
+# Only enter trades on backtest-validated symbols.  All TRADING_SYMBOLS are still
+# scanned (for monitoring, HTF context, forming schematics) but trades are
+# restricted to this list until additional pairs are backtest-proven.
+TRADEABLE_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 STARTING_BALANCE = 5000.0
 RISK_PER_TRADE_PCT = 1.0  # 1% of balance per trade
 DEFAULT_LEVERAGE = 10
@@ -115,13 +119,14 @@ TRAIL_FACTOR = 0.50
 # HTF bias gate — daily candle tells us the dominant directional context.
 # 4h was too narrow; 1d changes once a day so the cache TTL matches.
 HTF_TIMEFRAME = "1d"
-# Scan TFs — 30m and above only.  Lower TFs (15m, 5m, 1m) produce too many
-# low-quality setups across 5 pairs; 30m+ keeps signal quality high.
+# Scan TFs — includes 15m to match backtest configuration.
+# 15m has strict quality gates in decision_engine_v2 (RR>=0.8, range>=0.3%,
+# displacement>=0.65) that filter low-quality setups.
 # Note: 5m/1m are still fetched separately for LTF BOS *entry refinement*
 # after a setup is confirmed on one of these TFs (see LTF_BOS_TIMEFRAMES).
-MTF_TIMEFRAMES = ["1d", "4h", "1h", "30m"]
+MTF_TIMEFRAMES = ["1d", "4h", "1h", "30m", "15m"]
 AUTO_SCAN_INTERVAL = int(os.getenv("SCHEMATICS_5B_SCAN_INTERVAL", "60"))
-ENTRY_THRESHOLD = 60  # v2 pipeline: raised from 50 to 60
+ENTRY_THRESHOLD = 50  # aligned with backtest Run 38 (97.8% WR at threshold=50)
 
 # TF hierarchy for the upward cascade (ordered highest → lowest).
 # When a schematic is confirmed at a lower TF, we try to upgrade it to the
@@ -2116,40 +2121,57 @@ class Schematics5BTrader:
                                     _pm_scaling = _pm_result["scaling_factor"]
 
                             if not _compress_block and not _portfolio_block:
-                                trade = self._enter_trade(
-                                    schematic, evaluation, best_current_price, best_htf_bias,
-                                    best_symbol, best_tf,
-                                    risk_multiplier=_dd_mult * _pm_scaling,
-                                )
-                                if trade.get("error"):
-                                    # _enter_trade() rejected the setup (bad stop/target, R:R
-                                    # too low at market, etc.) — do NOT update the compression
-                                    # window so a valid future trade is not locked out.
-                                    logger.warning(
-                                        "[5B] _enter_trade failed: %s", trade["error"]
+                                # Only trade backtest-validated symbols
+                                if best_symbol not in TRADEABLE_SYMBOLS:
+                                    logger.info(
+                                        "[5B] SYMBOL_NOT_TRADEABLE: %s not in %s — "
+                                        "skipping trade (score=%s model=%s tf=%s)",
+                                        best_symbol, TRADEABLE_SYMBOLS,
+                                        evaluation.get("score"),
+                                        evaluation.get("model"), best_tf,
                                     )
-                                    cycle_result["action"] = "entry_failed"
-                                    cycle_result["details"] = trade
+                                    cycle_result["action"] = "symbol_not_tradeable"
+                                    cycle_result["details"] = {
+                                        "symbol": best_symbol,
+                                        "score": evaluation.get("score"),
+                                        "model": evaluation.get("model"),
+                                        "timeframe": best_tf,
+                                    }
                                 else:
-                                    # v15: only record accepted trade when order was placed
-                                    self.state.last_accepted_trade_ts = (
-                                        datetime.now(timezone.utc).isoformat()
+                                    trade = self._enter_trade(
+                                        schematic, evaluation, best_current_price, best_htf_bias,
+                                        best_symbol, best_tf,
+                                        risk_multiplier=_dd_mult * _pm_scaling,
                                     )
-                                    self.state.last_accepted_trade_priority = _priority
-                                    cycle_result["action"] = "trade_entered"
-                                    cycle_result["details"] = trade
-
-                                    # ── Issue 5: register in portfolio after confirmed entry
-                                    if self._portfolio is not None:
-                                        _pm_open_position(
-                                            self._portfolio,
-                                            symbol=best_symbol,
-                                            direction=evaluation["direction"],
-                                            notional_risk=trade.get("risk_amount", 0.0),
-                                            entry_price=trade.get("entry_price", 0.0),
-                                            model=evaluation.get("model", "unknown"),
-                                            timeframe=best_tf or "unknown",
+                                    if trade.get("error"):
+                                        # _enter_trade() rejected the setup (bad stop/target, R:R
+                                        # too low at market, etc.) — do NOT update the compression
+                                        # window so a valid future trade is not locked out.
+                                        logger.warning(
+                                            "[5B] _enter_trade failed: %s", trade["error"]
                                         )
+                                        cycle_result["action"] = "entry_failed"
+                                        cycle_result["details"] = trade
+                                    else:
+                                        # v15: only record accepted trade when order was placed
+                                        self.state.last_accepted_trade_ts = (
+                                            datetime.now(timezone.utc).isoformat()
+                                        )
+                                        self.state.last_accepted_trade_priority = _priority
+                                        cycle_result["action"] = "trade_entered"
+                                        cycle_result["details"] = trade
+
+                                        # ── Issue 5: register in portfolio after confirmed entry
+                                        if self._portfolio is not None:
+                                            _pm_open_position(
+                                                self._portfolio,
+                                                symbol=best_symbol,
+                                                direction=evaluation["direction"],
+                                                notional_risk=trade.get("risk_amount", 0.0),
+                                                entry_price=trade.get("entry_price", 0.0),
+                                                model=evaluation.get("model", "unknown"),
+                                                timeframe=best_tf or "unknown",
+                                            )
             else:
                 # Legacy: no qualifying setups found.
                 # Log if v2 independently found a signal (informational — not executed).
