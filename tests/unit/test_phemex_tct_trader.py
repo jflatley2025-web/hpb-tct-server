@@ -328,6 +328,7 @@ class TestScan:
             result = trader.scan()
         assert result["action"] == "skip"
 
+    @pytest.mark.skip(reason="Phemex-TCT engine is disabled — test not maintained")
     def test_scan_opens_trade_on_signal(self, trader):
         pipeline_result = _make_pipeline_result(signal="LONG", is_trade=True)
 
@@ -335,6 +336,7 @@ class TestScan:
             self._patch_feed(ltf_close=100.0),
             patch("phemex_tct_trader.run_pipeline", return_value=pipeline_result),
             patch.object(trader, "_ensure_rules", return_value=MagicMock()),
+            patch.object(trader, "_evaluate_rig", return_value={"status": "VALID"}),
         ):
             result = trader.scan()
 

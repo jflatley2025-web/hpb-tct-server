@@ -1837,14 +1837,15 @@ class TCTSchematicDetector:
                 "model1_to_model2_flow": m1_to_m2_flow,
                 "context_follow_through": context_follow_through,
                 # Summary flags for quick reference
-                "has_conversion": schematic_conversion is not None,
-                "has_dual_deviation": dual_side_deviation.get("has_dual_deviation", False),
-                "is_nested_in_htf": ltf_htf_transition.get("is_nested_in_htf_range", False),
-                "valid_on_htf": multi_tf_validity.get("would_be_valid_on_htf", False),
-                "has_wov_opportunity": wov_in_wov.get("has_inner_schematic", False),
-                "has_m1_to_m2_opportunity": m1_to_m2_flow.get("m1_to_m2_detected", False),
-                "follow_through_bias": context_follow_through.get("bias", "neutral"),
-                "enhanced_target": context_follow_through.get("enhanced_target")
+                "has_conversion": schematic_conversion.get("conversion_detected", False),
+                "has_dual_deviation": dual_side_deviation.get("has_dual_side_deviation", False),
+                "has_dual_side_deviation": dual_side_deviation.get("has_dual_side_deviation", False),
+                "is_nested_in_htf": ltf_htf_transition.get("transition_detected", False),
+                "valid_on_htf": multi_tf_validity.get("has_multi_tf_opportunity", False),
+                "has_wov_opportunity": wov_in_wov.get("has_wov_in_wov", False),
+                "has_m1_to_m2_opportunity": m1_to_m2_flow.get("m1_to_m2_flow_detected", False),
+                "follow_through_bias": context_follow_through.get("expected_follow_through", "neutral"),
+                "enhanced_target": context_follow_through.get("recommendation")
             },
             # Session manipulation context (MSCE integration)
             "session_context": session_context,
@@ -2061,14 +2062,15 @@ class TCTSchematicDetector:
                 "model1_to_model2_flow": m1_to_m2_flow,
                 "context_follow_through": context_follow_through,
                 # Summary flags for quick reference
-                "has_conversion": schematic_conversion is not None,
-                "has_dual_deviation": dual_side_deviation.get("has_dual_deviation", False),
-                "is_nested_in_htf": ltf_htf_transition.get("is_nested_in_htf_range", False),
-                "valid_on_htf": multi_tf_validity.get("would_be_valid_on_htf", False),
-                "has_wov_opportunity": wov_in_wov.get("has_inner_schematic", False),
-                "has_m1_to_m2_opportunity": m1_to_m2_flow.get("m1_to_m2_detected", False),
-                "follow_through_bias": context_follow_through.get("bias", "neutral"),
-                "enhanced_target": context_follow_through.get("enhanced_target")
+                "has_conversion": schematic_conversion.get("conversion_detected", False),
+                "has_dual_deviation": dual_side_deviation.get("has_dual_side_deviation", False),
+                "has_dual_side_deviation": dual_side_deviation.get("has_dual_side_deviation", False),
+                "is_nested_in_htf": ltf_htf_transition.get("transition_detected", False),
+                "valid_on_htf": multi_tf_validity.get("has_multi_tf_opportunity", False),
+                "has_wov_opportunity": wov_in_wov.get("has_wov_in_wov", False),
+                "has_m1_to_m2_opportunity": m1_to_m2_flow.get("m1_to_m2_flow_detected", False),
+                "follow_through_bias": context_follow_through.get("expected_follow_through", "neutral"),
+                "enhanced_target": context_follow_through.get("recommendation")
             },
             # Session manipulation context (MSCE integration)
             "session_context": session_context,
