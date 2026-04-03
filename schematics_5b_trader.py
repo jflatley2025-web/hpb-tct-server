@@ -121,6 +121,7 @@ HTF_TIMEFRAME = "1d"
 # after a setup is confirmed on one of these TFs (see LTF_BOS_TIMEFRAMES).
 MTF_TIMEFRAMES = ["1d", "4h", "1h", "30m"]
 AUTO_SCAN_INTERVAL = int(os.getenv("SCHEMATICS_5B_SCAN_INTERVAL", "60"))
+ACTIVE_SCHEMATIC_INTERVAL = int(os.getenv("SCHEMATICS_5B_ACTIVE_INTERVAL", "15"))
 ENTRY_THRESHOLD = 60  # v2 pipeline: raised from 50 to 60
 
 # TF hierarchy for the upward cascade (ordered highest → lowest).
@@ -1180,6 +1181,7 @@ class Schematics5BTrader:
         self.evaluator = DecisionTreeEvaluator()
         self._jack_evaluator = JackTCTEvaluator()
         self.last_debug: Dict = {}
+        self._has_forming_schematics: bool = False  # signals scan loop to use faster interval
         self._lock = threading.Lock()
         # Lifetime gate-block counters — incremented inside _scan_lock (no race).
         # One counter per failure_context label + "passes" for the success path.
@@ -1550,6 +1552,7 @@ class Schematics5BTrader:
                 best_current_price = _first.get("current_price", 0.0)
 
             with self._lock:
+                self._has_forming_schematics = bool(all_forming)
                 self.last_debug = {
                     "timestamp": cycle_result["timestamp"],
                     "trading_mode": scan_mode,

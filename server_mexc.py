@@ -18675,12 +18675,12 @@ async def schematics_5b_auto_scan_loop():
     Integrates MSCE (Multi-Session Context Engine) for session-aware
     confidence weighting.  Pushes trade log to GitHub every hour.
     """
-    from schematics_5b_trader import get_5b_trader, AUTO_SCAN_INTERVAL, TRADE_LOG_PATH as LOG_5B
+    from schematics_5b_trader import get_5b_trader, AUTO_SCAN_INTERVAL, ACTIVE_SCHEMATIC_INTERVAL, TRADE_LOG_PATH as LOG_5B
     from schematics_5b_trader import github_push_5b_log
 
     # Small stagger so startup health-check passes before first scan hits the API.
     await asyncio.sleep(5)
-    logger.info(f"[5B-TRADE] Auto-scan loop started — interval: {AUTO_SCAN_INTERVAL}s")
+    logger.info(f"[5B-TRADE] Auto-scan loop started — interval: {AUTO_SCAN_INTERVAL}s (active: {ACTIVE_SCHEMATIC_INTERVAL}s)")
 
     consecutive_errors = 0
     _5b_last_successful_cycle = time.time()
@@ -18688,6 +18688,7 @@ async def schematics_5b_auto_scan_loop():
     GITHUB_PUSH_INTERVAL = 3600
     _last_telegram_summary = time.time()
     TELEGRAM_SUMMARY_INTERVAL = 34 * 60  # 34 minutes
+    _prev_fast_mode = False  # track interval state changes for logging
 
     while True:
         # ── Deadlock watchdog ─────────────────────────────────────────
@@ -18958,7 +18959,15 @@ async def schematics_5b_auto_scan_loop():
             except Exception as _tg_err:
                 logger.warning("[5B-TRADE] Telegram summary failed: %s", _tg_err)
 
-        await asyncio.sleep(AUTO_SCAN_INTERVAL)
+        # Adaptive interval: scan 4x faster when forming schematics (Tap 3
+        # present, BOS imminent) are detected on any symbol.
+        _fast_mode = trader._has_forming_schematics
+        if _fast_mode != _prev_fast_mode:
+            _new_interval = ACTIVE_SCHEMATIC_INTERVAL if _fast_mode else AUTO_SCAN_INTERVAL
+            logger.info("[5B-TRADE] Scan interval → %ds (%s)", _new_interval,
+                        "forming schematic detected" if _fast_mode else "no active schematics")
+            _prev_fast_mode = _fast_mode
+        await asyncio.sleep(ACTIVE_SCHEMATIC_INTERVAL if _fast_mode else AUTO_SCAN_INTERVAL)
 
 
 def _send_telegram_status_summary(trader) -> None:
