@@ -12,7 +12,7 @@ vectors — identical dimensionality to all-MiniLM-L6-v2. Semantic quality
 is not tested here; only the ChromaDB integration and rule extraction logic.
 
 Tests:
-  - Pre-flight check fails with SystemExit when model cache is missing
+  - Pre-flight check fails with RuntimeError when model cache is missing
   - Pre-flight check passes when model cache directory exists
   - _populate_collection ingests documents and increments count
   - _populate_collection skips ingestion if collection already has documents
@@ -21,8 +21,8 @@ Tests:
   - _query_layer_rules fills rules_by_topic for each query
   - TCTRuleSet.all_populated() returns True when all layers have chunks
   - TCTRuleSet.all_populated() returns False when any layer is empty
-  - load_tct_rules raises SystemExit when PDF dir is missing
-  - load_tct_rules raises SystemExit when collection is empty after ingestion
+  - load_tct_rules raises RuntimeError when PDF dir is missing
+  - load_tct_rules raises RuntimeError when collection is empty after ingestion
   - _chunk_text produces correct chunk count and overlap
   - LayerRules.is_populated returns correct value
 """
@@ -132,7 +132,7 @@ def _ingest_fake_docs(collection: chromadb.Collection, layer: int, n: int = 5) -
 
 @pytest.mark.integration
 def test_preflight_fails_when_model_cache_missing(tmp_path):
-    """SystemExit is raised when the model cache directory does not exist."""
+    """RuntimeError is raised when the model cache directory does not exist."""
     with patch("tct_pdf_rules.Path.home", return_value=tmp_path):
         # tmp_path has no sentence_transformers cache
         with pytest.raises(RuntimeError, match="Embedding model not cached"):
@@ -372,7 +372,7 @@ def test_layer_rules_is_populated_true_after_adding_chunks():
 
 @pytest.mark.integration
 def test_load_tct_rules_raises_on_missing_pdf_dir(tmp_path):
-    """load_tct_rules raises SystemExit when PDF directory doesn't exist."""
+    """load_tct_rules raises RuntimeError when PDF directory doesn't exist."""
     missing_dir = tmp_path / "no_pdfs_here"
 
     model_cache = (
@@ -389,7 +389,7 @@ def test_load_tct_rules_raises_on_missing_pdf_dir(tmp_path):
 
 @pytest.mark.integration
 def test_load_tct_rules_raises_when_collection_empty_after_ingestion(tmp_path):
-    """load_tct_rules raises SystemExit when ChromaDB has 0 docs after ingestion."""
+    """load_tct_rules raises RuntimeError when ChromaDB has 0 docs after ingestion."""
     pdf_dir = tmp_path / "PDFs"
     pdf_dir.mkdir()
     chroma_dir = tmp_path / ".chromadb"

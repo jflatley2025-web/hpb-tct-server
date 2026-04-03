@@ -495,14 +495,21 @@ class TestTradeManagement:
                     assert s["target"]["price"] == s["range"]["high"]
 
     def test_distribution_stop_loss_above_tap3(self, distribution_pattern_df):
-        """Test distribution stop loss is at Tap3 price"""
+        """Test distribution stop loss is at or slightly above Tap3 price (2% buffer)."""
         detector = TCTSchematicDetector(distribution_pattern_df)
 
         schematics = detector._detect_distribution_schematics(None)
 
         for s in schematics:
-            if s.get("stop_loss", {}).get("price") and s.get("tap3", {}).get("price"):
-                assert s["stop_loss"]["price"] == s["tap3"]["price"]
+            stop_price = s.get("stop_loss", {}).get("price")
+            tap3_price = s.get("tap3", {}).get("price")
+            if stop_price and tap3_price:
+                range_size = s.get("range", {}).get("size", 0)
+                buffer = range_size * 0.02
+                assert stop_price >= tap3_price, \
+                    "Stop loss must be at or above Tap3 price"
+                assert stop_price <= tap3_price + buffer + 1e-9, \
+                    f"Stop loss {stop_price} too far above Tap3 {tap3_price} + buffer {buffer}"
 
     def test_risk_reward_calculation(self, accumulation_pattern_df):
         """Test risk/reward ratio is calculated correctly"""
@@ -1273,12 +1280,12 @@ class TestSchematicConversion:
             l6 = schematic.get("lecture_6_enhancements", {})
             conversion = l6.get("schematic_conversion")
 
-            if conversion is not None:
+            if conversion and conversion.get("conversion_detected"):
                 assert "original_type" in conversion
                 assert "converted_type" in conversion
                 assert "conversion_trigger" in conversion
-                assert "conversion_idx" in conversion
-                assert "recommendation" in conversion
+                assert "new_tap3_idx" in conversion
+                assert "follow_through_expectation" in conversion
 
     def test_conversion_only_on_opposite_deviation(self, accumulation_pattern_df):
         """Test conversion is only detected on opposite-side deviation"""
@@ -1345,8 +1352,8 @@ class TestLTFToHTFTransition:
             assert "recommendation" in transition
             assert isinstance(transition["transition_detected"], bool)
 
-    def test_nested_range_size_ratio(self, accumulation_pattern_df):
-        """Test size ratio is calculated for nested ranges"""
+    def test_nested_range_expansion_factor(self, accumulation_pattern_df):
+        """Test expansion_factor is calculated for nested ranges"""
         result = detect_tct_schematics(accumulation_pattern_df)
 
         for schematic in result.get("accumulation_schematics", []):
@@ -1354,10 +1361,11 @@ class TestLTFToHTFTransition:
             transition = l6.get("ltf_htf_transition", {})
 
             if transition.get("transition_detected"):
-                size_ratio = transition.get("size_ratio")
-                if size_ratio is not None:
-                    # LTF range should be smaller than HTF range (ratio < 1)
-                    assert 0 < size_ratio <= 1.0
+                expansion_factor = transition.get("expansion_factor")
+                if expansion_factor is not None:
+                    # expansion_factor > 1 means range grew (expansion)
+                    # expansion_factor < 1 means range shrank (contraction)
+                    assert expansion_factor > 0
 
 
 @pytest.mark.unit
@@ -1387,9 +1395,9 @@ class TestMultiTFValidity:
             l6 = schematic.get("lecture_6_enhancements", {})
             multi_tf = l6.get("multi_tf_validity", {})
 
-            # If taps are close and would merge, should have HTF target recommendation
-            if multi_tf.get("tap2_tap3_close") and multi_tf.get("would_merge_on_htf"):
-                assert multi_tf.get("htf_target_recommendation") is not None
+            # If multi-TF opportunity detected with HTF potential, should have recommendation
+            if multi_tf.get("has_multi_tf_opportunity") and multi_tf.get("htf_schematic_potential"):
+                assert multi_tf.get("recommendation") is not None
 
 
 @pytest.mark.unit
@@ -1455,10 +1463,15 @@ class TestModel1ToModel2Flow:
 
             if m1_m2.get("m1_to_m2_flow_detected"):
                 position = m1_m2.get("position_management")
-                if position is not None:
-                    assert "add_at_m2" in position
-                    assert "keep_same_stop" in position
-                    assert "extended_target" in position
+                if position:
+                    assert "step_1" in position
+                    assert "step_2" in position
+                    assert "step_3" in position
+                    assert "risk_freed" in position
+                # Top-level keys for position flow
+                assert "trail_stop_to" in m1_m2
+                assert "add_position_trigger" in m1_m2
+                assert "extended_target" in m1_m2
 
 
 @pytest.mark.unit
