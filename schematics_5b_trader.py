@@ -125,7 +125,16 @@ HTF_TIMEFRAME = "1d"
 # Note: 5m/1m are still fetched separately for LTF BOS *entry refinement*
 # after a setup is confirmed on one of these TFs (see LTF_BOS_TIMEFRAMES).
 MTF_TIMEFRAMES = ["4h", "1h", "30m", "15m"]
-AUTO_SCAN_INTERVAL = int(os.getenv("SCHEMATICS_5B_SCAN_INTERVAL", "60"))
+def _parse_int_env(key: str, default: int) -> int:
+    raw = os.getenv(key, str(default))
+    try:
+        return int(raw)
+    except (ValueError, TypeError):
+        logger.warning("[CONFIG] Malformed env %s=%r — using default %d", key, raw, default)
+        return default
+
+AUTO_SCAN_INTERVAL = _parse_int_env("SCHEMATICS_5B_SCAN_INTERVAL", 60)
+ACTIVE_SCHEMATIC_INTERVAL = _parse_int_env("SCHEMATICS_5B_ACTIVE_INTERVAL", 15)
 ENTRY_THRESHOLD = 50  # aligned with backtest Run 38 (97.8% WR at threshold=50)
 
 # TF hierarchy for the upward cascade (ordered highest → lowest).
@@ -1197,6 +1206,7 @@ class Schematics5BTrader:
         self.evaluator = DecisionTreeEvaluator()
         self._jack_evaluator = JackTCTEvaluator()
         self.last_debug: Dict = {}
+        self._has_forming_schematics: bool = False  # signals scan loop to use faster interval
         self._lock = threading.Lock()
         # Lifetime gate-block counters — incremented inside _scan_lock (no race).
         # One counter per failure_context label + "passes" for the success path.
@@ -1302,6 +1312,11 @@ class Schematics5BTrader:
             )
         else:
             logger.info("[5B] MoonDev paper trading DISABLED — using MEXC for price/candle data.")
+
+    def has_forming_schematics(self) -> bool:
+        """Thread-safe check for active forming schematics (Tap 3 present, BOS imminent)."""
+        with self._lock:
+            return self._has_forming_schematics
 
     def _dd_risk_multiplier(self) -> float:
         """
@@ -1511,6 +1526,13 @@ class Schematics5BTrader:
             "details": {},
         }
 
+        # Reset forming-schematics flag at cycle start so it can't remain
+        # latched from a prior sweep through early-return branches (open-trade
+        # management, fetch errors, warmup gate).  The flag is set to the
+        # actual result after the full symbol sweep completes.
+        with self._lock:
+            self._has_forming_schematics = False
+
         try:
             # 1. Manage open trade first
             if self.state.current_trade:
@@ -1585,6 +1607,10 @@ class Schematics5BTrader:
                 best_current_price = _first.get("current_price", 0.0)
 
             with self._lock:
+                # Use unfiltered set (all_forming_ranges) so interval switching
+                # catches forming schematics on either bias direction, not just
+                # the HTF-filtered display list (all_forming).
+                self._has_forming_schematics = bool(all_forming_ranges)
                 self.last_debug = {
                     "timestamp": cycle_result["timestamp"],
                     "trading_mode": scan_mode,

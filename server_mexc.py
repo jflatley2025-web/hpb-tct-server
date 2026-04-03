@@ -18675,12 +18675,20 @@ async def schematics_5b_auto_scan_loop():
     Integrates MSCE (Multi-Session Context Engine) for session-aware
     confidence weighting.  Pushes trade log to GitHub every hour.
     """
-    from schematics_5b_trader import get_5b_trader, AUTO_SCAN_INTERVAL, TRADE_LOG_PATH as LOG_5B
+    from schematics_5b_trader import get_5b_trader, AUTO_SCAN_INTERVAL, ACTIVE_SCHEMATIC_INTERVAL, TRADE_LOG_PATH as LOG_5B
     from schematics_5b_trader import github_push_5b_log
+
+    # Validate interval configuration — clamp to safe minimums.
+    _scan_interval = max(AUTO_SCAN_INTERVAL, 5)
+    _active_interval = max(ACTIVE_SCHEMATIC_INTERVAL, 1)
+    if _scan_interval != AUTO_SCAN_INTERVAL:
+        logger.warning("[5B-TRADE] AUTO_SCAN_INTERVAL=%d too low — clamped to %d", AUTO_SCAN_INTERVAL, _scan_interval)
+    if _active_interval != ACTIVE_SCHEMATIC_INTERVAL:
+        logger.warning("[5B-TRADE] ACTIVE_SCHEMATIC_INTERVAL=%d too low — clamped to %d", ACTIVE_SCHEMATIC_INTERVAL, _active_interval)
 
     # Small stagger so startup health-check passes before first scan hits the API.
     await asyncio.sleep(5)
-    logger.info(f"[5B-TRADE] Auto-scan loop started — interval: {AUTO_SCAN_INTERVAL}s")
+    logger.info(f"[5B-TRADE] Auto-scan loop started — interval: {_scan_interval}s (active: {_active_interval}s)")
 
     consecutive_errors = 0
     _5b_last_successful_cycle = time.time()
@@ -18688,6 +18696,7 @@ async def schematics_5b_auto_scan_loop():
     GITHUB_PUSH_INTERVAL = 3600
     _last_telegram_summary = time.time()
     TELEGRAM_SUMMARY_INTERVAL = 34 * 60  # 34 minutes
+    _prev_fast_mode = False  # track interval state changes for logging
 
     while True:
         # ── Deadlock watchdog ─────────────────────────────────────────
@@ -18958,7 +18967,16 @@ async def schematics_5b_auto_scan_loop():
             except Exception as _tg_err:
                 logger.warning("[5B-TRADE] Telegram summary failed: %s", _tg_err)
 
-        await asyncio.sleep(AUTO_SCAN_INTERVAL)
+        # Adaptive interval: switch from normal (_scan_interval) to shorter
+        # (_active_interval) when forming schematics (Tap 3 present, BOS
+        # imminent) are detected on any symbol.  See SCHEMATICS_5B_ACTIVE_INTERVAL.
+        _fast_mode = trader.has_forming_schematics()
+        _sleep_secs = _active_interval if _fast_mode else _scan_interval
+        if _fast_mode != _prev_fast_mode:
+            logger.info("[5B-TRADE] Scan interval → %ds (%s)", _sleep_secs,
+                        "forming schematic detected" if _fast_mode else "no active schematics")
+            _prev_fast_mode = _fast_mode
+        await asyncio.sleep(_sleep_secs)
 
 
 def _send_telegram_status_summary(trader) -> None:
