@@ -772,7 +772,11 @@ def decide(
             # ── RIG (CONDITIONAL) ─────────────────────────────────
             # Apply confidence penalty upfront; does NOT skip other gates.
             if rig_status == "CONDITIONAL":
-                _rig_mod = rig_result.get("confidence_modifier", 0.6)
+                try:
+                    _rig_mod = float(rig_result.get("confidence_modifier", 0.6))
+                except (TypeError, ValueError):
+                    _rig_mod = 0.6
+                _rig_mod = max(0.0, min(1.0, _rig_mod))
                 execution_confidence *= _rig_mod
 
             # ── RIG (BLOCK) ──────────────────────────────────────

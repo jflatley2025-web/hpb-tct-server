@@ -318,7 +318,7 @@ def fail_run(conn, run_id: int, error_message: str):
     try:
         conn.rollback()
     except Exception:
-        pass
+        logger.exception("Rollback failed in fail_run (run_id=%s)", run_id)
     with conn.cursor() as cur:
         cur.execute(
             """
