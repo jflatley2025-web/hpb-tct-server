@@ -49,7 +49,14 @@ def range_integrity_validator(context):
     session_bias = msce.get("session_bias", htf_bias)
     session_name = msce.get("session", "Unknown")
 
-    local_disp = context.get("local_range_displacement", 0.0)
+    # Default to 0.5 (mid-range / neutral) when displacement is missing.
+    # 0.0 would falsely satisfy the "weak displacement" block condition.
+    local_disp = context.get("local_range_displacement")
+    if local_disp is None:
+        local_disp = 0.5
+        logger.warning(
+            "INVALID_DISPLACEMENT_INPUT: local_range_displacement missing from context, defaulting to 0.5"
+        )
     range_valid = rcm.get("valid", False)
     range_duration = rcm.get("range_duration_hours", 0)
     exec_conf = one_d.get("score", 0.0)

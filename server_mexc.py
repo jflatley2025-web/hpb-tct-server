@@ -16130,8 +16130,10 @@ async def schematics_5b_debug():
         else:
             # Shallow copy so setdefault below does not mutate stored last_debug data.
             _pr = dict(_best_ev.get("phase_results", {}))
-            _pr.setdefault("rig", {"zone": "unknown", "displacement_pct": 0.0, "penalty": 0})
-            _rig_pr = _pr["rig"]
+            _rig_default = {"zone": "unknown", "displacement_pct": None, "penalty": 0}
+            _rig_raw = _pr.get("rig")
+            _rig_pr = _rig_raw if isinstance(_rig_raw, dict) else _rig_default
+            _pr["rig"] = _rig_pr
             _rig_zone = _rig_pr.get("zone", "undetermined")
             # Emit None when a phase was never evaluated (e.g. pipeline aborted earlier).
             # The UI renders None as "—" (na class) to distinguish from a real PASS/FAIL.
@@ -16145,7 +16147,7 @@ async def schematics_5b_debug():
                 "l2_blocked": _l2_blocked,
                 "l3_confirmed": _l3_confirmed,
                 "rig_zone": _rig_zone,
-                "rig_displacement": _rig_pr.get("displacement_pct", 0.0),
+                "rig_displacement": _rig_pr.get("displacement_pct"),
                 "rig_penalty": _rig_pr.get("penalty", 0),
             }
 

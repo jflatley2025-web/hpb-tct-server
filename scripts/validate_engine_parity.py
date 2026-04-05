@@ -288,7 +288,7 @@ def run_parity_check(
                         "range": {
                             "high": sj.get("range_high", 0),
                             "low": sj.get("range_low", 0),
-                            "displacement": float(sig.get("local_displacement", 0) or 0),
+                            "displacement": float(sig.get("local_displacement") or 0.5),
                             "duration_hours": float(sig.get("range_duration_hours", 0) or 0),
                         },
                         "entry": {"price": float(sig.get("entry_price", 0) or 0)},
