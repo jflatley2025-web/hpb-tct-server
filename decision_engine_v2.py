@@ -48,6 +48,7 @@ DO NOT modify gate values here without updating runner.py to match.
 
 import concurrent.futures
 import logging
+import math
 import random
 from datetime import datetime, timezone
 from typing import Optional
@@ -700,7 +701,10 @@ def decide(
             if isinstance(range_info, dict):
                 r_high = range_info.get("high", 0)
                 r_low = range_info.get("low", 0)
-                if r_high and r_low and r_high > r_low and current_price is not None:
+                if (r_high and r_low and r_high > r_low
+                        and current_price is not None
+                        and math.isfinite(r_high) and math.isfinite(r_low)
+                        and math.isfinite(current_price)):
                     local_displacement = (current_price - r_low) / (r_high - r_low)
                     local_displacement = max(0.0, min(1.0, local_displacement))
                 else:
