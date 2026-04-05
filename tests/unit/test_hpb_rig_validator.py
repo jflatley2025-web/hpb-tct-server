@@ -351,6 +351,205 @@ class TestEvaluateRigStandalone:
 
 
 # ═══════════════════════════════════════════════════════════════════
+# Edge cases: zone threshold boundaries
+# ═══════════════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestZoneBoundaryEdgeCases:
+    """Test behavior at exact zone boundaries (0.25, 0.75) and epsilon away."""
+
+    def test_position_exactly_0_25_is_low(self):
+        """Position 0.25 → LOW zone (boundary inclusive)."""
+        from hpb_rig_validator import evaluate_rig
+        result = evaluate_rig("bullish", "bearish", 100, 110, 102.5, 0.25, 48)
+        assert result["position"] == pytest.approx(0.25)
+        # LOW zone, counter-bias, disp=0.25 >= 0.15 → CONDITIONAL
+        assert result["rig_status"] == "CONDITIONAL"
+
+    def test_position_0_2501_is_mid(self):
+        """Position just above 0.25 → MID zone → BLOCK."""
+        from hpb_rig_validator import evaluate_rig
+        result = evaluate_rig("bullish", "bearish", 100, 1000, 325.09, 0.26, 48)
+        # 325.09 is at ~0.2501 position → MID zone
+        assert result["rig_status"] == "BLOCK"
+
+    def test_position_0_2499_is_low(self):
+        """Position just below 0.25 → LOW zone."""
+        from hpb_rig_validator import evaluate_rig
+        result = evaluate_rig("bullish", "bearish", 100, 1000, 324.9, 0.24, 48)
+        assert result["rig_status"] != "BLOCK" or result["reason"] != "Counter-bias in mid-range (no edge)"
+
+    def test_position_exactly_0_75_is_high(self):
+        """Position 0.75 → HIGH zone (boundary inclusive)."""
+        from hpb_rig_validator import evaluate_rig
+        result = evaluate_rig("bullish", "bearish", 100, 110, 107.5, 0.75, 48)
+        assert result["position"] == pytest.approx(0.75)
+        assert result["rig_status"] == "CONDITIONAL"
+
+    def test_position_0_7499_is_mid(self):
+        """Position just below 0.75 → MID zone → BLOCK."""
+        from hpb_rig_validator import evaluate_rig
+        result = evaluate_rig("bullish", "bearish", 100, 1000, 774.9, 0.74, 48)
+        assert result["rig_status"] == "BLOCK"
+
+    def test_displacement_exactly_0_15_allows(self):
+        """Displacement exactly 0.15 → meets threshold → CONDITIONAL."""
+        from hpb_rig_validator import evaluate_rig
+        result = evaluate_rig("bullish", "bearish", 100, 110, 101.5, 0.15, 48)
+        assert result["rig_status"] == "CONDITIONAL"
+
+    def test_displacement_0_1499_blocks(self):
+        """Displacement just below 0.15 → BLOCK."""
+        from hpb_rig_validator import evaluate_rig
+        result = evaluate_rig("bullish", "bearish", 100, 110, 101.4, 0.149, 48)
+        assert result["rig_status"] == "BLOCK"
+        assert result["confidence_modifier"] == 0.0
+
+    def test_position_at_0_extremes(self):
+        """Price at exact range low → position 0.0, disp determines outcome."""
+        from hpb_rig_validator import evaluate_rig
+        r = evaluate_rig("bullish", "bearish", 100, 110, 100, 0.05, 48)
+        assert r["position"] == pytest.approx(0.0)
+        assert r["rig_status"] == "BLOCK"  # disp < 0.15
+
+    def test_position_at_1_extremes(self):
+        """Price at exact range high → position 1.0."""
+        from hpb_rig_validator import evaluate_rig
+        r = evaluate_rig("bullish", "bearish", 100, 110, 110, 0.20, 48)
+        assert r["position"] == pytest.approx(1.0)
+        assert r["rig_status"] == "CONDITIONAL"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Confidence modifier scaling tests
+# ═══════════════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestConfidenceModifierScaling:
+    """Validate confidence_modifier ranges and scaling behavior."""
+
+    def test_conf_mod_range(self):
+        """CONDITIONAL confidence_modifier is always in [0.0, 0.7]."""
+        from hpb_rig_validator import evaluate_rig
+        for disp in [0.15, 0.20, 0.25, 0.30, 0.50, 0.80, 1.0]:
+            r = evaluate_rig("bullish", "bearish", 100, 110, 102, disp, 48)
+            if r["rig_status"] == "CONDITIONAL":
+                assert 0.0 <= r["confidence_modifier"] <= 0.7, \
+                    f"conf_mod {r['confidence_modifier']} out of [0, 0.7] at disp={disp}"
+
+    def test_conf_mod_base_is_0_5(self):
+        """Base CONDITIONAL conf_mod starts at 0.5 (no bonuses)."""
+        from hpb_rig_validator import evaluate_rig
+        # disp=0.20 (< 0.25 so no bonus), neutral session, duration >= 24
+        r = evaluate_rig("bullish", "bearish", 100, 110, 102, 0.20, 48, "neutral")
+        assert r["rig_status"] == "CONDITIONAL"
+        assert r["confidence_modifier"] == pytest.approx(0.5)
+
+    def test_conf_mod_displacement_bonus_adds_0_1(self):
+        """Displacement > 0.25 adds +0.1."""
+        from hpb_rig_validator import evaluate_rig
+        r_no_bonus = evaluate_rig("bullish", "bearish", 100, 110, 102, 0.20, 48, "neutral")
+        r_with_bonus = evaluate_rig("bullish", "bearish", 100, 110, 102, 0.30, 48, "neutral")
+        assert r_with_bonus["confidence_modifier"] == pytest.approx(
+            r_no_bonus["confidence_modifier"] + 0.1
+        )
+
+    def test_conf_mod_session_bonus_adds_0_1(self):
+        """Session alignment adds +0.1 for bullish reversal + expansion."""
+        from hpb_rig_validator import evaluate_rig
+        r_neutral = evaluate_rig("bearish", "bullish", 100, 110, 102, 0.20, 48, "neutral")
+        r_expansion = evaluate_rig("bearish", "bullish", 100, 110, 102, 0.20, 48, "expansion")
+        assert r_expansion["confidence_modifier"] == pytest.approx(
+            r_neutral["confidence_modifier"] + 0.1
+        )
+
+    def test_conf_mod_both_bonuses_stack(self):
+        """Displacement + session bonuses stack to 0.7."""
+        from hpb_rig_validator import evaluate_rig
+        r = evaluate_rig("bearish", "bullish", 100, 110, 102, 0.30, 48, "expansion")
+        assert r["confidence_modifier"] == pytest.approx(0.7)
+
+    def test_conf_mod_capped_at_0_7(self):
+        """Even with all bonuses, conf_mod cannot exceed 0.7."""
+        from hpb_rig_validator import evaluate_rig
+        r = evaluate_rig("bearish", "bullish", 100, 110, 102, 0.99, 48, "expansion")
+        assert r["confidence_modifier"] <= 0.7
+
+    def test_conf_mod_short_duration_penalty(self):
+        """Duration < 24h multiplies conf_mod by 0.8."""
+        from hpb_rig_validator import evaluate_rig
+        r_long = evaluate_rig("bullish", "bearish", 100, 110, 102, 0.20, 48, "neutral")
+        r_short = evaluate_rig("bullish", "bearish", 100, 110, 102, 0.20, 12, "neutral")
+        assert r_short["confidence_modifier"] == pytest.approx(
+            r_long["confidence_modifier"] * 0.8
+        )
+
+    def test_block_always_zero(self):
+        """BLOCK status always has confidence_modifier == 0.0."""
+        from hpb_rig_validator import evaluate_rig
+        # Mid-range block
+        r1 = evaluate_rig("bullish", "bearish", 100, 110, 105, 0.5, 48)
+        assert r1["confidence_modifier"] == 0.0
+        # No-displacement block
+        r2 = evaluate_rig("bullish", "bearish", 100, 110, 101, 0.1, 48)
+        assert r2["confidence_modifier"] == 0.0
+
+    def test_valid_always_one(self):
+        """VALID status (trend-aligned) always has confidence_modifier == 1.0."""
+        from hpb_rig_validator import evaluate_rig
+        for pos in [101, 105, 109]:
+            r = evaluate_rig("bullish", "bullish", 100, 110, pos, 0.5, 48)
+            assert r["confidence_modifier"] == 1.0
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Displacement 0.0 fix validation
+# ═══════════════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestDisplacementZeroFix:
+    """Validate displacement 0.0 recomputation from range midpoint."""
+
+    def test_zero_disp_at_high_recomputes(self):
+        """disp=0.0, price near high → recomputed disp is distance from mid."""
+        from hpb_rig_validator import evaluate_rig
+        # range=[100,110], mid=105, price=109 → recomputed = |109-105|/10 = 0.4
+        r = evaluate_rig("bullish", "bearish", 100, 110, 109, 0.0, 48)
+        assert r["rig_status"] == "CONDITIONAL"  # 0.4 >= 0.15
+
+    def test_zero_disp_at_mid_recomputes(self):
+        """disp=0.0, price at mid → recomputed disp = 0.0 → BLOCK (no displacement)."""
+        from hpb_rig_validator import evaluate_rig
+        # range=[100,110], mid=105, price=105 → recomputed = 0.0
+        r = evaluate_rig("bullish", "bearish", 100, 110, 105, 0.0, 48)
+        # position=0.5 → MID zone → BLOCK
+        assert r["rig_status"] == "BLOCK"
+
+    def test_zero_disp_at_low_recomputes(self):
+        """disp=0.0, price near low → recomputed disp is distance from mid."""
+        from hpb_rig_validator import evaluate_rig
+        # range=[100,110], mid=105, price=101 → recomputed = |101-105|/10 = 0.4
+        r = evaluate_rig("bullish", "bearish", 100, 110, 101, 0.0, 48)
+        # position=0.1 → LOW zone, disp 0.4 >= 0.15 → CONDITIONAL
+        assert r["rig_status"] == "CONDITIONAL"
+
+    def test_nonzero_disp_not_recomputed(self):
+        """disp=0.10 (nonzero) is used as-is, not recomputed."""
+        from hpb_rig_validator import evaluate_rig
+        r = evaluate_rig("bullish", "bearish", 100, 110, 101, 0.10, 48)
+        # disp 0.10 < 0.15 → BLOCK (would be CONDITIONAL if recomputed)
+        assert r["rig_status"] == "BLOCK"
+
+    def test_degenerate_range_zero_disp(self):
+        """Degenerate range (high==low) + disp=0.0 → defaults to neutral."""
+        from hpb_rig_validator import evaluate_rig
+        r = evaluate_rig("bullish", "bearish", 100, 100, 100, 0.0, 48)
+        # Degenerate range → position 0.5, disp stays 0.0 (range_size=0)
+        # MID zone, counter-bias → BLOCK
+        assert r["rig_status"] == "BLOCK"
+
+
+# ═══════════════════════════════════════════════════════════════════
 # compute_displacement tests (unchanged)
 # ═══════════════════════════════════════════════════════════════════
 
