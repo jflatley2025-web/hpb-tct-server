@@ -121,7 +121,7 @@ CREATE TABLE IF NOT EXISTS backtest_signals (
     msce_session             VARCHAR(20),
     msce_confidence          DOUBLE PRECISION,
     session_bias             VARCHAR(20),
-    rig_status               VARCHAR(10),
+    rig_status               VARCHAR(20),
     rig_reason               VARCHAR(200),
     score_1d                 INTEGER,
     -- Execution tracking
@@ -214,6 +214,11 @@ def create_schema(conn=None):
         with conn.cursor() as cur:
             cur.execute(SCHEMA_SQL)
             cur.execute(UNIQUE_INDEX_SQL)
+            # Widen rig_status from VARCHAR(10) to VARCHAR(20) for "CONDITIONAL"
+            cur.execute("""
+                ALTER TABLE backtest_signals
+                    ALTER COLUMN rig_status TYPE VARCHAR(20);
+            """)
         conn.commit()
         logger.info("Backtest schema created/verified successfully")
     except Exception:
@@ -309,7 +314,11 @@ def complete_run(conn, run_id: int, final_balance: float, total_trades: int,
 
 
 def fail_run(conn, run_id: int, error_message: str):
-    """Mark a run as failed."""
+    """Mark a run as failed.  Rolls back any aborted transaction first."""
+    try:
+        conn.rollback()
+    except Exception:
+        logger.exception("Rollback failed in fail_run (run_id=%s)", run_id)
     with conn.cursor() as cur:
         cur.execute(
             """

@@ -772,8 +772,8 @@ def decide(
             # ── RIG (CONDITIONAL) ─────────────────────────────────
             # Apply confidence penalty upfront; does NOT skip other gates.
             if rig_status == "CONDITIONAL":
-                _rig_mod = rig_result.get("confidence_modifier", 0.6)
-                execution_confidence *= _rig_mod
+                from hpb_rig_validator import safe_confidence_modifier
+                execution_confidence *= safe_confidence_modifier(rig_result)
 
             # ── RIG (BLOCK) ──────────────────────────────────────
             if rig_status == "BLOCK":
