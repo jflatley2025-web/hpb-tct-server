@@ -49,11 +49,11 @@ class TestComputeExtremity:
 
 @pytest.mark.unit
 class TestEvaluateRigTestStatus:
-    """Tests for the mid-range BLOCK / extreme VALID evaluation."""
+    """Tests: displacement alone never blocks — always VALID."""
 
-    def test_mid_range_blocks(self):
-        """Displacement ~0.5 (mid-range) → BLOCK"""
-        assert evaluate_rig_test_status(0.5) == "BLOCK"
+    def test_mid_range_valid(self):
+        """Displacement ~0.5 (mid-range) → VALID (no longer blocks)"""
+        assert evaluate_rig_test_status(0.5) == "VALID"
 
     def test_high_extreme_valid(self):
         """Displacement 0.875 (near range high) → VALID"""
@@ -64,36 +64,32 @@ class TestEvaluateRigTestStatus:
         assert evaluate_rig_test_status(0.125) == "VALID"
 
     def test_at_upper_boundary_valid(self):
-        """Displacement 0.76 (just above mid-range) → VALID"""
+        """Displacement 0.76 → VALID"""
         assert evaluate_rig_test_status(0.76) == "VALID"
 
     def test_at_lower_boundary_valid(self):
-        """Displacement 0.24 (just below mid-range) → VALID"""
+        """Displacement 0.24 → VALID"""
         assert evaluate_rig_test_status(0.24) == "VALID"
 
-    def test_at_mid_range_upper_edge_blocks(self):
-        """Displacement 0.74 (still mid-range) → BLOCK"""
-        assert evaluate_rig_test_status(0.74) == "BLOCK"
+    def test_at_mid_range_upper_edge_valid(self):
+        """Displacement 0.74 → VALID (no displacement-based blocking)"""
+        assert evaluate_rig_test_status(0.74) == "VALID"
 
-    def test_at_mid_range_lower_edge_blocks(self):
-        """Displacement 0.26 (still mid-range) → BLOCK"""
-        assert evaluate_rig_test_status(0.26) == "BLOCK"
+    def test_at_mid_range_lower_edge_valid(self):
+        """Displacement 0.26 → VALID (no displacement-based blocking)"""
+        assert evaluate_rig_test_status(0.26) == "VALID"
 
     def test_none_not_evaluated(self):
         """None displacement → NOT_EVALUATED"""
         assert evaluate_rig_test_status(None) == "NOT_EVALUATED"
 
     def test_exact_boundary_0_25(self):
-        """Displacement exactly 0.25 → BLOCK (boundary is inclusive for mid-range)"""
-        # extremity = abs(0.25 - 0.5) * 2 = 0.5
-        # threshold check: 0.5 <= 0.5 → BLOCK
-        assert evaluate_rig_test_status(0.25) == "BLOCK"
+        """Displacement exactly 0.25 → VALID"""
+        assert evaluate_rig_test_status(0.25) == "VALID"
 
     def test_exact_boundary_0_75(self):
-        """Displacement exactly 0.75 → BLOCK (boundary is inclusive for mid-range)"""
-        # extremity = abs(0.75 - 0.5) * 2 = 0.5
-        # threshold check: 0.5 <= 0.5 → BLOCK
-        assert evaluate_rig_test_status(0.75) == "BLOCK"
+        """Displacement exactly 0.75 → VALID"""
+        assert evaluate_rig_test_status(0.75) == "VALID"
 
 
 @pytest.mark.unit
@@ -165,14 +161,14 @@ class TestRunSingleScenario:
     """Tests for running individual test scenarios."""
 
     def test_mid_range_scenario(self):
-        """Mid-range scenario produces correct displacement and BLOCK status"""
+        """Mid-range scenario produces correct displacement and VALID status"""
         scenario = {"name": "mid_range", "current_price": 70000, "expected_displacement": 0.5}
         result = run_single_scenario(scenario)
 
         assert result["scenario"] == "mid_range"
         assert result["price"] == 70000
         assert abs(result["displacement"] - 0.5) < 1e-10
-        assert result["rig_status"] == "BLOCK"
+        assert result["rig_status"] == "VALID"
 
     def test_high_extreme_scenario(self):
         """High extreme scenario produces correct displacement and VALID status"""
@@ -256,12 +252,12 @@ class TestRunAllScenarios:
                 assert r["displacement"] is not None
 
     def test_expected_statuses(self):
-        """Validate expected RIG statuses: mid-range=BLOCK, extremes=VALID"""
+        """All displacement scenarios return VALID (no displacement-based blocking)"""
         with patch("rig_test_mode.RIG_TEST_MODE", True):
             results = run_all_scenarios()
             by_name = {r["scenario"]: r for r in results}
 
-            assert by_name["mid_range"]["rig_status"] == "BLOCK"
+            assert by_name["mid_range"]["rig_status"] == "VALID"
             assert by_name["high_extreme"]["rig_status"] == "VALID"
             assert by_name["low_extreme"]["rig_status"] == "VALID"
 
@@ -272,7 +268,7 @@ class TestRunAllScenarios:
                 range_high=80000, range_low=60000, range_duration=72
             )
             assert len(results) == len(TEST_SCENARIOS)
-            # Mid-range: (70000-60000)/(80000-60000) = 0.5 → still BLOCK
+            # Mid-range: (70000-60000)/(80000-60000) = 0.5 → VALID (confidence penalized, not blocked)
             mid = next(r for r in results if r["scenario"] == "mid_range")
             assert abs(mid["displacement"] - 0.5) < 1e-10
 

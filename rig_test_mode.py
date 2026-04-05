@@ -55,16 +55,18 @@ def compute_extremity(displacement):
 
 
 def evaluate_rig_test_status(displacement):
-    """Determine RIG status using mid-range BLOCK / extreme VALID rule.
+    """Determine RIG test status — mid-range applies confidence penalty, not block.
 
-    Mid-range (inclusive): 0.25 <= disp <= 0.75 -> BLOCK
-    Extreme: disp > 0.75 or disp < 0.25 -> VALID
+    Mid-range (inclusive): 0.25 <= disp <= 0.75 -> VALID (with confidence penalty)
+    Extreme: disp > 0.75 or disp < 0.25 -> VALID (full confidence)
+
+    RIG no longer blocks based on displacement alone.  Blocking requires
+    all four structural conditions (see range_integrity_validator).
     """
     if displacement is None:
         return "NOT_EVALUATED"
-    extremity = compute_extremity(displacement)
-    if extremity <= (EXTREME_THRESHOLD * 2):  # within ±0.25 of center
-        return "BLOCK"
+    # All displacement values return VALID — blocking is only for
+    # structural counter-bias conditions in range_integrity_validator.
     return "VALID"
 
 

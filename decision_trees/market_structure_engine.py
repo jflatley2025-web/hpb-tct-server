@@ -406,22 +406,10 @@ class MarketStructureEngine:
                              range_low: float,
                              current_price: float,
                              threshold: float = 0.10):
-        """Return False if current price is near the range equilibrium (0.5 Fib).
+        """EQ proximity check — returns True always (no longer blocks).
 
-        Uses a tighter 10% equilibrium zone (vs 0.20 default in the standalone
-        range_integrity_gate in decision_tree_bridge) — appropriate for
-        execution-level structure checks where price must be clearly away from
-        mid-range before confirming a setup.
+        Equilibrium proximity is handled as a confidence penalty in
+        _compute_rig_payload (decision_tree_bridge.py), not as a gate.
+        Kept for API compatibility — always passes.
         """
-        if range_high <= range_low:
-            return True
-
-        midpoint = (range_high + range_low) / 2
-        range_size = range_high - range_low
-
-        eq_zone = range_size * threshold
-
-        if abs(current_price - midpoint) <= eq_zone:
-            return False
-
         return True

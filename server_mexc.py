@@ -17208,17 +17208,17 @@ function renderStructureGates(d) {
   const rig  = s.rig_zone || 'unknown';
   const disp = (s.rig_displacement != null) ? s.rig_displacement + '%' : '\u2014';
   const pen  = s.rig_penalty || 0;
-  const rigClassMap = {blocked:'fail', penalty:'warn', clear:'pass', undetermined:'na'};
+  const rigClassMap = {eq_penalty:'warn', mild_penalty:'warn', clear:'pass', undetermined:'na'};
   const rigClass = rigClassMap[rig] || 'na';
-  const rigText  = rig === 'blocked'      ? 'HARD BLOCK'
-                 : rig === 'penalty'      ? 'PENALTY \u2212' + pen
+  const rigText  = rig === 'eq_penalty'   ? 'EQ PENALTY x0.6'
+                 : rig === 'mild_penalty' ? 'MILD PENALTY x0.8'
                  : rig === 'clear'        ? 'CLEAR'
                  : rig === 'undetermined' ? 'UNDETERMINED'
                  : '\u2014';
-  const rigTip   = rig === 'blocked'
-    ? 'RIG: Hard block\nWithin 10\u0025 of equilibrium\nDisplacement: ' + disp
-    : rig === 'penalty'
-    ? 'RIG: Penalty zone (10\u201320\u0025)\nDisplacement: ' + disp + '\nScore deduction: \u2212' + pen + ' pts'
+  const rigTip   = rig === 'eq_penalty'
+    ? 'RIG: Near equilibrium (confidence x0.6)\nDisplacement: ' + disp
+    : rig === 'mild_penalty'
+    ? 'RIG: Mild EQ penalty (confidence x0.8)\nDisplacement: ' + disp
     : rig === 'clear'
     ? 'RIG: Clear (\u003e20\u0025 from equilibrium)\nDisplacement: ' + disp
     : 'RIG: Not yet evaluated\n(L2 early block or no scan data)';
@@ -17257,7 +17257,7 @@ function renderStructureGates(d) {
       +   'L2 Blocks: <b>' + (gm.l2_blocks || 0) + '</b></span>'
       + '<span style="font-size:.68rem;color:#ff7043;white-space:nowrap" title="L3 BOS confirmation failures (lifetime)">'
       +   'L3 Failures: <b>' + (gm.l3_failures || 0) + '</b></span>'
-      + '<span style="font-size:.68rem;color:#ce93d8;white-space:nowrap" title="RIG equilibrium hard blocks (lifetime)">'
+      + '<span style="font-size:.68rem;color:#ce93d8;white-space:nowrap" title="RIG structural blocks (counter-bias only)">'
       +   'RIG Blocks: <b>' + (gm.rig_blocks || 0) + '</b></span>'
       + '<span style="font-size:.68rem;color:#00e676;white-space:nowrap" title="Evaluations that passed all gates (lifetime)">'
       +   'Passes: <b>' + (gm.passes || 0) + '</b></span>'
