@@ -33,6 +33,19 @@ def compute_displacement(current_price, range_high, range_low):
     return max(0.0, min(1.0, displacement))
 
 
+def safe_confidence_modifier(rig_result: dict, default: float = 0.6) -> float:
+    """Extract and clamp confidence_modifier from a RIG result dict.
+
+    Coerces to float, falls back to *default* on None/invalid,
+    and clamps to [0.0, 1.0].
+    """
+    try:
+        mod = float(rig_result.get("confidence_modifier", default))
+    except (TypeError, ValueError):
+        mod = default
+    return max(0.0, min(1.0, mod))
+
+
 # ---------------------------------------------------------------------------
 # Core RIG evaluator — spec-compliant standalone function
 # ---------------------------------------------------------------------------
