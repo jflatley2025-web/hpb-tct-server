@@ -769,7 +769,13 @@ def decide(
             if model in CONTINUATION_MODELS:
                 logger.debug("[MODEL] CONTINUATION detected — skipping displacement gates")
 
-            # ── RIG ───────────────────────────────────────────────
+            # ── RIG (CONDITIONAL) ─────────────────────────────────
+            # Apply confidence penalty upfront; does NOT skip other gates.
+            if rig_status == "CONDITIONAL":
+                _rig_mod = rig_result.get("confidence_modifier", 0.6)
+                execution_confidence *= _rig_mod
+
+            # ── RIG (BLOCK) ──────────────────────────────────────
             if rig_status == "BLOCK":
                 final_decision = "PASS"
                 skip_reason = "RIG_BLOCK"

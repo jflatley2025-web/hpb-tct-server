@@ -1,15 +1,29 @@
 # hpb_rig_validator.py
+"""
+Range Integrity Gate (RIG) — TCT-aware structural filter.
+
+Self-contained, modular, pluggable.  No external dependencies beyond stdlib.
+
+Decision tree:
+  A. Trend-aligned (ltf_direction == htf_bias) → VALID, conf 1.0
+  B. Counter-bias, mid-range (0.25 < pos < 0.75) → BLOCK
+  C. Counter-bias, extreme, displacement >= 0.15 → CONDITIONAL (0.5–0.7)
+  D. Counter-bias, extreme, displacement <  0.15 → BLOCK
+"""
 import logging
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
 
-def compute_displacement(current_price, range_high, range_low):
-    """Compute local range displacement: where price sits within the HTF range.
+# ---------------------------------------------------------------------------
+# Shared helper
+# ---------------------------------------------------------------------------
 
-    Returns a float between 0.0 and 1.0, or None if the range is degenerate
-    (range_high == range_low) or inputs are missing.
+def compute_displacement(current_price, range_high, range_low):
+    """Compute where price sits within the HTF range (0.0–1.0).
+
+    Returns None if inputs are missing or range is degenerate.
     """
     if current_price is None or range_high is None or range_low is None:
         return None
@@ -19,113 +33,248 @@ def compute_displacement(current_price, range_high, range_low):
     return max(0.0, min(1.0, displacement))
 
 
-def range_integrity_validator(context):
+# ---------------------------------------------------------------------------
+# Core RIG evaluator — spec-compliant standalone function
+# ---------------------------------------------------------------------------
+
+def evaluate_rig(
+    htf_bias: str,
+    ltf_direction: str,
+    range_low: float,
+    range_high: float,
+    current_price: float,
+    local_displacement: float,
+    range_duration_hours: float,
+    session_bias: str = "neutral",
+) -> dict:
     """
-    HPB Range Integrity Validator (RIG) — structural integrity gate.
+    Evaluate Range Integrity Gate with TCT counter-bias logic.
 
-    RIG may ONLY block when ALL four conditions are true:
-      1. HTF range is valid
-      2. Range duration >= 24 hours
-      3. Local displacement < 25% of HTF range
-      4. Session bias is opposite HTF bias
+    Args:
+        htf_bias:             "bullish" | "bearish" — HTF directional context
+        ltf_direction:        "bullish" | "bearish" — trade direction on LTF
+        range_low:            Bottom of dominant HTF range
+        range_high:           Top of dominant HTF range
+        current_price:        Latest price
+        local_displacement:   0–1 normalized position within range
+        range_duration_hours: Age of the range in hours
+        session_bias:         "expansion" | "distribution" | "neutral" | "trending"
+                              (modifies confidence in Case C only, never blocks)
 
-    If NOT all four conditions are met → VALID (no block).
-
-    These do NOT block:
-      - Equilibrium proximity
-      - Mid-range positioning
-      - Weak displacement alone (without counter-bias)
-      - Missing minor inputs
+    Returns:
+        {
+            "rig_status":          "VALID" | "BLOCK" | "CONDITIONAL",
+            "confidence_modifier": float (0.0–1.0),
+            "position":            float (0.0–1.0),
+            "counter_bias":        bool,
+            "reason":              str,
+        }
     """
+    # --- Compute position ---
+    if range_high > range_low and current_price is not None:
+        position = (current_price - range_low) / (range_high - range_low)
+        position = max(0.0, min(1.0, position))
+    else:
+        position = 0.5  # neutral fallback for degenerate range
 
-    # Extract info from HPB context
+    # --- Fix displacement 0.0 ---
+    # If displacement is exactly 0.0 (likely a pipeline default, not real),
+    # recompute from distance to range midpoint.
+    if local_displacement == 0.0 and range_high > range_low:
+        range_mid = (range_high + range_low) / 2.0
+        local_displacement = abs(current_price - range_mid) / (range_high - range_low)
+
+    # --- Counter-bias detection ---
+    counter_bias = (ltf_direction != htf_bias)
+
+    # === Case A: Trend-aligned → VALID ===
+    if not counter_bias:
+        return {
+            "rig_status": "VALID",
+            "confidence_modifier": 1.0,
+            "position": round(position, 4),
+            "counter_bias": False,
+            "reason": "Trend-aligned — no restriction",
+        }
+
+    # === Counter-bias below ===
+    in_low = position <= 0.25
+    in_high = position >= 0.75
+    in_extreme = in_low or in_high
+
+    # === Case B: Counter-bias, mid-range → BLOCK ===
+    if not in_extreme:
+        return {
+            "rig_status": "BLOCK",
+            "confidence_modifier": 0.0,
+            "position": round(position, 4),
+            "counter_bias": True,
+            "reason": "Counter-bias in mid-range (no edge)",
+        }
+
+    # === Cases C & D: Counter-bias at extreme ===
+
+    # === Case D: No displacement at extreme → BLOCK ===
+    if local_displacement < 0.15:
+        return {
+            "rig_status": "BLOCK",
+            "confidence_modifier": 0.0,
+            "position": round(position, 4),
+            "counter_bias": True,
+            "reason": "No displacement at range extreme",
+        }
+
+    # === Case C: Extreme WITH displacement → CONDITIONAL ===
+    conf_mod = 0.5
+
+    # +0.1 for strong displacement
+    if local_displacement > 0.25:
+        conf_mod += 0.1
+
+    # +0.1 for session alignment with reversal logic
+    if in_low and ltf_direction == "bullish" and session_bias == "expansion":
+        conf_mod += 0.1
+    elif in_high and ltf_direction == "bearish" and session_bias == "distribution":
+        conf_mod += 0.1
+
+    # Range duration penalty (soft, never blocks)
+    if range_duration_hours < 24:
+        conf_mod *= 0.8
+
+    conf_mod = round(max(0.0, min(0.7, conf_mod)), 3)
+    zone = "low" if in_low else "high"
+
+    return {
+        "rig_status": "CONDITIONAL",
+        "confidence_modifier": conf_mod,
+        "position": round(position, 4),
+        "counter_bias": True,
+        "reason": (
+            f"Counter-bias at range {zone} — allowed with displacement "
+            f"(conf x{conf_mod})"
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Legacy adapter — wraps evaluate_rig for existing context-based callers
+# (rig_engine.py, decision_engine_v2.py)
+# ---------------------------------------------------------------------------
+
+def range_integrity_validator(context: dict) -> dict:
+    """
+    Adapter: translates legacy context dict into evaluate_rig() call.
+
+    Maps the existing gates-based context to the new standalone signature,
+    then converts the output back to the legacy format expected by callers.
+    """
     gates = context.get("gates", {})
-    rcm = gates.get("RCM", {})
-    msce = gates.get("MSCE", {})
     one_a = gates.get("1A", {})
+    msce = gates.get("MSCE", {})
+    rcm = gates.get("RCM", {})
     one_d = gates.get("1D", {})
 
     htf_bias = one_a.get("bias", "neutral")
-    session_bias = msce.get("session_bias", htf_bias)
+
+    # Legacy uses session_bias as the trade direction proxy.
+    # In the new model, session_bias IS ltf_direction for the adapter path.
+    session_bias_raw = msce.get("session_bias", htf_bias)
     session_name = msce.get("session", "Unknown")
 
-    # Default to 0.5 (mid-range / neutral) when displacement is missing.
-    # 0.0 would falsely satisfy the "weak displacement" block condition.
     local_disp = context.get("local_range_displacement")
     if local_disp is None:
         local_disp = 0.5
         logger.warning(
-            "INVALID_DISPLACEMENT_INPUT: local_range_displacement missing from context, defaulting to 0.5"
+            "INVALID_DISPLACEMENT_INPUT: local_range_displacement missing, defaulting to 0.5"
         )
+
     range_valid = rcm.get("valid", False)
     range_duration = rcm.get("range_duration_hours", 0)
     exec_conf = one_d.get("score", 0.0)
 
-    # Strict block thresholds
-    MIN_DURATION = 24        # hours
-    DISP_THRESHOLD = 0.25    # <25% of range = weak displacement
-
-    # --- Evaluate the 4 strict block conditions ---
-    cond_range_valid = range_valid
-    cond_duration = range_duration >= MIN_DURATION
-    cond_weak_disp = local_disp < DISP_THRESHOLD
-    cond_counter_bias = (session_bias != htf_bias)
-
-    all_block_conditions = (
-        cond_range_valid
-        and cond_duration
-        and cond_weak_disp
-        and cond_counter_bias
-    )
-
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-    if all_block_conditions:
-        reason = f"Counter-bias {session_name} session during intact HTF range."
-        logger.info(
-            "RIG BLOCK: %s",
-            {
-                "rig_status": "BLOCK",
-                "rig_reason": reason,
-                "local_displacement": local_disp,
-                "range_duration": range_duration,
-                "htf_bias": htf_bias,
-                "session_bias": session_bias,
-            },
-        )
+    # If range is not valid, defer to RCM (fail-open)
+    if not range_valid:
         return {
             "timestamp": ts,
-            "status": "BLOCK",
             "Gate": "RIG",
-            "reason": reason,
-            "confidence": 0.0,
+            "status": "VALID",
+            "reason": "Range not valid — RIG defers to RCM",
+            "confidence": exec_conf,
+            "confidence_modifier": 1.0,
             "htf_bias": htf_bias,
-            "session_bias": session_bias,
+            "session_bias": session_bias_raw,
             "evaluated": True,
-        }
-
-    # Not all conditions met → VALID
-    reason = None
-    logger.debug(
-        "RIG VALID: %s",
-        {
-            "rig_status": "VALID",
-            "rig_reason": reason,
+            "position": None,
+            "counter_bias": False,
             "local_displacement": local_disp,
             "range_duration": range_duration,
-            "htf_bias": htf_bias,
-            "session_bias": session_bias,
-            "range_valid": range_valid,
-            "counter_bias": cond_counter_bias,
-        },
+        }
+
+    # Use real range data when available (passed by rig_engine.evaluate_rig_global),
+    # otherwise fall back to unit range [0,1] where position = displacement.
+    ctx_rh = context.get("range_high")
+    ctx_rl = context.get("range_low")
+    ctx_price = context.get("current_price")
+
+    if ctx_rh is not None and ctx_rl is not None and ctx_rh > ctx_rl and ctx_price is not None:
+        rig_range_low = ctx_rl
+        rig_range_high = ctx_rh
+        rig_price = ctx_price
+    else:
+        rig_range_low = 0.0
+        rig_range_high = 1.0
+        rig_price = local_disp
+
+    result = evaluate_rig(
+        htf_bias=htf_bias,
+        ltf_direction=session_bias_raw,
+        range_low=rig_range_low,
+        range_high=rig_range_high,
+        current_price=rig_price,
+        local_displacement=local_disp,
+        range_duration_hours=range_duration,
+        session_bias="neutral",  # session type not available in legacy context
     )
+
+    # Map to legacy output format
+    status = result["rig_status"]
+    conf_mod = result["confidence_modifier"]
+    position_label = (
+        "low" if result["position"] <= 0.25
+        else "high" if result["position"] >= 0.75
+        else "mid"
+    )
+
+    if status == "BLOCK":
+        confidence = 0.0
+    elif status == "CONDITIONAL":
+        confidence = exec_conf * conf_mod
+    else:
+        confidence = exec_conf
+
+    logger.info(
+        "RIG %s: %s",
+        status,
+        {"rig_status": status, "rig_reason": result["reason"],
+         "local_displacement": local_disp, "range_duration": range_duration,
+         "confidence_modifier": conf_mod,
+         "htf_bias": htf_bias, "session_bias": session_bias_raw},
+    )
+
     return {
         "timestamp": ts,
-        "status": "VALID",
         "Gate": "RIG",
-        "reason": reason,
-        "confidence": exec_conf,
+        "status": status,
+        "reason": result["reason"],
+        "confidence": confidence,
+        "confidence_modifier": conf_mod,
         "htf_bias": htf_bias,
-        "session_bias": session_bias,
+        "session_bias": session_bias_raw,
         "evaluated": True,
+        "position": position_label,
+        "counter_bias": result["counter_bias"],
+        "local_displacement": local_disp,
+        "range_duration": range_duration,
     }

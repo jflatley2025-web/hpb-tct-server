@@ -116,15 +116,8 @@ def evaluate_rig_global(
             timestamp=ts,
         )
 
-    # --- Guard: range must meet minimum duration ---
-    if range_duration_hours < MIN_RANGE_DURATION:
-        return _not_evaluated_response(
-            reason=f"Range duration {range_duration_hours}h below minimum {MIN_RANGE_DURATION}h",
-            displacement=displacement,
-            htf_bias=htf_bias,
-            session_bias=session_bias,
-            timestamp=ts,
-        )
+    # Range duration < 24h is a soft penalty inside the validator,
+    # NOT a hard block.  The validator applies conf *= 0.8 for short ranges.
 
     # --- Build validator context (NO FAKE DATA) ---
     rig_context = {
@@ -141,6 +134,9 @@ def evaluate_rig_global(
             "1D": {"score": exec_score or 0.0},
         },
         "local_range_displacement": displacement,
+        "range_high": range_high,
+        "range_low": range_low,
+        "current_price": current_price,
     }
 
     result = range_integrity_validator(rig_context)
@@ -152,6 +148,12 @@ def evaluate_rig_global(
     # Enforce: BLOCK always zeroes confidence (prevent downstream override)
     if result.get("status") == "BLOCK":
         result["confidence"] = 0.0
+        result.setdefault("confidence_modifier", 0.0)
+
+    # Ensure confidence_modifier is always present
+    result.setdefault("confidence_modifier", 1.0)
+    result.setdefault("position", None)
+    result.setdefault("counter_bias", False)
 
     return result
 

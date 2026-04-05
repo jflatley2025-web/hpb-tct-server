@@ -38,18 +38,19 @@ class TestEvaluateRigGlobal:
         assert result["evaluated"] is True
         assert result["displacement"] == pytest.approx(0.1)
 
-    def test_valid_counter_bias_high_displacement(self):
-        """Counter-bias but high displacement → no block (price already displaced)."""
+    def test_conditional_counter_bias_high_displacement(self):
+        """Counter-bias at range extreme with displacement → CONDITIONAL."""
         result = evaluate_rig_global(
             htf_bias="bullish",
             session_name="New York",
             session_bias="bearish",
             range_high=110.0,
             range_low=100.0,
-            current_price=108.0,  # displacement = 0.8 (> 0.25)
+            current_price=108.0,  # displacement = 0.8 → HIGH zone
         )
-        assert result["status"] == "VALID"
+        assert result["status"] == "CONDITIONAL"
         assert result["evaluated"] is True
+        assert 0.0 < result["confidence_modifier"] <= 0.7
 
     def test_not_evaluated_no_range(self):
         """Missing range data → NOT_EVALUATED with evaluated=True."""
@@ -139,20 +140,31 @@ class TestEvaluateRigGlobal:
         assert "confidence" in result
         assert "timestamp" in result
 
-    def test_short_range_duration_not_evaluated(self):
-        """Duration below MIN_RANGE_DURATION (24h) → NOT_EVALUATED."""
-        result = evaluate_rig_global(
+    def test_short_range_duration_soft_penalty(self):
+        """Duration < 24h applies soft confidence penalty, does NOT hard-block."""
+        # Use displacement >= 0.15 so we get CONDITIONAL (not BLOCK)
+        r_long = evaluate_rig_global(
             htf_bias="bullish",
             session_name="New York",
             session_bias="bearish",
             range_high=110.0,
             range_low=100.0,
-            current_price=101.0,
-            range_duration_hours=12,  # below 24h minimum
+            current_price=102.0,  # disp=0.2 → LOW zone, disp >= 0.15 → CONDITIONAL
+            range_duration_hours=48,
         )
-        assert result["status"] == "NOT_EVALUATED"
-        assert result["evaluated"] is True
-        assert "duration" in result["reason"].lower()
+        r_short = evaluate_rig_global(
+            htf_bias="bullish",
+            session_name="New York",
+            session_bias="bearish",
+            range_high=110.0,
+            range_low=100.0,
+            current_price=102.0,
+            range_duration_hours=12,
+        )
+        assert r_long["status"] == "CONDITIONAL"
+        assert r_short["status"] == "CONDITIONAL"
+        # Short duration applies conf *= 0.8 penalty
+        assert r_short["confidence_modifier"] < r_long["confidence_modifier"]
 
     def test_sufficient_range_duration_allows_block(self):
         """Duration >= 24h allows normal RIG evaluation (BLOCK possible)."""
@@ -183,7 +195,7 @@ class TestEvaluateRigGlobal:
 
     def test_displacement_override(self):
         """displacement_override takes precedence over computed displacement."""
-        # Without override: displacement = 0.8 (high) → VALID
+        # Without override: displacement = 0.8 → HIGH zone → CONDITIONAL
         result_no_override = evaluate_rig_global(
             htf_bias="bullish",
             session_name="New York",
@@ -192,9 +204,9 @@ class TestEvaluateRigGlobal:
             range_low=100.0,
             current_price=108.0,
         )
-        assert result_no_override["status"] == "VALID"
+        assert result_no_override["status"] == "CONDITIONAL"
 
-        # With override: force low displacement → BLOCK
+        # With override: force low displacement (0.1 < 0.15) → BLOCK
         result_override = evaluate_rig_global(
             htf_bias="bullish",
             session_name="New York",
