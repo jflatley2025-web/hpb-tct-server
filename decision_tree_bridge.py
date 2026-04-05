@@ -751,42 +751,21 @@ def _estimate_path_quality(df: pd.DataFrame, direction: str,
     return PathQuality.OBSTRUCTED
 
 
-def range_integrity_gate(range_high: float, range_low: float, current_price: float,
-                         threshold: float = 0.20) -> bool:
-    """Return False if current price is near the range equilibrium (0.5 Fib).
-
-    The gate passes (True) when price is in the outer region of the range, and
-    fails (False) when price is inside the equilibrium zone.
-
-    Args:
-        threshold: Fraction of range size defining the equilibrium zone.
-                   Default 0.20 (central 20%). MarketStructureEngine.range_integrity_gate
-                   uses 0.10 for a tighter gate at execution level.
-    """
-    if range_high <= range_low or current_price <= 0:
-        return True  # Cannot determine — allow through
-    rng = range_high - range_low
-    eq = (range_high + range_low) / 2.0
-    eq_zone = rng * threshold
-    return abs(current_price - eq) > eq_zone
-
-
 def _compute_rig_payload(range_high: float, range_low: float,
                          current_price: float) -> tuple:
-    """Full RIG assessment for the v2 pipeline — returns (payload_dict, penalty).
+    """RIG assessment for the v2 pipeline — returns (payload_dict, confidence_multiplier).
 
-    Thresholds (hard-coded for execution-level use):
-      ≤ 10%  displacement from midpoint → hard block  (passed=False, zone="blocked")
-      10–20% displacement               → penalty zone (passed=True, zone="penalty")
-      ≥ 20%  displacement               → clear        (passed=True, zone="clear")
-      invalid range or price            → undetermined  (passed=True, zone="undetermined")
-
-    Penalty formula: max(1, int(round((0.20 - pct) * 50)))
+    EQ proximity does NOT block. Instead it applies a confidence multiplier:
+      ≤ 10%  displacement from midpoint → confidence *= 0.6 (near EQ penalty)
+      10–20% displacement               → confidence *= 0.8 (mild EQ penalty)
+      ≥ 20%  displacement               → confidence *= 1.0 (clear, no penalty)
+      invalid range or price             → confidence *= 1.0 (undetermined, pass through)
     """
     if not (range_high > range_low and current_price > 0):
         return (
-            {"passed": True, "zone": "undetermined", "displacement_pct": 0.0, "penalty": 0},
-            0,
+            {"passed": True, "zone": "undetermined", "displacement_pct": 0.0,
+             "confidence_mult": 1.0},
+            1.0,
         )
     rng = range_high - range_low
     eq  = (range_high + range_low) / 2.0
@@ -795,24 +774,27 @@ def _compute_rig_payload(range_high: float, range_low: float,
     if pct <= 0.10:
         return (
             {
-                "passed": False,
-                "zone": "blocked",
-                "reason": "RIG: price within 10% of equilibrium (hard block)",
+                "passed": True,
+                "zone": "eq_penalty",
+                "reason": "RIG: price near equilibrium (confidence penalized, not blocked)",
                 "displacement_pct": round(pct * 100, 1),
-                "penalty": 0,
+                "confidence_mult": 0.6,
             },
-            0,
+            0.6,
         )
     elif pct < 0.20:
-        penalty = max(1, int(round((0.20 - pct) * 50)))
         return (
-            {"passed": True, "zone": "penalty", "displacement_pct": round(pct * 100, 1), "penalty": penalty},
-            penalty,
+            {"passed": True, "zone": "mild_penalty",
+             "displacement_pct": round(pct * 100, 1),
+             "confidence_mult": 0.8},
+            0.8,
         )
     else:
         return (
-            {"passed": True, "zone": "clear", "displacement_pct": round(pct * 100, 1), "penalty": 0},
-            0,
+            {"passed": True, "zone": "clear",
+             "displacement_pct": round(pct * 100, 1),
+             "confidence_mult": 1.0},
+            1.0,
         )
 
 
@@ -1505,24 +1487,17 @@ def compute_composite_score_v2(
     range_low = range_info.get("low", 0)
 
     # ============================================================
-    # RIG (RANGE INTEGRITY GATE — HYBRID DYNAMIC)
-    # Hard block:   price within 10% of equilibrium
-    # Penalty zone: price within 10–20%, penalty = int((0.20 - dist) * 50)
-    #               At 10%: 5pts  |  At 15%: 2pts  |  At ~20%: 0pts
-    # Clear:        outside 20%, no penalty
+    # RIG (RANGE INTEGRITY GATE — CONFIDENCE PENALTY)
+    # EQ proximity penalizes confidence, never blocks.
+    # ≤10% from midpoint → confidence *= 0.6
+    # 10–20%             → confidence *= 0.8
+    # ≥20%               → no penalty
     # ============================================================
-    _rig_payload, _rig_penalty = _compute_rig_payload(range_high, range_low, current_price)
+    _rig_payload, _rig_conf_mult = _compute_rig_payload(range_high, range_low, current_price)
     phase_results["rig"] = _rig_payload
 
-    if not _rig_payload["passed"]:
-        fail["failure_context"] = "RIG"
-        return {**fail,
-                "reasons": ["RIG: price within 10% of equilibrium (hard block)"],
-                "phase_results": phase_results}
-
-    if _rig_penalty:
-        score -= _rig_penalty
-        reasons.append(f"RIG penalty: -{_rig_penalty} (mid-zone {_rig_payload['displacement_pct']}% displacement)")
+    if _rig_conf_mult < 1.0:
+        reasons.append(f"RIG EQ penalty: confidence x{_rig_conf_mult} ({_rig_payload['displacement_pct']}% displacement from midpoint)")
 
     time_ok, time_gap = _check_time_displacement(schematic)
     liq_stack = _detect_liquidity_stacking(df, range_high, range_low)
@@ -1820,6 +1795,10 @@ def compute_composite_score_v2(
         penalty = 5
         score -= penalty
         reasons.append(f"Reversal penalty: -{penalty}")
+
+    # Apply RIG EQ confidence multiplier (penalizes near-equilibrium, never blocks)
+    if _rig_conf_mult < 1.0:
+        score = int(score * _rig_conf_mult)
 
     score = max(0, min(100, score))
 

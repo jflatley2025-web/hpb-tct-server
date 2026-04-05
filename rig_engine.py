@@ -12,10 +12,13 @@ Requires real gate context — never fabricates RCM/MSCE data.
 Fail-closed: missing inputs → NOT_EVALUATED (never silent VALID).
 """
 
+import logging
 from datetime import datetime, timezone
 from typing import Optional
 
 from hpb_rig_validator import range_integrity_validator, compute_displacement
+
+logger = logging.getLogger(__name__)
 
 # Minimum range age (hours) for RIG to consider blocking.
 # Ranges younger than this are too immature to enforce.
@@ -62,6 +65,12 @@ def evaluate_rig_global(
         displacement = displacement_override
     else:
         displacement = compute_displacement(current_price, range_high, range_low)
+
+    logger.debug(
+        "RIG displacement: override=%s computed=%s",
+        displacement_override,
+        displacement,
+    )
 
     if displacement is None:
         return _not_evaluated_response(

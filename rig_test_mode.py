@@ -3,7 +3,8 @@
 Temporary RIG Test Mode for Displacement Validation
 
 Allows controlled injection of range parameters and price to simulate
-displacement scenarios and validate mid-range BLOCK vs extreme VALID behavior.
+displacement scenarios.  Mid-range displacement applies a confidence
+penalty rather than blocking — only structural counter-bias blocks.
 
 IMPORTANT:
 - ONLY active when RIG_TEST_MODE=true (env var or flag)
@@ -23,11 +24,6 @@ RIG_TEST_MODE = os.environ.get("RIG_TEST_MODE", "false").lower() == "true"
 TEST_RANGE_HIGH = 72000
 TEST_RANGE_LOW = 68000
 TEST_RANGE_DURATION = 48  # hours
-
-# Extremity threshold: how far from center price must be to count as "extreme"
-# displacement > 0.75 or displacement < 0.25 → extreme → VALID
-# 0.25 <= displacement <= 0.75 → mid-range → BLOCK
-EXTREME_THRESHOLD = 0.25  # distance from center (0.5 ± 0.25)
 
 # --- Test scenarios ---
 TEST_SCENARIOS = [
@@ -55,16 +51,18 @@ def compute_extremity(displacement):
 
 
 def evaluate_rig_test_status(displacement):
-    """Determine RIG status using mid-range BLOCK / extreme VALID rule.
+    """Determine RIG test status — mid-range applies confidence penalty, not block.
 
-    Mid-range (inclusive): 0.25 <= disp <= 0.75 -> BLOCK
-    Extreme: disp > 0.75 or disp < 0.25 -> VALID
+    Mid-range (inclusive): 0.25 <= disp <= 0.75 -> VALID (with confidence penalty)
+    Extreme: disp > 0.75 or disp < 0.25 -> VALID (full confidence)
+
+    RIG no longer blocks based on displacement alone.  Blocking requires
+    all four structural conditions (see range_integrity_validator).
     """
     if displacement is None:
         return "NOT_EVALUATED"
-    extremity = compute_extremity(displacement)
-    if extremity <= (EXTREME_THRESHOLD * 2):  # within ±0.25 of center
-        return "BLOCK"
+    # All displacement values return VALID — blocking is only for
+    # structural counter-bias conditions in range_integrity_validator.
     return "VALID"
 
 

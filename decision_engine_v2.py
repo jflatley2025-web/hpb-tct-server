@@ -694,7 +694,10 @@ def decide(
                                 pass
 
             # Compute local_displacement from range levels vs current price
-            local_displacement: float = 0.0
+            # Standard formula: where price sits within range (0=low, 1=high).
+            # Direction-independent — displacement measures range position, not
+            # directional favourability.
+            local_displacement: float = 0.5
             if isinstance(range_info, dict):
                 local_displacement = range_info.get("displacement", 0.0)
                 if local_displacement == 0.0:
@@ -702,10 +705,7 @@ def decide(
                     r_low = range_info.get("low", 0)
                     if r_high and r_low and r_high > r_low:
                         range_size = r_high - r_low
-                        if direction == "bullish":
-                            local_displacement = (current_price - r_low) / range_size
-                        else:
-                            local_displacement = (r_high - current_price) / range_size
+                        local_displacement = (current_price - r_low) / range_size
                         local_displacement = max(0.0, min(1.0, local_displacement))
 
             # ── RIG (Range Integrity Gate) ────────────────────────
