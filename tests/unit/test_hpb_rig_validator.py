@@ -374,10 +374,11 @@ class TestZoneBoundaryEdgeCases:
         assert result["rig_status"] == "BLOCK"
 
     def test_position_0_2499_is_low(self):
-        """Position just below 0.25 → LOW zone."""
+        """Position just below 0.25 → LOW zone → CONDITIONAL (not mid-range BLOCK)."""
         from hpb_rig_validator import evaluate_rig
+        # position = (324.9 - 100) / (1000 - 100) = 0.2499 → LOW zone
         result = evaluate_rig("bullish", "bearish", 100, 1000, 324.9, 0.24, 48)
-        assert result["rig_status"] != "BLOCK" or result["reason"] != "Counter-bias in mid-range (no edge)"
+        assert result["rig_status"] == "CONDITIONAL"
 
     def test_position_exactly_0_75_is_high(self):
         """Position 0.75 → HIGH zone (boundary inclusive)."""

@@ -212,15 +212,27 @@ def range_integrity_validator(context: dict) -> dict:
             "range_duration": range_duration,
         }
 
-    # Call the core evaluator.
-    # The adapter doesn't have range_high/range_low (only displacement),
-    # so we synthesize a unit range [0, 1] where position = displacement.
+    # Use real range data when available (passed by rig_engine.evaluate_rig_global),
+    # otherwise fall back to unit range [0,1] where position = displacement.
+    ctx_rh = context.get("range_high")
+    ctx_rl = context.get("range_low")
+    ctx_price = context.get("current_price")
+
+    if ctx_rh is not None and ctx_rl is not None and ctx_rh > ctx_rl and ctx_price is not None:
+        rig_range_low = ctx_rl
+        rig_range_high = ctx_rh
+        rig_price = ctx_price
+    else:
+        rig_range_low = 0.0
+        rig_range_high = 1.0
+        rig_price = local_disp
+
     result = evaluate_rig(
         htf_bias=htf_bias,
         ltf_direction=session_bias_raw,
-        range_low=0.0,
-        range_high=1.0,
-        current_price=local_disp,
+        range_low=rig_range_low,
+        range_high=rig_range_high,
+        current_price=rig_price,
         local_displacement=local_disp,
         range_duration_hours=range_duration,
         session_bias="neutral",  # session type not available in legacy context

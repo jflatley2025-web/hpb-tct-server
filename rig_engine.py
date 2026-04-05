@@ -134,6 +134,9 @@ def evaluate_rig_global(
             "1D": {"score": exec_score or 0.0},
         },
         "local_range_displacement": displacement,
+        "range_high": range_high,
+        "range_low": range_low,
+        "current_price": current_price,
     }
 
     result = range_integrity_validator(rig_context)
