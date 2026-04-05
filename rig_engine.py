@@ -58,21 +58,32 @@ def evaluate_rig_global(
     """
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
+    # --- Validate range inputs ---
+    range_valid = (
+        range_high is not None
+        and range_low is not None
+        and range_high > range_low
+    )
+    logger.debug(
+        "RIG range validation: range_valid=%s range_high=%s range_low=%s price=%s",
+        range_valid, range_high, range_low, current_price,
+    )
+
     # --- Compute displacement ---
     # Use override (conservative min across ranges) if provided,
     # otherwise compute from the primary range.
     if displacement_override is not None:
         displacement = displacement_override
-    else:
+    elif range_valid and current_price is not None:
         displacement = compute_displacement(current_price, range_high, range_low)
-
-    logger.debug(
-        "RIG displacement: override=%s computed=%s",
-        displacement_override,
-        displacement,
-    )
+    else:
+        displacement = None
 
     if displacement is None:
+        logger.warning(
+            "INVALID_DISPLACEMENT_INPUT: price=%s range_low=%s range_high=%s override=%s",
+            current_price, range_low, range_high, displacement_override,
+        )
         return _not_evaluated_response(
             reason=_missing_reason(
                 displacement=False,

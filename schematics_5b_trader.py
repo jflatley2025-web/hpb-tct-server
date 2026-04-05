@@ -1820,12 +1820,26 @@ class Schematics5BTrader:
             # then use conservative (min) displacement across all valid ranges.
             from hpb_rig_validator import compute_displacement as _cd
 
+            # Collect valid ranges from forming pool first, then fall back to
+            # confirmed schematics so RIG always has range context.
             _valid_ranges = []
             for _fs in (all_forming_ranges or []):
                 _rh = _fs.get("range_high")
                 _rl = _fs.get("range_low")
                 if _rh is not None and _rl is not None and _rh > _rl:
                     _valid_ranges.append((_rh, _rl, _rh - _rl))
+
+            # Fallback: if no forming ranges, extract from confirmed schematics
+            if not _valid_ranges:
+                for _sym_res in all_symbol_results.values():
+                    _sym_best = _sym_res.get("best_setup")
+                    if _sym_best:
+                        _sb_sch = _sym_best[0] if isinstance(_sym_best, tuple) else _sym_best
+                        _sb_rng = (_sb_sch.get("range") or {}) if isinstance(_sb_sch, dict) else {}
+                        _sb_rh = _sb_rng.get("high") or _sb_rng.get("range_high")
+                        _sb_rl = _sb_rng.get("low") or _sb_rng.get("range_low")
+                        if _sb_rh is not None and _sb_rl is not None and _sb_rh > _sb_rl:
+                            _valid_ranges.append((_sb_rh, _sb_rl, _sb_rh - _sb_rl))
 
             # Primary range: widest span (most significant structural range)
             _rig_range_high = None
@@ -1843,6 +1857,12 @@ class Schematics5BTrader:
             ]
             _all_displacements = [d for d in _all_displacements if d is not None]
             _conservative_disp = min(_all_displacements) if _all_displacements else None
+
+            logger.debug(
+                "[5B] RIG range context: range=[%s, %s] disp=%s sources=%d price=%.2f",
+                _rig_range_high, _rig_range_low, _conservative_disp,
+                len(_valid_ranges), best_current_price or 0,
+            )
 
             rig_result = evaluate_rig_global(
                 htf_bias=best_htf_bias,
