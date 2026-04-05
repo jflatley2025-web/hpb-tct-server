@@ -1,403 +1,340 @@
 """
 Unit tests for hpb_rig_validator.py
-Tests the Range Integrity Gate (RIG) validation logic
+Tests the TCT-aware Range Integrity Gate (RIG) validation logic.
+
+Decision tree:
+  - Trend-aligned → VALID
+  - Counter-bias mid-range → BLOCK
+  - Counter-bias extreme with displacement → CONDITIONAL
+  - Counter-bias extreme without displacement → BLOCK
 """
 import pytest
 from datetime import datetime
 from hpb_rig_validator import range_integrity_validator
 
 
+def _ctx(*, htf_bias="bullish", session_bias="bearish", disp=0.5,
+         range_valid=True, duration=48, score=0.80, session="London"):
+    """Build a minimal RIG context for testing."""
+    return {
+        "gates": {
+            "1A": {"bias": htf_bias},
+            "RCM": {"valid": range_valid, "range_duration_hours": duration},
+            "MSCE": {"session_bias": session_bias, "session": session},
+            "1D": {"score": score},
+        },
+        "local_range_displacement": disp,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Case A: Trend-aligned trades → always VALID
+# ═══════════════════════════════════════════════════════════════════
+
 @pytest.mark.unit
-class TestRangeIntegrityValidator:
-    """Tests for RIG validator function"""
+class TestTrendAligned:
+    """Trend-aligned trades pass unconditionally regardless of position."""
 
-    def test_rig_allows_aligned_bias(self, mock_context_basic):
-        """Test RIG allows trade when session bias aligns with HTF bias"""
-        result = range_integrity_validator(mock_context_basic)
-
+    def test_aligned_at_low(self):
+        result = range_integrity_validator(_ctx(session_bias="bullish", disp=0.10))
         assert result["status"] == "VALID"
-        assert result["Gate"] == "RIG"
-        assert result["reason"] is None
+        assert result["counter_bias"] is False
+        assert result["confidence_modifier"] == 1.0
+
+    def test_aligned_at_mid(self):
+        result = range_integrity_validator(_ctx(session_bias="bullish", disp=0.50))
+        assert result["status"] == "VALID"
+
+    def test_aligned_at_high(self):
+        result = range_integrity_validator(_ctx(session_bias="bullish", disp=0.90))
+        assert result["status"] == "VALID"
+
+    def test_aligned_preserves_confidence(self):
+        result = range_integrity_validator(_ctx(session_bias="bullish", disp=0.50, score=0.85))
+        assert result["confidence"] == pytest.approx(0.85)
+        assert result["confidence_modifier"] == 1.0
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Case B: Counter-bias mid-range → BLOCK
+# ═══════════════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestCounterBiasMidRange:
+    """Counter-bias trades in mid-range (0.25 < pos < 0.75) are blocked."""
+
+    def test_mid_range_center(self):
+        """Displacement 0.50 → mid zone → BLOCK"""
+        result = range_integrity_validator(_ctx(disp=0.50))
+        assert result["status"] == "BLOCK"
+        assert result["position"] == "mid"
+        assert result["counter_bias"] is True
+        assert result["confidence"] == 0.0
+        assert "mid-range" in result["reason"]
+
+    def test_mid_range_lower_edge(self):
+        """Displacement 0.26 → still mid zone → BLOCK"""
+        result = range_integrity_validator(_ctx(disp=0.26))
+        assert result["status"] == "BLOCK"
+        assert result["position"] == "mid"
+
+    def test_mid_range_upper_edge(self):
+        """Displacement 0.74 → still mid zone → BLOCK"""
+        result = range_integrity_validator(_ctx(disp=0.74))
+        assert result["status"] == "BLOCK"
+        assert result["position"] == "mid"
+
+    def test_mid_range_zeroes_confidence(self):
+        result = range_integrity_validator(_ctx(disp=0.50, score=0.90))
+        assert result["confidence"] == 0.0
+        assert result["confidence_modifier"] == 0.0
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Case C: Counter-bias at range extreme WITH displacement → CONDITIONAL
+# ═══════════════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestCounterBiasExtremeWithDisplacement:
+    """Counter-bias at LOW/HIGH zone with sufficient displacement → CONDITIONAL."""
+
+    def test_low_zone_with_displacement(self):
+        """Disp 0.20 → LOW zone, disp >= 0.15 → CONDITIONAL"""
+        result = range_integrity_validator(_ctx(disp=0.20))
+        assert result["status"] == "CONDITIONAL"
+        assert result["position"] == "low"
+        assert result["counter_bias"] is True
+        assert 0.0 < result["confidence_modifier"] <= 0.7
+
+    def test_high_zone_with_displacement(self):
+        """Disp 0.80 → HIGH zone, (1-0.80)=0.20 >= 0.15 → CONDITIONAL"""
+        result = range_integrity_validator(_ctx(disp=0.80))
+        assert result["status"] == "CONDITIONAL"
+        assert result["position"] == "high"
+        assert 0.0 < result["confidence_modifier"] <= 0.7
+
+    def test_low_zone_at_threshold(self):
+        """Disp exactly 0.15 → LOW zone, meets threshold → CONDITIONAL"""
+        result = range_integrity_validator(_ctx(disp=0.15))
+        assert result["status"] == "CONDITIONAL"
+        assert result["position"] == "low"
+
+    def test_high_zone_at_threshold(self):
+        """Disp 0.85 → HIGH zone, (1-0.85)=0.15 meets threshold → CONDITIONAL"""
+        result = range_integrity_validator(_ctx(disp=0.85))
+        assert result["status"] == "CONDITIONAL"
+        assert result["position"] == "high"
+
+    def test_confidence_penalized(self):
+        """CONDITIONAL reduces confidence from base score."""
+        result = range_integrity_validator(_ctx(disp=0.20, score=0.80))
+        assert result["confidence"] < 0.80
         assert result["confidence"] > 0.0
-        assert result["htf_bias"] == "bullish"
-        assert result["session_bias"] == "bullish"
-        assert result["evaluated"] is True
 
-    def test_rig_blocks_counter_bias(self, mock_context_counter_bias):
-        """Test RIG blocks trade when session bias counters HTF bias"""
-        result = range_integrity_validator(mock_context_counter_bias)
+    def test_short_range_further_penalizes(self):
+        """Range < 24h applies additional penalty."""
+        r_long = range_integrity_validator(_ctx(disp=0.20, duration=48))
+        r_short = range_integrity_validator(_ctx(disp=0.20, duration=12))
+        assert r_short["confidence_modifier"] < r_long["confidence_modifier"]
 
-        assert result["status"] == "BLOCK"
-        assert result["Gate"] == "RIG"
-        assert result["reason"] is not None
-        assert "Counter-bias" in result["reason"]
-        assert result["confidence"] == 0.0
-        assert result["htf_bias"] == "bullish"
-        assert result["session_bias"] == "bearish"
-        assert result["evaluated"] is True
+    def test_low_zone_boundary(self):
+        """Disp exactly 0.25 → LOW zone boundary → CONDITIONAL"""
+        result = range_integrity_validator(_ctx(disp=0.25))
+        assert result["status"] == "CONDITIONAL"
+        assert result["position"] == "low"
 
-    def test_rig_allows_invalid_range(self, mock_context_invalid_range):
-        """Test RIG allows trade when range is already broken"""
-        result = range_integrity_validator(mock_context_invalid_range)
+    def test_high_zone_boundary(self):
+        """Disp exactly 0.75 → HIGH zone boundary → CONDITIONAL"""
+        result = range_integrity_validator(_ctx(disp=0.75))
+        assert result["status"] == "CONDITIONAL"
+        assert result["position"] == "high"
 
-        # Should NOT block because range is invalid (not intact)
-        assert result["status"] == "VALID"
-        assert result["Gate"] == "RIG"
 
-    def test_rig_allows_short_duration_range(self):
-        """Test RIG allows trade when range duration is too short"""
-        context = {
-            "gates": {
-                "1A": {"bias": "bullish", "score": 0.85},
-                "RCM": {"valid": True, "range_duration_hours": 12},  # Less than MIN_DURATION (24)
-                "MSCE": {"session_bias": "bearish", "session": "London"},
-                "1D": {"score": 0.80}
-            },
-            "local_range_displacement": 0.15,
-            "ExecutionConfidence_Total": 0.75
-        }
-
-        result = range_integrity_validator(context)
-
-        # Should NOT block because range duration < 24 hours
-        assert result["status"] == "VALID"
-
-    def test_rig_allows_high_displacement(self):
-        """Test RIG allows trade when displacement is high (range breaking)"""
-        context = {
-            "gates": {
-                "1A": {"bias": "bullish", "score": 0.85},
-                "RCM": {"valid": True, "range_duration_hours": 48},
-                "MSCE": {"session_bias": "bearish", "session": "London"},
-                "1D": {"score": 0.80}
-            },
-            "local_range_displacement": 0.35,  # Above DISP_THRESHOLD (0.25)
-            "ExecutionConfidence_Total": 0.75
-        }
-
-        result = range_integrity_validator(context)
-
-        # Should NOT block because displacement > 25% (range is breaking)
-        assert result["status"] == "VALID"
-
-    def test_rig_blocks_only_when_all_conditions_met(self):
-        """Test RIG blocks only when ALL blocking conditions are met"""
-        # ALL conditions for blocking:
-        # 1. range_valid = True
-        # 2. range_duration >= 24 hours
-        # 3. local_disp < 0.25
-        # 4. session_bias != htf_bias
-
-        context = {
-            "gates": {
-                "1A": {"bias": "bullish", "score": 0.85},
-                "RCM": {"valid": True, "range_duration_hours": 48},
-                "MSCE": {"session_bias": "bearish", "session": "New York"},
-                "1D": {"score": 0.75}
-            },
-            "local_range_displacement": 0.10,  # < 0.25
-            "ExecutionConfidence_Total": 0.70
-        }
-
-        result = range_integrity_validator(context)
-
-        assert result["status"] == "BLOCK"
-        assert result["confidence"] == 0.0
-
-    def test_rig_result_structure(self, mock_context_basic):
-        """Test RIG result has correct structure"""
-        result = range_integrity_validator(mock_context_basic)
-
-        # Check all required fields exist
-        assert "timestamp" in result
-        assert "status" in result
-        assert "Gate" in result
-        assert "reason" in result
-        assert "confidence" in result
-        assert "htf_bias" in result
-        assert "session_bias" in result
-        assert "evaluated" in result
-        assert result["evaluated"] is True
-
-        # Validate timestamp format
-        try:
-            datetime.strptime(result["timestamp"], "%Y-%m-%d %H:%M:%S")
-        except ValueError:
-            pytest.fail("Timestamp format is invalid")
-
-    def test_rig_handles_missing_gates(self):
-        """Test RIG handles missing gate data gracefully"""
-        context = {
-            "gates": {},
-            "local_range_displacement": 0.15,
-            "ExecutionConfidence_Total": 0.75
-        }
-
-        result = range_integrity_validator(context)
-
-        # Should not crash, should return VALID with defaults
-        assert result["status"] == "VALID"
-        assert result["Gate"] == "RIG"
-
-    def test_rig_handles_partial_gates(self):
-        """Test RIG handles partial gate data"""
-        context = {
-            "gates": {
-                "1A": {"bias": "bullish"},
-                # Missing RCM, MSCE, 1D
-            },
-            "local_range_displacement": 0.15,
-        }
-
-        result = range_integrity_validator(context)
-
-        # Should not crash
-        assert "status" in result
-        assert result["Gate"] == "RIG"
-
-    def test_rig_neutral_htf_bias(self):
-        """Test RIG behavior with neutral HTF bias"""
-        context = {
-            "gates": {
-                "1A": {"bias": "neutral", "score": 0.70},
-                "RCM": {"valid": True, "range_duration_hours": 48},
-                "MSCE": {"session_bias": "bullish", "session": "London"},
-                "1D": {"score": 0.75}
-            },
-            "local_range_displacement": 0.15,
-            "ExecutionConfidence_Total": 0.70
-        }
-
-        result = range_integrity_validator(context)
-
-        # Neutral bias should still check session_bias != htf_bias
-        assert result["status"] == "BLOCK"
-        assert result["htf_bias"] == "neutral"
-
-    def test_rig_case_sensitivity(self):
-        """Test RIG handles bias string case variations"""
-        context = {
-            "gates": {
-                "1A": {"bias": "Bullish", "score": 0.85},  # Capitalized
-                "RCM": {"valid": True, "range_duration_hours": 48},
-                "MSCE": {"session_bias": "bullish", "session": "London"},
-                "1D": {"score": 0.80}
-            },
-            "local_range_displacement": 0.15,
-            "ExecutionConfidence_Total": 0.75
-        }
-
-        result = range_integrity_validator(context)
-
-        # Should handle different cases
-        assert "status" in result
-        assert result["htf_bias"] == "Bullish"
-
+# ═══════════════════════════════════════════════════════════════════
+# Case D: Counter-bias at extreme WITHOUT displacement → BLOCK
+# ═══════════════════════════════════════════════════════════════════
 
 @pytest.mark.unit
-class TestRIGThresholds:
-    """Test RIG threshold constants"""
+class TestCounterBiasExtremeNoDisplacement:
+    """Counter-bias at extreme but displacement < 0.15 → BLOCK."""
 
-    def test_min_duration_threshold(self):
-        """Test MIN_DURATION threshold at boundary"""
-        # Exactly at threshold
-        context = {
-            "gates": {
-                "1A": {"bias": "bullish"},
-                "RCM": {"valid": True, "range_duration_hours": 24},  # Exactly MIN_DURATION
-                "MSCE": {"session_bias": "bearish", "session": "London"},
-                "1D": {"score": 0.80}
-            },
-            "local_range_displacement": 0.15,
-            "ExecutionConfidence_Total": 0.75
-        }
+    def test_low_zone_no_displacement(self):
+        """Disp 0.05 → LOW zone, disp < 0.15 → BLOCK"""
+        result = range_integrity_validator(_ctx(disp=0.05))
+        assert result["status"] == "BLOCK"
+        assert result["position"] == "low"
+        assert result["confidence"] == 0.0
+        assert "insufficient displacement" in result["reason"]
 
-        result = range_integrity_validator(context)
+    def test_high_zone_no_displacement(self):
+        """Disp 0.95 → HIGH zone, (1-0.95)=0.05 < 0.15 → BLOCK"""
+        result = range_integrity_validator(_ctx(disp=0.95))
+        assert result["status"] == "BLOCK"
+        assert result["position"] == "high"
+        assert "insufficient displacement" in result["reason"]
 
-        # At 24 hours, should block (>= 24)
+    def test_low_zone_just_below_threshold(self):
+        """Disp 0.14 → below 0.15 threshold → BLOCK"""
+        result = range_integrity_validator(_ctx(disp=0.14))
         assert result["status"] == "BLOCK"
 
-    def test_displacement_threshold(self):
-        """Test DISP_THRESHOLD at boundary"""
-        # Exactly at threshold
-        context = {
-            "gates": {
-                "1A": {"bias": "bullish"},
-                "RCM": {"valid": True, "range_duration_hours": 48},
-                "MSCE": {"session_bias": "bearish", "session": "London"},
-                "1D": {"score": 0.80}
-            },
-            "local_range_displacement": 0.25,  # Exactly at DISP_THRESHOLD
-            "ExecutionConfidence_Total": 0.75
-        }
+    def test_high_zone_just_below_threshold(self):
+        """Disp 0.86 → (1-0.86)=0.14 < 0.15 → BLOCK"""
+        result = range_integrity_validator(_ctx(disp=0.86))
+        assert result["status"] == "BLOCK"
 
-        result = range_integrity_validator(context)
 
-        # At 0.25, should NOT block (< 0.25 required for blocking)
-        assert result["status"] == "VALID"
-
+# ═══════════════════════════════════════════════════════════════════
+# Range validity edge cases
+# ═══════════════════════════════════════════════════════════════════
 
 @pytest.mark.unit
-class TestRIGSessionNames:
-    """Test RIG with different session names"""
+class TestRangeValidity:
+    """Range validity and missing data handling."""
+
+    def test_invalid_range_passes(self):
+        """Invalid range → defers to RCM, returns VALID."""
+        result = range_integrity_validator(_ctx(range_valid=False, disp=0.50))
+        assert result["status"] == "VALID"
+
+    def test_missing_displacement_defaults_neutral(self):
+        """Missing displacement defaults to 0.5 (mid) → counter-bias mid → BLOCK."""
+        ctx = _ctx(disp=0.50)
+        del ctx["local_range_displacement"]
+        result = range_integrity_validator(ctx)
+        assert result["status"] == "BLOCK"
+
+    def test_missing_gates(self):
+        """Empty gates → no crash, returns VALID."""
+        result = range_integrity_validator({"gates": {}, "local_range_displacement": 0.50})
+        assert result["status"] == "VALID"
+        assert result["Gate"] == "RIG"
+
+    def test_partial_gates(self):
+        """Partial gates → no crash."""
+        ctx = {"gates": {"1A": {"bias": "bullish"}}, "local_range_displacement": 0.50}
+        result = range_integrity_validator(ctx)
+        assert "status" in result
+        assert result["Gate"] == "RIG"
+
+    def test_neutral_htf_bias_counter(self):
+        """Neutral HTF + bullish session → counter-bias detected."""
+        result = range_integrity_validator(
+            _ctx(htf_bias="neutral", session_bias="bullish", disp=0.50)
+        )
+        assert result["counter_bias"] is True
+        assert result["status"] == "BLOCK"  # mid-range counter-bias
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Output structure
+# ═══════════════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestOutputStructure:
+    """Verify output dict has all required fields."""
+
+    def test_all_fields_present(self):
+        result = range_integrity_validator(_ctx(disp=0.50))
+        for key in ("timestamp", "status", "Gate", "reason", "confidence",
+                     "htf_bias", "session_bias", "evaluated",
+                     "position", "counter_bias", "confidence_modifier"):
+            assert key in result, f"Missing key: {key}"
+
+    def test_timestamp_format(self):
+        result = range_integrity_validator(_ctx(disp=0.50))
+        datetime.strptime(result["timestamp"], "%Y-%m-%d %H:%M:%S")
+
+    def test_evaluated_always_true(self):
+        result = range_integrity_validator(_ctx(disp=0.50))
+        assert result["evaluated"] is True
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Session name parametrized
+# ═══════════════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestSessionNames:
+    @pytest.mark.parametrize("session_name", [
+        "London", "New York", "Tokyo", "Sydney", "Unknown"
+    ])
+    def test_sessions_at_mid_range(self, session_name):
+        """Counter-bias mid-range blocks regardless of session name."""
+        result = range_integrity_validator(_ctx(disp=0.50, session=session_name))
+        assert result["status"] == "BLOCK"
 
     @pytest.mark.parametrize("session_name", [
         "London", "New York", "Tokyo", "Sydney", "Unknown"
     ])
-    def test_rig_different_sessions(self, session_name):
-        """Test RIG works with different session names"""
-        context = {
-            "gates": {
-                "1A": {"bias": "bullish"},
-                "RCM": {"valid": True, "range_duration_hours": 48},
-                "MSCE": {"session_bias": "bearish", "session": session_name},
-                "1D": {"score": 0.80}
-            },
-            "local_range_displacement": 0.15,
-            "ExecutionConfidence_Total": 0.75
-        }
+    def test_sessions_at_extreme(self, session_name):
+        """Counter-bias at extreme with displacement → CONDITIONAL."""
+        result = range_integrity_validator(_ctx(disp=0.20, session=session_name))
+        assert result["status"] == "CONDITIONAL"
 
-        result = range_integrity_validator(context)
 
-        # Should block regardless of session name if conditions met
-        assert result["status"] == "BLOCK"
-        assert session_name in result["reason"]
-
+# ═══════════════════════════════════════════════════════════════════
+# compute_displacement tests (unchanged)
+# ═══════════════════════════════════════════════════════════════════
 
 @pytest.mark.unit
 class TestComputeDisplacement:
     """Tests for the compute_displacement helper function"""
 
     def test_mid_range(self):
-        """Price at midpoint → displacement = 0.5"""
         from hpb_rig_validator import compute_displacement
         assert compute_displacement(105.0, 110.0, 100.0) == 0.5
 
     def test_at_range_low(self):
-        """Price at range low → displacement = 0.0"""
         from hpb_rig_validator import compute_displacement
         assert compute_displacement(100.0, 110.0, 100.0) == 0.0
 
     def test_at_range_high(self):
-        """Price at range high → displacement = 1.0"""
         from hpb_rig_validator import compute_displacement
         assert compute_displacement(110.0, 110.0, 100.0) == 1.0
 
     def test_below_range_clamps_to_zero(self):
-        """Price below range → clamps to 0.0"""
         from hpb_rig_validator import compute_displacement
         assert compute_displacement(90.0, 110.0, 100.0) == 0.0
 
     def test_above_range_clamps_to_one(self):
-        """Price above range → clamps to 1.0"""
         from hpb_rig_validator import compute_displacement
         assert compute_displacement(120.0, 110.0, 100.0) == 1.0
 
     def test_degenerate_range_returns_none(self):
-        """range_high == range_low → None"""
         from hpb_rig_validator import compute_displacement
         assert compute_displacement(100.0, 100.0, 100.0) is None
 
     def test_missing_price_returns_none(self):
-        """Missing current_price → None"""
         from hpb_rig_validator import compute_displacement
         assert compute_displacement(None, 110.0, 100.0) is None
 
     def test_missing_range_high_returns_none(self):
-        """Missing range_high → None"""
         from hpb_rig_validator import compute_displacement
         assert compute_displacement(105.0, None, 100.0) is None
 
     def test_missing_range_low_returns_none(self):
-        """Missing range_low → None"""
         from hpb_rig_validator import compute_displacement
         assert compute_displacement(105.0, 110.0, None) is None
 
     def test_quarter_displacement(self):
-        """Price at 25% of range → displacement = 0.25"""
         from hpb_rig_validator import compute_displacement
         result = compute_displacement(102.5, 110.0, 100.0)
         assert abs(result - 0.25) < 1e-10
 
     def test_three_quarter_displacement(self):
-        """Price at 75% of range → displacement = 0.75"""
         from hpb_rig_validator import compute_displacement
         result = compute_displacement(107.5, 110.0, 100.0)
         assert abs(result - 0.75) < 1e-10
 
 
 @pytest.mark.unit
-class TestRIGWithDisplacement:
-    """Integration tests: RIG evaluation with displacement scenarios"""
-
-    def test_mid_range_blocks_counter_bias(self):
-        """Mid-range (0.4-0.6) with counter-bias → BLOCK (displacement < 0.25)"""
-        context = {
-            "gates": {
-                "1A": {"bias": "bullish"},
-                "RCM": {"valid": True, "range_duration_hours": 48},
-                "MSCE": {"session_bias": "bearish", "session": "London"},
-                "1D": {"score": 0.80},
-            },
-            "local_range_displacement": 0.15,  # Below 0.25 threshold → blocks
-        }
-        result = range_integrity_validator(context)
-        assert result["status"] == "BLOCK"
-
-    def test_range_high_allows_short(self):
-        """Price at range high (>0.75) → VALID (displacement above threshold)"""
-        context = {
-            "gates": {
-                "1A": {"bias": "bullish"},
-                "RCM": {"valid": True, "range_duration_hours": 48},
-                "MSCE": {"session_bias": "bearish", "session": "London"},
-                "1D": {"score": 0.80},
-            },
-            "local_range_displacement": 0.80,  # Above 0.25 threshold
-        }
-        result = range_integrity_validator(context)
-        assert result["status"] == "VALID"
-
-    def test_range_low_allows_long(self):
-        """Price at range low (<0.25) but aligned bias → VALID"""
-        context = {
-            "gates": {
-                "1A": {"bias": "bullish"},
-                "RCM": {"valid": True, "range_duration_hours": 48},
-                "MSCE": {"session_bias": "bullish", "session": "London"},
-                "1D": {"score": 0.80},
-            },
-            "local_range_displacement": 0.10,  # Low displacement but aligned
-        }
-        result = range_integrity_validator(context)
-        assert result["status"] == "VALID"
-
-    def test_true_mid_range_allows_when_above_threshold(self):
-        """True mid-range (0.5) is above DISP_THRESHOLD → VALID (not blocked)"""
-        context = {
-            "gates": {
-                "1A": {"bias": "bullish"},
-                "RCM": {"valid": True, "range_duration_hours": 48},
-                "MSCE": {"session_bias": "bearish", "session": "London"},
-                "1D": {"score": 0.80},
-            },
-            "local_range_displacement": 0.50,  # Mid-range but above 0.25 threshold
-        }
-        result = range_integrity_validator(context)
-        # 0.50 > 0.25 threshold so RIG does NOT block
-        assert result["status"] == "VALID"
-
-
-@pytest.mark.unit
 class TestComputeDisplacementEdgeCases:
-    """Additional edge case tests for compute_displacement"""
 
     def test_inverted_range_returns_none(self):
-        """range_high < range_low (inverted) → None"""
         from hpb_rig_validator import compute_displacement
         assert compute_displacement(105.0, 100.0, 110.0) is None
 
     def test_slightly_inverted_range_returns_none(self):
-        """range_high barely below range_low → None"""
         from hpb_rig_validator import compute_displacement
         assert compute_displacement(100.0, 99.99, 100.0) is None

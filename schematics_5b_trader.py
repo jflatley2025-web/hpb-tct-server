@@ -1941,7 +1941,9 @@ class Schematics5BTrader:
                 with self._lock:
                     self.last_debug["rig"] = rig_result
 
-                rig_blocked = rig_result.get("status") not in ("VALID", "NOT_EVALUATED", None)
+                rig_blocked = rig_result.get("status") not in (
+                    "VALID", "NOT_EVALUATED", "CONDITIONAL", None,
+                )
 
                 if rig_blocked:
                     logger.info("[5B] RIG BLOCK: %s", rig_result)
