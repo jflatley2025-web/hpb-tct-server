@@ -172,7 +172,7 @@ class TestRunSingleScenario:
         assert result["production_rig_status"] == "BLOCK"
 
     def test_high_extreme_scenario(self):
-        """High extreme: disp 0.875, (1-0.875)=0.125 < 0.15 → production BLOCK"""
+        """High extreme: disp 0.875 >= 0.15 → production CONDITIONAL (strong displacement)"""
         scenario = {"name": "high_extreme", "current_price": 71500, "expected_displacement": 0.875}
         result = run_single_scenario(scenario)
 
@@ -180,7 +180,7 @@ class TestRunSingleScenario:
         assert result["price"] == 71500
         assert abs(result["displacement"] - 0.875) < 1e-10
         assert result["rig_status"] == "VALID"  # test-mode always VALID
-        assert result["production_rig_status"] == "BLOCK"
+        assert result["production_rig_status"] == "CONDITIONAL"
 
     def test_low_extreme_scenario(self):
         """Low extreme: disp 0.125 < 0.15 → production BLOCK (insufficient displacement)"""
