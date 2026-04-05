@@ -38,18 +38,19 @@ class TestEvaluateRigGlobal:
         assert result["evaluated"] is True
         assert result["displacement"] == pytest.approx(0.1)
 
-    def test_valid_counter_bias_high_displacement(self):
-        """Counter-bias but high displacement → no block (price already displaced)."""
+    def test_conditional_counter_bias_high_displacement(self):
+        """Counter-bias at range extreme with displacement → CONDITIONAL."""
         result = evaluate_rig_global(
             htf_bias="bullish",
             session_name="New York",
             session_bias="bearish",
             range_high=110.0,
             range_low=100.0,
-            current_price=108.0,  # displacement = 0.8 (> 0.25)
+            current_price=108.0,  # displacement = 0.8 → HIGH zone
         )
-        assert result["status"] == "VALID"
+        assert result["status"] == "CONDITIONAL"
         assert result["evaluated"] is True
+        assert 0.0 < result["confidence_modifier"] <= 0.7
 
     def test_not_evaluated_no_range(self):
         """Missing range data → NOT_EVALUATED with evaluated=True."""
@@ -183,7 +184,7 @@ class TestEvaluateRigGlobal:
 
     def test_displacement_override(self):
         """displacement_override takes precedence over computed displacement."""
-        # Without override: displacement = 0.8 (high) → VALID
+        # Without override: displacement = 0.8 → HIGH zone → CONDITIONAL
         result_no_override = evaluate_rig_global(
             htf_bias="bullish",
             session_name="New York",
@@ -192,9 +193,9 @@ class TestEvaluateRigGlobal:
             range_low=100.0,
             current_price=108.0,
         )
-        assert result_no_override["status"] == "VALID"
+        assert result_no_override["status"] == "CONDITIONAL"
 
-        # With override: force low displacement → BLOCK
+        # With override: force low displacement (0.1 < 0.15) → BLOCK
         result_override = evaluate_rig_global(
             htf_bias="bullish",
             session_name="New York",

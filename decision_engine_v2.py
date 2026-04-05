@@ -775,6 +775,10 @@ def decide(
                 skip_reason = "RIG_BLOCK"
                 failure_code = "FAIL_RIG_COUNTER_BIAS"
                 execution_confidence = 0.0
+            elif rig_status == "CONDITIONAL":
+                # Counter-bias at range extreme — allowed with penalty
+                _rig_mod = rig_result.get("confidence_modifier", 0.6)
+                execution_confidence *= _rig_mod
 
             # ── 1A: HTF bias ──────────────────────────────────────
             elif not gate_1a_pass:

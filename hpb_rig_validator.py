@@ -19,26 +19,43 @@ def compute_displacement(current_price, range_high, range_low):
     return max(0.0, min(1.0, displacement))
 
 
+# ---------------------------------------------------------------------------
+# Range position zone thresholds
+# ---------------------------------------------------------------------------
+_LOW_ZONE_UPPER = 0.25   # position <= 0.25 → LOW zone (near range low)
+_HIGH_ZONE_LOWER = 0.75  # position >= 0.75 → HIGH zone (near range high)
+_EXTREME_DISP_MIN = 0.15  # minimum displacement at extreme for conditional pass
+_SHORT_RANGE_HOURS = 24   # ranges younger than this weaken confidence
+
+
+def _classify_position(position: float) -> str:
+    """Classify price position within range as 'low', 'mid', or 'high'."""
+    if position <= _LOW_ZONE_UPPER:
+        return "low"
+    if position >= _HIGH_ZONE_LOWER:
+        return "high"
+    return "mid"
+
+
 def range_integrity_validator(context):
     """
-    HPB Range Integrity Validator (RIG) — structural integrity gate.
+    HPB Range Integrity Validator (RIG) — TCT-aware structural gate.
 
-    RIG may ONLY block when ALL four conditions are true:
-      1. HTF range is valid
-      2. Range duration >= 24 hours
-      3. Local displacement < 25% of HTF range
-      4. Session bias is opposite HTF bias
+    Decision tree:
+      1. Trend-aligned trades → PASS (no restriction)
+      2. Counter-bias in mid-range → BLOCK (no edge, no setup)
+      3. Counter-bias at range extreme with displacement → CONDITIONAL
+         (allowed with confidence penalty — this is TCT reversal behavior)
+      4. Counter-bias at range extreme WITHOUT displacement → BLOCK
+         (no confirmation of reversal)
 
-    If NOT all four conditions are met → VALID (no block).
-
-    These do NOT block:
-      - Equilibrium proximity
-      - Mid-range positioning
-      - Weak displacement alone (without counter-bias)
-      - Missing minor inputs
+    Returns dict with:
+      status:              "VALID" | "BLOCK" | "CONDITIONAL"
+      confidence:          float (execution confidence)
+      confidence_modifier: float (1.0 = no penalty, 0.5-0.7 = penalized)
+      position:            "low" | "mid" | "high"
+      counter_bias:        bool
     """
-
-    # Extract info from HPB context
     gates = context.get("gates", {})
     rcm = gates.get("RCM", {})
     msce = gates.get("MSCE", {})
@@ -49,83 +66,162 @@ def range_integrity_validator(context):
     session_bias = msce.get("session_bias", htf_bias)
     session_name = msce.get("session", "Unknown")
 
-    # Default to 0.5 (mid-range / neutral) when displacement is missing.
-    # 0.0 would falsely satisfy the "weak displacement" block condition.
     local_disp = context.get("local_range_displacement")
     if local_disp is None:
         local_disp = 0.5
         logger.warning(
-            "INVALID_DISPLACEMENT_INPUT: local_range_displacement missing from context, defaulting to 0.5"
+            "INVALID_DISPLACEMENT_INPUT: local_range_displacement missing, defaulting to 0.5"
         )
+
     range_valid = rcm.get("valid", False)
     range_duration = rcm.get("range_duration_hours", 0)
     exec_conf = one_d.get("score", 0.0)
 
-    # Strict block thresholds
-    MIN_DURATION = 24        # hours
-    DISP_THRESHOLD = 0.25    # <25% of range = weak displacement
-
-    # --- Evaluate the 4 strict block conditions ---
-    cond_range_valid = range_valid
-    cond_duration = range_duration >= MIN_DURATION
-    cond_weak_disp = local_disp < DISP_THRESHOLD
-    cond_counter_bias = (session_bias != htf_bias)
-
-    all_block_conditions = (
-        cond_range_valid
-        and cond_duration
-        and cond_weak_disp
-        and cond_counter_bias
-    )
-
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-    if all_block_conditions:
-        reason = f"Counter-bias {session_name} session during intact HTF range."
-        logger.info(
-            "RIG BLOCK: %s",
-            {
-                "rig_status": "BLOCK",
-                "rig_reason": reason,
-                "local_displacement": local_disp,
-                "range_duration": range_duration,
-                "htf_bias": htf_bias,
-                "session_bias": session_bias,
-            },
-        )
-        return {
-            "timestamp": ts,
-            "status": "BLOCK",
-            "Gate": "RIG",
-            "reason": reason,
-            "confidence": 0.0,
-            "htf_bias": htf_bias,
-            "session_bias": session_bias,
-            "evaluated": True,
-        }
+    # --- Classify position and counter-bias ---
+    position = _classify_position(local_disp)
+    counter_bias = (session_bias != htf_bias)
 
-    # Not all conditions met → VALID
-    reason = None
-    logger.debug(
-        "RIG VALID: %s",
-        {
-            "rig_status": "VALID",
-            "rig_reason": reason,
-            "local_displacement": local_disp,
-            "range_duration": range_duration,
-            "htf_bias": htf_bias,
-            "session_bias": session_bias,
-            "range_valid": range_valid,
-            "counter_bias": cond_counter_bias,
-        },
-    )
-    return {
+    base_result = {
         "timestamp": ts,
-        "status": "VALID",
         "Gate": "RIG",
-        "reason": reason,
-        "confidence": exec_conf,
         "htf_bias": htf_bias,
         "session_bias": session_bias,
         "evaluated": True,
+        "position": position,
+        "counter_bias": counter_bias,
+        "local_displacement": local_disp,
+        "range_duration": range_duration,
+    }
+
+    # --- Case A: Trend-aligned → PASS unconditionally ---
+    if not counter_bias:
+        logger.debug(
+            "RIG PASS (trend-aligned): %s",
+            {"position": position, "htf_bias": htf_bias,
+             "session_bias": session_bias, "displacement": local_disp},
+        )
+        return {
+            **base_result,
+            "status": "VALID",
+            "reason": None,
+            "confidence": exec_conf,
+            "confidence_modifier": 1.0,
+        }
+
+    # --- Counter-bias trades below: range context required ---
+    if not range_valid:
+        # No valid range → cannot assess, pass through (fail-open for
+        # broken range context — RCM gate handles range quality upstream).
+        return {
+            **base_result,
+            "status": "VALID",
+            "reason": "Range not valid — RIG defers to RCM",
+            "confidence": exec_conf,
+            "confidence_modifier": 1.0,
+        }
+
+    # --- Case B: Counter-bias in MID range → HARD BLOCK ---
+    if position == "mid":
+        reason = "Counter-bias in mid-range — no structural edge"
+        logger.info(
+            "RIG BLOCK: %s",
+            {"rig_status": "BLOCK", "rig_reason": reason,
+             "local_displacement": local_disp, "range_duration": range_duration,
+             "htf_bias": htf_bias, "session_bias": session_bias},
+        )
+        return {
+            **base_result,
+            "status": "BLOCK",
+            "reason": reason,
+            "confidence": 0.0,
+            "confidence_modifier": 0.0,
+        }
+
+    # --- Case C: Counter-bias at EXTREME (low or high) ---
+
+    # C1: No displacement at extreme → BLOCK (no reversal confirmation)
+    if local_disp < _EXTREME_DISP_MIN or (1.0 - local_disp) < _EXTREME_DISP_MIN:
+        # Price is at extreme but displacement is negligible — could be
+        # a slow drift, not a displacement-driven reversal.
+        # Re-check: for LOW zone, displacement IS the position value;
+        # for HIGH zone, displacement from high is (1 - position).
+        # If either is < 0.15, there's no meaningful push into the zone.
+        pass  # fall through to displacement check below
+
+    # Determine displacement strength at the relevant extreme
+    if position == "low":
+        extreme_disp = local_disp  # how deep into the low zone
+    else:  # position == "high"
+        extreme_disp = 1.0 - local_disp  # how deep into the high zone
+
+    # Note: extreme_disp here measures how far INTO the extreme zone
+    # we are.  But the spec says "local_displacement < 0.15 → BLOCK".
+    # local_disp IS the range position (0=low, 1=high), so:
+    #   - At LOW zone: local_disp is small (e.g. 0.10).  The "displacement"
+    #     the spec refers to is whether price has MOVED into this zone,
+    #     which we approximate as: being in the zone IS the displacement.
+    #   - We use local_disp for LOW, (1-local_disp) for HIGH.
+
+    # C1: Displacement too weak at extreme → BLOCK
+    if position == "low" and local_disp < _EXTREME_DISP_MIN:
+        reason = "Counter-bias at range low — insufficient displacement"
+        logger.info(
+            "RIG BLOCK: %s",
+            {"rig_status": "BLOCK", "rig_reason": reason,
+             "local_displacement": local_disp, "range_duration": range_duration,
+             "htf_bias": htf_bias, "session_bias": session_bias},
+        )
+        return {
+            **base_result,
+            "status": "BLOCK",
+            "reason": reason,
+            "confidence": 0.0,
+            "confidence_modifier": 0.0,
+        }
+
+    if position == "high" and (1.0 - local_disp) < _EXTREME_DISP_MIN:
+        reason = "Counter-bias at range high — insufficient displacement"
+        logger.info(
+            "RIG BLOCK: %s",
+            {"rig_status": "BLOCK", "rig_reason": reason,
+             "local_displacement": local_disp, "range_duration": range_duration,
+             "htf_bias": htf_bias, "session_bias": session_bias},
+        )
+        return {
+            **base_result,
+            "status": "BLOCK",
+            "reason": reason,
+            "confidence": 0.0,
+            "confidence_modifier": 0.0,
+        }
+
+    # C2: Sufficient displacement at extreme → CONDITIONAL (allow with penalty)
+    # Confidence modifier: 0.5 base, scaled up toward 0.7 by displacement strength
+    conf_mod = 0.5 + min(0.2, extreme_disp * 0.5)
+
+    # Range duration penalty: weak range context reduces confidence further
+    if range_duration < _SHORT_RANGE_HOURS:
+        conf_mod *= 0.8
+
+    conf_mod = round(max(0.0, min(1.0, conf_mod)), 3)
+
+    reason = (
+        f"Counter-bias at range {position} — allowed with displacement "
+        f"(conf x{conf_mod})"
+    )
+    logger.info(
+        "RIG CONDITIONAL: %s",
+        {"rig_status": "CONDITIONAL", "rig_reason": reason,
+         "local_displacement": local_disp, "range_duration": range_duration,
+         "confidence_modifier": conf_mod,
+         "htf_bias": htf_bias, "session_bias": session_bias},
+    )
+    return {
+        **base_result,
+        "status": "CONDITIONAL",
+        "reason": reason,
+        "confidence": exec_conf * conf_mod,
+        "confidence_modifier": conf_mod,
     }

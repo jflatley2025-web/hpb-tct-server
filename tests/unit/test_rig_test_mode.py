@@ -161,34 +161,37 @@ class TestRunSingleScenario:
     """Tests for running individual test scenarios."""
 
     def test_mid_range_scenario(self):
-        """Mid-range scenario produces correct displacement and VALID status"""
+        """Mid-range scenario: disp 0.5 → mid zone counter-bias → production BLOCK"""
         scenario = {"name": "mid_range", "current_price": 70000, "expected_displacement": 0.5}
         result = run_single_scenario(scenario)
 
         assert result["scenario"] == "mid_range"
         assert result["price"] == 70000
         assert abs(result["displacement"] - 0.5) < 1e-10
-        assert result["rig_status"] == "VALID"
+        assert result["rig_status"] == "VALID"  # test-mode always VALID
+        assert result["production_rig_status"] == "BLOCK"
 
     def test_high_extreme_scenario(self):
-        """High extreme scenario produces correct displacement and VALID status"""
+        """High extreme: disp 0.875, (1-0.875)=0.125 < 0.15 → production BLOCK"""
         scenario = {"name": "high_extreme", "current_price": 71500, "expected_displacement": 0.875}
         result = run_single_scenario(scenario)
 
         assert result["scenario"] == "high_extreme"
         assert result["price"] == 71500
         assert abs(result["displacement"] - 0.875) < 1e-10
-        assert result["rig_status"] == "VALID"
+        assert result["rig_status"] == "VALID"  # test-mode always VALID
+        assert result["production_rig_status"] == "BLOCK"
 
     def test_low_extreme_scenario(self):
-        """Low extreme scenario produces correct displacement and VALID status"""
+        """Low extreme: disp 0.125 < 0.15 → production BLOCK (insufficient displacement)"""
         scenario = {"name": "low_extreme", "current_price": 68500, "expected_displacement": 0.125}
         result = run_single_scenario(scenario)
 
         assert result["scenario"] == "low_extreme"
         assert result["price"] == 68500
         assert abs(result["displacement"] - 0.125) < 1e-10
-        assert result["rig_status"] == "VALID"
+        assert result["rig_status"] == "VALID"  # test-mode always VALID
+        assert result["production_rig_status"] == "BLOCK"
 
     def test_result_includes_production_status(self):
         """Result includes the production RIG validator output for comparison"""
@@ -196,7 +199,7 @@ class TestRunSingleScenario:
         result = run_single_scenario(scenario)
 
         assert "production_rig_status" in result
-        assert result["production_rig_status"] in ("VALID", "BLOCK")
+        assert result["production_rig_status"] in ("VALID", "BLOCK", "CONDITIONAL")
 
     def test_result_includes_extremity(self):
         """Result includes the extremity metric"""

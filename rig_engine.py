@@ -152,6 +152,12 @@ def evaluate_rig_global(
     # Enforce: BLOCK always zeroes confidence (prevent downstream override)
     if result.get("status") == "BLOCK":
         result["confidence"] = 0.0
+        result.setdefault("confidence_modifier", 0.0)
+
+    # Ensure confidence_modifier is always present
+    result.setdefault("confidence_modifier", 1.0)
+    result.setdefault("position", None)
+    result.setdefault("counter_bias", False)
 
     return result
 
