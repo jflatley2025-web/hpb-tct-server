@@ -1600,6 +1600,7 @@ class Schematics5BTrader:
                     best_tradeable_symbol = _sym
                 all_forming.extend(sym_result.get("forming", []))
                 all_forming_ranges.extend(sym_result.get("forming_all_ranges", []))
+                all_forming_ranges.extend(sym_result.get("confirmed_ranges", []))
 
             # If no setup found, use the first symbol's price for debug display
             if best_current_price == 0.0 and all_symbol_results:
@@ -1829,17 +1830,9 @@ class Schematics5BTrader:
                 if _rh is not None and _rl is not None and _rh > _rl:
                     _valid_ranges.append((_rh, _rl, _rh - _rl))
 
-            # Fallback: if no forming ranges, extract from confirmed schematics
-            if not _valid_ranges:
-                for _sym_res in all_symbol_results.values():
-                    _sym_best = _sym_res.get("best_setup")
-                    if _sym_best:
-                        _sb_sch = _sym_best[0] if isinstance(_sym_best, tuple) else _sym_best
-                        _sb_rng = (_sb_sch.get("range") or {}) if isinstance(_sb_sch, dict) else {}
-                        _sb_rh = _sb_rng.get("high") or _sb_rng.get("range_high")
-                        _sb_rl = _sb_rng.get("low") or _sb_rng.get("range_low")
-                        if _sb_rh is not None and _sb_rl is not None and _sb_rh > _sb_rl:
-                            _valid_ranges.append((_sb_rh, _sb_rl, _sb_rh - _sb_rl))
+            # No separate fallback needed — confirmed_ranges are merged into
+            # all_forming_ranges at aggregation (line above), so the primary
+            # loop always includes both forming AND confirmed schematic ranges.
 
             # Primary range: widest span (most significant structural range)
             _rig_range_high = None
@@ -2634,16 +2627,30 @@ class Schematics5BTrader:
                 }
 
             # Collect forming (unconfirmed, all 3 taps present) schematics for display
+            # and confirmed schematic ranges for RIG fallback
             forming: List[Dict] = []
             forming_all_ranges: List[Dict] = []
+            confirmed_ranges: List[Dict] = []
             for _ftf, _fsch_list in all_schematics_by_tf.items():
                 for _fs in _fsch_list:
-                    if not isinstance(_fs, dict) or _fs.get("is_confirmed", False):
-                        continue
-                    _fdir = _fs.get("direction", "unknown")
-                    if not (_fs.get("tap1") and _fs.get("tap2") and _fs.get("tap3")):
+                    if not isinstance(_fs, dict):
                         continue
                     _range = _fs.get("range") or {}
+                    _fdir = _fs.get("direction", "unknown")
+
+                    # Confirmed schematics: extract range for RIG fallback
+                    if _fs.get("is_confirmed", False):
+                        _cr_rh = _range.get("high")
+                        _cr_rl = _range.get("low")
+                        if _cr_rh is not None and _cr_rl is not None and _cr_rh > _cr_rl:
+                            confirmed_ranges.append({
+                                "range_high": _cr_rh,
+                                "range_low": _cr_rl,
+                            })
+                        continue
+
+                    if not (_fs.get("tap1") and _fs.get("tap2") and _fs.get("tap3")):
+                        continue
                     _sl = _fs.get("stop_loss")
                     _tgt = _fs.get("target")
                     _forming_entry = {
@@ -2685,6 +2692,7 @@ class Schematics5BTrader:
                 "best_tf": best_tf_local,
                 "forming": forming[:5],
                 "forming_all_ranges": forming_all_ranges,
+                "confirmed_ranges": confirmed_ranges,
                 "timeframes": all_tf_results,
                 "session": session_info,
             })
