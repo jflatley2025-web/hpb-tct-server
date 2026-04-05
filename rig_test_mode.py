@@ -3,7 +3,8 @@
 Temporary RIG Test Mode for Displacement Validation
 
 Allows controlled injection of range parameters and price to simulate
-displacement scenarios and validate mid-range BLOCK vs extreme VALID behavior.
+displacement scenarios.  Mid-range displacement applies a confidence
+penalty rather than blocking — only structural counter-bias blocks.
 
 IMPORTANT:
 - ONLY active when RIG_TEST_MODE=true (env var or flag)
@@ -23,11 +24,6 @@ RIG_TEST_MODE = os.environ.get("RIG_TEST_MODE", "false").lower() == "true"
 TEST_RANGE_HIGH = 72000
 TEST_RANGE_LOW = 68000
 TEST_RANGE_DURATION = 48  # hours
-
-# Extremity threshold: how far from center price must be to count as "extreme"
-# displacement > 0.75 or displacement < 0.25 → extreme → VALID
-# 0.25 <= displacement <= 0.75 → mid-range → BLOCK
-EXTREME_THRESHOLD = 0.25  # distance from center (0.5 ± 0.25)
 
 # --- Test scenarios ---
 TEST_SCENARIOS = [

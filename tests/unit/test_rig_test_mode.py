@@ -271,6 +271,7 @@ class TestRunAllScenarios:
             # Mid-range: (70000-60000)/(80000-60000) = 0.5 → VALID (confidence penalized, not blocked)
             mid = next(r for r in results if r["scenario"] == "mid_range")
             assert abs(mid["displacement"] - 0.5) < 1e-10
+            assert mid["rig_status"] == "VALID"
 
 
 @pytest.mark.unit

@@ -17,6 +17,7 @@ Compatible with pandas OHLC dataframe:
 columns required: open, high, low, close
 """
 
+import warnings
 from dataclasses import dataclass
 from typing import Optional
 import numpy as np
@@ -412,4 +413,9 @@ class MarketStructureEngine:
         _compute_rig_payload (decision_tree_bridge.py), not as a gate.
         Kept for API compatibility — always passes.
         """
+        warnings.warn(
+            "range_integrity_gate is deprecated — use RIG confidence penalty instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         return True

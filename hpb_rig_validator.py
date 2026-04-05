@@ -1,6 +1,6 @@
 # hpb_rig_validator.py
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +71,7 @@ def range_integrity_validator(context):
         and cond_counter_bias
     )
 
-    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
     if all_block_conditions:
         reason = f"Counter-bias {session_name} session during intact HTF range."
