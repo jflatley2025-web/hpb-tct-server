@@ -855,6 +855,11 @@ def run_gate_pipeline(
             skip_reason = None
             final_decision = "TAKE"
 
+            # CONDITIONAL: apply confidence penalty but continue gate checks
+            if rig_status == "CONDITIONAL":
+                _rig_mod = rig_result.get("confidence_modifier", 0.6)
+                execution_confidence *= _rig_mod
+
             if rig_status == "BLOCK":
                 final_decision = "SKIP"
                 skip_reason = "RIG_BLOCK"
