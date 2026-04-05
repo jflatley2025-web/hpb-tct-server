@@ -116,15 +116,8 @@ def evaluate_rig_global(
             timestamp=ts,
         )
 
-    # --- Guard: range must meet minimum duration ---
-    if range_duration_hours < MIN_RANGE_DURATION:
-        return _not_evaluated_response(
-            reason=f"Range duration {range_duration_hours}h below minimum {MIN_RANGE_DURATION}h",
-            displacement=displacement,
-            htf_bias=htf_bias,
-            session_bias=session_bias,
-            timestamp=ts,
-        )
+    # Range duration < 24h is a soft penalty inside the validator,
+    # NOT a hard block.  The validator applies conf *= 0.8 for short ranges.
 
     # --- Build validator context (NO FAKE DATA) ---
     rig_context = {

@@ -140,20 +140,21 @@ class TestEvaluateRigGlobal:
         assert "confidence" in result
         assert "timestamp" in result
 
-    def test_short_range_duration_not_evaluated(self):
-        """Duration below MIN_RANGE_DURATION (24h) → NOT_EVALUATED."""
+    def test_short_range_duration_soft_penalty(self):
+        """Duration < 24h applies soft penalty, does NOT hard-block."""
         result = evaluate_rig_global(
             htf_bias="bullish",
             session_name="New York",
             session_bias="bearish",
             range_high=110.0,
             range_low=100.0,
-            current_price=101.0,
-            range_duration_hours=12,  # below 24h minimum
+            current_price=101.0,  # disp=0.1 → LOW zone, disp < 0.15 → BLOCK
+            range_duration_hours=12,
         )
-        assert result["status"] == "NOT_EVALUATED"
+        # Short duration doesn't override the zone-based decision;
+        # this setup blocks because displacement < 0.15, not because of duration
+        assert result["status"] == "BLOCK"
         assert result["evaluated"] is True
-        assert "duration" in result["reason"].lower()
 
     def test_sufficient_range_duration_allows_block(self):
         """Duration >= 24h allows normal RIG evaluation (BLOCK possible)."""

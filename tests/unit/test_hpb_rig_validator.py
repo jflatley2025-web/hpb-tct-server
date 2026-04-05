@@ -164,23 +164,21 @@ class TestCounterBiasExtremeNoDisplacement:
         assert result["status"] == "BLOCK"
         assert result["position"] == "low"
         assert result["confidence"] == 0.0
-        assert "insufficient displacement" in result["reason"]
 
-    def test_high_zone_no_displacement(self):
-        """Disp 0.95 → HIGH zone, (1-0.95)=0.05 < 0.15 → BLOCK"""
+    def test_high_zone_strong_displacement(self):
+        """Disp 0.95 → HIGH zone, disp 0.95 >= 0.15 → CONDITIONAL (strong displacement)"""
         result = range_integrity_validator(_ctx(disp=0.95))
-        assert result["status"] == "BLOCK"
+        assert result["status"] == "CONDITIONAL"
         assert result["position"] == "high"
-        assert "insufficient displacement" in result["reason"]
 
     def test_low_zone_just_below_threshold(self):
         """Disp 0.14 → below 0.15 threshold → BLOCK"""
         result = range_integrity_validator(_ctx(disp=0.14))
         assert result["status"] == "BLOCK"
 
-    def test_high_zone_just_below_threshold(self):
-        """Disp 0.86 → (1-0.86)=0.14 < 0.15 → BLOCK"""
-        result = range_integrity_validator(_ctx(disp=0.86))
+    def test_low_zone_very_low_displacement(self):
+        """Disp 0.02 → LOW zone, disp < 0.15 → BLOCK"""
+        result = range_integrity_validator(_ctx(disp=0.02))
         assert result["status"] == "BLOCK"
 
 
@@ -271,6 +269,85 @@ class TestSessionNames:
         """Counter-bias at extreme with displacement → CONDITIONAL."""
         result = range_integrity_validator(_ctx(disp=0.20, session=session_name))
         assert result["status"] == "CONDITIONAL"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# evaluate_rig standalone function tests
+# ═══════════════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestEvaluateRigStandalone:
+    """Tests for the new evaluate_rig() function (spec-compliant)."""
+
+    def test_case_a_trend_aligned(self):
+        from hpb_rig_validator import evaluate_rig
+        result = evaluate_rig("bullish", "bullish", 100, 110, 105, 0.5, 48)
+        assert result["rig_status"] == "VALID"
+        assert result["confidence_modifier"] == 1.0
+        assert result["counter_bias"] is False
+
+    def test_case_b_counter_bias_mid(self):
+        from hpb_rig_validator import evaluate_rig
+        result = evaluate_rig("bullish", "bearish", 100, 110, 105, 0.5, 48)
+        assert result["rig_status"] == "BLOCK"
+        assert result["confidence_modifier"] == 0.0
+        assert "mid-range" in result["reason"]
+
+    def test_case_c_extreme_with_displacement(self):
+        from hpb_rig_validator import evaluate_rig
+        result = evaluate_rig("bullish", "bearish", 100, 110, 102, 0.2, 48)
+        assert result["rig_status"] == "CONDITIONAL"
+        assert 0.5 <= result["confidence_modifier"] <= 0.7
+
+    def test_case_d_extreme_no_displacement(self):
+        from hpb_rig_validator import evaluate_rig
+        result = evaluate_rig("bullish", "bearish", 100, 110, 101, 0.1, 48)
+        assert result["rig_status"] == "BLOCK"
+        assert result["confidence_modifier"] == 0.0
+        assert "No displacement" in result["reason"]
+
+    def test_displacement_bonus(self):
+        """Displacement > 0.25 adds +0.1 to confidence."""
+        from hpb_rig_validator import evaluate_rig
+        r_low = evaluate_rig("bullish", "bearish", 100, 110, 102, 0.20, 48)
+        r_high = evaluate_rig("bullish", "bearish", 100, 110, 102, 0.30, 48)
+        assert r_high["confidence_modifier"] > r_low["confidence_modifier"]
+
+    def test_session_expansion_bonus(self):
+        """Bullish reversal at LOW + expansion session → +0.1."""
+        from hpb_rig_validator import evaluate_rig
+        r_neutral = evaluate_rig("bearish", "bullish", 100, 110, 102, 0.2, 48, "neutral")
+        r_expansion = evaluate_rig("bearish", "bullish", 100, 110, 102, 0.2, 48, "expansion")
+        assert r_expansion["confidence_modifier"] > r_neutral["confidence_modifier"]
+
+    def test_session_distribution_bonus(self):
+        """Bearish reversal at HIGH + distribution session → +0.1."""
+        from hpb_rig_validator import evaluate_rig
+        r_neutral = evaluate_rig("bullish", "bearish", 100, 110, 108, 0.8, 48, "neutral")
+        r_distrib = evaluate_rig("bullish", "bearish", 100, 110, 108, 0.8, 48, "distribution")
+        assert r_distrib["confidence_modifier"] > r_neutral["confidence_modifier"]
+
+    def test_short_duration_penalty(self):
+        """Duration < 24h applies conf *= 0.8."""
+        from hpb_rig_validator import evaluate_rig
+        r_long = evaluate_rig("bullish", "bearish", 100, 110, 102, 0.2, 48)
+        r_short = evaluate_rig("bullish", "bearish", 100, 110, 102, 0.2, 12)
+        assert r_short["confidence_modifier"] < r_long["confidence_modifier"]
+
+    def test_displacement_zero_fix(self):
+        """local_displacement == 0.0 is recomputed from range midpoint."""
+        from hpb_rig_validator import evaluate_rig
+        # price=108, range=[100,110], mid=105, abs(108-105)/10 = 0.3
+        # So recomputed disp = 0.3 >= 0.15 → CONDITIONAL
+        result = evaluate_rig("bullish", "bearish", 100, 110, 108, 0.0, 48)
+        assert result["rig_status"] == "CONDITIONAL"
+
+    def test_output_format(self):
+        from hpb_rig_validator import evaluate_rig
+        result = evaluate_rig("bullish", "bearish", 100, 110, 105, 0.5, 48)
+        for key in ("rig_status", "confidence_modifier", "position",
+                     "counter_bias", "reason"):
+            assert key in result
 
 
 # ═══════════════════════════════════════════════════════════════════
