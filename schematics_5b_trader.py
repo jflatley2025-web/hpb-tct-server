@@ -2080,7 +2080,14 @@ class Schematics5BTrader:
                                 abs(_p_tgt - best_current_price) / _p_risk
                                 if _p_risk > 0 and _p_tgt else 0.0
                             )
-                            _p_disp = (schematic.get("range") or {}).get("displacement", 0.0)
+                            _p_rng = schematic.get("range") or {}
+                            _p_rh = _p_rng.get("high", 0)
+                            _p_rl = _p_rng.get("low", 0)
+                            _p_disp = (
+                                max(0.0, min(1.0, (best_current_price - _p_rl) / (_p_rh - _p_rl)))
+                                if _p_rh and _p_rl and _p_rh > _p_rl and best_current_price
+                                else 0.5
+                            )
                             _p_score = evaluation.get("score", 0)
                             _p_rcm = schematic.get("quality_score", 0.0)
                             _priority = (

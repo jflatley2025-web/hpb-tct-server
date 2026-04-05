@@ -681,20 +681,22 @@ def run_gate_pipeline(
                             except ValueError:
                                 pass
 
-            # Compute local_displacement from range high/low vs current price
-            # Standard formula: where price sits within range (0=low, 1=high).
-            # Direction-independent — displacement measures range position, not
-            # directional favourability.
-            local_displacement = 0.5
+            # Compute local_displacement: price position within range (0=low, 1=high).
+            # Always recompute from range bounds — never trust pre-stored values.
+            local_displacement = None
             if isinstance(range_info, dict):
-                local_displacement = range_info.get("displacement", 0.0)
-                if local_displacement == 0.0:
-                    r_high = range_info.get("high", 0)
-                    r_low = range_info.get("low", 0)
-                    if r_high and r_low and r_high > r_low:
-                        range_size = r_high - r_low
-                        local_displacement = (current_price - r_low) / range_size
-                        local_displacement = max(0.0, min(1.0, local_displacement))
+                r_high = range_info.get("high", 0)
+                r_low = range_info.get("low", 0)
+                if r_high and r_low and r_high > r_low and current_price is not None:
+                    local_displacement = (current_price - r_low) / (r_high - r_low)
+                    local_displacement = max(0.0, min(1.0, local_displacement))
+                else:
+                    logger.warning(
+                        "INVALID_DISPLACEMENT_INPUT: price=%s range_low=%s range_high=%s",
+                        current_price, r_low, r_high,
+                    )
+            if local_displacement is None:
+                local_displacement = 0.5
 
             # Range persistence lock + duration tracking (keyed by TF to avoid cross-TF leakage)
             if state.active_range_context.get(tf) and rcm_valid:
