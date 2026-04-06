@@ -1236,6 +1236,9 @@ class Schematics5BTrader:
             "last_successful_order_time": None,
             "top_block_reasons": {},
             "recent_non_executions": [],  # last 10
+            "conditional_seen": 0,
+            "conditional_passed_floor": 0,
+            "conditional_blocked_floor": 0,
         }
         # ── Portfolio reference (set externally for multi-symbol mode) ──
         self._portfolio = None
@@ -2032,6 +2035,17 @@ class Schematics5BTrader:
                     _v2_decision = _v2_result.get("decision", "PASS") if _v2_result else "not_run"
                     _v2_blocks = _USE_V2 and _v2_result is not None and _v2_decision != "TAKE"
 
+                    # Track conditional flow through v2 gate
+                    if rig_result.get("status") == "CONDITIONAL":
+                        self._live_health["conditional_seen"] += 1
+                        if _v2_blocks:
+                            _v2_fc = _v2_result.get("failure_code", "") if _v2_result else ""
+                            if "SCORE" in _v2_fc:
+                                self._live_health["conditional_blocked_floor"] += 1
+                        else:
+                            self._live_health["conditional_passed_floor"] += 1
+                    self._live_health["after_v2_gate"] += (0 if _v2_blocks else 1)
+
                     # Build unified parity entry (Steps 1 + 5).
                     # Includes all fields required by analyze_parity.py and the
                     # gate_debug block on mismatch for root-cause triage.
@@ -2375,6 +2389,10 @@ class Schematics5BTrader:
         h["top_block_reasons"] = dict(
             sorted(h.get("top_block_reasons", {}).items(), key=lambda x: -x[1])
         )
+        # Conditional conversion rate
+        _cs = h.get("conditional_seen", 0)
+        _cp = h.get("conditional_passed_floor", 0)
+        h["conditional_conversion_pct"] = round(_cp / _cs * 100, 1) if _cs > 0 else 0
         return h
 
     def _load_htf_cache(self) -> None:

@@ -913,11 +913,17 @@ def run_gate_pipeline(
                     logger.debug(
                         "BTC_ANCHOR | neutral/ranging BTC — confidence x0.85 (was hard block)",
                     )
+                elif rig_status == "CONDITIONAL":
+                    # Counter-bias reversal against BTC — tighter penalty
+                    execution_confidence *= 0.75
+                    logger.debug(
+                        "BTC_ANCHOR | opposing BTC + CONDITIONAL — confidence x0.75",
+                    )
                 else:
-                    # BTC directional but opposing — stronger penalty
+                    # BTC directional but opposing — standard penalty
                     execution_confidence *= 0.70
                     logger.debug(
-                        "BTC_ANCHOR | opposing BTC bias — confidence x0.70 (was hard block)",
+                        "BTC_ANCHOR | opposing BTC bias — confidence x0.70",
                     )
             elif not rcm_valid:
                 final_decision = "SKIP"
@@ -1022,10 +1028,15 @@ def run_gate_pipeline(
             # decision-tree gates (FVG, market structure) aren't designed for
             # continuation patterns.  Their quality is validated by the
             # continuation-specific gates below (trend, TF, distance).
-            if final_decision == "TAKE" and not is_continuation and score < _MIN_SCORE_HARD:
-                final_decision = "SKIP"
-                skip_reason = "SCORE_HARD_FLOOR ({} < {})".format(score, _MIN_SCORE_HARD)
-                failure_code = "FAIL_SCORE_HARD_FLOOR"
+            if final_decision == "TAKE" and not is_continuation:
+                _effective_floor = int(_MIN_SCORE_HARD * 0.80) if rig_status == "CONDITIONAL" else _MIN_SCORE_HARD
+                if score < _effective_floor:
+                    if rig_status == "CONDITIONAL":
+                        execution_confidence *= 0.85
+                    else:
+                        final_decision = "SKIP"
+                        skip_reason = "SCORE_HARD_FLOOR ({} < {})".format(score, _effective_floor)
+                        failure_code = "FAIL_SCORE_HARD_FLOOR"
 
             # ── v12/v13: Continuation model quality gates ──────────────
             if final_decision == "TAKE" and is_continuation:

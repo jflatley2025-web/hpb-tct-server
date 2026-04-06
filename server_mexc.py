@@ -16846,6 +16846,16 @@ async function loadLiveHealth() {
           html += '  ' + reasons[k] + 'x  ' + k + '\n';
         }
       }
+      // Conditional flow
+      const cs = h.conditional_seen || 0;
+      const cp = h.conditional_passed_floor || 0;
+      const cb = h.conditional_blocked_floor || 0;
+      const cc = h.conditional_conversion_pct || 0;
+      const ccColor = cc >= 3 && cc <= 15 ? '#00e676' : cc > 0 ? '#ff9800' : '#555';
+      html += '\n<span style="color:#e040fb;font-weight:600;font-size:.68rem">CONDITIONAL FLOW</span>\n';
+      html += '  Seen: ' + cs + '  |  Passed floor: ' + cp + '  |  Blocked: ' + cb + '\n';
+      html += '  Conversion: <b style="color:' + ccColor + '">' + cc + '%</b> (target: 3-8%)\n';
+
       html += '\n<span style="color:#ff9800;font-weight:600;font-size:.68rem">RECENT NON-EXECUTIONS</span>\n';
       const recent = h.recent_non_executions || [];
       if (recent.length === 0) {
