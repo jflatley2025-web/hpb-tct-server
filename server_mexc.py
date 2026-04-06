@@ -16751,6 +16751,23 @@ function showLoading(v) {
   document.getElementById('loadingIndicator').style.display = v ? 'flex' : 'none';
 }
 
+// Version badge — fetch once on page load
+(async function loadVersion() {
+  try {
+    const v = await fetchJSON('/api/version');
+    const badge = document.getElementById('version-badge');
+    if (badge) {
+      badge.textContent = v.engine_version + ' [' + v.git_commit + ']';
+      badge.title = 'Build: ' + v.build_timestamp + '\nRIG: ' + v.rig_version + '\nExec: ' + v.execution_version + '\nMode: ' + v.mode;
+      badge.style.color = '#00d4ff';
+      badge.style.borderColor = '#00d4ff44';
+    }
+  } catch (e) {
+    const badge = document.getElementById('version-badge');
+    if (badge) { badge.textContent = 'version error'; badge.style.color = '#ff4444'; }
+  }
+})();
+
 // ── Retry state for gateway/cold-start errors ─────────────────────
 let _retryTimer   = null;
 let _retryCount   = 0;
