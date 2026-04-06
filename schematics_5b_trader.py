@@ -1222,6 +1222,28 @@ class Schematics5BTrader:
             "rr_failures": 0,
             "passes": 0,
         }
+        # ── Scan loop health trace ────────────────────────────────
+        self._scan_trace = {
+            "startup_fired": False,
+            "task_created": False,
+            "loop_entered": False,
+            "loop_iteration_count": 0,
+            "loop_iteration_started": False,
+            "symbols_loaded": len(TRADING_SYMBOLS),
+            "symbol_list": list(TRADING_SYMBOLS),
+            "fetch_attempted": False,
+            "fetch_success": False,
+            "fetched_symbol": None,
+            "candle_count": None,
+            "evaluation_entered": False,
+            "evaluation_completed": False,
+            "last_exception": None,
+            "last_exception_stage": None,
+            "last_success_stage": "init",
+            "heartbeat_time": None,
+            "process_start_time": datetime.now(timezone.utc).isoformat(),
+        }
+
         # ── Live execution health telemetry ──────────────────────
         self._live_health = {
             "signals_seen": 0,
@@ -1547,6 +1569,12 @@ class Schematics5BTrader:
             "details": {},
         }
 
+        # Update scan trace heartbeat
+        self._scan_trace["loop_iteration_started"] = True
+        self._scan_trace["loop_iteration_count"] += 1
+        self._scan_trace["heartbeat_time"] = datetime.now(timezone.utc).isoformat()
+        self._scan_trace["last_success_stage"] = "LOOP_ENTER"
+
         # Reset forming-schematics flag at cycle start so it can't remain
         # latched from a prior sweep through early-return branches (open-trade
         # management, fetch errors, warmup gate).  The flag is set to the
@@ -1599,8 +1627,21 @@ class Schematics5BTrader:
             all_forming_ranges = []
             all_symbol_results: Dict[str, Dict] = {}
 
+            self._scan_trace["last_success_stage"] = "LOAD_SYMBOLS"
+            self._scan_trace["symbols_loaded"] = len(TRADING_SYMBOLS)
+
             for _sym in TRADING_SYMBOLS:
-                sym_result = self._scan_single_symbol(_sym, mode=scan_mode, timeframes=scan_tfs)
+                self._scan_trace["fetch_attempted"] = True
+                self._scan_trace["fetched_symbol"] = _sym
+                try:
+                    sym_result = self._scan_single_symbol(_sym, mode=scan_mode, timeframes=scan_tfs)
+                except Exception as _sym_err:
+                    self._scan_trace["last_exception"] = str(_sym_err)[:200]
+                    self._scan_trace["last_exception_stage"] = f"EVALUATE_SYMBOL({_sym})"
+                    logger.error("[5B] _scan_single_symbol(%s) crashed: %s", _sym, _sym_err, exc_info=True)
+                    sym_result = {"error": str(_sym_err), "current_price": 0, "best_setup": None, "best_score": 0}
+                self._scan_trace["fetch_success"] = sym_result.get("error") is None
+                self._scan_trace["candle_count"] = len(sym_result.get("mtf_dfs", {}))
                 all_symbol_results[_sym] = sym_result
                 sym_best = sym_result.get("best_setup")
                 sym_score = sym_result.get("best_score", 0)
@@ -1622,6 +1663,10 @@ class Schematics5BTrader:
                 all_forming.extend(sym_result.get("forming", []))
                 all_forming_ranges.extend(sym_result.get("forming_all_ranges", []))
                 all_forming_ranges.extend(sym_result.get("confirmed_ranges", []))
+
+            self._scan_trace["evaluation_entered"] = True
+            self._scan_trace["evaluation_completed"] = True
+            self._scan_trace["last_success_stage"] = "EVALUATE_COMPLETE"
 
             # If no setup found, use the first symbol's price for debug display
             if best_current_price == 0.0 and all_symbol_results:
@@ -2351,12 +2396,15 @@ class Schematics5BTrader:
 
         except Exception as e:
             logger.error(f"[5B] Scan error: {e}", exc_info=True)
+            self._scan_trace["last_exception"] = str(e)[:200]
+            self._scan_trace["last_exception_stage"] = "SCAN_CYCLE"
             self.state.last_error = str(e)
             self.state.last_scan_action = "error"
             self.state.save()
             cycle_result["action"] = "error"
             cycle_result["details"] = {"error": str(e)}
 
+        self._scan_trace["heartbeat_time"] = datetime.now(timezone.utc).isoformat()
         return cycle_result
 
     # ----------------------------------------------------------------
@@ -2375,6 +2423,10 @@ class Schematics5BTrader:
             self._live_health["recent_non_executions"] = self._live_health["recent_non_executions"][-10:]
         # Track top block reasons
         self._live_health["top_block_reasons"][reason] = self._live_health["top_block_reasons"].get(reason, 0) + 1
+
+    def get_scan_trace(self) -> dict:
+        """Return scan loop health trace for debugging."""
+        return dict(self._scan_trace)
 
     def get_live_health(self) -> dict:
         """Return live trading health snapshot for dashboard."""

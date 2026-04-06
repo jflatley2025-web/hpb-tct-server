@@ -3732,7 +3732,18 @@ async def startup_event():
     # logger.info("[TENSOR-TRADE] Background auto-scan loop launched (supervised)")
 
     # Start the schematics-5B auto-scan loop (hands-free trading, separate engine)
+    try:
+        from schematics_5b_trader import get_5b_trader
+        _trader = get_5b_trader()
+        _trader._scan_trace["startup_fired"] = True
+    except Exception as _st_err:
+        logger.error("[5B-TRADE] Could not mark startup_fired: %s", _st_err)
     asyncio.create_task(_auto_scan_supervisor(schematics_5b_auto_scan_loop, "5B-TRADE"))
+    try:
+        _trader._scan_trace["task_created"] = True
+        _trader._scan_trace["loop_entered"] = True
+    except Exception:
+        pass
     logger.info("[5B-TRADE] Background auto-scan loop launched (supervised)")
 
 
@@ -3826,6 +3837,17 @@ async def get_version():
     """Return engine version, git commit, build timestamp, and component versions."""
     from engine_version import get_version_info
     return get_version_info()
+
+
+@app.get("/api/schematics-5b-trader/scan-debug")
+async def schematics_5b_scan_debug():
+    """Return scan loop health trace for debugging feed/loop issues."""
+    try:
+        from schematics_5b_trader import get_5b_trader
+        trader = get_5b_trader()
+        return trader.get_scan_trace()
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @app.get("/api/schematics-5b-trader/live-health")
@@ -16609,6 +16631,11 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
   <div id="versionDetails">Loading...</div>
 </div>
 
+<div id="scanDebugPanel" style="margin:8px 24px;padding:10px 16px;background:#0d0d18;border:1px solid #1e1e2d;border-radius:6px;font-size:.7rem;font-family:monospace;color:#888;line-height:1.6">
+  <span style="color:#ff9800;font-weight:700;font-size:.72rem">SCAN LOOP HEALTH</span>
+  <div id="scanDebugDetails" style="margin-top:4px;white-space:pre-wrap">Loading...</div>
+</div>
+
 <div id="liveHealthPanel" style="margin:8px 24px;padding:10px 16px;background:#0d0d18;border:1px solid #1e1e2d;border-radius:6px;font-size:.7rem;font-family:monospace;color:#888;line-height:1.6">
   <span style="color:#00e676;font-weight:700;font-size:.72rem">LIVE TRADING HEALTH</span>
   <div id="liveHealthDetails" style="margin-top:4px;white-space:pre-wrap">Loading...</div>
@@ -16809,6 +16836,36 @@ function showLoading(v) {
     if (badge) { badge.textContent = 'version error'; badge.style.color = '#ff4444'; }
   }
 })();
+
+// Scan debug panel — refreshes every 15s
+async function loadScanDebug() {
+  try {
+    const s = await fetchJSON('/api/schematics-5b-trader/scan-debug');
+    const el = document.getElementById('scanDebugDetails');
+    if (el) {
+      const loopColor = s.loop_iteration_count > 0 ? '#00e676' : '#ff4444';
+      const fetchColor = s.fetch_success ? '#00e676' : (s.fetch_attempted ? '#ff4444' : '#555');
+      const evalColor = s.evaluation_completed ? '#00e676' : '#ff4444';
+      const excColor = s.last_exception ? '#ff4444' : '#00e676';
+      el.innerHTML =
+        '<span style="color:#e0e0e0">Loop iterations:</span> <b style="color:' + loopColor + '">' + s.loop_iteration_count + '</b>\n'
+        + '<span style="color:#e0e0e0">Symbols loaded:</span> ' + s.symbols_loaded + '\n'
+        + '<span style="color:#e0e0e0">Fetch attempted:</span> ' + s.fetch_attempted + '  |  <span style="color:#e0e0e0">Success:</span> <b style="color:' + fetchColor + '">' + s.fetch_success + '</b>\n'
+        + '<span style="color:#e0e0e0">Last fetched:</span> ' + (s.fetched_symbol || 'none') + '  |  <span style="color:#e0e0e0">Candles:</span> ' + (s.candle_count || 0) + '\n'
+        + '<span style="color:#e0e0e0">Eval completed:</span> <b style="color:' + evalColor + '">' + s.evaluation_completed + '</b>\n'
+        + '<span style="color:#e0e0e0">Last success:</span> ' + s.last_success_stage + '\n'
+        + '<span style="color:#e0e0e0">Heartbeat:</span> ' + (s.heartbeat_time || 'never') + '\n'
+        + (s.last_exception
+          ? '<span style="color:#ff4444">EXCEPTION at ' + s.last_exception_stage + ':</span> ' + s.last_exception
+          : '<span style="color:' + excColor + '">No exceptions</span>');
+    }
+  } catch (e) {
+    const el = document.getElementById('scanDebugDetails');
+    if (el) el.textContent = 'Error loading scan debug';
+  }
+}
+loadScanDebug();
+setInterval(loadScanDebug, 15000);
 
 // Live health panel — refreshes every 30s
 async function loadLiveHealth() {
