@@ -775,6 +775,14 @@ def decide(
                 from hpb_rig_validator import safe_confidence_modifier
                 execution_confidence *= safe_confidence_modifier(rig_result)
 
+            # ── BTC Anchor (soft penalty) ─────────────────────────
+            # Applied upfront; does NOT skip downstream hard gates.
+            if _btc_gate_active and direction != btc_htf_bias:
+                if btc_htf_bias in ("neutral", "ranging"):
+                    execution_confidence *= 0.85
+                else:
+                    execution_confidence *= 0.70
+
             # ── RIG (BLOCK) ──────────────────────────────────────
             if rig_status == "BLOCK":
                 final_decision = "PASS"
@@ -802,15 +810,6 @@ def decide(
                     f"direction={direction}, model={model})"
                 )
                 failure_code = "FAIL_HTF_MODEL_DIRECTION"
-
-            # ── Run 29: BTC Anchor Gate (soft penalty) ─────────────
-            # Confidence penalty when trade opposes BTC HTF bias.
-            # NEUTRAL/RANGING BTC gets lighter penalty (not hard block).
-            elif _btc_gate_active and direction != btc_htf_bias:
-                if btc_htf_bias in ("neutral", "ranging"):
-                    execution_confidence *= 0.85
-                else:
-                    execution_confidence *= 0.70
 
             # ── RCM: range quality ────────────────────────────────
             elif not rcm_valid:

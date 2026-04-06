@@ -3827,6 +3827,17 @@ async def get_version():
     from engine_version import get_version_info
     return get_version_info()
 
+
+@app.get("/api/schematics-5b-trader/live-health")
+async def schematics_5b_live_health():
+    """Return live trading health telemetry for dashboard."""
+    try:
+        from schematics_5b_trader import get_5b_trader
+        trader = get_5b_trader()
+        return trader.get_live_health()
+    except Exception as e:
+        return {"error": str(e)}
+
 @app.get("/api/price")
 async def live_price(symbol: Optional[str] = None):
     sym = resolve_symbol(symbol)

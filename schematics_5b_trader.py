@@ -1222,6 +1222,24 @@ class Schematics5BTrader:
             "rr_failures": 0,
             "passes": 0,
         }
+        # ── Live execution health telemetry ──────────────────────
+        self._live_health = {
+            "signals_seen": 0,
+            "after_rig": 0,
+            "after_v2_gate": 0,
+            "order_attempts": 0,
+            "orders_submitted": 0,
+            "orders_rejected": 0,
+            "last_signal_time": None,
+            "last_candidate_time": None,
+            "last_order_attempt_time": None,
+            "last_successful_order_time": None,
+            "top_block_reasons": {},
+            "recent_non_executions": [],  # last 10
+        }
+        # ── Portfolio reference (set externally for multi-symbol mode) ──
+        self._portfolio = None
+
         # Per-symbol HTF bias cache: symbol → (bias_str, expiry_timestamp)
         self._htf_bias_cache: Dict[str, str] = {}
         self._htf_bias_expiry: Dict[str, float] = {}
@@ -1898,6 +1916,12 @@ class Schematics5BTrader:
             # 5. Enter trade on highest-scoring qualifying TRADEABLE setup.
             #    best_setup tracks the global best (any symbol) for monitoring.
             #    best_tradeable_setup tracks the best among TRADEABLE_SYMBOLS only.
+
+            # Live health: track signal presence
+            if best_tradeable_setup:
+                self._live_health["signals_seen"] += 1
+                self._live_health["last_signal_time"] = datetime.now(timezone.utc).isoformat()
+
             if best_tradeable_setup:
                 schematic, evaluation = best_tradeable_setup
                 # Use tradeable candidate's context for the execution path
@@ -1975,7 +1999,12 @@ class Schematics5BTrader:
                 with self._lock:
                     self.last_debug["rig_trace"] = rig_trace
 
+                if not rig_blocked:
+                    self._live_health["after_rig"] += 1
+                    self._live_health["last_candidate_time"] = datetime.now(timezone.utc).isoformat()
+
                 if rig_blocked:
+                    self._record_non_execution(best_symbol, "RIG_BLOCK", rig_result.get("reason"))
                     logger.info("[5B] RIG BLOCK: %s", rig_result)
                     cycle_result["action"] = "rig_blocked"
                     cycle_result["details"] = {
@@ -1986,6 +2015,7 @@ class Schematics5BTrader:
                         "displacement": rig_result.get("displacement"),
                     }
                 elif self._is_duplicate_setup(candidate_price, evaluation["direction"]):
+                    self._record_non_execution(best_symbol, "DUPLICATE_SETUP", "cooldown active")
                     cycle_result["action"] = "duplicate_setup_skipped"
                     cycle_result["details"] = {
                         "price": best_current_price,
@@ -2058,6 +2088,11 @@ class Schematics5BTrader:
 
                     if _v2_blocks:
                         # v2 gate fired — trade blocked by unified engine
+                        self._record_non_execution(
+                            best_symbol,
+                            _v2_result.get("failure_code", "V2_BLOCK"),
+                            _v2_result.get("reason"),
+                        )
                         logger.info(
                             "[5B] V2 GATE BLOCK: legacy=TAKE v2=PASS | "
                             "failure=%s reason=%s | score=%s model=%s tf=%s",
@@ -2096,6 +2131,7 @@ class Schematics5BTrader:
                         # (_dd_mult = self._dd_risk_multiplier()) so the 72h clock starts even
                         # on cycles where no schematic reaches this point.
                         if _dd_mult == 0.0:
+                            self._record_non_execution(best_symbol, "DD_HARD_BLOCK", "drawdown protection")
                             logger.info(
                                 "[5B] DD hard block: suppressing legacy TAKE — "
                                 "balance=$%.2f peak=$%.2f",
@@ -2170,6 +2206,7 @@ class Schematics5BTrader:
                                             _bars_since, _COMPRESSION_BARS,
                                             evaluation.get("model"), best_tf,
                                         )
+                                        self._record_non_execution(best_symbol, "COMPRESSION", "priority too low within window")
                                         cycle_result["action"] = "compression_suppressed"
                                         cycle_result["details"] = {
                                             "compression_blocked": True,
@@ -2221,21 +2258,24 @@ class Schematics5BTrader:
                                     _pm_scaling = _pm_result["scaling_factor"]
 
                             if not _compress_block and not _portfolio_block:
+                                self._live_health["order_attempts"] += 1
+                                self._live_health["last_order_attempt_time"] = datetime.now(timezone.utc).isoformat()
                                 trade = self._enter_trade(
                                     schematic, evaluation, best_current_price, best_htf_bias,
                                     best_symbol, best_tf,
                                     risk_multiplier=_dd_mult * _pm_scaling,
                                 )
                                 if trade.get("error"):
-                                    # _enter_trade() rejected the setup (bad stop/target, R:R
-                                    # too low at market, etc.) — do NOT update the compression
-                                    # window so a valid future trade is not locked out.
+                                    self._live_health["orders_rejected"] += 1
+                                    self._record_non_execution(best_symbol, "ENTRY_REJECTED", trade["error"])
                                     logger.warning(
                                         "[5B] _enter_trade failed: %s", trade["error"]
                                     )
                                     cycle_result["action"] = "entry_failed"
                                     cycle_result["details"] = trade
                                 else:
+                                    self._live_health["orders_submitted"] += 1
+                                    self._live_health["last_successful_order_time"] = datetime.now(timezone.utc).isoformat()
                                     # v15: only record accepted trade when order was placed
                                     self.state.last_accepted_trade_ts = (
                                         datetime.now(timezone.utc).isoformat()
@@ -2308,6 +2348,34 @@ class Schematics5BTrader:
     # ----------------------------------------------------------------
     # HTF BIAS CACHE PERSISTENCE
     # ----------------------------------------------------------------
+
+    def _record_non_execution(self, symbol: str, reason: str, detail: str = None):
+        """Record a non-execution event for live health telemetry."""
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+        entry = f"{ts} {symbol} -> blocked: {reason}"
+        if detail:
+            entry += f" ({detail[:60]})"
+        self._live_health["recent_non_executions"].append(entry)
+        # Keep last 10
+        if len(self._live_health["recent_non_executions"]) > 10:
+            self._live_health["recent_non_executions"] = self._live_health["recent_non_executions"][-10:]
+        # Track top block reasons
+        self._live_health["top_block_reasons"][reason] = self._live_health["top_block_reasons"].get(reason, 0) + 1
+
+    def get_live_health(self) -> dict:
+        """Return live trading health snapshot for dashboard."""
+        h = dict(self._live_health)
+        h["trading_enabled"] = True  # paper trading is always enabled
+        h["exchange_mode"] = "paper (MoonDev)" if os.getenv("MOONDEV_PAPER_TRADING", "").lower() == "true" else "paper (MEXC)"
+        h["current_trade"] = self.state.current_trade is not None
+        h["balance"] = self.state.balance
+        h["peak_balance"] = self.state.peak_balance
+        h["dd_active"] = self.state.dd_triggered_at is not None
+        # Sort block reasons by count
+        h["top_block_reasons"] = dict(
+            sorted(h.get("top_block_reasons", {}).items(), key=lambda x: -x[1])
+        )
+        return h
 
     def _load_htf_cache(self) -> None:
         """Load HTF bias cache from disk if available, skipping expired entries."""
