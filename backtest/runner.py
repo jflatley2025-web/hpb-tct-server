@@ -81,6 +81,21 @@ from portfolio_manager import (
 
 logger = logging.getLogger("backtest.runner")
 
+
+def _build_version_stamp() -> dict:
+    """Return version info for stamping backtest output."""
+    try:
+        from core.versioning.build_info import BUILD_INFO
+        return {
+            "engine_version": BUILD_INFO["engine_version"],
+            "git_commit": BUILD_INFO["git_commit"],
+            "rig_version": BUILD_INFO["rig_version"],
+            "execution_version": BUILD_INFO["execution_version"],
+        }
+    except ImportError:
+        return {"engine_version": "unknown"}
+
+
 # ── v12/v13/v14 filter constants ──────────────────────────────────────
 # 15m quality gates (local overrides — global MIN_RR and threshold unchanged)
 _MIN_RR_15M = 0.8            # tighter RR for 15m entries
@@ -1333,6 +1348,7 @@ def run_backtest(
         "tp1_level_pct": effective_tp1_level_pct,
         "trail_factor": effective_trail_factor,
         "engine_version": 18,  # v18: L2 counter-structure gate removed (100% blocker on ETH/SOL)
+        "build_info": _build_version_stamp(),
     }
 
     run_id = create_run(
@@ -1636,6 +1652,7 @@ def run_backtest(
             "pnl_pct": ((state.equity - starting_balance) / starting_balance) * 100,
             "rig_stats": _rig_stats,
             "pipeline_blocks": _block_reasons_sorted,
+            "build_info": _build_version_stamp(),
         }
         logger.info(f"Backtest complete: {json.dumps(summary, indent=2)}")
 

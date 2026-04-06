@@ -16759,16 +16759,33 @@ function showLoading(v) {
   document.getElementById('loadingIndicator').style.display = v ? 'flex' : 'none';
 }
 
-// Version badge — fetch once on page load
+// Version badge + panel — fetch once on page load
 (async function loadVersion() {
   try {
     const v = await fetchJSON('/api/version');
     const badge = document.getElementById('version-badge');
     if (badge) {
       badge.textContent = v.engine_version + ' [' + v.git_commit + ']';
-      badge.title = 'Build: ' + v.build_timestamp + '\nRIG: ' + v.rig_version + '\nExec: ' + v.execution_version + '\nMode: ' + v.mode;
-      badge.style.color = '#00d4ff';
-      badge.style.borderColor = '#00d4ff44';
+      badge.style.color = v.restart_required ? '#ff4444' : '#00d4ff';
+      badge.style.borderColor = v.restart_required ? '#ff444444' : '#00d4ff44';
+    }
+    const panel = document.getElementById('versionDetails');
+    if (panel) {
+      const restartColor = v.restart_required ? '#ff4444' : '#00e676';
+      const changes = (v.changelog || []).slice(-5).map(c => '  ' + c).join('\n');
+      panel.innerHTML =
+        '<span style="color:#e0e0e0">Engine:</span> ' + v.engine_version + '\n'
+        + '<span style="color:#e0e0e0">Commit:</span> ' + v.git_commit + '\n'
+        + '<span style="color:#e0e0e0">Built:</span> ' + v.build_timestamp + '\n'
+        + '<span style="color:#e0e0e0">Env:</span> ' + v.environment + '\n'
+        + '<span style="color:#e0e0e0">Strategy:</span> ' + v.strategy_version + '\n'
+        + '<span style="color:#e0e0e0">RIG:</span> ' + v.rig_version + '\n'
+        + '<span style="color:#e0e0e0">Execution:</span> ' + v.execution_version + '\n'
+        + '<span style="color:#e0e0e0">Started:</span> ' + (v.process_start_time || 'n/a') + '\n'
+        + '<span style="color:#e0e0e0">Uptime:</span> ' + (v.uptime_human || 'n/a') + '\n'
+        + '<span style="color:' + restartColor + '">Restart Required:</span> <b style="color:' + restartColor + '">' + (v.restart_required ? 'YES' : 'false') + '</b>\n'
+        + '\n<span style="color:#e0e0e0">Latest Changes:</span>\n' + changes;
+      panel.style.whiteSpace = 'pre-wrap';
     }
   } catch (e) {
     const badge = document.getElementById('version-badge');
