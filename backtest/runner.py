@@ -236,6 +236,10 @@ class BacktestState:
     dd_hard_blocks: int = 0         # signals blocked by active DD hard block
     intra_cycle_max_dd: float = 0.0 # max DD% recorded during any DD protection cycle
     total_signals: int = 0          # total signals reaching score evaluation
+    # RIG status distribution
+    rig_valid: int = 0
+    rig_block: int = 0
+    rig_conditional: int = 0
 
 
 # ── Multi-TF Synchronization ─────────────────────────────────────────
@@ -740,6 +744,14 @@ def run_gate_pipeline(
             rig_result = range_integrity_validator(rig_context)
             rig_status = rig_result.get("status", "VALID")
             rig_reason = rig_result.get("reason")
+
+            # Track RIG status distribution
+            if rig_status == "VALID":
+                state.rig_valid += 1
+            elif rig_status == "BLOCK":
+                state.rig_block += 1
+            elif rig_status == "CONDITIONAL":
+                state.rig_conditional += 1
 
             # Apply session multiplier to confidence
             msce_result = apply_session_multiplier(float(score), current_time)
@@ -1549,6 +1561,19 @@ def run_backtest(
             max_drawdown_pct=state.max_drawdown_pct,
         )
 
+        # RIG distribution stats
+        _rig_total = state.rig_valid + state.rig_block + state.rig_conditional
+        _rig_stats = {
+            "VALID": state.rig_valid,
+            "BLOCK": state.rig_block,
+            "CONDITIONAL": state.rig_conditional,
+            "total": _rig_total,
+            "block_pct": round(state.rig_block / _rig_total * 100, 1) if _rig_total else 0,
+            "conditional_pct": round(state.rig_conditional / _rig_total * 100, 1) if _rig_total else 0,
+            "valid_pct": round(state.rig_valid / _rig_total * 100, 1) if _rig_total else 0,
+        }
+        logger.info("RIG DISTRIBUTION: %s", _rig_stats)
+
         summary = {
             "run_id": run_id,
             "final_balance": state.equity,
@@ -1558,6 +1583,7 @@ def run_backtest(
             "win_rate": (state.wins / state.trade_count * 100) if state.trade_count > 0 else 0,
             "max_drawdown_pct": state.max_drawdown_pct,
             "pnl_pct": ((state.equity - starting_balance) / starting_balance) * 100,
+            "rig_stats": _rig_stats,
         }
         logger.info(f"Backtest complete: {json.dumps(summary, indent=2)}")
 
@@ -1566,6 +1592,7 @@ def run_backtest(
         # Portfolio-level aggregation (distribution gate) is handled by run_portfolio_backtest.
         try:
             _r29 = _compute_run29_evaluation(state, starting_balance)
+            _r29["rig_stats"] = _rig_stats
             _r29_path = f"run29_evaluation_{symbol}.json"
             _generate_run29_report(_r29, output_path=_r29_path)
             summary["run29_result"] = _r29["result"]
@@ -2047,6 +2074,14 @@ def _generate_run29_report(
         print(f"  {_mark}  {_gate}")
     print()
     print(f"RESULT: {result}")
+    print()
+    if eval_result.get("rig_stats"):
+        _rs = eval_result["rig_stats"]
+        print("RIG DISTRIBUTION:")
+        print(f"  VALID:       {_rs.get('VALID', 0):>5}  ({_rs.get('valid_pct', 0):.1f}%)")
+        print(f"  BLOCK:       {_rs.get('BLOCK', 0):>5}  ({_rs.get('block_pct', 0):.1f}%)")
+        print(f"  CONDITIONAL: {_rs.get('CONDITIONAL', 0):>5}  ({_rs.get('conditional_pct', 0):.1f}%)")
+        print(f"  Total evals: {_rs.get('total', 0)}")
     print("=" * 44)
     if eval_result.get("notes"):
         print()
