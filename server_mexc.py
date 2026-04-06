@@ -16609,6 +16609,12 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
   <div id="versionDetails">Loading...</div>
 </div>
 
+<div id="liveHealthPanel" style="margin:8px 24px;padding:10px 16px;background:#0d0d18;border:1px solid #1e1e2d;border-radius:6px;font-size:.7rem;font-family:monospace;color:#888;line-height:1.6">
+  <span style="color:#00e676;font-weight:700;font-size:.72rem">LIVE TRADING HEALTH</span>
+  <div id="liveHealthDetails" style="margin-top:4px;white-space:pre-wrap">Loading...</div>
+  <div id="recentNonExec" style="margin-top:6px;border-top:1px solid #1e1e2d;padding-top:6px"></div>
+</div>
+
 <div class="stats" id="statsRow">
   <div class="stat-card"><div class="stat-label">Balance</div><div class="stat-value blue" id="statBalance">$5,000.00</div></div>
   <div class="stat-card"><div class="stat-label">Total P&L</div><div class="stat-value white" id="statPnl">$0.00</div></div>
