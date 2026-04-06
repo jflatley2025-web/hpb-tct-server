@@ -1,8 +1,7 @@
 """
 phemex_tct_trader.py — Phemex TCT 6-Gate Simulated Trading Engine
 
-Standalone background trader. No dependency on tensor_tct_trader or
-schematics_5b_trader. Uses:
+Standalone background trader. Uses:
   - phemex_feed.py   : TTL-cached OHLCV candles from Phemex
   - phemex_tct_algo  : run_pipeline() — 6-gate signal generation
   - tct_pdf_rules    : load_tct_rules() — rule set loaded once at startup

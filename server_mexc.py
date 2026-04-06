@@ -3749,7 +3749,7 @@ async def shutdown_event():
     # Push trade logs to GitHub on graceful shutdown
     try:
         from github_storage import push_trade_log
-        from tensor_tct_trader import TRADE_LOG_PATH
+        from mexc_data import TRADE_LOG_PATH
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, push_trade_log, TRADE_LOG_PATH)
     except Exception as e:
@@ -4533,7 +4533,7 @@ async def get_schematics_5a_data(symbol: str = "BTCUSDT", timeframe: str = "4h")
             None, detect_tct_schematics, df, []
         )
 
-        # --- HTF (4h) bias detection — mirrors tensor_tct_trader scan_and_trade ---
+        # --- HTF (4h) bias detection ---
         # Always fetch 4h candles for directional bias, even when viewing a lower TF.
         htf_bias = "neutral"
         htf_bias_detail = {}
@@ -4555,7 +4555,9 @@ async def get_schematics_5a_data(symbol: str = "BTCUSDT", timeframe: str = "4h")
             logger.warning(f"[SCHEMATICS-5A] HTF bias fetch failed: {htf_e}")
 
         # --- TCTTradeEvaluator — same scoring logic used by tensor-trade ---
-        from tensor_tct_trader import TCTTradeEvaluator
+        # TCTTradeEvaluator was part of the retired 5A engine.
+        # This code path is dead (5B engine is active).
+        raise RuntimeError("TCTTradeEvaluator removed — 5A engine retired")
         _MAX_STALE_PER_TF = {"1m": 10, "5m": 8, "15m": 5, "30m": 5, "1h": 3, "2h": 5, "4h": 5, "1d": 3}
         max_stale = _MAX_STALE_PER_TF.get(timeframe, 5)
         evaluator = TCTTradeEvaluator()
@@ -15351,7 +15353,7 @@ document.getElementById('tfSelect').addEventListener('change', loadData);
 @app.get("/api/tensor-trade/scan")
 async def tensor_trade_scan():
     """Run a single TCT scan-and-trade cycle."""
-    from tensor_tct_trader import get_trader
+    raise RuntimeError("get_trader removed — 5A engine retired")
     trader = get_trader()
     loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(None, trader.scan_and_trade)
@@ -15437,7 +15439,7 @@ async def tensor_trade_scan():
 @app.get("/api/tensor-trade/state")
 async def tensor_trade_state():
     """Return current trading state for the dashboard."""
-    from tensor_tct_trader import get_trader
+    raise RuntimeError("get_trader removed — 5A engine retired")
     trader = get_trader()
     return convert_numpy_types(trader.state.snapshot())
 
@@ -15445,7 +15447,7 @@ async def tensor_trade_state():
 @app.get("/api/tensor-trade/restore")
 async def tensor_trade_restore():
     """Restore trade state from the most recent backup."""
-    from tensor_tct_trader import get_trader
+    raise RuntimeError("get_trader removed — 5A engine retired")
     trader = get_trader()
     success = trader.state.restore_from_backup()
     if success:
@@ -15456,7 +15458,7 @@ async def tensor_trade_restore():
 @app.get("/api/tensor-trade/debug")
 async def tensor_trade_debug():
     """Return detailed debug diagnostics from the last scan cycle."""
-    from tensor_tct_trader import get_trader
+    raise RuntimeError("get_trader removed — 5A engine retired")
     trader = get_trader()
     debug = dict(trader.last_debug) if trader.last_debug else {}
     debug["evaluator_consecutive_losses"] = trader.evaluator.consecutive_losses
@@ -15980,7 +15982,7 @@ async def tensor_trade_auto_scan_loop():
     confidence weighting.  Also pushes the trade log to GitHub every
     hour so trade history survives Render deployments.
     """
-    from tensor_tct_trader import get_trader, AUTO_SCAN_INTERVAL, TRADE_LOG_PATH
+    raise RuntimeError("get_trader removed — 5A engine retired")
     from github_storage import push_trade_log
 
     # Let the server finish starting up before first scan
@@ -16254,7 +16256,7 @@ async def schematics_5b_candles(tf: str = "15m", limit: int = 200, symbol: str =
     symbol defaults to BTCUSDT; accepts any pair from the top-5 universe.
     Forming schematics are filtered to the requested symbol and limited to
     the single best TCT model so only one model shows on the chart at a time."""
-    from tensor_tct_trader import fetch_candles_sync
+    from mexc_data import fetch_candles_sync
     limit = max(50, min(int(limit), 500))
     # Sanitise: only allow alphanumeric symbols (e.g. BTCUSDT, SOLUSDT)
     safe_symbol = symbol if symbol.isalnum() else "BTCUSDT"

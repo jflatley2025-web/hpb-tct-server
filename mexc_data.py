@@ -4,8 +4,7 @@ mexc_data.py — Shared MEXC data utilities and trading constants
 Provides candle fetching, live price, and configuration constants
 used by the active 5B engine and server_mexc.
 
-Extracted from the retired 5A_tct_trader.py so that shared utilities
-survive the removal of the dead 5A trading engine.
+Canonical source for MEXC data fetching and trading constants.
 """
 
 from __future__ import annotations
