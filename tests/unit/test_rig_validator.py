@@ -194,7 +194,11 @@ def test_exact_boundary_mid_range():
 
 
 def test_invalid_range_safe_handling():
+    # Degenerate range (high == low) with counter-bias → position defaults
+    # to 0.5 (mid-range) → BLOCK for counter-bias
     result = evaluate_rig(**make_input(
+        htf_bias="bullish",
+        ltf_direction="bearish",  # counter-bias
         price=150,
     ) | {
         "range_low": 100,
