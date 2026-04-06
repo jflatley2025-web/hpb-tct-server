@@ -1100,7 +1100,7 @@ def run_gate_pipeline(
             _bos_info = schematic.get("bos_confirmation") or {}
             rig_trace = {
                 "timestamp": str(current_time),
-                "symbol": symbol,
+                "symbol": "ETHUSDT",  # backtest runs single symbol
                 "htf_bias": htf_bias,
                 "ltf_direction": direction,
                 "rig_status": rig_status,
