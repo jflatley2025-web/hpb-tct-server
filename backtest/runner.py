@@ -240,6 +240,9 @@ class BacktestState:
     rig_valid: int = 0
     rig_block: int = 0
     rig_conditional: int = 0
+    # Execution pipeline trace aggregation
+    execution_traces: list = field(default_factory=list)  # last N traces for diagnostics
+    _MAX_TRACES: int = field(default=500, repr=False)
 
 
 # ── Multi-TF Synchronization ─────────────────────────────────────────
@@ -1082,6 +1085,31 @@ def run_gate_pipeline(
             _model_family = "Model_2" if "Model_2" in model else "Model_1"
             _model_variant = "continuation" if is_continuation else "reversal"
 
+            # ── RIG + Execution Trace ──────────────────────────────
+            _bos_info = schematic.get("bos_confirmation") or {}
+            rig_trace = {
+                "timestamp": str(current_time),
+                "symbol": symbol,
+                "htf_bias": htf_bias,
+                "ltf_direction": direction,
+                "rig_status": rig_status,
+                "confidence_modifier": rig_result.get("confidence_modifier", 1.0),
+                "position": rig_result.get("position"),
+                "local_displacement": local_displacement,
+                "range_duration": range_duration_hours,
+                "session": session_name,
+                "counter_bias": rig_result.get("counter_bias", False),
+                "execution_allowed": final_decision == "TAKE",
+                "execution_block_reason": failure_code,
+                "bos_confirmed": _bos_info.get("bos_idx") is not None,
+                "poi_valid": rcm_valid,
+                "session_alignment": session_info.get("bias", "neutral") == htf_bias,
+                "final_confidence": execution_confidence,
+            }
+            logger.debug("RIG_TRACE: %s", rig_trace)
+            if len(state.execution_traces) < state._MAX_TRACES:
+                state.execution_traces.append(rig_trace)
+
             signal = {
                 "signal_time": current_time,
                 "candle_timestamp": _candle_ts,
@@ -1561,6 +1589,18 @@ def run_backtest(
             max_drawdown_pct=state.max_drawdown_pct,
         )
 
+        # Execution pipeline trace summary
+        _exec_blocked = [t for t in state.execution_traces if not t["execution_allowed"]]
+        _block_reasons = {}
+        for t in _exec_blocked:
+            _reason = t.get("execution_block_reason") or "unknown"
+            _block_reasons[_reason] = _block_reasons.get(_reason, 0) + 1
+        _block_reasons_sorted = dict(sorted(_block_reasons.items(), key=lambda x: -x[1]))
+        logger.info(
+            "EXECUTION PIPELINE BLOCKS (top reasons): %s",
+            _block_reasons_sorted,
+        )
+
         # RIG distribution stats
         _rig_total = state.rig_valid + state.rig_block + state.rig_conditional
         _rig_stats = {
@@ -1584,6 +1624,7 @@ def run_backtest(
             "max_drawdown_pct": state.max_drawdown_pct,
             "pnl_pct": ((state.equity - starting_balance) / starting_balance) * 100,
             "rig_stats": _rig_stats,
+            "pipeline_blocks": _block_reasons_sorted,
         }
         logger.info(f"Backtest complete: {json.dumps(summary, indent=2)}")
 
@@ -1593,6 +1634,7 @@ def run_backtest(
         try:
             _r29 = _compute_run29_evaluation(state, starting_balance)
             _r29["rig_stats"] = _rig_stats
+            _r29["pipeline_blocks"] = _block_reasons_sorted
             _r29_path = f"run29_evaluation_{symbol}.json"
             _generate_run29_report(_r29, output_path=_r29_path)
             summary["run29_result"] = _r29["result"]
@@ -2082,6 +2124,11 @@ def _generate_run29_report(
         print(f"  BLOCK:       {_rs.get('BLOCK', 0):>5}  ({_rs.get('block_pct', 0):.1f}%)")
         print(f"  CONDITIONAL: {_rs.get('CONDITIONAL', 0):>5}  ({_rs.get('conditional_pct', 0):.1f}%)")
         print(f"  Total evals: {_rs.get('total', 0)}")
+    if eval_result.get("pipeline_blocks"):
+        print()
+        print("EXECUTION PIPELINE BLOCKS (why signals don't become trades):")
+        for _reason, _count in eval_result["pipeline_blocks"].items():
+            print(f"  {_count:>5}  {_reason}")
     print("=" * 44)
     if eval_result.get("notes"):
         print()

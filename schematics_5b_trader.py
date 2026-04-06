@@ -1945,6 +1945,36 @@ class Schematics5BTrader:
                     "VALID", "NOT_EVALUATED", "CONDITIONAL", None,
                 )
 
+                # ── RIG + Execution Trace (synchronized with backtest) ──
+                _exec_block_reason = None
+                if rig_blocked:
+                    _exec_block_reason = "FAIL_RIG_COUNTER_BIAS"
+                elif self._is_duplicate_setup(candidate_price, evaluation["direction"]):
+                    _exec_block_reason = "FAIL_DUPLICATE_SETUP"
+
+                rig_trace = {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "symbol": best_symbol,
+                    "htf_bias": best_htf_bias,
+                    "ltf_direction": evaluation.get("direction", "unknown"),
+                    "rig_status": rig_result.get("status"),
+                    "confidence_modifier": rig_result.get("confidence_modifier", 1.0),
+                    "position": rig_result.get("position"),
+                    "local_displacement": rig_result.get("displacement"),
+                    "range_duration": rig_result.get("range_duration", 0),
+                    "session": msce.get("session"),
+                    "counter_bias": rig_result.get("counter_bias", False),
+                    "execution_allowed": _exec_block_reason is None,
+                    "execution_block_reason": _exec_block_reason,
+                    "bos_confirmed": bool(schematic.get("bos_confirmation")),
+                    "poi_valid": bool(schematic.get("quality_score", 0) >= 0.6),
+                    "session_alignment": msce.get("session_bias") == best_htf_bias,
+                    "final_confidence": evaluation.get("score", 0) / 100.0,
+                }
+                logger.info("[5B] RIG_TRACE: %s", rig_trace)
+                with self._lock:
+                    self.last_debug["rig_trace"] = rig_trace
+
                 if rig_blocked:
                     logger.info("[5B] RIG BLOCK: %s", rig_result)
                     cycle_result["action"] = "rig_blocked"
