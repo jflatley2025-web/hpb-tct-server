@@ -16562,6 +16562,7 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
 <div class="header">
   <h1>Schematics 5B <span class="subtitle">Simulated Trading — Multi-Pair</span></h1>
   <div class="header-right">
+    <span id="version-badge" style="font-size:.6rem;color:#555;background:#0d0d15;border:1px solid #1e1e2d;padding:2px 8px;border-radius:3px;cursor:help" title="Loading version...">...</span>
     <a href="/tensor-trade" class="back-link">Tensor Trade</a>
     <a href="/dashboard" class="back-link">Dashboard</a>
   </div>
