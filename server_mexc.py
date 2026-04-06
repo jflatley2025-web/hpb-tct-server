@@ -16810,6 +16810,62 @@ function showLoading(v) {
   }
 })();
 
+// Live health panel — refreshes every 30s
+async function loadLiveHealth() {
+  try {
+    const h = await fetchJSON('/api/schematics-5b-trader/live-health');
+    const el = document.getElementById('liveHealthDetails');
+    if (el) {
+      const sigColor = h.signals_seen > 0 ? '#00e676' : '#ff4444';
+      const rigColor = h.after_rig > 0 ? '#00e676' : '#ff4444';
+      const ordColor = h.orders_submitted > 0 ? '#00e676' : '#ff4444';
+      el.innerHTML =
+        '<span style="color:#e0e0e0">Signals seen:</span> <b style="color:' + sigColor + '">' + h.signals_seen + '</b>\n'
+        + '<span style="color:#e0e0e0">After RIG:</span> <b style="color:' + rigColor + '">' + h.after_rig + '</b>\n'
+        + '<span style="color:#e0e0e0">Order attempts:</span> ' + h.order_attempts + '\n'
+        + '<span style="color:#e0e0e0">Orders submitted:</span> <b style="color:' + ordColor + '">' + h.orders_submitted + '</b>\n'
+        + '<span style="color:#e0e0e0">Orders rejected:</span> ' + h.orders_rejected + '\n'
+        + '<span style="color:#e0e0e0">Last signal:</span> ' + (h.last_signal_time || 'none') + '\n'
+        + '<span style="color:#e0e0e0">Last candidate:</span> ' + (h.last_candidate_time || 'none') + '\n'
+        + '<span style="color:#e0e0e0">Last order attempt:</span> ' + (h.last_order_attempt_time || 'none') + '\n'
+        + '<span style="color:#e0e0e0">Last successful:</span> ' + (h.last_successful_order_time || 'none') + '\n'
+        + '<span style="color:#e0e0e0">Exchange mode:</span> ' + h.exchange_mode + '\n'
+        + '<span style="color:#e0e0e0">DD active:</span> ' + (h.dd_active ? '<b style="color:#ff4444">YES</b>' : 'no') + '\n'
+        + '<span style="color:#e0e0e0">Trading enabled:</span> ' + (h.trading_enabled ? 'yes' : '<b style="color:#ff4444">NO</b>');
+    }
+    // Top block reasons
+    const ne = document.getElementById('recentNonExec');
+    if (ne) {
+      let html = '<span style="color:#ff9800;font-weight:600;font-size:.68rem">TOP BLOCK REASONS</span>\n';
+      const reasons = h.top_block_reasons || {};
+      const keys = Object.keys(reasons);
+      if (keys.length === 0) {
+        html += '<span style="color:#555">No blocks recorded yet (engine just started)</span>\n';
+      } else {
+        for (const k of keys.slice(0, 5)) {
+          html += '  ' + reasons[k] + 'x  ' + k + '\n';
+        }
+      }
+      html += '\n<span style="color:#ff9800;font-weight:600;font-size:.68rem">RECENT NON-EXECUTIONS</span>\n';
+      const recent = h.recent_non_executions || [];
+      if (recent.length === 0) {
+        html += '<span style="color:#555">No non-executions recorded yet</span>';
+      } else {
+        for (const r of recent.slice(-5)) {
+          html += '<span style="color:#aaa">' + r + '</span>\n';
+        }
+      }
+      ne.innerHTML = html;
+      ne.style.whiteSpace = 'pre-wrap';
+    }
+  } catch (e) {
+    const el = document.getElementById('liveHealthDetails');
+    if (el) el.textContent = 'Error loading live health';
+  }
+}
+loadLiveHealth();
+setInterval(loadLiveHealth, 30000);
+
 // ── Retry state for gateway/cold-start errors ─────────────────────
 let _retryTimer   = null;
 let _retryCount   = 0;
