@@ -116,6 +116,9 @@ DEFAULT_LEVERAGE = 10
 # profit direction by (target-entry)*TRAIL_FACTOR from the best price
 # seen since TP1.  Matches backtest/config.py for parity with Run 40.
 TRAIL_FACTOR = 0.50
+# ── Scan throughput config ───────────────────────────────────────
+MAX_SYMBOL_CONCURRENCY = 4          # scan up to N symbols in parallel
+PER_SYMBOL_TIMEOUT_SECONDS = 60     # hard timeout per symbol scan
 # HTF bias gate — daily candle tells us the dominant directional context.
 # 4h was too narrow; 1d changes once a day so the cache TTL matches.
 HTF_TIMEFRAME = "1d"
@@ -1654,49 +1657,67 @@ class Schematics5BTrader:
             self._scan_trace["last_success_stage"] = "LOAD_SYMBOLS"
             self._scan_trace["symbols_loaded"] = len(TRADING_SYMBOLS)
 
-            # Performance tracking
+            # ── Parallel symbol scanning with bounded concurrency ──
             _cycle_start = time.time()
             _per_sym_perf = []
             _cycle_schematics = 0
             _cycle_confirmed = 0
             _cycle_qualified = 0
             _cycle_by_model = {}
+            _timed_out_symbols = []
 
-            for _sym in TRADING_SYMBOLS:
+            def _scan_one_symbol(_sym):
+                """Scan a single symbol with hard timeout. Thread-safe."""
                 _sym_start = time.time()
-                self._scan_trace["fetch_attempted"] = True
-                self._scan_trace["fetched_symbol"] = _sym
                 try:
-                    sym_result = self._scan_single_symbol(_sym, mode=scan_mode, timeframes=scan_tfs)
+                    _result = self._scan_single_symbol(_sym, mode=scan_mode, timeframes=scan_tfs)
                 except Exception as _sym_err:
-                    self._scan_trace["last_exception"] = str(_sym_err)[:200]
-                    self._scan_trace["last_exception_stage"] = f"EVALUATE_SYMBOL({_sym})"
                     logger.error("[5B] _scan_single_symbol(%s) crashed: %s", _sym, _sym_err, exc_info=True)
-                    sym_result = {"error": str(_sym_err), "current_price": 0, "best_setup": None, "best_score": 0}
-                _sym_dur = round(time.time() - _sym_start, 1)
-                self._scan_trace["fetch_success"] = sym_result.get("error") is None
-                self._scan_trace["candle_count"] = len(sym_result.get("mtf_dfs", {}))
+                    _result = {"error": str(_sym_err), "current_price": 0, "best_setup": None, "best_score": 0}
+                _dur = round(time.time() - _sym_start, 1)
+                return _sym, _result, _dur
 
-                # Collect per-symbol setup stats
-                _sym_tfs = sym_result.get("timeframes", {})
-                _sym_sch_count = sum(v.get("schematics_found", 0) for v in _sym_tfs.values() if isinstance(v, dict))
-                _sym_conf_count = sum(v.get("confirmed", 0) for v in _sym_tfs.values() if isinstance(v, dict))
-                _sym_setup = sym_result.get("best_setup") is not None
-                _cycle_schematics += _sym_sch_count
-                _cycle_confirmed += _sym_conf_count
-                if _sym_setup:
-                    _cycle_qualified += 1
-                    _m = ((sym_result.get("best_setup") or (None, {}))[1] or {}).get("model", "unknown") if isinstance(sym_result.get("best_setup"), tuple) else "unknown"
-                    _cycle_by_model[_m] = _cycle_by_model.get(_m, 0) + 1
+            self._scan_trace["fetch_attempted"] = True
+            with ThreadPoolExecutor(max_workers=MAX_SYMBOL_CONCURRENCY) as _pool:
+                _futures = {
+                    _pool.submit(_scan_one_symbol, _sym): _sym
+                    for _sym in TRADING_SYMBOLS
+                }
+                for _fut in as_completed(_futures, timeout=PER_SYMBOL_TIMEOUT_SECONDS * len(TRADING_SYMBOLS)):
+                    _sym_name = _futures[_fut]
+                    try:
+                        _sym, _result, _dur = _fut.result(timeout=PER_SYMBOL_TIMEOUT_SECONDS)
+                    except Exception as _fut_err:
+                        _sym = _sym_name
+                        _dur = PER_SYMBOL_TIMEOUT_SECONDS
+                        _result = {"error": f"timeout/crash: {_fut_err}", "current_price": 0, "best_setup": None, "best_score": 0}
+                        _timed_out_symbols.append(_sym)
+                        logger.warning("[5B] Symbol %s timed out or crashed: %s", _sym, _fut_err)
 
-                _per_sym_perf.append({
-                    "symbol": _sym,
-                    "duration_seconds": _sym_dur,
-                    "setup_found": _sym_setup,
-                    "schematics": _sym_sch_count,
-                    "confirmed": _sym_conf_count,
-                })
-                all_symbol_results[_sym] = sym_result
+                    self._scan_trace["fetched_symbol"] = _sym
+                    self._scan_trace["fetch_success"] = _result.get("error") is None
+
+                    # Collect per-symbol stats
+                    _sym_tfs = _result.get("timeframes", {})
+                    _sym_sch_count = sum(v.get("schematics_found", 0) for v in _sym_tfs.values() if isinstance(v, dict))
+                    _sym_conf_count = sum(v.get("confirmed", 0) for v in _sym_tfs.values() if isinstance(v, dict))
+                    _sym_setup = _result.get("best_setup") is not None
+                    _cycle_schematics += _sym_sch_count
+                    _cycle_confirmed += _sym_conf_count
+                    if _sym_setup:
+                        _cycle_qualified += 1
+                        _m = ((_result.get("best_setup") or (None, {}))[1] or {}).get("model", "unknown") if isinstance(_result.get("best_setup"), tuple) else "unknown"
+                        _cycle_by_model[_m] = _cycle_by_model.get(_m, 0) + 1
+
+                    _per_sym_perf.append({
+                        "symbol": _sym,
+                        "duration_seconds": _dur,
+                        "setup_found": _sym_setup,
+                        "schematics": _sym_sch_count,
+                        "confirmed": _sym_conf_count,
+                        "timed_out": _sym in _timed_out_symbols,
+                    })
+                    all_symbol_results[_sym] = _result
                 sym_best = sym_result.get("best_setup")
                 sym_score = sym_result.get("best_score", 0)
                 if sym_best and sym_score > best_score:
@@ -1731,11 +1752,15 @@ class Schematics5BTrader:
                 "cycle_duration_seconds": _cycle_dur,
                 "symbols_total": len(TRADING_SYMBOLS),
                 "symbols_completed": len(_per_sym_perf),
-                "avg_symbol_seconds": round(_cycle_dur / max(len(_per_sym_perf), 1), 1),
+                "symbols_timed_out": len(_timed_out_symbols),
+                "timed_out_symbols": _timed_out_symbols,
+                "avg_symbol_seconds": round(sum(p["duration_seconds"] for p in _per_sym_perf) / max(len(_per_sym_perf), 1), 1),
                 "slowest_symbol": _sorted_perf[-1]["symbol"] if _sorted_perf else None,
                 "slowest_symbol_seconds": _sorted_perf[-1]["duration_seconds"] if _sorted_perf else 0,
                 "fastest_symbol": _sorted_perf[0]["symbol"] if _sorted_perf else None,
                 "fastest_symbol_seconds": _sorted_perf[0]["duration_seconds"] if _sorted_perf else 0,
+                "max_symbol_concurrency": MAX_SYMBOL_CONCURRENCY,
+                "per_symbol_timeout": PER_SYMBOL_TIMEOUT_SECONDS,
                 "per_symbol": _per_sym_perf,
             }
             self._candidate_stats = {
