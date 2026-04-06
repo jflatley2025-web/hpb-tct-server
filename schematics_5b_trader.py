@@ -49,7 +49,7 @@ from portfolio_manager import (
 )
 
 # Reuse MEXC fetch helpers from tensor trader (no duplication)
-from tensor_tct_trader import (
+from mexc_data import (
     fetch_candles_sync as _mexc_fetch_candles,
     fetch_live_price as _mexc_fetch_live_price,
 )

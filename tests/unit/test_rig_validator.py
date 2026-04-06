@@ -193,17 +193,37 @@ def test_exact_boundary_mid_range():
     assert result["rig_status"] in ["BLOCK", "CONDITIONAL"]
 
 
-def test_invalid_range_safe_handling():
-    # Degenerate range (high == low) with counter-bias → position defaults
-    # to 0.5 (mid-range) → BLOCK for counter-bias
+def test_invalid_range_aligned_bias_valid():
+    """
+    Degenerate range + trend-aligned should still be VALID
+    (Case A always overrides)
+    """
     result = evaluate_rig(**make_input(
         htf_bias="bullish",
-        ltf_direction="bearish",  # counter-bias
+        ltf_direction="bullish",
         price=150,
     ) | {
         "range_low": 100,
-        "range_high": 100  # invalid range
+        "range_high": 100
+    })
+
+    assert result["rig_status"] == "VALID"
+    assert result["confidence_modifier"] == 1.0
+
+
+def test_invalid_range_counter_bias_blocks():
+    """
+    Degenerate range + counter-bias → treated as mid-range (pos=0.5) → BLOCK
+    """
+    result = evaluate_rig(**make_input(
+        htf_bias="bullish",
+        ltf_direction="bearish",
+        price=150,
+    ) | {
+        "range_low": 100,
+        "range_high": 100
     })
 
     assert result["rig_status"] == "BLOCK"
     assert result["confidence_modifier"] == 0.0
+    assert result["counter_bias"] is True
