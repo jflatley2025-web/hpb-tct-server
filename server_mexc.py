@@ -16562,7 +16562,7 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
 <div class="header">
   <h1>Schematics 5B <span class="subtitle">Simulated Trading — Multi-Pair</span></h1>
   <div class="header-right">
-    <span id="version-badge" style="font-size:.6rem;color:#555;background:#0d0d15;border:1px solid #1e1e2d;padding:2px 8px;border-radius:3px;cursor:help" title="Loading version...">...</span>
+    <span id="version-badge" style="font-size:.6rem;color:#555;background:#0d0d15;border:1px solid #1e1e2d;padding:2px 8px;border-radius:3px;cursor:pointer" title="Click for details" onclick="document.getElementById('versionPanel').style.display=document.getElementById('versionPanel').style.display==='none'?'block':'none'">...</span>
     <a href="/tensor-trade" class="back-link">Tensor Trade</a>
     <a href="/dashboard" class="back-link">Dashboard</a>
   </div>
@@ -16588,6 +16588,14 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
     <option value="claude">Claude's TCT Mode</option>
     <option value="jack">Jack's TCT Mode</option>
   </select>
+</div>
+
+<div id="versionPanel" style="display:none;margin:0 24px;padding:10px 16px;background:#0d0d18;border:1px solid #1e1e2d;border-radius:6px;font-size:.7rem;font-family:monospace;color:#888;line-height:1.6">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+    <span style="color:#00d4ff;font-weight:700;font-size:.75rem">LIVE ENGINE STATUS</span>
+    <button onclick="document.getElementById('versionPanel').style.display='none'" style="background:none;border:none;color:#555;cursor:pointer;font-size:.8rem">X</button>
+  </div>
+  <div id="versionDetails">Loading...</div>
 </div>
 
 <div class="stats" id="statsRow">
