@@ -1226,7 +1226,7 @@ class Schematics5BTrader:
             "passes": 0,
         }
         # ── Scan performance: last completed cycle (immutable until next cycle finishes) ──
-        self._last_completed_scan_perf: Dict = {}
+        self._last_completed_scan_perf: Optional[Dict] = None
         self._scan_cycle_id = 0
 
         # ── Scan loop health trace ────────────────────────────────
@@ -1582,6 +1582,11 @@ class Schematics5BTrader:
         self._scan_trace["heartbeat_time"] = datetime.now(timezone.utc).isoformat()
         self._scan_trace["last_success_stage"] = "LOOP_ENTER"
 
+        # Initialize perf vars before try so the except handler can access them
+        _cycle_start = time.time()
+        _per_sym_perf = []
+        _timed_out_symbols = []
+
         # Reset forming-schematics flag at cycle start so it can't remain
         # latched from a prior sweep through early-return branches (open-trade
         # management, fetch errors, warmup gate).  The flag is set to the
@@ -1638,13 +1643,10 @@ class Schematics5BTrader:
             self._scan_trace["symbols_loaded"] = len(TRADING_SYMBOLS)
 
             # ── Parallel symbol scanning with bounded concurrency ──
-            _cycle_start = time.time()
-            _per_sym_perf = []
             _cycle_schematics = 0
             _cycle_confirmed = 0
             _cycle_qualified = 0
             _cycle_by_model = {}
-            _timed_out_symbols = []
 
             def _scan_one_symbol(_sym):
                 """Scan a single symbol with hard timeout. Thread-safe."""
@@ -2496,6 +2498,18 @@ class Schematics5BTrader:
             logger.error(f"[5B] Scan error: {e}", exc_info=True)
             self._scan_trace["last_exception"] = str(e)[:200]
             self._scan_trace["last_exception_stage"] = "SCAN_CYCLE"
+            # Save partial perf even on crash so we can diagnose
+            self._scan_cycle_id += 1
+            self._last_completed_scan_perf = {
+                "cycle_id": self._scan_cycle_id,
+                "cycle_duration_seconds": round(time.time() - _cycle_start, 1),
+                "symbols_completed": len(_per_sym_perf),
+                "symbols_total": len(TRADING_SYMBOLS),
+                "symbols_timed_out": len(_timed_out_symbols),
+                "error": str(e)[:200],
+                "per_symbol": _per_sym_perf,
+                "last_cycle_result": "error",
+            }
             self.state.last_error = str(e)
             self.state.last_scan_action = "error"
             self.state.save()
