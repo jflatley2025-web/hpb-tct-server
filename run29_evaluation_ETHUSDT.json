@@ -1,134 +1,153 @@
 {
   "result": "FAIL",
   "summary": {
-    "trades": 23,
-    "wins": 19,
-    "losses": 4,
-    "win_rate": 82.61,
-    "gross_profit": 3108.47,
-    "gross_loss": 238.37,
-    "pf": 13.0405,
-    "expectancy": 124.79,
-    "net_profit": 2870.1,
-    "max_dd": 2.236,
-    "avg_rr": 2.725,
-    "avg_win": 163.6,
-    "avg_loss": 59.59
+    "trades": 82,
+    "wins": 50,
+    "losses": 32,
+    "win_rate": 60.98,
+    "gross_profit": 4268.62,
+    "gross_loss": 1987.04,
+    "pf": 2.1482,
+    "expectancy": 27.83,
+    "net_profit": 2281.58,
+    "max_dd": 10.9289,
+    "avg_rr": 2.322,
+    "avg_win": 85.37,
+    "avg_loss": 62.1
   },
   "gates": {
-    "trade_count": "FAIL",
+    "trade_count": "PASS",
     "profit_factor": "PASS",
     "expectancy": "PASS",
-    "max_dd": "PASS",
+    "max_dd": "FAIL",
     "win_rate": "PASS",
     "symbol_distribution": "FAIL",
-    "timeframe_quality": "PASS",
-    "model_quality": "PASS",
+    "timeframe_quality": "FAIL",
+    "model_quality": "FAIL",
     "dd_behavior": "FAIL"
   },
   "distributions": {
     "by_symbol": {
       "ETHUSDT": {
-        "trades": 23,
-        "wins": 19,
-        "wr_pct": 82.6,
-        "pf": 13.041,
-        "net_pnl": 2870.1
+        "trades": 82,
+        "wins": 50,
+        "wr_pct": 61.0,
+        "pf": 2.148,
+        "net_pnl": 2281.58
       }
     },
     "by_tf": {
-      "30m": {
-        "trades": 5,
-        "wins": 3,
-        "wr_pct": 60.0,
-        "pf": 2.656,
-        "net_pnl": 205.59
-      },
-      "1h": {
-        "trades": 10,
-        "wins": 8,
-        "wr_pct": 80.0,
-        "pf": 4.852,
-        "net_pnl": 439.81
-      },
       "4h": {
-        "trades": 4,
-        "wins": 4,
-        "wr_pct": 100.0,
-        "pf": "inf",
-        "net_pnl": 763.45
+        "trades": 8,
+        "wins": 6,
+        "wr_pct": 75.0,
+        "pf": 8.281,
+        "net_pnl": 1058.05
       },
       "15m": {
-        "trades": 4,
-        "wins": 4,
-        "wr_pct": 100.0,
-        "pf": "inf",
-        "net_pnl": 1461.25
+        "trades": 13,
+        "wins": 8,
+        "wr_pct": 61.5,
+        "pf": 1.106,
+        "net_pnl": 30.3
+      },
+      "30m": {
+        "trades": 32,
+        "wins": 17,
+        "wr_pct": 53.1,
+        "pf": 1.363,
+        "net_pnl": 339.19
+      },
+      "1h": {
+        "trades": 29,
+        "wins": 19,
+        "wr_pct": 65.5,
+        "pf": 2.374,
+        "net_pnl": 854.04
       }
     },
     "by_model": {
       "Model_1": {
-        "trades": 12,
-        "wins": 10,
-        "wr_pct": 83.3,
-        "pf": 18.118,
-        "net_pnl": 2125.68
-      },
-      "Model_2": {
-        "trades": 4,
-        "wins": 4,
-        "wr_pct": 100.0,
-        "pf": "inf",
-        "net_pnl": 563.26
+        "trades": 40,
+        "wins": 21,
+        "wr_pct": 52.5,
+        "pf": 1.878,
+        "net_pnl": 1024.9
       },
       "Model_2_EXT": {
-        "trades": 3,
-        "wins": 2,
-        "wr_pct": 66.7,
-        "pf": 2.473,
-        "net_pnl": 85.72
+        "trades": 12,
+        "wins": 6,
+        "wr_pct": 50.0,
+        "pf": 1.042,
+        "net_pnl": 18.04
+      },
+      "Model_2": {
+        "trades": 14,
+        "wins": 9,
+        "wr_pct": 64.3,
+        "pf": 3.012,
+        "net_pnl": 585.93
       },
       "Model_1_CONTINUATION": {
-        "trades": 4,
-        "wins": 3,
-        "wr_pct": 75.0,
-        "pf": 2.704,
-        "net_pnl": 95.44
+        "trades": 10,
+        "wins": 8,
+        "wr_pct": 80.0,
+        "pf": 5.319,
+        "net_pnl": 414.69
+      },
+      "Model_1_from_M2_failure": {
+        "trades": 6,
+        "wins": 6,
+        "wr_pct": 100.0,
+        "pf": "inf",
+        "net_pnl": 238.02
       }
     }
   },
   "risk": {
-    "dd_trigger_count": 0,
-    "dd_hard_blocks": 0,
-    "intra_cycle_max_dd": 0.0
+    "dd_trigger_count": 1,
+    "dd_hard_blocks": 628,
+    "intra_cycle_max_dd": 10.9289
   },
   "gate_diagnostics": {
-    "FAIL_BTC_ANCHOR_BIAS": 6657,
-    "FAIL_RIG_COUNTER_BIAS": 5001,
-    "FAIL_LOW_DISPLACEMENT": 2120,
-    "FAIL_SCORE_HARD_FLOOR": 1247,
-    "FAIL_MODEL3_TF_FILTER": 904,
-    "FAIL_15M_ASIA_FILTER": 242,
-    "FAIL_MODEL2_15M_BLOCK": 161,
-    "FAIL_MODEL3_EXTENDED": 84,
-    "FAIL_DUPLICATE_BOS": 81,
-    "FAIL_RR_FILTER": 80,
-    "FAIL_RR_15M_STRICT": 58,
-    "FAIL_15M_POOR_ENTRY_LOCATION": 34,
-    "FAIL_MODEL3_NO_TREND": 12
+    "FAIL_SCORE_HARD_FLOOR": 3597,
+    "FAIL_RIG_COUNTER_BIAS": 2922,
+    "FAIL_MODEL3_TF_FILTER": 1227,
+    "FAIL_LOW_DISPLACEMENT": 983,
+    "FAIL_DD_PROTECTION": 628,
+    "FAIL_MODEL2_15M_BLOCK": 243,
+    "FAIL_15M_POOR_ENTRY_LOCATION": 211,
+    "FAIL_DUPLICATE_BOS": 210,
+    "FAIL_MODEL3_EXTENDED": 132,
+    "FAIL_15M_ASIA_FILTER": 101,
+    "FAIL_RR_FILTER": 72,
+    "FAIL_MODEL3_NO_TREND": 24,
+    "FAIL_RR_15M_STRICT": 22
   },
   "notes": [
-    "Trade count 23 < 30",
-    "Symbol imbalance \u2014 ETH=100% (23t), SOL=0% (0t)",
-    "DD system never engaged (0 triggers fired)"
+    "Max DD 10.93% > 6.0%",
+    "Symbol imbalance \u2014 ETH=100% (82t), SOL=0% (0t)",
+    "1h WR 65.5% < 70%",
+    "Model Model_2_EXT PF 1.04 < 1.5",
+    "Intra-cycle max DD 10.93% > 4.5%"
   ],
   "rig_stats": {
     "VALID": 0,
-    "BLOCK": 5001,
-    "CONDITIONAL": 11736,
-    "total": 16737,
-    "block_pct": 29.9,
-    "conditional_pct": 70.1,
+    "BLOCK": 2922,
+    "CONDITIONAL": 7654,
+    "total": 10576,
+    "block_pct": 27.6,
+    "conditional_pct": 72.4,
     "valid_pct": 0.0
+  },
+  "pipeline_blocks": {
+    "FAIL_SCORE_HARD_FLOOR": 216,
+    "FAIL_RIG_COUNTER_BIAS": 112,
+    "FAIL_LOW_DISPLACEMENT": 64,
+    "FAIL_MODEL3_TF_FILTER": 61,
+    "FAIL_MODEL2_15M_BLOCK": 25,
+    "FAIL_MODEL3_EXTENDED": 14,
+    "FAIL_DUPLICATE_BOS": 2,
+    "FAIL_15M_POOR_ENTRY_LOCATION": 1
   }
 }
