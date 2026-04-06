@@ -3716,13 +3716,11 @@ async def _auto_scan_supervisor(coro_fn, name: str, restart_delay: int = 30) -> 
 @app.on_event("startup")
 async def startup_event():
     """Start background scanners on server startup."""
+    # ── Deploy / version verification ────────────────────────────
+    from engine_version import log_startup_version
+    log_startup_version()
+
     # Range scanner paused — focusing on Schematics-5B page only.
-    # Uncomment the block below to re-enable 400-pair scanning.
-    # if ENABLE_SCANNER:
-    #     asyncio.create_task(scanner_loop())
-    #     logger.info(f"[SCANNER] Background scanner started — interval: {SCANNER_INTERVAL_SEC}s ({SCANNER_INTERVAL_SEC // 3600}h)")
-    # else:
-    #     logger.info("[SCANNER] Scanner DISABLED via ENABLE_SCANNER env var — web-only mode")
     logger.info("[SCANNER] Range scanner paused — 5B-only mode active")
 
     # Always start the tensor-trade auto-scan loop (hands-free trading).
@@ -3821,6 +3819,13 @@ async def status_head():
 @app.get("/status")
 async def get_status():
     return {"status": "OK", "symbol": SYMBOL, "timestamp": datetime.utcnow().isoformat()}
+
+
+@app.get("/api/version")
+async def get_version():
+    """Return engine version, git commit, build timestamp, and component versions."""
+    from engine_version import get_version_info
+    return get_version_info()
 
 @app.get("/api/price")
 async def live_price(symbol: Optional[str] = None):
