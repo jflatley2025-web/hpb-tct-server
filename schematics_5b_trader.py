@@ -1225,29 +1225,9 @@ class Schematics5BTrader:
             "rr_failures": 0,
             "passes": 0,
         }
-        # ── Scan performance metrics ──────────────────────────────
-        self._scan_perf = {
-            "cycle_start": None,
-            "cycle_end": None,
-            "cycle_duration_seconds": 0,
-            "symbols_total": 0,
-            "symbols_completed": 0,
-            "avg_symbol_seconds": 0,
-            "slowest_symbol": None,
-            "slowest_symbol_seconds": 0,
-            "fastest_symbol": None,
-            "fastest_symbol_seconds": 999,
-            "per_symbol": [],
-        }
-
-        # ── Setup candidate counters ─────────────────────────────
-        self._candidate_stats = {
-            "schematics_detected_total": 0,
-            "confirmed_schematics_total": 0,
-            "qualified_setups_total": 0,
-            "by_model": {},
-            "last_cycle_result": "not_run",
-        }
+        # ── Scan performance: last completed cycle (immutable until next cycle finishes) ──
+        self._last_completed_scan_perf: Dict = {}
+        self._scan_cycle_id = 0
 
         # ── Scan loop health trace ────────────────────────────────
         self._scan_trace = {
@@ -1743,10 +1723,12 @@ class Schematics5BTrader:
             self._scan_trace["evaluation_completed"] = True
             self._scan_trace["last_success_stage"] = "EVALUATE_COMPLETE"
 
-            # Finalize scan performance
+            # Finalize scan performance — snapshot into last_completed (immutable until next cycle ends)
             _cycle_dur = round(time.time() - _cycle_start, 1)
             _sorted_perf = sorted(_per_sym_perf, key=lambda x: x["duration_seconds"])
-            self._scan_perf = {
+            self._scan_cycle_id += 1
+            self._last_completed_scan_perf = {
+                "cycle_id": self._scan_cycle_id,
                 "cycle_start": datetime.fromtimestamp(_cycle_start, tz=timezone.utc).isoformat(),
                 "cycle_end": datetime.now(timezone.utc).isoformat(),
                 "cycle_duration_seconds": _cycle_dur,
@@ -1762,8 +1744,6 @@ class Schematics5BTrader:
                 "max_symbol_concurrency": MAX_SYMBOL_CONCURRENCY,
                 "per_symbol_timeout": PER_SYMBOL_TIMEOUT_SECONDS,
                 "per_symbol": _per_sym_perf,
-            }
-            self._candidate_stats = {
                 "schematics_detected_total": _cycle_schematics,
                 "confirmed_schematics_total": _cycle_confirmed,
                 "qualified_setups_total": _cycle_qualified,
@@ -1774,7 +1754,8 @@ class Schematics5BTrader:
                 "[5B] SCAN_PERF: %.1fs total | %d symbols | slowest=%s (%.1fs) | "
                 "schematics=%d confirmed=%d qualified=%d",
                 _cycle_dur, len(_per_sym_perf),
-                self._scan_perf["slowest_symbol"], self._scan_perf["slowest_symbol_seconds"],
+                _sorted_perf[-1]["symbol"] if _sorted_perf else "none",
+                _sorted_perf[-1]["duration_seconds"] if _sorted_perf else 0,
                 _cycle_schematics, _cycle_confirmed, _cycle_qualified,
             )
 
@@ -2535,12 +2516,15 @@ class Schematics5BTrader:
         self._live_health["top_block_reasons"][reason] = self._live_health["top_block_reasons"].get(reason, 0) + 1
 
     def get_scan_perf(self) -> dict:
-        """Return scan performance metrics."""
-        return dict(self._scan_perf)
+        """Return last completed scan performance + current trace.
 
-    def get_candidate_stats(self) -> dict:
-        """Return setup candidate pipeline stats."""
-        return dict(self._candidate_stats)
+        last_completed persists until the NEXT cycle finishes.
+        current_scan_trace shows in-progress state.
+        """
+        return {
+            "last_completed": dict(self._last_completed_scan_perf) if self._last_completed_scan_perf else None,
+            "current_scan_trace": dict(self._scan_trace),
+        }
 
     def get_scan_trace(self) -> dict:
         """Return scan loop health trace for debugging."""

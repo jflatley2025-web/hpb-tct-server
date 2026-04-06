@@ -3841,11 +3841,11 @@ async def get_version():
 
 @app.get("/api/schematics-5b-trader/scan-perf")
 async def schematics_5b_scan_perf():
-    """Return scan performance metrics."""
+    """Return scan performance: last completed cycle + current trace."""
     try:
         from schematics_5b_trader import get_5b_trader
         trader = get_5b_trader()
-        return {**trader.get_scan_perf(), **trader.get_candidate_stats()}
+        return trader.get_scan_perf()
     except Exception as e:
         return {"error": str(e)}
 
@@ -16889,35 +16889,45 @@ setInterval(loadScanDebug, 15000);
 // Scan performance + setup pipeline — refreshes every 30s
 async function loadScanPerf() {
   try {
-    const p = await fetchJSON('/api/schematics-5b-trader/scan-perf');
+    const raw = await fetchJSON('/api/schematics-5b-trader/scan-perf');
     const el = document.getElementById('scanPerfDetails');
-    if (el) {
-      const dur = p.cycle_duration_seconds || 0;
+    if (!el) return;
+
+    // Current in-progress trace
+    const t = raw.current_scan_trace || {};
+    let html = '<span style="color:#888;font-size:.65rem">CURRENT SCAN</span>\n';
+    html += 'Cycle #' + (t.loop_iteration_count || 0) + '  |  Symbol: ' + (t.fetched_symbol || '-') + '  |  Stage: ' + (t.last_success_stage || '-') + '\n';
+    html += 'Heartbeat: ' + (t.heartbeat_time || 'n/a') + '\n\n';
+
+    // Last completed cycle (stable, persists between cycles)
+    const p = raw.last_completed || {};
+    if (p.cycle_duration_seconds) {
+      const dur = p.cycle_duration_seconds;
       const durColor = dur <= 120 ? '#00e676' : dur <= 300 ? '#ff9800' : '#ff4444';
       const durLabel = dur <= 120 ? 'FAST' : dur <= 300 ? 'BORDERLINE' : 'TOO SLOW';
       const schColor = (p.schematics_detected_total || 0) > 0 ? '#00e676' : '#555';
       const qualColor = (p.qualified_setups_total || 0) > 0 ? '#00e676' : '#ff9800';
-      el.innerHTML =
-        '<span style="color:#e0e0e0">Cycle duration:</span> <b style="color:' + durColor + '">' + dur + 's</b> [' + durLabel + ']\n'
-        + '<span style="color:#e0e0e0">Symbols:</span> ' + (p.symbols_completed || 0) + '/' + (p.symbols_total || 0) + '\n'
-        + '<span style="color:#e0e0e0">Avg/symbol:</span> ' + (p.avg_symbol_seconds || 0) + 's\n'
-        + '<span style="color:#e0e0e0">Slowest:</span> ' + (p.slowest_symbol || '-') + ' (' + (p.slowest_symbol_seconds || 0) + 's)\n'
-        + '<span style="color:#e0e0e0">Last cycle:</span> ' + (p.cycle_end || 'n/a') + '\n'
-        + '<span style="color:#e0e0e0">Result:</span> ' + (p.last_cycle_result || 'n/a') + '\n'
-        + '\n<span style="color:#e040fb;font-weight:600;font-size:.68rem">SETUP PIPELINE</span>\n'
-        + '<span style="color:#e0e0e0">Schematics detected:</span> <b style="color:' + schColor + '">' + (p.schematics_detected_total || 0) + '</b>\n'
-        + '<span style="color:#e0e0e0">Confirmed:</span> ' + (p.confirmed_schematics_total || 0) + '\n'
-        + '<span style="color:#e0e0e0">Qualified setups:</span> <b style="color:' + qualColor + '">' + (p.qualified_setups_total || 0) + '</b>\n';
-      const models = p.by_model || {};
-      const mk = Object.keys(models);
-      if (mk.length > 0) {
-        el.innerHTML += '<span style="color:#e0e0e0">Models:</span> ' + mk.map(k => k + '=' + models[k]).join(', ');
-      }
+      html += '<span style="color:#00d4ff;font-size:.65rem">LAST COMPLETED CYCLE</span>\n';
+      html += '<span style="color:#e0e0e0">Duration:</span> <b style="color:' + durColor + '">' + dur + 's</b> [' + durLabel + ']\n';
+      html += '<span style="color:#e0e0e0">Symbols:</span> ' + (p.symbols_completed || 0) + '/' + (p.symbols_total || 0);
+      if (p.symbols_timed_out > 0) html += ' <span style="color:#ff4444">(' + p.symbols_timed_out + ' timed out)</span>';
+      html += '\n';
+      html += '<span style="color:#e0e0e0">Avg/symbol:</span> ' + (p.avg_symbol_seconds || 0) + 's  |  Concurrency: ' + (p.max_symbol_concurrency || '?') + '\n';
+      html += '<span style="color:#e0e0e0">Slowest:</span> ' + (p.slowest_symbol || '-') + ' (' + (p.slowest_symbol_seconds || 0) + 's)\n';
+      html += '<span style="color:#e0e0e0">Completed:</span> ' + (p.cycle_end || 'n/a') + '\n';
+      html += '<span style="color:#e0e0e0">Result:</span> ' + (p.last_cycle_result || 'n/a') + '\n';
+      html += '\n<span style="color:#e040fb;font-weight:600;font-size:.68rem">SETUP PIPELINE</span>\n';
+      html += '<span style="color:#e0e0e0">Schematics:</span> <b style="color:' + schColor + '">' + (p.schematics_detected_total || 0) + '</b>';
+      html += '  |  Confirmed: ' + (p.confirmed_schematics_total || 0);
+      html += '  |  <span style="color:#e0e0e0">Qualified:</span> <b style="color:' + qualColor + '">' + (p.qualified_setups_total || 0) + '</b>\n';
+    } else {
+      html += '<span style="color:#555">No completed cycle yet (first scan in progress)</span>';
     }
+    el.innerHTML = html;
   } catch (e) {}
 }
 loadScanPerf();
-setInterval(loadScanPerf, 30000);
+setInterval(loadScanPerf, 15000);
 
 // Live health panel — refreshes every 30s
 async function loadLiveHealth() {
