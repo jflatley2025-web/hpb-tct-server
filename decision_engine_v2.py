@@ -803,13 +803,14 @@ def decide(
                 )
                 failure_code = "FAIL_HTF_MODEL_DIRECTION"
 
-            # ── Run 29: BTC Anchor Gate ───────────────────────────
-            # Hard gate: trade direction must align with BTC HTF bias.
-            # NEUTRAL/RANGING BTC blocks all trades — no clear anchor.
+            # ── Run 29: BTC Anchor Gate (soft penalty) ─────────────
+            # Confidence penalty when trade opposes BTC HTF bias.
+            # NEUTRAL/RANGING BTC gets lighter penalty (not hard block).
             elif _btc_gate_active and direction != btc_htf_bias:
-                final_decision = "PASS"
-                skip_reason = "BTC_ANCHOR_CONFLICT (trade={}, btc={})".format(direction, btc_htf_bias)
-                failure_code = "FAIL_BTC_ANCHOR_BIAS"
+                if btc_htf_bias in ("neutral", "ranging"):
+                    execution_confidence *= 0.85
+                else:
+                    execution_confidence *= 0.70
 
             # ── RCM: range quality ────────────────────────────────
             elif not rcm_valid:

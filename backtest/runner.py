@@ -94,8 +94,8 @@ _TREND_VOL_MULTIPLIER = 0.5  # slope threshold = max(floor, vol * multiplier)
 _MODEL3_MAX_DISTANCE_PCT = 0.015  # entry must be within 1.5% of range midpoint
 
 # v14: global displacement quality gate (applied after RR filter, before score)
-_MIN_DISPLACEMENT = 0.50     # minimum local_displacement for any signal
-_MIN_DISPLACEMENT_15M = 0.65 # stricter displacement floor for 15m specifically
+_MIN_DISPLACEMENT = 0.35     # minimum local_displacement for any signal (was 0.50 — reduced after diagnostic showed 12.7% rejection rate)
+_MIN_DISPLACEMENT_15M = 0.50 # stricter displacement floor for 15m specifically (was 0.65)
 
 # v14: hard score floor (below threshold trades are removed before score gate)
 _MIN_SCORE_HARD = 65         # score 57-64 confirmed losers — blocked regardless of threshold
@@ -886,13 +886,24 @@ def run_gate_pipeline(
                 skip_reason = "NO_HTF_BIAS"
                 failure_code = "FAIL_1A_BIAS"
             # ── Run 29: BTC HTF Anchor Gate ───────────────────────────
-            # Hard gate: trade direction must align with BTC HTF structural bias.
-            # Active only when BTC candles were supplied (btc_candles_by_tf not None).
-            # NEUTRAL/RANGING BTC also blocks — no clear directional anchor.
+            # Soft gate: trade direction mismatch with BTC HTF bias applies
+            # confidence penalty instead of hard block. NEUTRAL/RANGING BTC
+            # gets a lighter penalty (reduced conviction, not prohibition).
+            # Converted from hard block after diagnostic showed 57% of all
+            # post-RIG rejections came from this gate alone (6,657 signals).
             elif btc_candles_by_tf is not None and direction != btc_htf_bias:
-                final_decision = "SKIP"
-                skip_reason = "BTC_ANCHOR_CONFLICT (trade={}, btc={})".format(direction, btc_htf_bias)
-                failure_code = "FAIL_BTC_ANCHOR_BIAS"
+                if btc_htf_bias in ("neutral", "ranging"):
+                    # BTC undecided — mild penalty, don't block
+                    execution_confidence *= 0.85
+                    logger.debug(
+                        "BTC_ANCHOR | neutral/ranging BTC — confidence x0.85 (was hard block)",
+                    )
+                else:
+                    # BTC directional but opposing — stronger penalty
+                    execution_confidence *= 0.70
+                    logger.debug(
+                        "BTC_ANCHOR | opposing BTC bias — confidence x0.70 (was hard block)",
+                    )
             elif not rcm_valid:
                 final_decision = "SKIP"
                 skip_reason = "RCM_INVALID"
@@ -2126,9 +2137,49 @@ def _generate_run29_report(
         print(f"  Total evals: {_rs.get('total', 0)}")
     if eval_result.get("pipeline_blocks"):
         print()
-        print("EXECUTION PIPELINE BLOCKS (why signals don't become trades):")
-        for _reason, _count in eval_result["pipeline_blocks"].items():
-            print(f"  {_count:>5}  {_reason}")
+        print("TOP REJECTION PATHS:")
+        _pb = eval_result["pipeline_blocks"]
+        for _i, (_reason, _count) in enumerate(_pb.items(), 1):
+            _src = "BLOCK" if _reason == "FAIL_RIG_COUNTER_BIAS" else "CONDITIONAL"
+            print(f"  {_i:>2}. {_src} -> {_reason}: {_count} cases")
+
+    # Execution funnel
+    _rs = eval_result.get("rig_stats", {})
+    _pb = eval_result.get("pipeline_blocks", {})
+    _total_sig = _rs.get("total", 0)
+    _after_rig = _rs.get("VALID", 0) + _rs.get("CONDITIONAL", 0)
+    _trades = s.get("trades", 0)
+    if _total_sig > 0:
+        print()
+        print("EXECUTION FUNNEL:")
+        print(f"  Signals generated:       {_total_sig:>6}")
+        print(f"  After RIG (VALID+COND):  {_after_rig:>6}")
+        _remaining = _after_rig
+        for _reason in ["FAIL_BTC_ANCHOR_BIAS", "FAIL_LOW_DISPLACEMENT",
+                         "FAIL_SCORE_HARD_FLOOR", "FAIL_1D_SCORE"]:
+            _lost = _pb.get(_reason, 0)
+            _remaining -= _lost
+            _label = _reason.replace("FAIL_", "After ").replace("_", " ").lower()
+            print(f"  {_label + ':':.<27}{_remaining:>6}")
+        print(f"  Trades executed:         {_trades:>6}")
+
+    # Conditional conversion
+    _cond = _rs.get("CONDITIONAL", 0)
+    if _cond > 0:
+        _conv_rate = _trades / _cond * 100
+        print()
+        print("CONDITIONAL CONVERSION:")
+        print(f"  Total CONDITIONAL:       {_cond:>6}")
+        print(f"  Converted to trades:     {_trades:>6}")
+        print(f"  Conversion rate:         {_conv_rate:>5.2f}%")
+        print(f"  Target range:            5-15%")
+        if _conv_rate < 5:
+            print(f"  STATUS: BELOW TARGET")
+        elif _conv_rate > 20:
+            print(f"  STATUS: ABOVE TARGET (risk)")
+        else:
+            print(f"  STATUS: ON TARGET")
+
     print("=" * 44)
     if eval_result.get("notes"):
         print()
