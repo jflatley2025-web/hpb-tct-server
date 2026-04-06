@@ -1222,6 +1222,30 @@ class Schematics5BTrader:
             "rr_failures": 0,
             "passes": 0,
         }
+        # ── Scan performance metrics ──────────────────────────────
+        self._scan_perf = {
+            "cycle_start": None,
+            "cycle_end": None,
+            "cycle_duration_seconds": 0,
+            "symbols_total": 0,
+            "symbols_completed": 0,
+            "avg_symbol_seconds": 0,
+            "slowest_symbol": None,
+            "slowest_symbol_seconds": 0,
+            "fastest_symbol": None,
+            "fastest_symbol_seconds": 999,
+            "per_symbol": [],
+        }
+
+        # ── Setup candidate counters ─────────────────────────────
+        self._candidate_stats = {
+            "schematics_detected_total": 0,
+            "confirmed_schematics_total": 0,
+            "qualified_setups_total": 0,
+            "by_model": {},
+            "last_cycle_result": "not_run",
+        }
+
         # ── Scan loop health trace ────────────────────────────────
         self._scan_trace = {
             "startup_fired": False,
@@ -1630,7 +1654,16 @@ class Schematics5BTrader:
             self._scan_trace["last_success_stage"] = "LOAD_SYMBOLS"
             self._scan_trace["symbols_loaded"] = len(TRADING_SYMBOLS)
 
+            # Performance tracking
+            _cycle_start = time.time()
+            _per_sym_perf = []
+            _cycle_schematics = 0
+            _cycle_confirmed = 0
+            _cycle_qualified = 0
+            _cycle_by_model = {}
+
             for _sym in TRADING_SYMBOLS:
+                _sym_start = time.time()
                 self._scan_trace["fetch_attempted"] = True
                 self._scan_trace["fetched_symbol"] = _sym
                 try:
@@ -1640,8 +1673,29 @@ class Schematics5BTrader:
                     self._scan_trace["last_exception_stage"] = f"EVALUATE_SYMBOL({_sym})"
                     logger.error("[5B] _scan_single_symbol(%s) crashed: %s", _sym, _sym_err, exc_info=True)
                     sym_result = {"error": str(_sym_err), "current_price": 0, "best_setup": None, "best_score": 0}
+                _sym_dur = round(time.time() - _sym_start, 1)
                 self._scan_trace["fetch_success"] = sym_result.get("error") is None
                 self._scan_trace["candle_count"] = len(sym_result.get("mtf_dfs", {}))
+
+                # Collect per-symbol setup stats
+                _sym_tfs = sym_result.get("timeframes", {})
+                _sym_sch_count = sum(v.get("schematics_found", 0) for v in _sym_tfs.values() if isinstance(v, dict))
+                _sym_conf_count = sum(v.get("confirmed", 0) for v in _sym_tfs.values() if isinstance(v, dict))
+                _sym_setup = sym_result.get("best_setup") is not None
+                _cycle_schematics += _sym_sch_count
+                _cycle_confirmed += _sym_conf_count
+                if _sym_setup:
+                    _cycle_qualified += 1
+                    _m = ((sym_result.get("best_setup") or (None, {}))[1] or {}).get("model", "unknown") if isinstance(sym_result.get("best_setup"), tuple) else "unknown"
+                    _cycle_by_model[_m] = _cycle_by_model.get(_m, 0) + 1
+
+                _per_sym_perf.append({
+                    "symbol": _sym,
+                    "duration_seconds": _sym_dur,
+                    "setup_found": _sym_setup,
+                    "schematics": _sym_sch_count,
+                    "confirmed": _sym_conf_count,
+                })
                 all_symbol_results[_sym] = sym_result
                 sym_best = sym_result.get("best_setup")
                 sym_score = sym_result.get("best_score", 0)
@@ -1667,6 +1721,37 @@ class Schematics5BTrader:
             self._scan_trace["evaluation_entered"] = True
             self._scan_trace["evaluation_completed"] = True
             self._scan_trace["last_success_stage"] = "EVALUATE_COMPLETE"
+
+            # Finalize scan performance
+            _cycle_dur = round(time.time() - _cycle_start, 1)
+            _sorted_perf = sorted(_per_sym_perf, key=lambda x: x["duration_seconds"])
+            self._scan_perf = {
+                "cycle_start": datetime.fromtimestamp(_cycle_start, tz=timezone.utc).isoformat(),
+                "cycle_end": datetime.now(timezone.utc).isoformat(),
+                "cycle_duration_seconds": _cycle_dur,
+                "symbols_total": len(TRADING_SYMBOLS),
+                "symbols_completed": len(_per_sym_perf),
+                "avg_symbol_seconds": round(_cycle_dur / max(len(_per_sym_perf), 1), 1),
+                "slowest_symbol": _sorted_perf[-1]["symbol"] if _sorted_perf else None,
+                "slowest_symbol_seconds": _sorted_perf[-1]["duration_seconds"] if _sorted_perf else 0,
+                "fastest_symbol": _sorted_perf[0]["symbol"] if _sorted_perf else None,
+                "fastest_symbol_seconds": _sorted_perf[0]["duration_seconds"] if _sorted_perf else 0,
+                "per_symbol": _per_sym_perf,
+            }
+            self._candidate_stats = {
+                "schematics_detected_total": _cycle_schematics,
+                "confirmed_schematics_total": _cycle_confirmed,
+                "qualified_setups_total": _cycle_qualified,
+                "by_model": _cycle_by_model,
+                "last_cycle_result": "candidate_found" if best_tradeable_setup else "no_qualifying_setups",
+            }
+            logger.info(
+                "[5B] SCAN_PERF: %.1fs total | %d symbols | slowest=%s (%.1fs) | "
+                "schematics=%d confirmed=%d qualified=%d",
+                _cycle_dur, len(_per_sym_perf),
+                self._scan_perf["slowest_symbol"], self._scan_perf["slowest_symbol_seconds"],
+                _cycle_schematics, _cycle_confirmed, _cycle_qualified,
+            )
 
             # If no setup found, use the first symbol's price for debug display
             if best_current_price == 0.0 and all_symbol_results:
@@ -2423,6 +2508,14 @@ class Schematics5BTrader:
             self._live_health["recent_non_executions"] = self._live_health["recent_non_executions"][-10:]
         # Track top block reasons
         self._live_health["top_block_reasons"][reason] = self._live_health["top_block_reasons"].get(reason, 0) + 1
+
+    def get_scan_perf(self) -> dict:
+        """Return scan performance metrics."""
+        return dict(self._scan_perf)
+
+    def get_candidate_stats(self) -> dict:
+        """Return setup candidate pipeline stats."""
+        return dict(self._candidate_stats)
 
     def get_scan_trace(self) -> dict:
         """Return scan loop health trace for debugging."""

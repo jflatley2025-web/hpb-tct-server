@@ -3839,6 +3839,17 @@ async def get_version():
     return get_version_info()
 
 
+@app.get("/api/schematics-5b-trader/scan-perf")
+async def schematics_5b_scan_perf():
+    """Return scan performance metrics."""
+    try:
+        from schematics_5b_trader import get_5b_trader
+        trader = get_5b_trader()
+        return {**trader.get_scan_perf(), **trader.get_candidate_stats()}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.get("/api/schematics-5b-trader/scan-debug")
 async def schematics_5b_scan_debug():
     """Return scan loop health trace for debugging feed/loop issues."""
@@ -16632,8 +16643,16 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
 </div>
 
 <div id="scanDebugPanel" style="margin:8px 24px;padding:10px 16px;background:#0d0d18;border:1px solid #1e1e2d;border-radius:6px;font-size:.7rem;font-family:monospace;color:#888;line-height:1.6">
-  <span style="color:#ff9800;font-weight:700;font-size:.72rem">SCAN LOOP HEALTH</span>
-  <div id="scanDebugDetails" style="margin-top:4px;white-space:pre-wrap">Loading...</div>
+  <div style="display:flex;gap:24px;flex-wrap:wrap">
+    <div>
+      <span style="color:#ff9800;font-weight:700;font-size:.72rem">SCAN LOOP HEALTH</span>
+      <div id="scanDebugDetails" style="margin-top:4px;white-space:pre-wrap">Loading...</div>
+    </div>
+    <div>
+      <span style="color:#00d4ff;font-weight:700;font-size:.72rem">LIVE MARKET COVERAGE</span>
+      <div id="scanPerfDetails" style="margin-top:4px;white-space:pre-wrap">Loading...</div>
+    </div>
+  </div>
 </div>
 
 <div id="liveHealthPanel" style="margin:8px 24px;padding:10px 16px;background:#0d0d18;border:1px solid #1e1e2d;border-radius:6px;font-size:.7rem;font-family:monospace;color:#888;line-height:1.6">
@@ -16866,6 +16885,39 @@ async function loadScanDebug() {
 }
 loadScanDebug();
 setInterval(loadScanDebug, 15000);
+
+// Scan performance + setup pipeline — refreshes every 30s
+async function loadScanPerf() {
+  try {
+    const p = await fetchJSON('/api/schematics-5b-trader/scan-perf');
+    const el = document.getElementById('scanPerfDetails');
+    if (el) {
+      const dur = p.cycle_duration_seconds || 0;
+      const durColor = dur <= 120 ? '#00e676' : dur <= 300 ? '#ff9800' : '#ff4444';
+      const durLabel = dur <= 120 ? 'FAST' : dur <= 300 ? 'BORDERLINE' : 'TOO SLOW';
+      const schColor = (p.schematics_detected_total || 0) > 0 ? '#00e676' : '#555';
+      const qualColor = (p.qualified_setups_total || 0) > 0 ? '#00e676' : '#ff9800';
+      el.innerHTML =
+        '<span style="color:#e0e0e0">Cycle duration:</span> <b style="color:' + durColor + '">' + dur + 's</b> [' + durLabel + ']\n'
+        + '<span style="color:#e0e0e0">Symbols:</span> ' + (p.symbols_completed || 0) + '/' + (p.symbols_total || 0) + '\n'
+        + '<span style="color:#e0e0e0">Avg/symbol:</span> ' + (p.avg_symbol_seconds || 0) + 's\n'
+        + '<span style="color:#e0e0e0">Slowest:</span> ' + (p.slowest_symbol || '-') + ' (' + (p.slowest_symbol_seconds || 0) + 's)\n'
+        + '<span style="color:#e0e0e0">Last cycle:</span> ' + (p.cycle_end || 'n/a') + '\n'
+        + '<span style="color:#e0e0e0">Result:</span> ' + (p.last_cycle_result || 'n/a') + '\n'
+        + '\n<span style="color:#e040fb;font-weight:600;font-size:.68rem">SETUP PIPELINE</span>\n'
+        + '<span style="color:#e0e0e0">Schematics detected:</span> <b style="color:' + schColor + '">' + (p.schematics_detected_total || 0) + '</b>\n'
+        + '<span style="color:#e0e0e0">Confirmed:</span> ' + (p.confirmed_schematics_total || 0) + '\n'
+        + '<span style="color:#e0e0e0">Qualified setups:</span> <b style="color:' + qualColor + '">' + (p.qualified_setups_total || 0) + '</b>\n';
+      const models = p.by_model || {};
+      const mk = Object.keys(models);
+      if (mk.length > 0) {
+        el.innerHTML += '<span style="color:#e0e0e0">Models:</span> ' + mk.map(k => k + '=' + models[k]).join(', ');
+      }
+    }
+  } catch (e) {}
+}
+loadScanPerf();
+setInterval(loadScanPerf, 30000);
 
 // Live health panel — refreshes every 30s
 async function loadLiveHealth() {
