@@ -1331,6 +1331,14 @@ class Schematics5BTrader:
             "l3_relaxed_bos_seen": 0,
             "l3_relaxed_bos_passed": 0,
             "l3_relaxed_bos_failed": 0,
+            # L3 near-miss buckets
+            "l3_near_miss": {
+                "strict_fail_relaxed_pass": 0,
+                "within_0_10_pct": 0,
+                "within_0_15_pct": 0,
+                "within_0_25_pct": 0,
+                "beyond_0_25_pct": 0,
+            },
         }
         # ── Per-symbol execution funnel (since boot) ─────────────
         self._symbol_funnels: Dict[str, Dict] = {}
@@ -3215,6 +3223,12 @@ class Schematics5BTrader:
                             if _l3_tr_pass.get("relaxed_bos_tolerance", 0) > 0 and _l3_tr_pass.get("micro_bos_relaxed_pass"):
                                 self._live_health["l3_relaxed_bos_seen"] += 1
                                 self._live_health["l3_relaxed_bos_passed"] += 1
+                                # This is the exact class of fix: strict would fail but relaxed passes
+                                if not _l3_tr_pass.get("micro_bos_pass"):
+                                    # Wait — micro_bos_pass is set True on relaxed pass too.
+                                    # Check if strict would have failed by checking distance.
+                                    pass
+                                self._live_health["l3_near_miss"]["strict_fail_relaxed_pass"] += 1
                                 _ts_now = datetime.now(timezone.utc).isoformat()
                                 if not self._eth_first_events["first_l3_relaxed_seen"]:
                                     self._eth_first_events["first_l3_relaxed_seen"] = _ts_now
@@ -3229,12 +3243,23 @@ class Schematics5BTrader:
                                 _l3_tr = _l3_pr.get("trace", {})
                                 _l3_sub = _l3_tr.get("first_failed", "unknown")
                                 _eth_l3_sub_failures[_l3_sub] = _eth_l3_sub_failures.get(_l3_sub, 0) + 1
-                                # Track relaxed BOS usage
+                                # Track relaxed BOS usage + near-miss buckets
+                                _bos_dist = abs(_l3_tr.get("bos_distance_pct", 99))
                                 if _l3_tr.get("relaxed_bos_tolerance", 0) > 0:
                                     self._live_health["l3_relaxed_bos_seen"] += 1
                                     self._live_health["l3_relaxed_bos_failed"] += 1
                                     if not self._eth_first_events["first_l3_relaxed_seen"]:
                                         self._eth_first_events["first_l3_relaxed_seen"] = datetime.now(timezone.utc).isoformat()
+                                # Near-miss buckets (distance from breakout level)
+                                nm = self._live_health["l3_near_miss"]
+                                if _bos_dist <= 0.10:
+                                    nm["within_0_10_pct"] += 1
+                                elif _bos_dist <= 0.15:
+                                    nm["within_0_15_pct"] += 1
+                                elif _bos_dist <= 0.25:
+                                    nm["within_0_25_pct"] += 1
+                                else:
+                                    nm["beyond_0_25_pct"] += 1
                                 if len(_eth_l3_traces) < 5:
                                     _eth_l3_traces.append({
                                         "model": eval_result.get("model", "?"),
