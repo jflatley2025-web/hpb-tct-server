@@ -122,6 +122,27 @@ TRADEABLE_SYMBOLS = list(TRADING_SYMBOLS)  # all scanned symbols are tradeable i
 L3_RELAXED_BOS = os.getenv("L3_RELAXED_BOS", "true").lower() == "true"
 L3_RELAXED_BOS_TOLERANCE_PCT = float(os.getenv("L3_RELAXED_BOS_TOLERANCE_PCT", "0.0015"))
 
+# ── Staged pair expansion plan ───────────────────────────────────
+# Phase 1 candidates are NOT active. They are queued for rollout
+# after ETH-only live mode proves stable (readiness gate).
+PAIR_ROLLOUT_PLAN = {
+    "phase_0_live_focus": ["ETHUSDT"],
+    "phase_1_candidates": [
+        {"symbol": "AAVEUSDT", "source_name": "AAVEUSDT.P", "order": 1},
+        {"symbol": "ADAUSDT", "source_name": "ADAUSDT.P", "order": 2},
+        {"symbol": "XLMUSDT", "source_name": "XLMUSDT.P", "order": 3},
+        {"symbol": "CRVUSDT", "source_name": "CRVUSDT.P", "order": 4},
+        {"symbol": "VIRTUALUSDT", "source_name": "VIRTUALUSDT.P", "order": 5},
+    ],
+    "readiness_gate": {
+        "eth_live_trade_count_min": 1,
+        "live_cycle_duration_max": 300,
+        "scanner_healthy": True,
+        "no_critical_errors": True,
+    },
+    "test_order_note": "Start with established/liquid names; VIRTUAL last (newer/noisier)",
+}
+
 logger.info(
     "[CONFIG] LIVE_SCAN_SYMBOL_MODE=%s symbols=%s L3_RELAXED_BOS=%s tolerance=%.4f",
     LIVE_SCAN_SYMBOL_MODE, TRADING_SYMBOLS, L3_RELAXED_BOS, L3_RELAXED_BOS_TOLERANCE_PCT,
@@ -2628,6 +2649,13 @@ class Schematics5BTrader:
         _cs = h.get("conditional_seen", 0)
         _cp = h.get("conditional_passed_floor", 0)
         h["conditional_conversion_pct"] = round(_cp / _cs * 100, 1) if _cs > 0 else 0
+        # Pair rollout queue status
+        h["pair_rollout"] = {
+            "active_phase": "phase_0_live_focus",
+            "active_symbols": list(TRADING_SYMBOLS),
+            "queued_pairs": [p["source_name"] for p in PAIR_ROLLOUT_PLAN.get("phase_1_candidates", [])],
+            "expansion_ready": False,  # gate not yet evaluated live
+        }
         return h
 
     def _load_htf_cache(self) -> None:
