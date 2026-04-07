@@ -113,7 +113,7 @@ _SYMBOL_MODES = {
     "primary_only": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
     "full": _ALL_SYMBOLS,
 }
-LIVE_SCAN_SYMBOL_MODE = os.getenv("LIVE_SCAN_SYMBOL_MODE", "eth_only")
+LIVE_SCAN_SYMBOL_MODE = os.getenv("LIVE_SCAN_SYMBOL_MODE", "primary_only")
 TRADING_SYMBOLS = _SYMBOL_MODES.get(LIVE_SCAN_SYMBOL_MODE, _SYMBOL_MODES["eth_only"])
 DEFAULT_SYMBOL = TRADING_SYMBOLS[0]
 TRADEABLE_SYMBOLS = list(TRADING_SYMBOLS)  # all scanned symbols are tradeable in narrowed modes
@@ -1332,6 +1332,24 @@ class Schematics5BTrader:
             "l3_relaxed_bos_passed": 0,
             "l3_relaxed_bos_failed": 0,
         }
+        # ── Per-symbol execution funnel (since boot) ─────────────
+        self._symbol_funnels: Dict[str, Dict] = {}
+        for _s in TRADING_SYMBOLS:
+            self._symbol_funnels[_s] = {
+                "schematics_detected": 0, "confirmed": 0,
+                "after_l3": 0, "qualified": 0,
+                "order_attempts": 0, "orders_submitted": 0,
+                "top_block_reasons": {},
+            }
+        # ── Global first-hit markers ─────────────────────────────
+        self._global_first_events = {
+            "first_schematic_detected": None,
+            "first_confirmed": None,
+            "first_l3_pass": None,
+            "first_qualified": None,
+            "first_order_attempt": None,
+            "first_order_submitted": None,
+        }
         # ── Rolling ETH override monitoring ─────────────────────
         self._eth_rollup_boot = self._new_eth_rollup()  # since boot
         self._eth_rollup_1h: List[Dict] = []            # per-cycle snapshots for rolling 1h
@@ -1772,6 +1790,29 @@ class Schematics5BTrader:
                         _cycle_qualified += 1
                         _m = ((_result.get("best_setup") or (None, {}))[1] or {}).get("model", "unknown") if isinstance(_result.get("best_setup"), tuple) else "unknown"
                         _cycle_by_model[_m] = _cycle_by_model.get(_m, 0) + 1
+
+                    # Per-symbol funnel update
+                    _sf = self._symbol_funnels.get(_sym)
+                    if _sf is not None:
+                        _sf["schematics_detected"] += _sym_sch_count
+                        _sf["confirmed"] += _sym_conf_count
+                        _sym_ef = _result.get("eth_funnel", {})
+                        _sf["after_l3"] += _sym_ef.get("passed_eval", 0)
+                        if _sym_setup:
+                            _sf["qualified"] += 1
+                        for _rk, _rv in _sym_ef.get("rejections", {}).items():
+                            _sf["top_block_reasons"][_rk] = _sf["top_block_reasons"].get(_rk, 0) + _rv
+
+                    # Global first-hit events
+                    _ts_now = datetime.now(timezone.utc).isoformat()
+                    if _sym_sch_count > 0 and not self._global_first_events["first_schematic_detected"]:
+                        self._global_first_events["first_schematic_detected"] = _ts_now
+                    if _sym_conf_count > 0 and not self._global_first_events["first_confirmed"]:
+                        self._global_first_events["first_confirmed"] = _ts_now
+                    if _sym_ef.get("passed_eval", 0) > 0 and not self._global_first_events["first_l3_pass"]:
+                        self._global_first_events["first_l3_pass"] = _ts_now
+                    if _sym_setup and not self._global_first_events["first_qualified"]:
+                        self._global_first_events["first_qualified"] = _ts_now
 
                     _sym_fetch_perf = _result.get("fetch_perf", {})
                     _sym_eth_funnel = _result.get("eth_funnel", {})
@@ -2521,6 +2562,8 @@ class Schematics5BTrader:
                                 self._live_health["last_order_attempt_time"] = datetime.now(timezone.utc).isoformat()
                                 if not self._eth_first_events["first_order_attempt"]:
                                     self._eth_first_events["first_order_attempt"] = datetime.now(timezone.utc).isoformat()
+                                if not self._global_first_events["first_order_attempt"]:
+                                    self._global_first_events["first_order_attempt"] = datetime.now(timezone.utc).isoformat()
                                 trade = self._enter_trade(
                                     schematic, evaluation, best_current_price, best_htf_bias,
                                     best_symbol, best_tf,
@@ -2539,6 +2582,8 @@ class Schematics5BTrader:
                                     self._live_health["last_successful_order_time"] = datetime.now(timezone.utc).isoformat()
                                     if not self._eth_first_events["first_order_submitted"]:
                                         self._eth_first_events["first_order_submitted"] = datetime.now(timezone.utc).isoformat()
+                                    if not self._global_first_events["first_order_submitted"]:
+                                        self._global_first_events["first_order_submitted"] = datetime.now(timezone.utc).isoformat()
                                     # v15: only record accepted trade when order was placed
                                     self.state.last_accepted_trade_ts = (
                                         datetime.now(timezone.utc).isoformat()
@@ -2795,6 +2840,8 @@ class Schematics5BTrader:
         h["eth_rollup_session_label"] = self._eth_rollup_session_label or self._get_session_label()
         h["eth_first_events"] = dict(self._eth_first_events)
         h["eth_cycle_archive"] = list(self._eth_cycle_archive)
+        h["symbol_funnels"] = {sym: dict(f) for sym, f in self._symbol_funnels.items()}
+        h["global_first_events"] = dict(self._global_first_events)
 
         # ETH HTF/warmup diagnostic
         h["eth_context_debug"] = {
