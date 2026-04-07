@@ -3845,7 +3845,10 @@ async def schematics_5b_scan_perf():
     try:
         from schematics_5b_trader import get_5b_trader
         trader = get_5b_trader()
-        return trader.get_scan_perf()
+        data = trader.get_scan_perf()
+        # Safe serialization — convert numpy/non-JSON types
+        import json
+        return json.loads(json.dumps(data, default=str))
     except Exception as e:
         return {"error": str(e)}
 
