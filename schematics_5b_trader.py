@@ -2747,6 +2747,24 @@ class Schematics5BTrader:
         h["eth_rollup_session_label"] = self._eth_rollup_session_label or self._get_session_label()
         h["eth_first_events"] = dict(self._eth_first_events)
 
+        # ETH HTF/warmup diagnostic
+        h["eth_context_debug"] = {
+            "warmup_completed": self._is_ready,
+            "warmup_cycles_done": self._warmup_cycles_completed,
+            "warmup_required": WARMUP_CYCLES_REQUIRED,
+            "htf_bias_cache": {
+                sym: {"bias": bias, "expires_in": round(self._htf_bias_expiry.get(sym, 0) - time.time())}
+                for sym, bias in self._htf_bias_cache.items()
+            },
+            "scan_mode": LIVE_SCAN_SYMBOL_MODE,
+            "trading_symbols": list(TRADING_SYMBOLS),
+            "warmup_validation_symbols": list(WARMUP_VALIDATION_SYMBOLS),
+            "context_mode": "mixed: HTF bias cached (24h TTL), pivots/ranges/schematics recomputed each cycle",
+            "mtf_timeframes": list(MTF_TIMEFRAMES),
+            "ltf_bos_timeframes": list(LTF_BOS_TIMEFRAMES),
+            "candle_limits": dict(_MTF_CANDLE_LIMITS),
+        }
+
         # Pair rollout queue status
         h["pair_rollout"] = {
             "active_phase": "phase_0_live_focus",
