@@ -1337,6 +1337,7 @@ class Schematics5BTrader:
         self._eth_rollup_1h: List[Dict] = []            # per-cycle snapshots for rolling 1h
         self._eth_rollup_session_label = ""
         self._eth_rollup_session = self._new_eth_rollup()
+        self._eth_cycle_archive: List[Dict] = []        # last 20 per-cycle records
 
         # ── First-hit events ─────────────────────────────────────
         self._eth_first_events = {
@@ -2684,6 +2685,53 @@ class Schematics5BTrader:
         if len(self._eth_rollup_1h) > 40:
             self._eth_rollup_1h = self._eth_rollup_1h[-40:]
 
+        # Per-cycle archive (ring buffer, last 20)
+        _detected = increment["schematics_detected"]
+        _confirmed = increment["confirmed_schematics"]
+        _qualified = increment["qualified_setups"]
+        _l3_seen = ef.get("l3_sub_failures", {})
+        _l3_relaxed_seen = sum(1 for p in cycle_perf.get("per_symbol", []) if p.get("l3_sub_failures"))
+
+        # Determine zero-schematic reason
+        if _detected == 0:
+            _per_sym = cycle_perf.get("per_symbol", [])
+            _any_error = any(p.get("error") for p in _per_sym if isinstance(p, dict))
+            if not _per_sym:
+                _zero_reason = "data_gap"
+            elif _any_error:
+                _zero_reason = "data_gap"
+            else:
+                _zero_reason = "market_absence"
+        else:
+            _zero_reason = None
+
+        # Determine last_result classification
+        if _qualified > 0:
+            _last_result = "qualified"
+        elif _confirmed > 0:
+            _last_result = "confirmed_only"
+        elif _detected > 0:
+            _last_result = "detected_only"
+        else:
+            _last_result = "no_schematics"
+
+        _top_rej = max(rej, key=rej.get) if rej else None
+
+        self._eth_cycle_archive.append({
+            "cycle_id": cycle_perf.get("cycle_id", 0),
+            "cycle_end": cycle_perf.get("cycle_end", ""),
+            "session": current_session,
+            "schematics_detected": _detected,
+            "confirmed_schematics": _confirmed,
+            "qualified_setups": _qualified,
+            "l3_relaxed_bos_seen": sum(ef.get("l3_sub_failures", {}).values()),
+            "top_block_reason": _top_rej,
+            "zero_schematic_reason": _zero_reason,
+            "last_result": _last_result,
+        })
+        if len(self._eth_cycle_archive) > 20:
+            self._eth_cycle_archive = self._eth_cycle_archive[-20:]
+
         # First-hit events
         ts_now = datetime.now(timezone.utc).isoformat()
         if increment["confirmed_schematics"] > 0 and not self._eth_first_events["first_confirmed"]:
@@ -2746,6 +2794,7 @@ class Schematics5BTrader:
         h["eth_rollup_session"] = dict(self._eth_rollup_session)
         h["eth_rollup_session_label"] = self._eth_rollup_session_label or self._get_session_label()
         h["eth_first_events"] = dict(self._eth_first_events)
+        h["eth_cycle_archive"] = list(self._eth_cycle_archive)
 
         # ETH HTF/warmup diagnostic
         h["eth_context_debug"] = {
