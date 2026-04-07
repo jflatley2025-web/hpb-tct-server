@@ -16920,6 +16920,21 @@ async function loadScanPerf() {
       html += '<span style="color:#e0e0e0">Schematics:</span> <b style="color:' + schColor + '">' + (p.schematics_detected_total || 0) + '</b>';
       html += '  |  Confirmed: ' + (p.confirmed_schematics_total || 0);
       html += '  |  <span style="color:#e0e0e0">Qualified:</span> <b style="color:' + qualColor + '">' + (p.qualified_setups_total || 0) + '</b>\n';
+
+      // ETH filter funnel
+      const ef = p.eth_funnel || {};
+      if (ef.confirmed_evaluated > 0) {
+        html += '\n<span style="color:#ff9800;font-weight:600;font-size:.68rem">ETH FILTER FUNNEL</span>\n';
+        html += 'Confirmed evaluated: ' + ef.confirmed_evaluated + '  ->  Passed eval: <b style="color:' + (ef.passed_eval > 0 ? '#00e676' : '#ff4444') + '">' + ef.passed_eval + '</b>\n';
+        const rej = ef.rejections || {};
+        const rk = Object.keys(rej);
+        if (rk.length > 0) {
+          html += '\n<span style="color:#ff4444;font-size:.65rem">TOP BLOCK REASONS</span>\n';
+          for (const k of rk.slice(0, 8)) {
+            html += '  ' + rej[k] + 'x  ' + k + '\n';
+          }
+        }
+      }
     } else {
       html += '<span style="color:#555">No completed cycle yet (first scan in progress)</span>';
     }

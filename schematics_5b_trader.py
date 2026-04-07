@@ -1205,6 +1205,19 @@ def _find_htf_upgrade(
 # ================================================================
 # MAIN TRADING ENGINE
 # ================================================================
+def _build_eth_funnel(per_sym_perf: list) -> dict:
+    """Aggregate ETH funnel rejections from per-symbol perf data."""
+    merged = {}
+    for p in per_sym_perf:
+        for k, v in p.get("rejections", {}).items():
+            merged[k] = merged.get(k, 0) + v
+    return {
+        "confirmed_evaluated": sum(p.get("confirmed_evaluated", 0) for p in per_sym_perf),
+        "passed_eval": sum(p.get("passed_eval", 0) for p in per_sym_perf),
+        "rejections": dict(sorted(merged.items(), key=lambda x: -x[1])),
+    }
+
+
 class Schematics5BTrader:
     """
     Deterministic TCT trading engine — BTCUSDT only, fixed threshold,
@@ -1704,17 +1717,19 @@ class Schematics5BTrader:
                         _cycle_by_model[_m] = _cycle_by_model.get(_m, 0) + 1
 
                     _sym_fetch_perf = _result.get("fetch_perf", {})
+                    _sym_eth_funnel = _result.get("eth_funnel", {})
                     _per_sym_perf.append({
                         "symbol": _sym,
                         "duration_seconds": _dur,
                         "fetch_seconds": _sym_fetch_perf.get("fetch_seconds", 0),
                         "requests_total": _sym_fetch_perf.get("requests_total", 0),
                         "requests_failed": _sym_fetch_perf.get("requests_failed", 0),
-                        "avg_request_seconds": _sym_fetch_perf.get("avg_request_seconds", 0),
-                        "max_request_seconds": _sym_fetch_perf.get("max_request_seconds", 0),
                         "setup_found": _sym_setup,
                         "schematics": _sym_sch_count,
                         "confirmed": _sym_conf_count,
+                        "confirmed_evaluated": _sym_eth_funnel.get("confirmed_evaluated", 0),
+                        "passed_eval": _sym_eth_funnel.get("passed_eval", 0),
+                        "rejections": _sym_eth_funnel.get("rejections", {}),
                         "timed_out": _sym in _timed_out_symbols,
                     })
                     all_symbol_results[_sym] = _result
@@ -1781,6 +1796,7 @@ class Schematics5BTrader:
                 "qualified_setups_total": _cycle_qualified,
                 "by_model": _cycle_by_model,
                 "last_cycle_result": "candidate_found" if best_tradeable_setup else "no_qualifying_setups",
+                "eth_funnel": _build_eth_funnel(_per_sym_perf),
             }
             logger.info(
                 "[5B] SCAN_PERF: %.1fs total | %d symbols | slowest=%s (%.1fs) | "
@@ -2857,6 +2873,11 @@ class Schematics5BTrader:
             best_score = 0
             best_tf_local: Optional[str] = None
 
+            # ETH funnel tracking
+            _eth_funnel_rejections: Dict[str, int] = {}
+            _eth_funnel_confirmed = 0
+            _eth_funnel_passed_eval = 0
+
             for tf in reversed(active_mtf_tfs):
                 df = mtf_dfs.get(tf)
                 if tf not in all_schematics_by_tf or all_tf_results.get(tf, {}).get("status") in {"error", "insufficient_data"}:
@@ -2912,6 +2933,15 @@ class Schematics5BTrader:
                         int(eval_result.get("score") or 0), effective_tf,
                         _eval_entry, _eval_stop, _eval_tp1, _eval_rr,
                     )
+
+                    # ETH funnel: track confirmed and rejection reasons
+                    if s.get("is_confirmed"):
+                        _eth_funnel_confirmed += 1
+                        if eval_result.get("pass"):
+                            _eth_funnel_passed_eval += 1
+                        else:
+                            _rej = eval_result.get("failure_context") or "unknown"
+                            _eth_funnel_rejections[_rej] = _eth_funnel_rejections.get(_rej, 0) + 1
 
                     # Gate metrics — _scan_lock is held so no race condition.
                     _fc = eval_result.get("failure_context")
@@ -3029,12 +3059,17 @@ class Schematics5BTrader:
                 "confirmed_ranges": confirmed_ranges,
                 "timeframes": all_tf_results,
                 "session": session_info,
+                "eth_funnel": {
+                    "confirmed_evaluated": _eth_funnel_confirmed,
+                    "passed_eval": _eth_funnel_passed_eval,
+                    "rejections": dict(sorted(_eth_funnel_rejections.items(), key=lambda x: -x[1])),
+                },
             })
             logger.info(
                 f"[5B] _scan_single_symbol done ({time.time()-_t0:.1f}s) — "
                 f"best_tf={best_tf_local}, best_score={best_score}, "
-                f"session={session_info.get('active_session', 'none')}, "
-                f"timeframes={list(all_tf_results.keys())}"
+                f"confirmed_eval={_eth_funnel_confirmed}, passed={_eth_funnel_passed_eval}, "
+                f"rejections={_eth_funnel_rejections}"
             )
 
         except Exception as e:
