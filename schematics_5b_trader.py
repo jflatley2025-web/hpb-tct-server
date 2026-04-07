@@ -1702,26 +1702,28 @@ class Schematics5BTrader:
                         "timed_out": _sym in _timed_out_symbols,
                     })
                     all_symbol_results[_sym] = _result
-                sym_best = sym_result.get("best_setup")
-                sym_score = sym_result.get("best_score", 0)
-                if sym_best and sym_score > best_score:
-                    best_setup = sym_best
-                    best_score = sym_score
-                    best_tf = sym_result.get("best_tf")
-                    best_current_price = sym_result.get("current_price", 0.0)
-                    best_htf_bias = sym_result.get("htf_bias", "neutral")
-                    best_symbol = _sym
-                # Track best tradeable setup separately
-                if sym_best and sym_score > best_tradeable_score and _sym in TRADEABLE_SYMBOLS:
-                    best_tradeable_setup = sym_best
-                    best_tradeable_score = sym_score
-                    best_tradeable_tf = sym_result.get("best_tf")
-                    best_tradeable_price = sym_result.get("current_price", 0.0)
-                    best_tradeable_htf_bias = sym_result.get("htf_bias", "neutral")
-                    best_tradeable_symbol = _sym
-                all_forming.extend(sym_result.get("forming", []))
-                all_forming_ranges.extend(sym_result.get("forming_all_ranges", []))
-                all_forming_ranges.extend(sym_result.get("confirmed_ranges", []))
+
+                    # Track best setup across all symbols
+                    _sym_best = _result.get("best_setup")
+                    _sym_score = _result.get("best_score", 0)
+                    if _sym_best and _sym_score > best_score:
+                        best_setup = _sym_best
+                        best_score = _sym_score
+                        best_tf = _result.get("best_tf")
+                        best_current_price = _result.get("current_price", 0.0)
+                        best_htf_bias = _result.get("htf_bias", "neutral")
+                        best_symbol = _sym
+                    # Track best tradeable setup separately
+                    if _sym_best and _sym_score > best_tradeable_score and _sym in TRADEABLE_SYMBOLS:
+                        best_tradeable_setup = _sym_best
+                        best_tradeable_score = _sym_score
+                        best_tradeable_tf = _result.get("best_tf")
+                        best_tradeable_price = _result.get("current_price", 0.0)
+                        best_tradeable_htf_bias = _result.get("htf_bias", "neutral")
+                        best_tradeable_symbol = _sym
+                    all_forming.extend(_result.get("forming", []))
+                    all_forming_ranges.extend(_result.get("forming_all_ranges", []))
+                    all_forming_ranges.extend(_result.get("confirmed_ranges", []))
 
             self._scan_trace["evaluation_entered"] = True
             self._scan_trace["evaluation_completed"] = True
