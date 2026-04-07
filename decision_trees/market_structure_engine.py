@@ -172,52 +172,61 @@ class MarketStructureEngine:
     # ========================================================
 
     def detect_l3_structure(self, df: pd.DataFrame, direction: str) -> bool:
+        """Detect L3 execution structure (compression + micro-BOS).
+
+        Also populates self.last_l3_trace for diagnostic instrumentation.
+        """
+        self.last_l3_trace = {
+            "direction": direction,
+            "candles_available": len(df) if df is not None else 0,
+            "compression_count": 0,
+            "compression_required": 3,
+            "compression_pass": False,
+            "micro_bos_pass": False,
+            "l3_pass": False,
+            "first_failed": None,
+        }
 
         if df is None or len(df) < 10:
+            self.last_l3_trace["first_failed"] = "insufficient_candles"
             return False
 
         recent = df.tail(10)
-
         highs = recent["high"].values
         lows = recent["low"].values
         closes = recent["close"].values
 
         compression = 0
 
-        # =========================
-        # BULLISH L3 (compression → breakout up)
-        # =========================
         if direction == "bullish":
-
-            # Higher lows = compression
             for i in range(1, len(lows)):
                 if lows[i] > lows[i - 1]:
                     compression += 1
-
             prev_high = max(highs[:-1])
-
             broke_structure = closes[-1] > prev_high
-
-            # Require BOTH compression + break
-            if compression >= 3 and broke_structure:
-                return True
-
-        # =========================
-        # BEARISH L3 (compression → breakdown)
-        # =========================
         else:
-
-            # Lower highs = compression
             for i in range(1, len(highs)):
                 if highs[i] < highs[i - 1]:
                     compression += 1
-
             prev_low = min(lows[:-1])
-
             broke_structure = closes[-1] < prev_low
 
-            if compression >= 3 and broke_structure:
-                return True
+        comp_pass = compression >= 3
+        self.last_l3_trace["compression_count"] = compression
+        self.last_l3_trace["compression_pass"] = comp_pass
+        self.last_l3_trace["micro_bos_pass"] = broke_structure
+
+        if comp_pass and broke_structure:
+            self.last_l3_trace["l3_pass"] = True
+            return True
+
+        # Record which failed first
+        if not comp_pass and not broke_structure:
+            self.last_l3_trace["first_failed"] = "both"
+        elif not comp_pass:
+            self.last_l3_trace["first_failed"] = "compression"
+        else:
+            self.last_l3_trace["first_failed"] = "micro_bos"
 
         return False
 

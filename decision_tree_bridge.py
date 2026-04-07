@@ -831,7 +831,11 @@ def _detect_l3_structure(df: pd.DataFrame, direction: str,
         df_post = df
 
     from decision_trees.market_structure_engine import MarketStructureEngine
-    return MarketStructureEngine().detect_l3_structure(df_post, direction)
+    mse = MarketStructureEngine()
+    result = mse.detect_l3_structure(df_post, direction)
+    # Store trace for instrumentation (thread-local via function attribute)
+    _detect_l3_structure._last_trace = getattr(mse, "last_l3_trace", None)
+    return result
 
 
 # ================================================================
@@ -1669,16 +1673,17 @@ def compute_composite_score_v2(
     # Pass tap3_idx so L3 is only confirmed by price action that formed after Tap3,
     # not by an older micro-BOS that predates the current schematic.
     l3_valid = _detect_l3_structure(df, direction, tap3.get("idx"))
+    _l3_trace = getattr(_detect_l3_structure, "_last_trace", None) or {}
 
     if not l3_valid:
-        phase_results["l3"] = {"passed": False}
+        phase_results["l3"] = {"passed": False, "trace": _l3_trace}
         fail["failure_context"] = "L3"
         return {**fail,
                 "score": score,
                 "reasons": reasons + ["No L3 execution confirmation"],
                 "phase_results": phase_results}
 
-    phase_results["l3"] = {"passed": True}
+    phase_results["l3"] = {"passed": True, "trace": _l3_trace}
 
     # ── Phase 5: BOS ──
     bos = schematic.get("bos_confirmation") or {}

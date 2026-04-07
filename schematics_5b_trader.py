@@ -1207,14 +1207,21 @@ def _find_htf_upgrade(
 # ================================================================
 def _build_eth_funnel(per_sym_perf: list) -> dict:
     """Aggregate ETH funnel rejections from per-symbol perf data."""
-    merged = {}
+    merged_rej = {}
+    merged_l3 = {}
+    all_l3_traces = []
     for p in per_sym_perf:
         for k, v in p.get("rejections", {}).items():
-            merged[k] = merged.get(k, 0) + v
+            merged_rej[k] = merged_rej.get(k, 0) + v
+        for k, v in p.get("l3_sub_failures", {}).items():
+            merged_l3[k] = merged_l3.get(k, 0) + v
+        all_l3_traces.extend(p.get("l3_traces", []))
     return {
         "confirmed_evaluated": sum(p.get("confirmed_evaluated", 0) for p in per_sym_perf),
         "passed_eval": sum(p.get("passed_eval", 0) for p in per_sym_perf),
-        "rejections": dict(sorted(merged.items(), key=lambda x: -x[1])),
+        "rejections": dict(sorted(merged_rej.items(), key=lambda x: -x[1])),
+        "l3_sub_failures": dict(sorted(merged_l3.items(), key=lambda x: -x[1])),
+        "l3_traces": all_l3_traces[:5],
     }
 
 
@@ -1730,6 +1737,8 @@ class Schematics5BTrader:
                         "confirmed_evaluated": _sym_eth_funnel.get("confirmed_evaluated", 0),
                         "passed_eval": _sym_eth_funnel.get("passed_eval", 0),
                         "rejections": _sym_eth_funnel.get("rejections", {}),
+                        "l3_sub_failures": _sym_eth_funnel.get("l3_sub_failures", {}),
+                        "l3_traces": _sym_eth_funnel.get("l3_traces", []),
                         "timed_out": _sym in _timed_out_symbols,
                     })
                     all_symbol_results[_sym] = _result
@@ -2877,6 +2886,8 @@ class Schematics5BTrader:
             _eth_funnel_rejections: Dict[str, int] = {}
             _eth_funnel_confirmed = 0
             _eth_funnel_passed_eval = 0
+            _eth_l3_sub_failures: Dict[str, int] = {}
+            _eth_l3_traces: List[Dict] = []
 
             for tf in reversed(active_mtf_tfs):
                 df = mtf_dfs.get(tf)
@@ -2942,6 +2953,21 @@ class Schematics5BTrader:
                         else:
                             _rej = eval_result.get("failure_context") or "unknown"
                             _eth_funnel_rejections[_rej] = _eth_funnel_rejections.get(_rej, 0) + 1
+                            # L3 sub-failure tracking
+                            if _rej == "L3":
+                                _l3_pr = (eval_result.get("phase_results") or {}).get("l3", {})
+                                _l3_tr = _l3_pr.get("trace", {})
+                                _l3_sub = _l3_tr.get("first_failed", "unknown")
+                                _eth_l3_sub_failures[_l3_sub] = _eth_l3_sub_failures.get(_l3_sub, 0) + 1
+                                if len(_eth_l3_traces) < 5:
+                                    _eth_l3_traces.append({
+                                        "model": eval_result.get("model", "?"),
+                                        "direction": eval_result.get("direction", "?"),
+                                        "compression": _l3_tr.get("compression_count", 0),
+                                        "comp_pass": _l3_tr.get("compression_pass"),
+                                        "bos_pass": _l3_tr.get("micro_bos_pass"),
+                                        "first_failed": _l3_sub,
+                                    })
 
                     # Gate metrics — _scan_lock is held so no race condition.
                     _fc = eval_result.get("failure_context")
@@ -3063,6 +3089,8 @@ class Schematics5BTrader:
                     "confirmed_evaluated": _eth_funnel_confirmed,
                     "passed_eval": _eth_funnel_passed_eval,
                     "rejections": dict(sorted(_eth_funnel_rejections.items(), key=lambda x: -x[1])),
+                    "l3_sub_failures": dict(sorted(_eth_l3_sub_failures.items(), key=lambda x: -x[1])),
+                    "l3_traces": _eth_l3_traces,
                 },
             })
             logger.info(

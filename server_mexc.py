@@ -16934,6 +16934,23 @@ async function loadScanPerf() {
             html += '  ' + rej[k] + 'x  ' + k + '\n';
           }
         }
+        // L3 sub-failure breakdown
+        const l3s = ef.l3_sub_failures || {};
+        const l3k = Object.keys(l3s);
+        if (l3k.length > 0) {
+          html += '\n<span style="color:#e040fb;font-size:.65rem">L3 SUB-FAILURES</span>\n';
+          for (const k of l3k) {
+            html += '  ' + l3s[k] + 'x  ' + k + '\n';
+          }
+        }
+        // Sample L3 traces
+        const l3t = ef.l3_traces || [];
+        if (l3t.length > 0) {
+          html += '\n<span style="color:#888;font-size:.6rem">L3 SAMPLES</span>\n';
+          for (const t of l3t.slice(0, 3)) {
+            html += '  ' + t.model + ' ' + t.direction + ' comp=' + t.compression + ' comp_pass=' + t.comp_pass + ' bos_pass=' + t.bos_pass + ' failed=' + t.first_failed + '\n';
+          }
+        }
       }
     } else {
       html += '<span style="color:#555">No completed cycle yet (first scan in progress)</span>';
