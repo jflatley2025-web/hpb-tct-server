@@ -118,7 +118,14 @@ TRADING_SYMBOLS = _SYMBOL_MODES.get(LIVE_SCAN_SYMBOL_MODE, _SYMBOL_MODES["eth_on
 DEFAULT_SYMBOL = TRADING_SYMBOLS[0]
 TRADEABLE_SYMBOLS = list(TRADING_SYMBOLS)  # all scanned symbols are tradeable in narrowed modes
 
-logger.info("[CONFIG] LIVE_SCAN_SYMBOL_MODE=%s symbols=%s", LIVE_SCAN_SYMBOL_MODE, TRADING_SYMBOLS)
+# ── L3 relaxed BOS override (ETH-only live feature flag) ─────────
+L3_RELAXED_BOS = os.getenv("L3_RELAXED_BOS", "true").lower() == "true"
+L3_RELAXED_BOS_TOLERANCE_PCT = float(os.getenv("L3_RELAXED_BOS_TOLERANCE_PCT", "0.0015"))
+
+logger.info(
+    "[CONFIG] LIVE_SCAN_SYMBOL_MODE=%s symbols=%s L3_RELAXED_BOS=%s tolerance=%.4f",
+    LIVE_SCAN_SYMBOL_MODE, TRADING_SYMBOLS, L3_RELAXED_BOS, L3_RELAXED_BOS_TOLERANCE_PCT,
+)
 STARTING_BALANCE = 5000.0
 RISK_PER_TRADE_PCT = 1.0  # 1% of balance per trade
 DEFAULT_LEVERAGE = 10
@@ -1298,6 +1305,11 @@ class Schematics5BTrader:
             "conditional_seen": 0,
             "conditional_passed_floor": 0,
             "conditional_blocked_floor": 0,
+            "l3_relaxed_bos_enabled": L3_RELAXED_BOS,
+            "l3_relaxed_bos_tolerance": L3_RELAXED_BOS_TOLERANCE_PCT,
+            "l3_relaxed_bos_seen": 0,
+            "l3_relaxed_bos_passed": 0,
+            "l3_relaxed_bos_failed": 0,
         }
         # ── Portfolio reference (set externally for multi-symbol mode) ──
         self._portfolio = None
@@ -2916,11 +2928,18 @@ class Schematics5BTrader:
                             htf_upgraded_count += 1
 
                     eff_df = mtf_dfs.get(effective_tf) if mtf_dfs.get(effective_tf) is not None else df
+                    # ETH-only L3 relaxed BOS: pass tolerance only for ETH in eth_only mode
+                    _l3_tol = (
+                        L3_RELAXED_BOS_TOLERANCE_PCT
+                        if L3_RELAXED_BOS and LIVE_SCAN_SYMBOL_MODE == "eth_only" and symbol == "ETHUSDT"
+                        else 0.0
+                    )
                     eval_result = self._get_evaluator(mode).evaluate_schematic(
                         s, htf_bias, current_price,
                         total_candles=len(eff_df),
                         max_stale_candles=_MAX_STALE.get(effective_tf, 5),
                         candle_df=eff_df,
+                        l3_relaxed_bos_tolerance=_l3_tol,
                     )
                     eval_result["source_tf"] = tf
                     eval_result["effective_tf"] = effective_tf
@@ -2950,6 +2969,12 @@ class Schematics5BTrader:
                         _eth_funnel_confirmed += 1
                         if eval_result.get("pass"):
                             _eth_funnel_passed_eval += 1
+                            # Track if L3 passed via relaxed BOS
+                            _l3_pr_pass = (eval_result.get("phase_results") or {}).get("l3", {})
+                            _l3_tr_pass = _l3_pr_pass.get("trace", {})
+                            if _l3_tr_pass.get("relaxed_bos_tolerance", 0) > 0 and _l3_tr_pass.get("micro_bos_relaxed_pass"):
+                                self._live_health["l3_relaxed_bos_seen"] += 1
+                                self._live_health["l3_relaxed_bos_passed"] += 1
                         else:
                             _rej = eval_result.get("failure_context") or "unknown"
                             _eth_funnel_rejections[_rej] = _eth_funnel_rejections.get(_rej, 0) + 1
@@ -2959,6 +2984,10 @@ class Schematics5BTrader:
                                 _l3_tr = _l3_pr.get("trace", {})
                                 _l3_sub = _l3_tr.get("first_failed", "unknown")
                                 _eth_l3_sub_failures[_l3_sub] = _eth_l3_sub_failures.get(_l3_sub, 0) + 1
+                                # Track relaxed BOS usage
+                                if _l3_tr.get("relaxed_bos_tolerance", 0) > 0:
+                                    self._live_health["l3_relaxed_bos_seen"] += 1
+                                    self._live_health["l3_relaxed_bos_failed"] += 1
                                 if len(_eth_l3_traces) < 5:
                                     _eth_l3_traces.append({
                                         "model": eval_result.get("model", "?"),
@@ -2966,6 +2995,8 @@ class Schematics5BTrader:
                                         "compression": _l3_tr.get("compression_count", 0),
                                         "comp_pass": _l3_tr.get("compression_pass"),
                                         "bos_pass": _l3_tr.get("micro_bos_pass"),
+                                        "relaxed_pass": _l3_tr.get("micro_bos_relaxed_pass"),
+                                        "bos_dist_pct": _l3_tr.get("bos_distance_pct"),
                                         "first_failed": _l3_sub,
                                     })
 

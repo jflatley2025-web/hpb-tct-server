@@ -171,8 +171,14 @@ class MarketStructureEngine:
     # L3 Execution Structure (Micro BOS)
     # ========================================================
 
-    def detect_l3_structure(self, df: pd.DataFrame, direction: str) -> bool:
+    def detect_l3_structure(self, df: pd.DataFrame, direction: str,
+                            relaxed_bos_tolerance: float = 0.0) -> bool:
         """Detect L3 execution structure (compression + micro-BOS).
+
+        Args:
+            relaxed_bos_tolerance: When > 0, accept micro-BOS if close is
+                within this fraction of the breakout level (e.g. 0.0015 = 0.15%).
+                Only used for ETH-only live override. Default 0.0 = strict.
 
         Also populates self.last_l3_trace for diagnostic instrumentation.
         """
@@ -183,8 +189,11 @@ class MarketStructureEngine:
             "compression_required": 3,
             "compression_pass": False,
             "micro_bos_pass": False,
+            "micro_bos_relaxed_pass": False,
+            "bos_distance_pct": 0.0,
             "l3_pass": False,
             "first_failed": None,
+            "relaxed_bos_tolerance": relaxed_bos_tolerance,
         }
 
         if df is None or len(df) < 10:
@@ -204,23 +213,37 @@ class MarketStructureEngine:
                     compression += 1
             prev_high = max(highs[:-1])
             broke_structure = closes[-1] > prev_high
+            # Distance from breakout level (negative = hasn't broken yet)
+            bos_dist = (closes[-1] - prev_high) / prev_high if prev_high > 0 else 0
+            relaxed_pass = closes[-1] >= prev_high * (1 - relaxed_bos_tolerance) if relaxed_bos_tolerance > 0 else False
         else:
             for i in range(1, len(highs)):
                 if highs[i] < highs[i - 1]:
                     compression += 1
             prev_low = min(lows[:-1])
             broke_structure = closes[-1] < prev_low
+            bos_dist = (prev_low - closes[-1]) / prev_low if prev_low > 0 else 0
+            relaxed_pass = closes[-1] <= prev_low * (1 + relaxed_bos_tolerance) if relaxed_bos_tolerance > 0 else False
 
         comp_pass = compression >= 3
         self.last_l3_trace["compression_count"] = compression
         self.last_l3_trace["compression_pass"] = comp_pass
         self.last_l3_trace["micro_bos_pass"] = broke_structure
+        self.last_l3_trace["micro_bos_relaxed_pass"] = relaxed_pass
+        self.last_l3_trace["bos_distance_pct"] = round(bos_dist * 100, 4)
 
+        # Strict pass
         if comp_pass and broke_structure:
             self.last_l3_trace["l3_pass"] = True
             return True
 
-        # Record which failed first
+        # Relaxed pass (only when tolerance is set and compression passes)
+        if comp_pass and relaxed_pass and relaxed_bos_tolerance > 0:
+            self.last_l3_trace["l3_pass"] = True
+            self.last_l3_trace["micro_bos_pass"] = True  # mark as passed via relaxed rule
+            return True
+
+        # Record which failed
         if not comp_pass and not broke_structure:
             self.last_l3_trace["first_failed"] = "both"
         elif not comp_pass:
