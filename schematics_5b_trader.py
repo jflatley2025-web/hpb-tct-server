@@ -116,9 +116,9 @@ DEFAULT_LEVERAGE = 10
 # profit direction by (target-entry)*TRAIL_FACTOR from the best price
 # seen since TP1.  Matches backtest/config.py for parity with Run 40.
 TRAIL_FACTOR = 0.50
-# ── Scan throughput config ───────────────────────────────────────
-MAX_SYMBOL_CONCURRENCY = 4          # scan up to N symbols in parallel
-PER_SYMBOL_TIMEOUT_SECONDS = 60     # hard timeout per symbol scan
+# ── Scan throughput config (env-configurable for live A/B testing) ──
+MAX_SYMBOL_CONCURRENCY = int(os.getenv("MAX_SYMBOL_CONCURRENCY", "1"))
+PER_SYMBOL_TIMEOUT_SECONDS = int(os.getenv("PER_SYMBOL_TIMEOUT_SECONDS", "120"))
 # HTF bias gate — daily candle tells us the dominant directional context.
 # 4h was too narrow; 1d changes once a day so the cache TTL matches.
 HTF_TIMEFRAME = "1d"
@@ -1693,9 +1693,15 @@ class Schematics5BTrader:
                         _m = ((_result.get("best_setup") or (None, {}))[1] or {}).get("model", "unknown") if isinstance(_result.get("best_setup"), tuple) else "unknown"
                         _cycle_by_model[_m] = _cycle_by_model.get(_m, 0) + 1
 
+                    _sym_fetch_perf = _result.get("fetch_perf", {})
                     _per_sym_perf.append({
                         "symbol": _sym,
                         "duration_seconds": _dur,
+                        "fetch_seconds": _sym_fetch_perf.get("fetch_seconds", 0),
+                        "requests_total": _sym_fetch_perf.get("requests_total", 0),
+                        "requests_failed": _sym_fetch_perf.get("requests_failed", 0),
+                        "avg_request_seconds": _sym_fetch_perf.get("avg_request_seconds", 0),
+                        "max_request_seconds": _sym_fetch_perf.get("max_request_seconds", 0),
                         "setup_found": _sym_setup,
                         "schematics": _sym_sch_count,
                         "confirmed": _sym_conf_count,
@@ -1750,6 +1756,15 @@ class Schematics5BTrader:
                 "max_symbol_concurrency": MAX_SYMBOL_CONCURRENCY,
                 "per_symbol_timeout": PER_SYMBOL_TIMEOUT_SECONDS,
                 "per_symbol": _per_sym_perf,
+                "provider_perf": {
+                    "requests_total": sum(p.get("requests_total", 0) for p in _per_sym_perf),
+                    "requests_failed": sum(p.get("requests_failed", 0) for p in _per_sym_perf),
+                    "avg_request_seconds": round(
+                        sum(p.get("avg_request_seconds", 0) for p in _per_sym_perf) / max(len(_per_sym_perf), 1), 1
+                    ),
+                    "max_request_seconds": max((p.get("max_request_seconds", 0) for p in _per_sym_perf), default=0),
+                    "fetch_time_total": round(sum(p.get("fetch_seconds", 0) for p in _per_sym_perf), 1),
+                },
                 "schematics_detected_total": _cycle_schematics,
                 "confirmed_schematics_total": _cycle_confirmed,
                 "qualified_setups_total": _cycle_qualified,
@@ -2724,39 +2739,57 @@ class Schematics5BTrader:
             # Resolve which MTF timeframes to scan
             active_mtf_tfs = timeframes if timeframes is not None else MTF_TIMEFRAMES
 
-            # Parallel MTF + LTF candle fetch
+            # Parallel MTF + LTF candle fetch with provider telemetry
             mtf_dfs: Dict[str, Optional[pd.DataFrame]] = {}
             ltf_dfs: Dict[str, Optional[pd.DataFrame]] = {}
             all_tfs = {
                 **{tf: _MTF_CANDLE_LIMITS.get(tf, 300) for tf in active_mtf_tfs},
                 **{ltf: _LTF_CANDLE_LIMITS[ltf] for ltf in LTF_BOS_TIMEFRAMES},
             }
+            _fetch_times = []  # (tf, seconds, success)
+            _fetch_start = time.time()
             with ThreadPoolExecutor(max_workers=len(all_tfs)) as ex:
                 futures = {
-                    ex.submit(fetch_candles_sync, symbol, tf, lim): tf
+                    ex.submit(fetch_candles_sync, symbol, tf, lim): (tf, time.time())
                     for tf, lim in all_tfs.items()
                 }
                 try:
                     for future in as_completed(futures, timeout=120):
-                        tf = futures[future]
+                        tf, _sub_time = futures[future]
+                        _req_dur = round(time.time() - _sub_time, 1)
                         try:
                             df_result = future.result(timeout=30)
+                            _fetch_times.append((tf, _req_dur, df_result is not None))
                             if tf in active_mtf_tfs:
                                 mtf_dfs[tf] = df_result
                             if tf in LTF_BOS_TIMEFRAMES:
                                 ltf_dfs[tf] = df_result
                         except Exception as e:
+                            _fetch_times.append((tf, _req_dur, False))
                             logger.warning(f"[5B] Fetch failed for {symbol}/{tf}: {e}")
                             if tf in active_mtf_tfs:
                                 mtf_dfs[tf] = None
                             if tf in LTF_BOS_TIMEFRAMES:
                                 ltf_dfs[tf] = None
                 except TimeoutError:
-                    logger.error(f"[5B] Parallel candle fetch timed out for {symbol} — cancelling remaining futures")
+                    _fetch_times.append(("TIMEOUT", 120.0, False))
+                    logger.error(f"[5B] Parallel candle fetch timed out for {symbol}")
                     for f in futures:
                         f.cancel()
 
-            logger.info(f"[5B] parallel candle fetch done ({time.time()-_t0:.1f}s)")
+            _fetch_total = round(time.time() - _fetch_start, 1)
+            _fetch_ok = sum(1 for _, _, ok in _fetch_times if ok)
+            _fetch_fail = sum(1 for _, _, ok in _fetch_times if not ok)
+            _fetch_durations = [d for _, d, _ in _fetch_times]
+            out["fetch_perf"] = {
+                "fetch_seconds": _fetch_total,
+                "requests_total": len(_fetch_times),
+                "requests_ok": _fetch_ok,
+                "requests_failed": _fetch_fail,
+                "avg_request_seconds": round(sum(_fetch_durations) / max(len(_fetch_durations), 1), 1),
+                "max_request_seconds": round(max(_fetch_durations, default=0), 1),
+            }
+            logger.info(f"[5B] fetch done ({_fetch_total:.1f}s) ok={_fetch_ok} fail={_fetch_fail}")
             # Expose fetched MTF DataFrames so the caller can pass them to
             # decision_engine_v2.decide() without a second round-trip to the API.
             out["mtf_dfs"] = {
