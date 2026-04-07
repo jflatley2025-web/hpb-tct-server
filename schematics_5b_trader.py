@@ -120,7 +120,7 @@ TRADEABLE_SYMBOLS = list(TRADING_SYMBOLS)  # all scanned symbols are tradeable i
 
 # ── L3 relaxed BOS override (ETH-only live feature flag) ─────────
 L3_RELAXED_BOS = os.getenv("L3_RELAXED_BOS", "true").lower() == "true"
-L3_RELAXED_BOS_TOLERANCE_PCT = float(os.getenv("L3_RELAXED_BOS_TOLERANCE_PCT", "0.0015"))
+L3_RELAXED_BOS_TOLERANCE_PCT = float(os.getenv("L3_RELAXED_BOS_TOLERANCE_PCT", "0.0025"))
 
 # ── Staged pair expansion plan ───────────────────────────────────
 # Phase 1 candidates are NOT active. They are queued for rollout
