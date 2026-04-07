@@ -98,17 +98,27 @@ def _compute_rr(entry: float, stop: float, target: float) -> float:
 # ================================================================
 # CONFIGURATION
 # ================================================================
-TRADING_SYMBOLS = [
+# ── Live scan symbol modes (env-configurable) ───────────────────
+# Modes:
+#   eth_only     → ETHUSDT only (fastest cycle, proven backtest edge)
+#   primary_only → BTCUSDT, ETHUSDT, SOLUSDT
+#   full         → all 12 symbols (monitoring/debug only)
+_ALL_SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT",
-    # ── New pairs (added 2026-03-31) ──
     "BCHUSDT", "WIFUSDT", "DOGEUSDT", "HBARUSDT", "FETUSDT",
     "XMRUSDT", "FARTCOINUSDT", "PEPEUSDT", "XRPUSDT",
 ]
-DEFAULT_SYMBOL = "BTCUSDT"  # backward-compat fallback for single-symbol contexts
-# Only enter trades on backtest-validated symbols.  All TRADING_SYMBOLS are still
-# scanned (for monitoring, HTF context, forming schematics) but trades are
-# restricted to this list until additional pairs are backtest-proven.
-TRADEABLE_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+_SYMBOL_MODES = {
+    "eth_only": ["ETHUSDT"],
+    "primary_only": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+    "full": _ALL_SYMBOLS,
+}
+LIVE_SCAN_SYMBOL_MODE = os.getenv("LIVE_SCAN_SYMBOL_MODE", "eth_only")
+TRADING_SYMBOLS = _SYMBOL_MODES.get(LIVE_SCAN_SYMBOL_MODE, _SYMBOL_MODES["eth_only"])
+DEFAULT_SYMBOL = TRADING_SYMBOLS[0]
+TRADEABLE_SYMBOLS = list(TRADING_SYMBOLS)  # all scanned symbols are tradeable in narrowed modes
+
+logger.info("[CONFIG] LIVE_SCAN_SYMBOL_MODE=%s symbols=%s", LIVE_SCAN_SYMBOL_MODE, TRADING_SYMBOLS)
 STARTING_BALANCE = 5000.0
 RISK_PER_TRADE_PCT = 1.0  # 1% of balance per trade
 DEFAULT_LEVERAGE = 10
@@ -1740,6 +1750,7 @@ class Schematics5BTrader:
             _sorted_perf = sorted(_per_sym_perf, key=lambda x: x["duration_seconds"])
             self._scan_cycle_id += 1
             self._last_completed_scan_perf = {
+                "scan_mode": LIVE_SCAN_SYMBOL_MODE,
                 "cycle_id": self._scan_cycle_id,
                 "cycle_start": datetime.fromtimestamp(_cycle_start, tz=timezone.utc).isoformat(),
                 "cycle_end": datetime.now(timezone.utc).isoformat(),
