@@ -1414,6 +1414,7 @@ def compute_composite_score_v2(
     htf_bias: str,
     current_price: float,
     active_trade: Optional[Dict] = None,
+    l3_relaxed_bos_tolerance: float = 0.0,
 ) -> Dict:
     """Run the 9-phase decision pipeline on a schematic.
 
@@ -1900,6 +1901,7 @@ class DecisionTreeEvaluator:
         if candle_df is not None and len(candle_df) > 0:
             return compute_composite_score_v2(
                 candle_df, schematic, htf_bias, current_price,
+                l3_relaxed_bos_tolerance=l3_relaxed_bos_tolerance,
             )
 
         # Fallback: no candle data — simplified scoring
