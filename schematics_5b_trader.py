@@ -1660,22 +1660,17 @@ class Schematics5BTrader:
                 return _sym, _result, _dur
 
             self._scan_trace["fetch_attempted"] = True
-            _TOTAL_TIMEOUT = PER_SYMBOL_TIMEOUT_SECONDS * 4  # hard cap on entire parallel batch
             with ThreadPoolExecutor(max_workers=MAX_SYMBOL_CONCURRENCY) as _pool:
                 _futures = {
                     _pool.submit(_scan_one_symbol, _sym): _sym
                     for _sym in TRADING_SYMBOLS
                 }
-                try:
-                    _done_futures = as_completed(_futures, timeout=_TOTAL_TIMEOUT)
-                except TypeError:
-                    # as_completed may not accept timeout in all Python versions
-                    _done_futures = as_completed(_futures)
-
-                for _fut in _done_futures:
+                # Collect results as futures complete (no global timeout —
+                # each symbol is bounded by PER_SYMBOL_TIMEOUT internally)
+                for _fut in as_completed(_futures):
                     _sym_name = _futures[_fut]
                     try:
-                        _sym, _result, _dur = _fut.result(timeout=10)  # short timeout — future should already be done
+                        _sym, _result, _dur = _fut.result(timeout=PER_SYMBOL_TIMEOUT_SECONDS)
                     except Exception as _fut_err:
                         _sym = _sym_name
                         _dur = PER_SYMBOL_TIMEOUT_SECONDS
