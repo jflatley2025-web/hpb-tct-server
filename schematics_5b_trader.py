@@ -1332,6 +1332,22 @@ class Schematics5BTrader:
             "l3_relaxed_bos_passed": 0,
             "l3_relaxed_bos_failed": 0,
         }
+        # ── Rolling ETH override monitoring ─────────────────────
+        self._eth_rollup_boot = self._new_eth_rollup()  # since boot
+        self._eth_rollup_1h: List[Dict] = []            # per-cycle snapshots for rolling 1h
+        self._eth_rollup_session_label = ""
+        self._eth_rollup_session = self._new_eth_rollup()
+
+        # ── First-hit events ─────────────────────────────────────
+        self._eth_first_events = {
+            "first_confirmed": None,
+            "first_l3_relaxed_seen": None,
+            "first_l3_relaxed_passed": None,
+            "first_qualified": None,
+            "first_order_attempt": None,
+            "first_order_submitted": None,
+        }
+
         # ── Portfolio reference (set externally for multi-symbol mode) ──
         self._portfolio = None
 
@@ -1848,6 +1864,8 @@ class Schematics5BTrader:
                 _sorted_perf[-1]["duration_seconds"] if _sorted_perf else 0,
                 _cycle_schematics, _cycle_confirmed, _cycle_qualified,
             )
+            # Update rolling ETH override monitoring
+            self._update_eth_rollups(self._last_completed_scan_perf)
 
             # If no setup found, use the first symbol's price for debug display
             if best_current_price == 0.0 and all_symbol_results:
@@ -2500,6 +2518,8 @@ class Schematics5BTrader:
                             if not _compress_block and not _portfolio_block:
                                 self._live_health["order_attempts"] += 1
                                 self._live_health["last_order_attempt_time"] = datetime.now(timezone.utc).isoformat()
+                                if not self._eth_first_events["first_order_attempt"]:
+                                    self._eth_first_events["first_order_attempt"] = datetime.now(timezone.utc).isoformat()
                                 trade = self._enter_trade(
                                     schematic, evaluation, best_current_price, best_htf_bias,
                                     best_symbol, best_tf,
@@ -2516,6 +2536,8 @@ class Schematics5BTrader:
                                 else:
                                     self._live_health["orders_submitted"] += 1
                                     self._live_health["last_successful_order_time"] = datetime.now(timezone.utc).isoformat()
+                                    if not self._eth_first_events["first_order_submitted"]:
+                                        self._eth_first_events["first_order_submitted"] = datetime.now(timezone.utc).isoformat()
                                     # v15: only record accepted trade when order was placed
                                     self.state.last_accepted_trade_ts = (
                                         datetime.now(timezone.utc).isoformat()
@@ -2604,6 +2626,71 @@ class Schematics5BTrader:
     # HTF BIAS CACHE PERSISTENCE
     # ----------------------------------------------------------------
 
+    @staticmethod
+    def _new_eth_rollup() -> Dict:
+        return {
+            "cycles_completed": 0,
+            "schematics_detected": 0,
+            "confirmed_schematics": 0,
+            "l3_relaxed_bos_seen": 0,
+            "l3_relaxed_bos_passed": 0,
+            "qualified_setups": 0,
+            "after_v2_gate": 0,
+            "order_attempts": 0,
+            "orders_submitted": 0,
+            "orders_rejected": 0,
+            "top_block_reasons": {},
+        }
+
+    def _get_session_label(self) -> str:
+        from datetime import datetime, timezone
+        h = datetime.now(timezone.utc).hour
+        if 0 <= h < 8:
+            return "Asia"
+        elif 8 <= h < 16:
+            return "London"
+        return "New York"
+
+    def _update_eth_rollups(self, cycle_perf: Dict):
+        """Update rolling aggregation after each completed cycle."""
+        ef = cycle_perf.get("eth_funnel", {})
+        rej = ef.get("rejections", {})
+
+        increment = {
+            "cycles_completed": 1,
+            "schematics_detected": cycle_perf.get("schematics_detected_total", 0),
+            "confirmed_schematics": cycle_perf.get("confirmed_schematics_total", 0),
+            "qualified_setups": cycle_perf.get("qualified_setups_total", 0),
+        }
+
+        for rollup in [self._eth_rollup_boot]:
+            for k, v in increment.items():
+                rollup[k] = rollup.get(k, 0) + v
+            for k, v in rej.items():
+                rollup["top_block_reasons"][k] = rollup["top_block_reasons"].get(k, 0) + v
+
+        # Session rollup — reset on session change
+        current_session = self._get_session_label()
+        if current_session != self._eth_rollup_session_label:
+            self._eth_rollup_session = self._new_eth_rollup()
+            self._eth_rollup_session_label = current_session
+        for k, v in increment.items():
+            self._eth_rollup_session[k] = self._eth_rollup_session.get(k, 0) + v
+        for k, v in rej.items():
+            self._eth_rollup_session["top_block_reasons"][k] = self._eth_rollup_session["top_block_reasons"].get(k, 0) + v
+
+        # Rolling 1h — keep last 40 cycle snapshots (~60min at 90s/cycle)
+        self._eth_rollup_1h.append({**increment, "ts": datetime.now(timezone.utc).isoformat()})
+        if len(self._eth_rollup_1h) > 40:
+            self._eth_rollup_1h = self._eth_rollup_1h[-40:]
+
+        # First-hit events
+        ts_now = datetime.now(timezone.utc).isoformat()
+        if increment["confirmed_schematics"] > 0 and not self._eth_first_events["first_confirmed"]:
+            self._eth_first_events["first_confirmed"] = ts_now
+        if increment["qualified_setups"] > 0 and not self._eth_first_events["first_qualified"]:
+            self._eth_first_events["first_qualified"] = ts_now
+
     def _record_non_execution(self, symbol: str, reason: str, detail: str = None):
         """Record a non-execution event for live health telemetry."""
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
@@ -2649,6 +2736,17 @@ class Schematics5BTrader:
         _cs = h.get("conditional_seen", 0)
         _cp = h.get("conditional_passed_floor", 0)
         h["conditional_conversion_pct"] = round(_cp / _cs * 100, 1) if _cs > 0 else 0
+        # Rolling ETH override monitoring
+        h["eth_rollup_boot"] = dict(self._eth_rollup_boot)
+        _1h_agg = self._new_eth_rollup()
+        for snap in self._eth_rollup_1h:
+            for k in ("cycles_completed", "schematics_detected", "confirmed_schematics", "qualified_setups"):
+                _1h_agg[k] += snap.get(k, 0)
+        h["eth_rollup_1h"] = _1h_agg
+        h["eth_rollup_session"] = dict(self._eth_rollup_session)
+        h["eth_rollup_session_label"] = self._eth_rollup_session_label or self._get_session_label()
+        h["eth_first_events"] = dict(self._eth_first_events)
+
         # Pair rollout queue status
         h["pair_rollout"] = {
             "active_phase": "phase_0_live_focus",
@@ -3003,6 +3101,11 @@ class Schematics5BTrader:
                             if _l3_tr_pass.get("relaxed_bos_tolerance", 0) > 0 and _l3_tr_pass.get("micro_bos_relaxed_pass"):
                                 self._live_health["l3_relaxed_bos_seen"] += 1
                                 self._live_health["l3_relaxed_bos_passed"] += 1
+                                _ts_now = datetime.now(timezone.utc).isoformat()
+                                if not self._eth_first_events["first_l3_relaxed_seen"]:
+                                    self._eth_first_events["first_l3_relaxed_seen"] = _ts_now
+                                if not self._eth_first_events["first_l3_relaxed_passed"]:
+                                    self._eth_first_events["first_l3_relaxed_passed"] = _ts_now
                         else:
                             _rej = eval_result.get("failure_context") or "unknown"
                             _eth_funnel_rejections[_rej] = _eth_funnel_rejections.get(_rej, 0) + 1
@@ -3016,6 +3119,8 @@ class Schematics5BTrader:
                                 if _l3_tr.get("relaxed_bos_tolerance", 0) > 0:
                                     self._live_health["l3_relaxed_bos_seen"] += 1
                                     self._live_health["l3_relaxed_bos_failed"] += 1
+                                    if not self._eth_first_events["first_l3_relaxed_seen"]:
+                                        self._eth_first_events["first_l3_relaxed_seen"] = datetime.now(timezone.utc).isoformat()
                                 if len(_eth_l3_traces) < 5:
                                     _eth_l3_traces.append({
                                         "model": eval_result.get("model", "?"),

@@ -17019,6 +17019,23 @@ async function loadLiveHealth() {
           html += '<span style="color:#aaa">' + r + '</span>\n';
         }
       }
+      // ETH Override Watch
+      const rb = h.eth_rollup_boot || {};
+      const rs = h.eth_rollup_session || {};
+      const sl = h.eth_rollup_session_label || '?';
+      const fe = h.eth_first_events || {};
+      html += '\n<span style="color:#00d4ff;font-weight:700;font-size:.7rem">ETH OVERRIDE WATCH</span>\n';
+      html += '<span style="color:#888">Session: ' + sl + '</span>\n';
+      html += '              <span style="color:#888">Boot</span>    <span style="color:#888">Session</span>\n';
+      html += '  Cycles:     ' + (rb.cycles_completed||0) + '       ' + (rs.cycles_completed||0) + '\n';
+      html += '  Confirmed:  ' + (rb.confirmed_schematics||0) + '       ' + (rs.confirmed_schematics||0) + '\n';
+      html += '  Qualified:  ' + (rb.qualified_setups||0) + '       ' + (rs.qualified_setups||0) + '\n';
+      html += '  L3 BOS seen:  ' + (h.l3_relaxed_bos_seen||0) + '  passed: ' + (h.l3_relaxed_bos_passed||0) + '  failed: ' + (h.l3_relaxed_bos_failed||0) + '\n';
+      html += '\n<span style="color:#888;font-size:.6rem">FIRST-HIT EVENTS</span>\n';
+      for (const [k,v] of Object.entries(fe)) {
+        html += '  ' + k + ': ' + (v || '<span style="color:#555">waiting</span>') + '\n';
+      }
+
       ne.innerHTML = html;
       ne.style.whiteSpace = 'pre-wrap';
     }
