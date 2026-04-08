@@ -545,7 +545,10 @@ def decide(
             logger.debug("HTF bias error on %s: %s", htf_candidate, e)
             continue
 
-    gate_1a_pass: bool = htf_bias in ("bullish", "bearish")
+    # Neutral HTF applies mild confidence penalty instead of hard block.
+    # Only "ranging" or truly unknown biases are blocked.
+    gate_1a_pass: bool = htf_bias in ("bullish", "bearish", "neutral")
+    _htf_neutral = htf_bias == "neutral"
 
     # ── Run 29: BTC HTF Anchor Bias ───────────────────────────────
     # Mirrors the same pivot → classify_trend logic used for Gate 1A.
@@ -787,6 +790,10 @@ def decide(
                 else:
                     execution_confidence *= 0.70
 
+            # ── Neutral HTF penalty (soft, does NOT block) ─────────
+            if _htf_neutral:
+                execution_confidence *= 0.90
+
             # ── RIG (BLOCK) ──────────────────────────────────────
             if rig_status == "BLOCK":
                 final_decision = "PASS"
@@ -805,8 +812,8 @@ def decide(
             # direction matches:
             #   Bullish HTF → Accumulation only (direction=bullish)
             #   Bearish HTF → Distribution only (direction=bearish)
-            # Neutral HTF already blocked above (1A). CONTINUATION
-            # models must also align with HTF direction.
+            # Neutral HTF passes through with confidence penalty (no block).
+            # CONTINUATION models must also align with HTF direction.
             elif gate_1a_pass and htf_bias in ("bullish", "bearish") and direction != htf_bias:
                 final_decision = "PASS"
                 skip_reason = (

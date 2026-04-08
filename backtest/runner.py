@@ -546,7 +546,10 @@ def run_gate_pipeline(
     else:
         state.last_htf_bias = htf_bias
 
-    gate_1a_pass = htf_bias != "neutral"
+    # Neutral HTF applies mild confidence penalty, not hard block.
+    # Only "ranging" or unknown biases are blocked.
+    gate_1a_pass = htf_bias not in ("ranging",)
+    _htf_neutral = htf_bias == "neutral"
 
     # ── Run 29: BTC HTF Anchor Bias ───────────────────────────────
     # BTC is NEVER traded — used only to compute cross-market structural bias.
@@ -889,6 +892,10 @@ def run_gate_pipeline(
             if rig_status == "CONDITIONAL":
                 from hpb_rig_validator import safe_confidence_modifier
                 execution_confidence *= safe_confidence_modifier(rig_result)
+
+            # Neutral HTF penalty (soft, does NOT block)
+            if _htf_neutral:
+                execution_confidence *= 0.90
 
             if rig_status == "BLOCK":
                 final_decision = "SKIP"

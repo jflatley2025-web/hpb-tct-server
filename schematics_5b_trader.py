@@ -1362,6 +1362,15 @@ class Schematics5BTrader:
                 "order_attempts": 0, "orders_submitted": 0,
                 "top_block_reasons": {},
             }
+        # ── Neutral HTF passthrough telemetry ─────────────────────
+        self._neutral_htf = {
+            "seen": 0,
+            "would_have_blocked": 0,
+            "allowed_with_penalty": 0,
+            "qualified": 0,
+            "order_attempts": 0,
+            "examples": [],  # last 10
+        }
         # ── Shadow candidates (blocked by open trade) ────────────
         self._shadow_candidates: List[Dict] = []
 
@@ -2392,6 +2401,27 @@ class Schematics5BTrader:
                             self._live_health["conditional_passed_floor"] += 1
                     self._live_health["after_v2_gate"] += (0 if _v2_blocks else 1)
 
+                    # Neutral HTF passthrough telemetry
+                    if best_htf_bias == "neutral":
+                        self._neutral_htf["seen"] += 1
+                        self._neutral_htf["would_have_blocked"] += 1  # old logic would have blocked
+                        _nhtf_example = {
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "symbol": best_symbol,
+                            "model": evaluation.get("model", "?"),
+                            "tf": best_tf or "?",
+                            "score": best_score,
+                            "rr": round(evaluation.get("rr", 0) or 0, 1),
+                            "htf_bias": "neutral",
+                            "allowed_with_penalty": not _v2_blocks,
+                            "final_block_reason": _v2_result.get("failure_code") if _v2_blocks else None,
+                        }
+                        if not _v2_blocks:
+                            self._neutral_htf["allowed_with_penalty"] += 1
+                        self._neutral_htf["examples"].append(_nhtf_example)
+                        if len(self._neutral_htf["examples"]) > 10:
+                            self._neutral_htf["examples"] = self._neutral_htf["examples"][-10:]
+
                     # Build unified parity entry (Steps 1 + 5).
                     # Includes all fields required by analyze_parity.py and the
                     # gate_debug block on mismatch for root-cause triage.
@@ -2911,6 +2941,7 @@ class Schematics5BTrader:
             "schematic_detection_running": True,
         }
         h["shadow_candidates"] = list(self._shadow_candidates)
+        h["neutral_htf"] = dict(self._neutral_htf)
 
         # ETH HTF/warmup diagnostic
         h["eth_context_debug"] = {

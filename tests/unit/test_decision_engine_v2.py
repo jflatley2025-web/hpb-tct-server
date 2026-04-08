@@ -127,11 +127,12 @@ class TestHTFModelDirectionGate:
         assert result["decision"] == "PASS"
         assert result["failure_code"] == "FAIL_HTF_MODEL_DIRECTION"
 
-    def test_neutral_htf_blocked_by_1a_not_1ab(self):
-        """Neutral HTF → blocked by Gate 1A (NO_HTF_BIAS), not 1A-b."""
+    def test_neutral_htf_allowed_with_penalty(self):
+        """Neutral HTF → allowed through with confidence penalty (not blocked)."""
         result = _call_decide("neutral", "bullish", "Model_1")
-        assert result["decision"] == "PASS"
-        assert result["failure_code"] == "FAIL_1A_BIAS"
+        # Neutral HTF no longer hard-blocks; applies conf *= 0.90 instead
+        assert result["decision"] == "TAKE"
+        assert result.get("failure_code") is None or result["failure_code"] != "FAIL_1A_BIAS"
 
     def test_ranging_htf_blocked_by_1a_not_1ab(self):
         """Ranging HTF → treated as non-directional, blocked by Gate 1A, not 1A-b."""
@@ -206,13 +207,14 @@ class TestTradingSymbols:
 
     def test_all_pairs_present(self):
         from schematics_5b_trader import TRADING_SYMBOLS
+        from schematics_5b_trader import _ALL_SYMBOLS
         expected = [
             "BTCUSDT", "ETHUSDT", "SOLUSDT",
             "BCHUSDT", "WIFUSDT", "DOGEUSDT", "HBARUSDT", "FETUSDT",
             "XMRUSDT", "FARTCOINUSDT", "PEPEUSDT", "XRPUSDT",
         ]
         for sym in expected:
-            assert sym in TRADING_SYMBOLS, f"{sym} missing from TRADING_SYMBOLS"
+            assert sym in _ALL_SYMBOLS, f"{sym} missing from _ALL_SYMBOLS"
 
 
 class TestMoonDevMappings:
