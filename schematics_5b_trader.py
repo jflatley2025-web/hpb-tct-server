@@ -1445,6 +1445,16 @@ class Schematics5BTrader:
                 },
                 "examples": [],  # last 15 with full anchor audit
             },
+            # BOS proximity tracker — SCCE-qualified setups approaching breakout
+            # Updated every cycle. Closest setups surface here for situational awareness.
+            "bos_proximity": {
+                "within_0_5_pct": 0,   # |bos_distance| <= 0.5%
+                "within_1_0_pct": 0,   # |bos_distance| <= 1.0%
+                "within_1_5_pct": 0,   # |bos_distance| <= 1.5%
+                "beyond_1_5_pct": 0,
+                "closest_setups": [],  # top 5 closest to breakout, refreshed each cycle
+                "alert_sent_keys": [],  # dedup: don't re-alert same setup
+            },
         }
         # ── Per-symbol execution funnel (since boot) ─────────────
         self._symbol_funnels: Dict[str, Dict] = {}
@@ -3710,6 +3720,76 @@ class Schematics5BTrader:
                                     "l3_pass": _l3_pass_aa,
                                     "first_failed": _first_failed,
                                 }]
+
+                            # ── BOS proximity tracker ──────────────────────
+                            # For confirmed schematics with a valid BOS distance,
+                            # track proximity to breakout and alert when close.
+                            if _first_failed != "insufficient_candles" and not _l3_pass_aa:
+                                _abs_dist = abs(_bos_dist_aa)
+                                _bp = self._live_health["bos_proximity"]
+                                _breakout_lvl = _l3_tr_aa.get("breakout_level")
+                                _cur_close = _l3_tr_aa.get("current_close")
+                                _direction_bp = s.get("direction", "")
+                                _model_bp = eval_result.get("model") or s.get("model")
+
+                                # Bucket counts (cumulative)
+                                if _abs_dist <= 0.5:
+                                    _bp["within_0_5_pct"] += 1
+                                elif _abs_dist <= 1.0:
+                                    _bp["within_1_0_pct"] += 1
+                                elif _abs_dist <= 1.5:
+                                    _bp["within_1_5_pct"] += 1
+                                else:
+                                    _bp["beyond_1_5_pct"] += 1
+
+                                # Maintain top-5 closest setups (refreshed — keeps smallest distances)
+                                _prox_entry = {
+                                    "symbol": symbol,
+                                    "tf": effective_tf,
+                                    "model": _model_bp,
+                                    "direction": _direction_bp,
+                                    "distance_to_bos_pct": round(_bos_dist_aa, 4),
+                                    "abs_distance_pct": round(_abs_dist, 4),
+                                    "breakout_level": _breakout_lvl,
+                                    "current_close": _cur_close,
+                                    "compression_pass": _comp_pass_aa,
+                                    "score": eval_result.get("score", 0),
+                                    "ts": datetime.now(timezone.utc).isoformat(),
+                                }
+                                _closest = _bp["closest_setups"]
+                                _closest.append(_prox_entry)
+                                # Keep only 5 closest by abs distance, deduped by sym+tf+model+direction
+                                _seen_keys_bp = set()
+                                _deduped = []
+                                for _pe in sorted(_closest, key=lambda x: x["abs_distance_pct"]):
+                                    _dk = f"{_pe['symbol']}_{_pe['tf']}_{_pe['model']}_{_pe['direction']}"
+                                    if _dk not in _seen_keys_bp:
+                                        _seen_keys_bp.add(_dk)
+                                        _deduped.append(_pe)
+                                _bp["closest_setups"] = _deduped[:5]
+
+                                # Telegram alert when proximity <= 0.5%
+                                if _abs_dist <= 0.5 and _breakout_lvl:
+                                    _alert_key = f"{symbol}_{effective_tf}_{_model_bp}_{_direction_bp}"
+                                    if _alert_key not in _bp["alert_sent_keys"]:
+                                        _bp["alert_sent_keys"].append(_alert_key)
+                                        # Keep dedup list bounded
+                                        if len(_bp["alert_sent_keys"]) > 50:
+                                            _bp["alert_sent_keys"] = _bp["alert_sent_keys"][-50:]
+                                        try:
+                                            _alert_text = (
+                                                f"<b>BOS PROXIMITY ALERT</b>\n"
+                                                f"<b>{symbol} | {effective_tf.upper()}</b>\n"
+                                                f"Model: {_model_bp} | Dir: {_direction_bp}\n"
+                                                f"Distance: {_bos_dist_aa:+.2f}%\n"
+                                                f"Breakout level: {_breakout_lvl:.4f}\n"
+                                                f"Current close: {_cur_close:.4f}\n"
+                                                f"Compression: {_l3_tr_aa.get('compression_count', 0)}/3\n"
+                                                f"<i>Structure confirmed — approaching micro-BOS</i>"
+                                            )
+                                            _telegram_5b_send(_alert_text)
+                                        except Exception:
+                                            pass
 
                     eval_result["source_tf"] = tf
                     eval_result["effective_tf"] = effective_tf

@@ -231,11 +231,14 @@ class MarketStructureEngine:
             relaxed_pass = closes[-1] <= prev_low * (1 + relaxed_bos_tolerance) if relaxed_bos_tolerance > 0 else False
 
         comp_pass = True if skip_compression else (compression >= 3)
+        _breakout_level = prev_high if direction == "bullish" else prev_low
         self.last_l3_trace["compression_count"] = compression
         self.last_l3_trace["compression_pass"] = comp_pass
         self.last_l3_trace["micro_bos_pass"] = broke_structure
         self.last_l3_trace["micro_bos_relaxed_pass"] = relaxed_pass
         self.last_l3_trace["bos_distance_pct"] = round(bos_dist * 100, 4)
+        self.last_l3_trace["breakout_level"] = round(_breakout_level, 6) if _breakout_level else None
+        self.last_l3_trace["current_close"] = round(float(closes[-1]), 6) if len(closes) > 0 else None
 
         # Strict pass
         if comp_pass and broke_structure:
