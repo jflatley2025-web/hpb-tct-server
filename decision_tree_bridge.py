@@ -825,7 +825,23 @@ def _detect_l3_structure(df: pd.DataFrame, direction: str,
                                       relaxed_bos_tolerance=relaxed_bos_tolerance,
                                       skip_compression=skip_compression)
     # Store trace for instrumentation (thread-local via function attribute)
-    _detect_l3_structure._last_trace = getattr(mse, "last_l3_trace", None)
+    trace = getattr(mse, "last_l3_trace", None) or {}
+    # Anchor audit fields — measure the df_post slice dimensions
+    trace["anchor_audit"] = {
+        "df_total_len": len(df),
+        "tap3_idx": tap3_idx,
+        "tap3_idx_valid": tap3_idx is not None and isinstance(tap3_idx, int) and 0 <= tap3_idx < len(df),
+        "df_post_len": len(df_post),
+        "df_post_start_idx": tap3_idx if (tap3_idx is not None and isinstance(tap3_idx, int) and 0 <= tap3_idx < len(df)) else 0,
+    }
+    # Add timestamps if open_time column exists
+    if "open_time" in df.columns:
+        trace["anchor_audit"]["df_start_time"] = str(df.iloc[0]["open_time"])
+        trace["anchor_audit"]["df_end_time"] = str(df.iloc[-1]["open_time"])
+    if "open_time" in df_post.columns and len(df_post) > 0:
+        trace["anchor_audit"]["df_post_start_time"] = str(df_post.iloc[0]["open_time"])
+        trace["anchor_audit"]["df_post_end_time"] = str(df_post.iloc[-1]["open_time"])
+    _detect_l3_structure._last_trace = trace
     return result
 
 

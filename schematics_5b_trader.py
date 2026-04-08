@@ -1419,6 +1419,32 @@ class Schematics5BTrader:
                 "by_symbol": {},
                 "examples": [],  # last 10
             },
+            # L3 anchor audit — diagnostic telemetry for Report BG
+            # Tracks the df_post slice dimensions and failure modes
+            "l3_anchor_audit": {
+                "total_evaluated": 0,
+                "insufficient_candles": 0,
+                "compression_pass": 0,
+                "bos_pass": 0,
+                "l3_pass": 0,
+                "l3_fail": 0,
+                "failure_modes": {
+                    "micro_bos_not_broken": 0,
+                    "insufficient_candles_post_tap3": 0,
+                    "compression_only": 0,
+                    "both_fail": 0,
+                },
+                "df_post_len_histogram": {},  # {"3": count, "10": count, ...}
+                "tap3_age_histogram": {},     # candles from tap3 to end of window
+                "bos_distance_histogram": {
+                    "negative_0_to_0.5": 0,   # close 0-0.5% below breakout (close miss)
+                    "negative_0.5_to_2": 0,   # close 0.5-2% below breakout
+                    "negative_2_to_5": 0,     # close 2-5% below breakout
+                    "negative_5_plus": 0,     # close >5% below breakout
+                    "positive_broke": 0,      # close above breakout (but comp fails)
+                },
+                "examples": [],  # last 15 with full anchor audit
+            },
         }
         # ── Per-symbol execution funnel (since boot) ─────────────
         self._symbol_funnels: Dict[str, Dict] = {}
@@ -3603,6 +3629,87 @@ class Schematics5BTrader:
                                     _co["no_override_needed"] += 1
                         except Exception as _co_err:
                             logger.debug("[L3-COMP-OVERRIDE-SHADOW] error: %s", _co_err)
+
+                    # ── L3 anchor audit (diagnostic telemetry) ─────────
+                    # Collect df_post dimensions and failure modes for
+                    # every confirmed schematic that hits L3.
+                    if s.get("is_confirmed"):
+                        _l3_pr_aa = (eval_result.get("phase_results") or {}).get("l3", {})
+                        _l3_tr_aa = _l3_pr_aa.get("trace", {})
+                        _aa = self._live_health["l3_anchor_audit"]
+                        _anchor = _l3_tr_aa.get("anchor_audit", {})
+
+                        if _l3_tr_aa:  # trace exists → L3 was evaluated
+                            _aa["total_evaluated"] += 1
+                            _first_failed = _l3_tr_aa.get("first_failed")
+                            _comp_pass_aa = _l3_tr_aa.get("compression_pass", False)
+                            _bos_pass_aa = _l3_tr_aa.get("micro_bos_pass", False)
+                            _l3_pass_aa = _l3_tr_aa.get("l3_pass", False)
+                            _bos_dist_aa = _l3_tr_aa.get("bos_distance_pct", 0)
+
+                            if _comp_pass_aa:
+                                _aa["compression_pass"] += 1
+                            if _bos_pass_aa:
+                                _aa["bos_pass"] += 1
+                            if _l3_pass_aa:
+                                _aa["l3_pass"] += 1
+                            else:
+                                _aa["l3_fail"] += 1
+
+                            # Failure mode classification
+                            if _first_failed == "insufficient_candles":
+                                _aa["insufficient_candles"] += 1
+                                _aa["failure_modes"]["insufficient_candles_post_tap3"] += 1
+                            elif _first_failed == "micro_bos":
+                                _aa["failure_modes"]["micro_bos_not_broken"] += 1
+                            elif _first_failed == "compression":
+                                _aa["failure_modes"]["compression_only"] += 1
+                            elif _first_failed == "both":
+                                _aa["failure_modes"]["both_fail"] += 1
+
+                            # df_post_len histogram
+                            _dpl = _anchor.get("df_post_len", 0)
+                            _dpl_bucket = str(min(_dpl, 200))
+                            _aa["df_post_len_histogram"][_dpl_bucket] = _aa["df_post_len_histogram"].get(_dpl_bucket, 0) + 1
+
+                            # tap3 age — how many candles from tap3 to end
+                            _tap3_age = _anchor.get("df_post_len", 0)
+                            _age_bucket = str(min(_tap3_age, 200))
+                            _aa["tap3_age_histogram"][_age_bucket] = _aa["tap3_age_histogram"].get(_age_bucket, 0) + 1
+
+                            # BOS distance histogram (signed)
+                            if _first_failed != "insufficient_candles":
+                                if _bos_dist_aa > 0:
+                                    _aa["bos_distance_histogram"]["positive_broke"] += 1
+                                elif _bos_dist_aa >= -0.5:
+                                    _aa["bos_distance_histogram"]["negative_0_to_0.5"] += 1
+                                elif _bos_dist_aa >= -2.0:
+                                    _aa["bos_distance_histogram"]["negative_0.5_to_2"] += 1
+                                elif _bos_dist_aa >= -5.0:
+                                    _aa["bos_distance_histogram"]["negative_2_to_5"] += 1
+                                else:
+                                    _aa["bos_distance_histogram"]["negative_5_plus"] += 1
+
+                            # Examples (last 15)
+                            if len(_aa["examples"]) < 15 or not _l3_pass_aa:
+                                _aa["examples"] = _aa["examples"][-14:] + [{
+                                    "ts": datetime.now(timezone.utc).isoformat(),
+                                    "symbol": symbol,
+                                    "tf": effective_tf,
+                                    "model": eval_result.get("model") or s.get("model"),
+                                    "direction": s.get("direction"),
+                                    "tap3_idx": _anchor.get("tap3_idx"),
+                                    "df_total_len": _anchor.get("df_total_len"),
+                                    "df_post_len": _anchor.get("df_post_len"),
+                                    "df_post_start_time": _anchor.get("df_post_start_time"),
+                                    "df_post_end_time": _anchor.get("df_post_end_time"),
+                                    "compression_count": _l3_tr_aa.get("compression_count"),
+                                    "compression_pass": _comp_pass_aa,
+                                    "bos_pass": _bos_pass_aa,
+                                    "bos_distance_pct": _bos_dist_aa,
+                                    "l3_pass": _l3_pass_aa,
+                                    "first_failed": _first_failed,
+                                }]
 
                     eval_result["source_tf"] = tf
                     eval_result["effective_tf"] = effective_tf
