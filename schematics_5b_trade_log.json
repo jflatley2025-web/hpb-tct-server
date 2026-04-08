@@ -42,8 +42,8 @@
       "multiplier": 1.0,
       "boost_applied": false
     },
-    "live_pnl_pct": 3.1,
-    "current_price": 84.52
+    "live_pnl_pct": 2.6,
+    "current_price": 84.11
   },
   "trade_history": [
     {
@@ -396,8 +396,8 @@
   ],
   "total_wins": 0,
   "total_losses": 9,
-  "last_scan_time": "2026-04-08T12:55:17.060914+00:00",
-  "last_scan_action": "no_qualifying_setups",
+  "last_scan_time": "2026-04-08T13:55:40.263447+00:00",
+  "last_scan_action": "shadow_candidate_blocked",
   "last_error": null,
   "trading_mode": "claude",
   "peak_balance": 4418.9,
