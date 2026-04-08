@@ -1352,6 +1352,19 @@ class Schematics5BTrader:
                 "within_0_25_pct": 0,
                 "beyond_0_25_pct": 0,
             },
+            # SCCE × L3 cross-telemetry: tracks SCCE phase at time of L3 failure
+            # seed/tap1/tap2 → structure genuinely incomplete (L3 correct to block)
+            # tap3/bos_pending/qualified → mature structure narrowly missing (L3 too tight)
+            "scce_l3_cross": {
+                "seed": 0,
+                "tap1": 0,
+                "tap2": 0,
+                "tap3": 0,
+                "bos_pending": 0,
+                "qualified": 0,
+                "no_match": 0,
+                "examples": [],
+            },
         }
         # ── Per-symbol execution funnel (since boot) ─────────────
         self._symbol_funnels: Dict[str, Dict] = {}
@@ -3384,6 +3397,51 @@ class Schematics5BTrader:
                                         "bos_dist_pct": _l3_tr.get("bos_distance_pct"),
                                         "first_failed": _l3_sub,
                                     })
+                                # ── SCCE × L3 cross-telemetry ──────────────
+                                # Find matching SCCE candidate and record its phase.
+                                # Phase distribution = L3 opportunity map:
+                                #   seed/tap1/tap2  → structure immature, L3 correct
+                                #   tap3/bos_pending/qualified → mature miss, tolerance candidate
+                                try:
+                                    from scce_engine import get_scce, SCCE_ENABLED
+                                    if SCCE_ENABLED:
+                                        _scce_phase = "no_match"
+                                        _rng_s = s.get("range") or {}
+                                        _rh_s = _rng_s.get("high")
+                                        _rl_s = _rng_s.get("low")
+                                        _dir_s = eval_result.get("direction", "")
+                                        _fam_s = (
+                                            "accumulation" if _dir_s == "bullish"
+                                            else "distribution" if _dir_s == "bearish"
+                                            else None
+                                        )
+                                        if _fam_s and _rh_s and _rl_s:
+                                            for _sc in get_scce().get_active_candidates(symbol):
+                                                if _sc.get("model_family") != _fam_s:
+                                                    continue
+                                                _sc_rh = _sc.get("range_high")
+                                                _sc_rl = _sc.get("range_low")
+                                                if (
+                                                    _sc_rh and _sc_rl
+                                                    and abs(_sc_rh - _rh_s) / max(_rh_s, 1) < 0.02
+                                                    and abs(_sc_rl - _rl_s) / max(_rl_s, 1) < 0.02
+                                                ):
+                                                    _scce_phase = _sc.get("phase", "seed")
+                                                    break
+                                        _cross = self._live_health["scce_l3_cross"]
+                                        _cross[_scce_phase] = _cross.get(_scce_phase, 0) + 1
+                                        _cross["examples"] = _cross["examples"][-9:] + [{
+                                            "ts": datetime.now(timezone.utc).isoformat(),
+                                            "symbol": symbol,
+                                            "tf": effective_tf,
+                                            "model": eval_result.get("model"),
+                                            "direction": _dir_s,
+                                            "scce_phase": _scce_phase,
+                                            "l3_sub": _l3_sub,
+                                            "bos_dist_pct": round(_bos_dist, 4),
+                                        }]
+                                except Exception:
+                                    pass
 
                     # Gate metrics — _scan_lock is held so no race condition.
                     _fc = eval_result.get("failure_context")

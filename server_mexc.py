@@ -3841,13 +3841,22 @@ async def get_version():
 
 @app.get("/api/schematics-5b-trader/scce")
 async def schematics_5b_scce():
-    """Return SCCE structural context state."""
+    """Return SCCE structural context state + L3 cross-telemetry."""
     try:
+        import json
         from scce_engine import get_scce, SCCE_ENABLED
-        if SCCE_ENABLED:
-            import json
-            return json.loads(json.dumps(get_scce().get_snapshot(), default=str))
-        return {"enabled": False}
+        snapshot = get_scce().get_snapshot() if SCCE_ENABLED else {"enabled": False}
+
+        # Merge L3 cross-telemetry from trader health
+        try:
+            from schematics_5b_trader import get_5b_trader
+            _h = get_5b_trader()._live_health
+            snapshot["scce_l3_cross"] = _h.get("scce_l3_cross", {})
+            snapshot["l3_near_miss"] = _h.get("l3_near_miss", {})
+        except Exception:
+            pass
+
+        return json.loads(json.dumps(snapshot, default=str))
     except Exception as e:
         return {"error": str(e)}
 
