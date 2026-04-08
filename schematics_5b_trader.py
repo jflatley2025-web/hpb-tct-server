@@ -464,6 +464,19 @@ def _telegram_5b_send(text: str) -> bool:
     return True
 
 
+def _notify_5b_shadow_candidate(shadow: Dict, open_trade: Dict) -> None:
+    """Telegram alert when a qualified setup is blocked by an open trade."""
+    open_sym = open_trade.get("symbol", "?")
+    text = (
+        f"<b>5B SHADOW — {shadow.get('symbol', '?')} | {shadow.get('timeframe', '?').upper()}</b>\n"
+        f"Model: {shadow.get('model', '?')}\n"
+        f"Score: {shadow.get('score', 0)}/100\n"
+        f"⚠️ Blocked by open {open_sym} trade\n"
+        f"<i>Would have entered if no position was open</i>"
+    )
+    _telegram_5b_send(text)
+
+
 def _notify_5b_entry(trade: Dict) -> None:
     direction = trade.get("direction", "?")
     symbol = trade.get("symbol", "BTCUSDT")
@@ -2251,6 +2264,7 @@ class Schematics5BTrader:
                     best_tradeable_symbol, _shadow["model"], best_tradeable_score,
                     self.state.current_trade.get("symbol", "?"),
                 )
+                _notify_5b_shadow_candidate(_shadow, self.state.current_trade)
                 cycle_result["action"] = "shadow_candidate_blocked"
                 cycle_result["details"] = _shadow
                 self.state.last_scan_time = cycle_result["timestamp"]
