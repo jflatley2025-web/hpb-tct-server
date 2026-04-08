@@ -1349,6 +1349,9 @@ class Schematics5BTrader:
                 "order_attempts": 0, "orders_submitted": 0,
                 "top_block_reasons": {},
             }
+        # ── Shadow candidates (blocked by open trade) ────────────
+        self._shadow_candidates: List[Dict] = []
+
         # ── Global first-hit markers ─────────────────────────────
         self._global_first_events = {
             "first_schematic_detected": None,
@@ -1701,8 +1704,9 @@ class Schematics5BTrader:
             self._has_forming_schematics = False
 
         try:
-            # 1. Manage open trade first
-            if self.state.current_trade:
+            # 1. Manage open trade first (if any)
+            _has_open_trade = self.state.current_trade is not None
+            if _has_open_trade:
                 _trade_sym = self.state.current_trade.get("symbol", DEFAULT_SYMBOL)
                 df_price = fetch_candles_sync(_trade_sym, "1m", 10)
                 if df_price is None or len(df_price) == 0:
@@ -1719,7 +1723,14 @@ class Schematics5BTrader:
                 self.state.last_scan_time = cycle_result["timestamp"]
                 self.state.last_scan_action = cycle_result["action"]
                 self.state.save()
-                return cycle_result
+
+                # If trade just closed, clear the flag so entry logic can run below
+                if self.state.current_trade is None:
+                    _has_open_trade = False
+
+                # PHASE 1: Continue scanning/context-building even while trade is open.
+                # Do NOT return early — fall through to symbol scan below.
+                # Entry will be blocked by the _has_open_trade guard at the entry point.
 
             # 2. Scan all trading symbols for qualifying TCT setups.
             # Snapshot mode here (under _scan_lock) so the entire scan cycle uses
@@ -2219,7 +2230,34 @@ class Schematics5BTrader:
                 self._live_health["signals_seen"] += 1
                 self._live_health["last_signal_time"] = datetime.now(timezone.utc).isoformat()
 
-            if best_tradeable_setup:
+            # ── PHASE 1 GUARD: block new entries while a trade is open ──
+            # Scanning/context-building ran above even with an open trade.
+            # But we still enforce single-trade-at-a-time for entry.
+            if _has_open_trade and best_tradeable_setup:
+                _shadow = {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "symbol": best_tradeable_symbol,
+                    "model": (best_tradeable_setup[1] or {}).get("model", "?") if isinstance(best_tradeable_setup, tuple) else "?",
+                    "timeframe": best_tradeable_tf or "?",
+                    "score": best_tradeable_score,
+                    "qualified_setup": True,
+                    "blocked_only_by_open_trade": True,
+                }
+                self._shadow_candidates.append(_shadow)
+                if len(self._shadow_candidates) > 20:
+                    self._shadow_candidates = self._shadow_candidates[-20:]
+                logger.info(
+                    "[5B] SHADOW_CANDIDATE: %s %s score=%s — blocked by open %s trade",
+                    best_tradeable_symbol, _shadow["model"], best_tradeable_score,
+                    self.state.current_trade.get("symbol", "?"),
+                )
+                cycle_result["action"] = "shadow_candidate_blocked"
+                cycle_result["details"] = _shadow
+                self.state.last_scan_time = cycle_result["timestamp"]
+                self.state.last_scan_action = cycle_result["action"]
+                self.state.save()
+                # Skip all entry logic below but scanning completed above
+            elif best_tradeable_setup:
                 schematic, evaluation = best_tradeable_setup
                 # Use tradeable candidate's context for the execution path
                 best_current_price = best_tradeable_price
@@ -2850,6 +2888,15 @@ class Schematics5BTrader:
         h["eth_cycle_archive"] = list(self._eth_cycle_archive)
         h["symbol_funnels"] = {sym: dict(f) for sym, f in self._symbol_funnels.items()}
         h["global_first_events"] = dict(self._global_first_events)
+        # Scan-while-trade-open telemetry
+        h["scan_while_trade_open"] = {
+            "current_trade_open": self.state.current_trade is not None,
+            "scan_running_while_trade_open": True,  # always True after Phase 1
+            "entry_blocked_due_to_open_trade": self.state.current_trade is not None,
+            "context_updates_running": True,
+            "schematic_detection_running": True,
+        }
+        h["shadow_candidates"] = list(self._shadow_candidates)
 
         # ETH HTF/warmup diagnostic
         h["eth_context_debug"] = {
