@@ -122,6 +122,16 @@ TRADEABLE_SYMBOLS = list(TRADING_SYMBOLS)  # all scanned symbols are tradeable i
 L3_RELAXED_BOS = os.getenv("L3_RELAXED_BOS", "true").lower() == "true"
 L3_RELAXED_BOS_TOLERANCE_PCT = float(os.getenv("L3_RELAXED_BOS_TOLERANCE_PCT", "0.0025"))
 
+# ── SCCE-gated L3 override (shadow mode — no live entries yet) ────
+# When True: track what would pass L3 if SCCE phase is used to set tolerance.
+# Does NOT affect real eval results or entry decisions.
+# qualified phase  → 0.0025 tolerance (0.25%)
+# bos_pending phase → 0.0015 tolerance (0.15%)
+# all others       → unchanged (0.0)
+SCCE_L3_OVERRIDE_SHADOW = os.getenv("SCCE_L3_OVERRIDE_SHADOW", "true").lower() == "true"
+_SCCE_L3_TOL_QUALIFIED = 0.0025   # tolerance when SCCE phase == "qualified"
+_SCCE_L3_TOL_BOS_PENDING = 0.0015 # tolerance when SCCE phase == "bos_pending"
+
 # ── Staged pair expansion plan ───────────────────────────────────
 # Phase 1 candidates are NOT active. They are queued for rollout
 # after ETH-only live mode proves stable (readiness gate).
@@ -1364,6 +1374,24 @@ class Schematics5BTrader:
                 "qualified": 0,
                 "no_match": 0,
                 "examples": [],
+            },
+            # SCCE-gated L3 override shadow telemetry
+            # SHADOW MODE ONLY — does not affect live entries.
+            # Measures what WOULD pass L3 if SCCE phase were used to gate tolerance.
+            "l3_override": {
+                "shadow_mode": True,
+                "enabled": SCCE_L3_OVERRIDE_SHADOW,
+                "total_seen": 0,         # confirmed schematics that reached SCCE lookup
+                "scce_match": 0,         # matched an active SCCE candidate
+                "override_applied": 0,   # override tolerance > 0.0 was used
+                "would_pass": 0,         # shadow eval passed with override tolerance
+                "would_fail": 0,         # shadow eval still failed with override tolerance
+                "no_override_needed": 0, # strict eval already passed (no help needed)
+                "by_phase": {
+                    "qualified": {"seen": 0, "would_pass": 0, "would_fail": 0},
+                    "bos_pending": {"seen": 0, "would_pass": 0, "would_fail": 0},
+                },
+                "examples": [],  # last 10: {symbol, tf, model, scce_phase, bos_dist_pct, override_used, result}
             },
         }
         # ── Per-symbol execution funnel (since boot) ─────────────
@@ -3315,6 +3343,120 @@ class Schematics5BTrader:
                         candle_df=eff_df,
                         l3_relaxed_bos_tolerance=_l3_tol,
                     )
+
+                    # ── SCCE-gated L3 shadow override ──────────────────
+                    # SHADOW MODE ONLY: run a second eval with SCCE-derived tolerance.
+                    # Does NOT alter eval_result or any entry decision.
+                    # Populates l3_override telemetry for Report BD.
+                    if SCCE_L3_OVERRIDE_SHADOW and s.get("is_confirmed"):
+                        try:
+                            from scce_engine import get_scce, SCCE_ENABLED
+                            if SCCE_ENABLED:
+                                _ov = self._live_health["l3_override"]
+                                _ov["total_seen"] += 1
+
+                                # Look up matching SCCE candidate
+                                _rng_ov = s.get("range") or {}
+                                _rh_ov = _rng_ov.get("high")
+                                _rl_ov = _rng_ov.get("low")
+                                _dir_ov = s.get("direction", "")
+                                _fam_ov = (
+                                    "accumulation" if _dir_ov == "bullish"
+                                    else "distribution" if _dir_ov == "bearish"
+                                    else None
+                                )
+                                _scce_cand = None
+                                _scce_phase_ov = None
+                                if _fam_ov and _rh_ov and _rl_ov:
+                                    for _c in get_scce().get_active_candidates(symbol):
+                                        # Safety guards: active, not stale, range_valid
+                                        if _c.get("stale") or not _c.get("range_valid"):
+                                            continue
+                                        if _c.get("model_family") != _fam_ov:
+                                            continue
+                                        _c_rh = _c.get("range_high")
+                                        _c_rl = _c.get("range_low")
+                                        if (
+                                            _c_rh and _c_rl
+                                            and abs(_c_rh - _rh_ov) / max(_rh_ov, 1) < 0.02
+                                            and abs(_c_rl - _rl_ov) / max(_rl_ov, 1) < 0.02
+                                        ):
+                                            _scce_cand = _c
+                                            _scce_phase_ov = _c.get("phase", "seed")
+                                            break
+
+                                # Determine override tolerance from SCCE phase
+                                _override_tol = 0.0
+                                if _scce_cand:
+                                    _ov["scce_match"] += 1
+                                    if _scce_phase_ov == "qualified":
+                                        _override_tol = _SCCE_L3_TOL_QUALIFIED
+                                    elif _scce_phase_ov == "bos_pending":
+                                        _override_tol = _SCCE_L3_TOL_BOS_PENDING
+
+                                # Run shadow eval only when override would make a difference
+                                if _override_tol > 0.0 and not eval_result.get("pass"):
+                                    # Strict eval failed — check if override would rescue it
+                                    _ov["override_applied"] += 1
+                                    _phase_bucket = _scce_phase_ov if _scce_phase_ov in ("qualified", "bos_pending") else None
+
+                                    # Shadow evaluation — does NOT touch eval_result
+                                    _shadow_eval = self._get_evaluator(mode).evaluate_schematic(
+                                        s, htf_bias, current_price,
+                                        total_candles=len(eff_df),
+                                        max_stale_candles=_MAX_STALE.get(effective_tf, 5),
+                                        candle_df=eff_df,
+                                        l3_relaxed_bos_tolerance=_override_tol,
+                                    )
+                                    _shadow_pass = _shadow_eval.get("pass", False)
+                                    _shadow_fc = _shadow_eval.get("failure_context", "unknown")
+
+                                    # Track l3_override telemetry
+                                    if _shadow_pass:
+                                        _ov["would_pass"] += 1
+                                    else:
+                                        _ov["would_fail"] += 1
+                                    if _phase_bucket:
+                                        _pb = _ov["by_phase"][_phase_bucket]
+                                        _pb["seen"] += 1
+                                        if _shadow_pass:
+                                            _pb["would_pass"] += 1
+                                        else:
+                                            _pb["would_fail"] += 1
+
+                                    # BOS distance for example record
+                                    _l3_pr_ov = (eval_result.get("phase_results") or {}).get("l3", {})
+                                    _l3_tr_ov = _l3_pr_ov.get("trace", {})
+                                    _bos_d_ov = abs(_l3_tr_ov.get("bos_distance_pct", 99))
+
+                                    _ov["examples"] = _ov["examples"][-9:] + [{
+                                        "ts": datetime.now(timezone.utc).isoformat(),
+                                        "symbol": symbol,
+                                        "tf": effective_tf,
+                                        "model": eval_result.get("model") or s.get("model"),
+                                        "direction": _dir_ov,
+                                        "scce_phase": _scce_phase_ov,
+                                        "override_tol": _override_tol,
+                                        "bos_dist_pct": round(_bos_d_ov, 4),
+                                        "strict_result": "fail",
+                                        "override_result": "pass" if _shadow_pass else "fail",
+                                        "override_fc": _shadow_fc if not _shadow_pass else None,
+                                        "score": _shadow_eval.get("score", 0),
+                                        "rr": round(_shadow_eval.get("rr", 0), 2),
+                                    }]
+                                    logger.debug(
+                                        "[L3-OVERRIDE-SHADOW] %s %s %s phase=%s "
+                                        "bos_dist=%.4f%% shadow=%s",
+                                        symbol, effective_tf,
+                                        eval_result.get("model") or s.get("model"),
+                                        _scce_phase_ov, _bos_d_ov,
+                                        "PASS" if _shadow_pass else "FAIL",
+                                    )
+                                elif eval_result.get("pass"):
+                                    # Strict eval already passed — no override needed
+                                    _ov["no_override_needed"] += 1
+                        except Exception as _ov_err:
+                            logger.debug("[L3-OVERRIDE-SHADOW] error: %s", _ov_err)
                     eval_result["source_tf"] = tf
                     eval_result["effective_tf"] = effective_tf
                     if effective_tf != tf:

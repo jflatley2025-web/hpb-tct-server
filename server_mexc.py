@@ -3847,12 +3847,13 @@ async def schematics_5b_scce():
         from scce_engine import get_scce, SCCE_ENABLED
         snapshot = get_scce().get_snapshot() if SCCE_ENABLED else {"enabled": False}
 
-        # Merge L3 cross-telemetry from trader health
+        # Merge L3 cross-telemetry and override shadow data from trader health
         try:
             from schematics_5b_trader import get_5b_trader
             _h = get_5b_trader()._live_health
             snapshot["scce_l3_cross"] = _h.get("scce_l3_cross", {})
             snapshot["l3_near_miss"] = _h.get("l3_near_miss", {})
+            snapshot["l3_override"] = _h.get("l3_override", {})
         except Exception:
             pass
 
