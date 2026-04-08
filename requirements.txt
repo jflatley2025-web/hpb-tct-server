@@ -3,10 +3,10 @@
 # Unified multi-phase pipeline (RCM + MSCE + RIG + NCR + DEM + QSA)
 # ───────────────────────────────────────────────
 
-# Core packaging
+# Core packaging (do NOT pin pip — Render manages its own pip version;
+# pinning pip causes hash mismatches on Render's build cache)
 setuptools==70.0.0
 wheel==0.43.0
-pip==25.1.1
 
 # ─── Core Framework ───
 fastapi==0.95.2
