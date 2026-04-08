@@ -172,13 +172,17 @@ class MarketStructureEngine:
     # ========================================================
 
     def detect_l3_structure(self, df: pd.DataFrame, direction: str,
-                            relaxed_bos_tolerance: float = 0.0) -> bool:
+                            relaxed_bos_tolerance: float = 0.0,
+                            skip_compression: bool = False) -> bool:
         """Detect L3 execution structure (compression + micro-BOS).
 
         Args:
             relaxed_bos_tolerance: When > 0, accept micro-BOS if close is
                 within this fraction of the breakout level (e.g. 0.0015 = 0.15%).
                 Only used for ETH-only live override. Default 0.0 = strict.
+            skip_compression: When True, treat compression as always-passed.
+                SHADOW MODE ONLY — used for SCCE-gated compression override
+                experiment. Default False = strict (production behavior).
 
         Also populates self.last_l3_trace for diagnostic instrumentation.
         """
@@ -188,6 +192,7 @@ class MarketStructureEngine:
             "compression_count": 0,
             "compression_required": 3,
             "compression_pass": False,
+            "compression_skipped": skip_compression,
             "micro_bos_pass": False,
             "micro_bos_relaxed_pass": False,
             "bos_distance_pct": 0.0,
@@ -225,7 +230,7 @@ class MarketStructureEngine:
             bos_dist = (prev_low - closes[-1]) / prev_low if prev_low > 0 else 0
             relaxed_pass = closes[-1] <= prev_low * (1 + relaxed_bos_tolerance) if relaxed_bos_tolerance > 0 else False
 
-        comp_pass = compression >= 3
+        comp_pass = True if skip_compression else (compression >= 3)
         self.last_l3_trace["compression_count"] = compression
         self.last_l3_trace["compression_pass"] = comp_pass
         self.last_l3_trace["micro_bos_pass"] = broke_structure

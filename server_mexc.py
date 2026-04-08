@@ -3854,6 +3854,7 @@ async def schematics_5b_scce():
             snapshot["scce_l3_cross"] = _h.get("scce_l3_cross", {})
             snapshot["l3_near_miss"] = _h.get("l3_near_miss", {})
             snapshot["l3_override"] = _h.get("l3_override", {})
+            snapshot["l3_compression_override"] = _h.get("l3_compression_override", {})
         except Exception:
             pass
 

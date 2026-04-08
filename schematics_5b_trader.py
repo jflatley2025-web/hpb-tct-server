@@ -132,6 +132,14 @@ SCCE_L3_OVERRIDE_SHADOW = os.getenv("SCCE_L3_OVERRIDE_SHADOW", "true").lower() =
 _SCCE_L3_TOL_QUALIFIED = 0.0025   # tolerance when SCCE phase == "qualified"
 _SCCE_L3_TOL_BOS_PENDING = 0.0015 # tolerance when SCCE phase == "bos_pending"
 
+# ── SCCE-gated L3 COMPRESSION override (shadow mode) ─────────────
+# Report BE showed tolerance relaxation has zero effect because the real
+# blocker is COMPRESSION (3 higher-lows / lower-highs), not micro-BOS
+# distance.  This flag enables a shadow eval that skips compression
+# entirely when SCCE confirms the structural BOS exists.
+# Does NOT change live behaviour — shadow telemetry only.
+SCCE_L3_COMP_OVERRIDE_SHADOW = os.getenv("SCCE_L3_COMP_OVERRIDE_SHADOW", "true").lower() == "true"
+
 # ── Staged pair expansion plan ───────────────────────────────────
 # Phase 1 candidates are NOT active. They are queued for rollout
 # after ETH-only live mode proves stable (readiness gate).
@@ -1392,6 +1400,24 @@ class Schematics5BTrader:
                     "bos_pending": {"seen": 0, "would_pass": 0, "would_fail": 0},
                 },
                 "examples": [],  # last 10: {symbol, tf, model, scce_phase, bos_dist_pct, override_used, result}
+            },
+            # SCCE-gated L3 COMPRESSION override shadow telemetry
+            # Bypasses compression requirement for SCCE-qualified candidates.
+            # Runs full downstream funnel to track would_be_qualified.
+            "l3_compression_override": {
+                "shadow_mode": True,
+                "enabled": SCCE_L3_COMP_OVERRIDE_SHADOW,
+                "total_seen": 0,
+                "scce_match": 0,
+                "override_applied": 0,
+                "would_pass_l3": 0,
+                "would_fail_l3": 0,
+                "would_be_qualified": 0,       # pass L3 AND all downstream gates
+                "would_fail_downstream": 0,    # pass L3 but fail later gate
+                "no_override_needed": 0,
+                "next_blocker": {},             # {gate: count} after L3 pass
+                "by_symbol": {},
+                "examples": [],  # last 10
             },
         }
         # ── Per-symbol execution funnel (since boot) ─────────────
@@ -3457,6 +3483,127 @@ class Schematics5BTrader:
                                     _ov["no_override_needed"] += 1
                         except Exception as _ov_err:
                             logger.debug("[L3-OVERRIDE-SHADOW] error: %s", _ov_err)
+
+                    # ── SCCE-gated L3 COMPRESSION override (shadow) ────
+                    # Separate experiment: skip compression entirely when
+                    # SCCE confirms structural BOS.  Measures whether
+                    # compression is the true bottleneck to tradeable setups.
+                    if SCCE_L3_COMP_OVERRIDE_SHADOW and s.get("is_confirmed") and not eval_result.get("pass"):
+                        try:
+                            from scce_engine import get_scce, SCCE_ENABLED
+                            if SCCE_ENABLED:
+                                _co = self._live_health["l3_compression_override"]
+                                _co["total_seen"] += 1
+
+                                # SCCE candidate lookup (same logic as tolerance override)
+                                _rng_co = s.get("range") or {}
+                                _rh_co = _rng_co.get("high")
+                                _rl_co = _rng_co.get("low")
+                                _dir_co = s.get("direction", "")
+                                _fam_co = (
+                                    "accumulation" if _dir_co == "bullish"
+                                    else "distribution" if _dir_co == "bearish"
+                                    else None
+                                )
+                                _co_phase = None
+                                if _fam_co and _rh_co and _rl_co:
+                                    for _cc in get_scce().get_active_candidates(symbol):
+                                        if _cc.get("stale") or not _cc.get("range_valid"):
+                                            continue
+                                        if _cc.get("model_family") != _fam_co:
+                                            continue
+                                        _cc_rh = _cc.get("range_high")
+                                        _cc_rl = _cc.get("range_low")
+                                        if (
+                                            _cc_rh and _cc_rl
+                                            and abs(_cc_rh - _rh_co) / max(_rh_co, 1) < 0.02
+                                            and abs(_cc_rl - _rl_co) / max(_rl_co, 1) < 0.02
+                                        ):
+                                            _co_phase = _cc.get("phase", "seed")
+                                            break
+
+                                if _co_phase == "qualified":
+                                    _co["scce_match"] += 1
+                                    _co["override_applied"] += 1
+
+                                    # Shadow eval with compression SKIPPED + relaxed BOS
+                                    _co_eval = self._get_evaluator(mode).evaluate_schematic(
+                                        s, htf_bias, current_price,
+                                        total_candles=len(eff_df),
+                                        max_stale_candles=_MAX_STALE.get(effective_tf, 5),
+                                        candle_df=eff_df,
+                                        l3_relaxed_bos_tolerance=_SCCE_L3_TOL_QUALIFIED,
+                                        l3_skip_compression=True,
+                                    )
+                                    _co_pass = _co_eval.get("pass", False)
+                                    _co_fc = _co_eval.get("failure_context", "unknown")
+                                    _co_score = _co_eval.get("score", 0)
+                                    _co_rr = round(_co_eval.get("rr", 0), 2)
+
+                                    if _co_pass:
+                                        _co["would_pass_l3"] += 1
+                                        _co["would_be_qualified"] += 1
+                                    else:
+                                        # Check if L3 itself still failed (data issue)
+                                        # vs passed L3 but failed downstream
+                                        _co_l3_pr = (_co_eval.get("phase_results") or {}).get("l3", {})
+                                        if not _co_l3_pr.get("passed", False):
+                                            _co["would_fail_l3"] += 1
+                                        else:
+                                            # Passed L3 but failed downstream gate
+                                            _co["would_pass_l3"] += 1
+                                            _co["would_fail_downstream"] += 1
+                                            _co["next_blocker"][_co_fc] = _co["next_blocker"].get(_co_fc, 0) + 1
+
+                                    # Per-symbol tracking
+                                    _sym_co = _co["by_symbol"].setdefault(symbol, {
+                                        "override_applied": 0, "would_pass_l3": 0,
+                                        "would_be_qualified": 0, "dominant_blocker": {},
+                                    })
+                                    _sym_co["override_applied"] += 1
+                                    if _co_pass or (_co_l3_pr if not _co_pass else {}).get("passed", False):
+                                        _sym_co["would_pass_l3"] += 1
+                                    if _co_pass:
+                                        _sym_co["would_be_qualified"] += 1
+                                    elif not _co_pass and (_co_eval.get("phase_results") or {}).get("l3", {}).get("passed"):
+                                        _sym_co["dominant_blocker"][_co_fc] = _sym_co["dominant_blocker"].get(_co_fc, 0) + 1
+
+                                    # Original L3 trace for context
+                                    _l3_pr_co = (eval_result.get("phase_results") or {}).get("l3", {})
+                                    _l3_tr_co = _l3_pr_co.get("trace", {})
+
+                                    _co["examples"] = _co["examples"][-9:] + [{
+                                        "ts": datetime.now(timezone.utc).isoformat(),
+                                        "symbol": symbol,
+                                        "tf": effective_tf,
+                                        "model": eval_result.get("model") or s.get("model"),
+                                        "direction": _dir_co,
+                                        "scce_phase": _co_phase,
+                                        "orig_compression_count": _l3_tr_co.get("compression_count", 0),
+                                        "orig_compression_pass": _l3_tr_co.get("compression_pass", False),
+                                        "orig_bos_pass": _l3_tr_co.get("micro_bos_pass", False),
+                                        "shadow_l3_pass": (_co_eval.get("phase_results") or {}).get("l3", {}).get("passed", False),
+                                        "shadow_final_pass": _co_pass,
+                                        "shadow_fc": _co_fc if not _co_pass else None,
+                                        "score": _co_score,
+                                        "rr": _co_rr,
+                                    }]
+                                    logger.debug(
+                                        "[L3-COMP-OVERRIDE-SHADOW] %s %s %s comp=%d "
+                                        "bos=%s shadow_l3=%s final=%s fc=%s score=%d rr=%.2f",
+                                        symbol, effective_tf,
+                                        eval_result.get("model") or s.get("model"),
+                                        _l3_tr_co.get("compression_count", 0),
+                                        _l3_tr_co.get("micro_bos_pass"),
+                                        (_co_eval.get("phase_results") or {}).get("l3", {}).get("passed"),
+                                        _co_pass, _co_fc if not _co_pass else "n/a",
+                                        _co_score, _co_rr,
+                                    )
+                                elif eval_result.get("pass"):
+                                    _co["no_override_needed"] += 1
+                        except Exception as _co_err:
+                            logger.debug("[L3-COMP-OVERRIDE-SHADOW] error: %s", _co_err)
+
                     eval_result["source_tf"] = tf
                     eval_result["effective_tf"] = effective_tf
                     if effective_tf != tf:

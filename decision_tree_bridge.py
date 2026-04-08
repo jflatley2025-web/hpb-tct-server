@@ -800,13 +800,16 @@ def _compute_rig_payload(range_high: float, range_low: float,
 
 def _detect_l3_structure(df: pd.DataFrame, direction: str,
                          tap3_idx: Optional[int] = None,
-                         relaxed_bos_tolerance: float = 0.0) -> bool:
+                         relaxed_bos_tolerance: float = 0.0,
+                         skip_compression: bool = False) -> bool:
     """Detect L3 execution structure (compression + micro-BOS), anchored to Tap3.
 
     Args:
         relaxed_bos_tolerance: Passed to MSE for relaxed micro-BOS check.
             0.0 = strict (default/backtest). >0 = allow close within tolerance
             of breakout level (ETH-only live override).
+        skip_compression: Passed to MSE. When True, compression check is
+            bypassed. SHADOW MODE ONLY — for SCCE-gated experiments.
     """
     if df is None or len(df) < 5:
         return False
@@ -819,7 +822,8 @@ def _detect_l3_structure(df: pd.DataFrame, direction: str,
     from decision_trees.market_structure_engine import MarketStructureEngine
     mse = MarketStructureEngine()
     result = mse.detect_l3_structure(df_post, direction,
-                                      relaxed_bos_tolerance=relaxed_bos_tolerance)
+                                      relaxed_bos_tolerance=relaxed_bos_tolerance,
+                                      skip_compression=skip_compression)
     # Store trace for instrumentation (thread-local via function attribute)
     _detect_l3_structure._last_trace = getattr(mse, "last_l3_trace", None)
     return result
@@ -1415,6 +1419,7 @@ def compute_composite_score_v2(
     current_price: float,
     active_trade: Optional[Dict] = None,
     l3_relaxed_bos_tolerance: float = 0.0,
+    l3_skip_compression: bool = False,
 ) -> Dict:
     """Run the 9-phase decision pipeline on a schematic.
 
@@ -1661,7 +1666,8 @@ def compute_composite_score_v2(
     # Pass tap3_idx so L3 is only confirmed by price action that formed after Tap3,
     # not by an older micro-BOS that predates the current schematic.
     l3_valid = _detect_l3_structure(df, direction, tap3.get("idx"),
-                                     relaxed_bos_tolerance=l3_relaxed_bos_tolerance)
+                                     relaxed_bos_tolerance=l3_relaxed_bos_tolerance,
+                                     skip_compression=l3_skip_compression)
     _l3_trace = getattr(_detect_l3_structure, "_last_trace", None) or {}
 
     if not l3_valid:
@@ -1844,7 +1850,8 @@ class DecisionTreeEvaluator:
     def evaluate_schematic(self, schematic: Dict, htf_bias: str, current_price: float,
                            total_candles: int = 200, max_stale_candles: int = 190,
                            candle_df: Optional[pd.DataFrame] = None,
-                           l3_relaxed_bos_tolerance: float = 0.0) -> Dict:
+                           l3_relaxed_bos_tolerance: float = 0.0,
+                           l3_skip_compression: bool = False) -> Dict:
         """
         Evaluate a schematic using the 9-phase v2 pipeline.
 
@@ -1902,6 +1909,7 @@ class DecisionTreeEvaluator:
             return compute_composite_score_v2(
                 candle_df, schematic, htf_bias, current_price,
                 l3_relaxed_bos_tolerance=l3_relaxed_bos_tolerance,
+                l3_skip_compression=l3_skip_compression,
             )
 
         # Fallback: no candle data — simplified scoring
