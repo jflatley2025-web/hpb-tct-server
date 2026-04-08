@@ -2942,6 +2942,15 @@ class Schematics5BTrader:
         }
         h["shadow_candidates"] = list(self._shadow_candidates)
         h["neutral_htf"] = dict(self._neutral_htf)
+        # SCCE snapshot
+        try:
+            from scce_engine import get_scce, SCCE_ENABLED
+            if SCCE_ENABLED:
+                h["scce"] = get_scce().get_snapshot()
+            else:
+                h["scce"] = {"enabled": False}
+        except Exception:
+            h["scce"] = {"enabled": False, "error": "import_failed"}
 
         # ETH HTF/warmup diagnostic
         h["eth_context_debug"] = {
@@ -3227,6 +3236,18 @@ class Schematics5BTrader:
                     updated.append(s)
                 all_schematics_by_tf[tf] = updated
             logger.info(f"[5B] Phase A.5 (LTF BOS confirm) done ({time.time()-_t0:.1f}s)")
+
+            # ── SCCE shadow update ────────────────────────────────
+            try:
+                from scce_engine import get_scce, SCCE_ENABLED
+                if SCCE_ENABLED:
+                    _scce = get_scce()
+                    for _scce_tf in active_mtf_tfs:
+                        _scce_sch = all_schematics_by_tf.get(_scce_tf, [])
+                        if _scce_sch:
+                            _scce.update_from_schematics(symbol, _scce_tf, _scce_sch, current_price)
+            except Exception as _scce_err:
+                logger.debug("[SCCE] Shadow update error: %s", _scce_err)
 
             # Phase B: evaluate with HTF cascade (lowest → highest TF walk)
             logger.info(f"[5B] Phase A (detection) done ({time.time()-_t0:.1f}s)")

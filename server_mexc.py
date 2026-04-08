@@ -3839,6 +3839,19 @@ async def get_version():
     return get_version_info()
 
 
+@app.get("/api/schematics-5b-trader/scce")
+async def schematics_5b_scce():
+    """Return SCCE structural context state."""
+    try:
+        from scce_engine import get_scce, SCCE_ENABLED
+        if SCCE_ENABLED:
+            import json
+            return json.loads(json.dumps(get_scce().get_snapshot(), default=str))
+        return {"enabled": False}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.get("/api/schematics-5b-trader/scan-perf")
 async def schematics_5b_scan_perf():
     """Return scan performance: last completed cycle + current trace."""
