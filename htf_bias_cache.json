@@ -1,50 +1,6 @@
 {
   "BTCUSDT": {
     "bias": "neutral",
-    "expiry": 1775608463.5078666
-  },
-  "ETHUSDT": {
-    "bias": "bearish",
-    "expiry": 1775674661.3643682
-  },
-  "SOLUSDT": {
-    "bias": "bearish",
-    "expiry": 1775674701.9343164
-  },
-  "BCHUSDT": {
-    "bias": "bearish",
-    "expiry": 1775693403.7671816
-  },
-  "WIFUSDT": {
-    "bias": "neutral",
-    "expiry": 1775608099.4165518
-  },
-  "DOGEUSDT": {
-    "bias": "neutral",
-    "expiry": 1775608131.6603339
-  },
-  "HBARUSDT": {
-    "bias": "bearish",
-    "expiry": 1775674835.2509556
-  },
-  "FETUSDT": {
-    "bias": "bullish",
-    "expiry": 1775674873.8684204
-  },
-  "XMRUSDT": {
-    "bias": "bearish",
-    "expiry": 1775674917.8525486
-  },
-  "FARTCOINUSDT": {
-    "bias": "neutral",
-    "expiry": 1775610307.2180042
-  },
-  "PEPEUSDT": {
-    "bias": "neutral",
-    "expiry": 1775607819.651457
-  },
-  "XRPUSDT": {
-    "bias": "bearish",
-    "expiry": 1775651523.0490162
+    "expiry": 1775663139.4397037
   }
 }
