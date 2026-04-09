@@ -146,7 +146,7 @@ SCCE_L3_COMP_OVERRIDE_SHADOW = os.getenv("SCCE_L3_COMP_OVERRIDE_SHADOW", "true")
 # have tap3 > 16 days old on 4h TF.
 TAP3_EXPIRY_TELEMETRY = os.getenv("TAP3_EXPIRY_TELEMETRY", "true").lower() == "true"
 TAP3_EXPIRY_SHADOW_FILTER = os.getenv("TAP3_EXPIRY_SHADOW_FILTER", "true").lower() == "true"
-TAP3_EXPIRY_LIVE_FILTER = os.getenv("TAP3_EXPIRY_LIVE_FILTER", "false").lower() == "true"
+TAP3_EXPIRY_LIVE_FILTER = os.getenv("TAP3_EXPIRY_LIVE_FILTER", "true").lower() == "true"
 _TAP3_EXPIRY_BARS = {
     "15m": 96,   # 24 hours
     "30m": 48,   # 24 hours
@@ -3614,11 +3614,18 @@ class Schematics5BTrader:
                                 "expiry_threshold": _expiry_thresh,
                             })
 
-                    # Shadow filter: skip stale schematics pre-L3 (OFF by default)
+                    # Tap3 expiry live filter: skip stale schematics before L3
+                    # Report CF: 213/213 expired → failed L3 (100%), 80.4% load reduction
                     if TAP3_EXPIRY_LIVE_FILTER and _tap3_expired and s.get("is_confirmed"):
-                        # LIVE FILTER: skip evaluation entirely for stale schematics
-                        # Currently OFF (TAP3_EXPIRY_LIVE_FILTER=false)
+                        _te_ref2 = self._live_health["tap3_expiry"]
+                        _te_ref2["filtered_live"] = _te_ref2.get("filtered_live", 0) + 1
                         continue
+
+                    # Track fresh schematics that proceed to L3
+                    if TAP3_EXPIRY_TELEMETRY and s.get("is_confirmed"):
+                        self._live_health["tap3_expiry"]["passed_to_l3"] = (
+                            self._live_health["tap3_expiry"].get("passed_to_l3", 0) + 1
+                        )
 
                     # ETH-only L3 relaxed BOS: pass tolerance only for ETH in eth_only mode
                     _l3_tol = (
