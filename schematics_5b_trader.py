@@ -140,6 +140,25 @@ _SCCE_L3_TOL_BOS_PENDING = 0.0015 # tolerance when SCCE phase == "bos_pending"
 # Does NOT change live behaviour — shadow telemetry only.
 SCCE_L3_COMP_OVERRIDE_SHADOW = os.getenv("SCCE_L3_COMP_OVERRIDE_SHADOW", "true").lower() == "true"
 
+# ── Tap3 expiry filtering ─────────────────────────────────────────
+# Schematics with a tap3 older than the threshold for its TF are
+# considered stale.  Reports BG/BH showed ~57% of evaluated schematics
+# have tap3 > 16 days old on 4h TF.
+TAP3_EXPIRY_TELEMETRY = os.getenv("TAP3_EXPIRY_TELEMETRY", "true").lower() == "true"
+TAP3_EXPIRY_SHADOW_FILTER = os.getenv("TAP3_EXPIRY_SHADOW_FILTER", "true").lower() == "true"
+TAP3_EXPIRY_LIVE_FILTER = os.getenv("TAP3_EXPIRY_LIVE_FILTER", "false").lower() == "true"
+_TAP3_EXPIRY_BARS = {
+    "15m": 96,   # 24 hours
+    "30m": 48,   # 24 hours
+    "1h": 48,    # 48 hours
+    "4h": 36,    # 6 days
+}
+
+# ── PO3 shadow tagging ────────────────────────────────────────────
+# Run PO3 detection alongside TCT and annotate overlap / confluence.
+# Dashboard + telemetry only — never gates entries.
+PO3_SHADOW_TAGGING = os.getenv("PO3_SHADOW_TAGGING", "true").lower() == "true"
+
 # ── Staged pair expansion plan ───────────────────────────────────
 # Phase 1 candidates are NOT active. They are queued for rollout
 # after ETH-only live mode proves stable (readiness gate).
@@ -1454,6 +1473,35 @@ class Schematics5BTrader:
                 "beyond_1_5_pct": 0,
                 "closest_setups": [],  # top 5 closest to breakout, refreshed each cycle
                 "alert_sent_keys": [],  # dedup: don't re-alert same setup
+            },
+            # PO3 confluence telemetry — shadow tagging
+            "po3_confluence": {
+                "po3_detected_total": 0,
+                "tct_confirmed_total": 0,
+                "po3_tct_overlap_total": 0,
+                "po3_unique_total": 0,
+                "overlap_rate_pct": 0.0,
+                "by_symbol": {},
+                "by_phase": {
+                    "range": 0,
+                    "manipulation": 0,
+                    "manipulation_complete": 0,
+                    "expansion": 0,
+                },
+                "examples": [],
+            },
+            # Tap3 expiry stats
+            "tap3_expiry": {
+                "evaluated_total": 0,
+                "fresh_total": 0,
+                "expired_total": 0,
+                "expired_pct": 0.0,
+                "l3_failures_from_expired": 0,
+                "l3_failures_from_fresh": 0,
+                "would_skip_pre_l3": 0,
+                "l3_load_reduction_pct": 0.0,
+                "by_timeframe": {},
+                "examples": [],
             },
         }
         # ── Per-symbol execution funnel (since boot) ─────────────
@@ -3352,6 +3400,128 @@ class Schematics5BTrader:
             except Exception as _scce_err:
                 logger.debug("[SCCE] Shadow update error: %s", _scce_err)
 
+            # ── PO3 shadow tagging ────────────────────────────────
+            # Run PO3 detection on the same candle data and annotate
+            # each confirmed TCT schematic with PO3 confluence info.
+            # Telemetry only — never affects entry decisions.
+            _po3_by_tf: Dict[str, List[Dict]] = {}
+            if PO3_SHADOW_TAGGING:
+                try:
+                    from po3_schematics import detect_po3_schematics as _detect_po3
+                    for _po3_tf in active_mtf_tfs:
+                        _po3_df = mtf_dfs.get(_po3_tf)
+                        if _po3_df is not None and len(_po3_df) >= 50:
+                            _po3_result = _detect_po3(_po3_df)
+                            _po3_all = (
+                                _po3_result.get("bullish_po3", [])
+                                + _po3_result.get("bearish_po3", [])
+                            )
+                            _po3_by_tf[_po3_tf] = _po3_all
+                        else:
+                            _po3_by_tf[_po3_tf] = []
+                except Exception as _po3_err:
+                    logger.debug("[PO3-SHADOW] Detection error: %s", _po3_err)
+
+                # Cross-reference PO3 with confirmed TCT schematics
+                _pc = self._live_health["po3_confluence"]
+                _po3_total_this_cycle = sum(len(v) for v in _po3_by_tf.values())
+                _pc["po3_detected_total"] += _po3_total_this_cycle
+
+                for _po3_tf in active_mtf_tfs:
+                    _tct_schematics = all_schematics_by_tf.get(_po3_tf, [])
+                    _po3_list = _po3_by_tf.get(_po3_tf, [])
+
+                    for _tct_s in _tct_schematics:
+                        if not isinstance(_tct_s, dict) or not _tct_s.get("is_confirmed"):
+                            continue
+                        _pc["tct_confirmed_total"] += 1
+                        _tct_dir = _tct_s.get("direction", "")
+                        _tct_rng = _tct_s.get("range") or {}
+                        _tct_rh = _tct_rng.get("high", 0)
+                        _tct_rl = _tct_rng.get("low", 0)
+                        _tct_range_size = _tct_rh - _tct_rl if _tct_rh and _tct_rl else 0
+
+                        # Find best PO3 match
+                        _best_po3 = None
+                        _best_overlap = 0.0
+                        for _po3 in _po3_list:
+                            _po3_dir = _po3.get("direction", "")
+                            _po3_rng = _po3.get("range") or {}
+                            _po3_rh = _po3_rng.get("high", 0)
+                            _po3_rl = _po3_rng.get("low", 0)
+
+                            # Direction must align
+                            if _po3_dir != _tct_dir:
+                                continue
+
+                            # Range overlap check
+                            _overlap_high = min(_tct_rh, _po3_rh)
+                            _overlap_low = max(_tct_rl, _po3_rl)
+                            _overlap = max(0, _overlap_high - _overlap_low)
+                            _overlap_pct = _overlap / max(_tct_range_size, 1e-8) * 100
+
+                            if _overlap_pct > 20 and _overlap_pct > _best_overlap:
+                                _best_po3 = _po3
+                                _best_overlap = _overlap_pct
+
+                        # Tag the schematic (shadow annotation)
+                        if _best_po3:
+                            _po3_phase = _best_po3.get("phase", "unknown")
+                            _tct_s["po3_shadow"] = {
+                                "po3_match": True,
+                                "po3_phase": _po3_phase,
+                                "po3_quality": _best_po3.get("quality_score"),
+                                "po3_direction_aligned": True,
+                                "po3_range_overlap_pct": round(_best_overlap, 1),
+                            }
+                            _pc["po3_tct_overlap_total"] += 1
+                            _pc["by_phase"][_po3_phase] = _pc["by_phase"].get(_po3_phase, 0) + 1
+
+                            # Per-symbol
+                            _sym_pc = _pc["by_symbol"].setdefault(symbol, {
+                                "po3_detected": 0, "tct_confirmed": 0,
+                                "overlap": 0, "dominant_phase": {},
+                            })
+                            _sym_pc["overlap"] += 1
+                            _sym_pc["dominant_phase"][_po3_phase] = _sym_pc["dominant_phase"].get(_po3_phase, 0) + 1
+
+                            # Examples (last 10)
+                            if len(_pc["examples"]) < 10:
+                                _pc["examples"].append({
+                                    "ts": datetime.now(timezone.utc).isoformat(),
+                                    "symbol": symbol, "tf": _po3_tf,
+                                    "model": _tct_s.get("model"),
+                                    "direction": _tct_dir,
+                                    "po3_phase": _po3_phase,
+                                    "po3_quality": _best_po3.get("quality_score"),
+                                    "overlap_pct": round(_best_overlap, 1),
+                                })
+                        else:
+                            _tct_s["po3_shadow"] = {
+                                "po3_match": False,
+                                "po3_phase": None,
+                                "po3_quality": None,
+                                "po3_direction_aligned": None,
+                                "po3_range_overlap_pct": None,
+                            }
+
+                    # Per-symbol counters
+                    _sym_pc = _pc["by_symbol"].setdefault(symbol, {
+                        "po3_detected": 0, "tct_confirmed": 0,
+                        "overlap": 0, "dominant_phase": {},
+                    })
+                    _sym_pc["po3_detected"] += len(_po3_list)
+                    _sym_pc["tct_confirmed"] += sum(
+                        1 for s in _tct_schematics
+                        if isinstance(s, dict) and s.get("is_confirmed")
+                    )
+
+                # Compute unique PO3 (detected but no TCT overlap)
+                _pc["po3_unique_total"] = _pc["po3_detected_total"] - _pc["po3_tct_overlap_total"]
+                _pc["overlap_rate_pct"] = round(
+                    _pc["po3_tct_overlap_total"] / max(_pc["tct_confirmed_total"], 1) * 100, 1
+                )
+
             # Phase B: evaluate with HTF cascade (lowest → highest TF walk)
             logger.info(f"[5B] Phase A (detection) done ({time.time()-_t0:.1f}s)")
             best_setup: Optional[Tuple] = None
@@ -3392,6 +3562,64 @@ class Schematics5BTrader:
                             htf_upgraded_count += 1
 
                     eff_df = mtf_dfs.get(effective_tf) if mtf_dfs.get(effective_tf) is not None else df
+
+                    # ── Tap3 expiry telemetry ──────────────────────────
+                    _tap3_expired = False
+                    if TAP3_EXPIRY_TELEMETRY and s.get("is_confirmed"):
+                        _te = self._live_health["tap3_expiry"]
+                        _tap3_s = s.get("tap3") or {}
+                        _tap3_idx_s = _tap3_s.get("idx")
+                        _df_len_s = len(eff_df) if eff_df is not None else 0
+                        _expiry_thresh = _TAP3_EXPIRY_BARS.get(effective_tf, 999)
+
+                        if _tap3_idx_s is not None and _df_len_s > 0:
+                            _tap3_age = _df_len_s - _tap3_idx_s
+                            _tap3_expired = _tap3_age > _expiry_thresh
+                        else:
+                            _tap3_age = None
+                            _tap3_expired = False
+
+                        _te["evaluated_total"] += 1
+                        if _tap3_expired:
+                            _te["expired_total"] += 1
+                            _te["would_skip_pre_l3"] += 1
+                        else:
+                            _te["fresh_total"] += 1
+                        _te["expired_pct"] = round(
+                            _te["expired_total"] / max(_te["evaluated_total"], 1) * 100, 1
+                        )
+                        _te["l3_load_reduction_pct"] = round(
+                            _te["would_skip_pre_l3"] / max(_te["evaluated_total"], 1) * 100, 1
+                        )
+
+                        # Per-TF
+                        _tf_te = _te["by_timeframe"].setdefault(effective_tf, {
+                            "evaluated": 0, "fresh": 0, "expired": 0,
+                        })
+                        _tf_te["evaluated"] += 1
+                        if _tap3_expired:
+                            _tf_te["expired"] += 1
+                        else:
+                            _tf_te["fresh"] += 1
+
+                        # Examples (last 10)
+                        if len(_te["examples"]) < 10 and _tap3_age is not None:
+                            _te["examples"].append({
+                                "ts": datetime.now(timezone.utc).isoformat(),
+                                "symbol": symbol, "tf": effective_tf,
+                                "model": s.get("model"),
+                                "tap3_idx": _tap3_idx_s,
+                                "tap3_age_bars": _tap3_age,
+                                "expired": _tap3_expired,
+                                "expiry_threshold": _expiry_thresh,
+                            })
+
+                    # Shadow filter: skip stale schematics pre-L3 (OFF by default)
+                    if TAP3_EXPIRY_LIVE_FILTER and _tap3_expired and s.get("is_confirmed"):
+                        # LIVE FILTER: skip evaluation entirely for stale schematics
+                        # Currently OFF (TAP3_EXPIRY_LIVE_FILTER=false)
+                        continue
+
                     # ETH-only L3 relaxed BOS: pass tolerance only for ETH in eth_only mode
                     _l3_tol = (
                         L3_RELAXED_BOS_TOLERANCE_PCT
@@ -3665,6 +3893,12 @@ class Schematics5BTrader:
                                 _aa["l3_pass"] += 1
                             else:
                                 _aa["l3_fail"] += 1
+                                # Track L3 failures by tap3 freshness
+                                _te_ref = self._live_health["tap3_expiry"]
+                                if _tap3_expired:
+                                    _te_ref["l3_failures_from_expired"] += 1
+                                else:
+                                    _te_ref["l3_failures_from_fresh"] += 1
 
                             # Failure mode classification
                             if _first_failed == "insufficient_candles":
