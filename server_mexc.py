@@ -3906,6 +3906,16 @@ async def schematics_5b_live_health():
         import traceback
         return {"error": str(e), "traceback": traceback.format_exc()}
 
+@app.get("/api/ccs/intelligence")
+async def ccs_intelligence(symbol: Optional[str] = None, date: Optional[str] = None):
+    """CCS v2 read-only intelligence — structural context metrics."""
+    try:
+        from ccs_intelligence import compute_ccs_metrics
+        return compute_ccs_metrics(symbol=symbol, date_str=date)
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.get("/api/price")
 async def live_price(symbol: Optional[str] = None):
     sym = resolve_symbol(symbol)

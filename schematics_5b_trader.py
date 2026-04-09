@@ -3128,6 +3128,12 @@ class Schematics5BTrader:
             "queued_pairs": [p["source_name"] for p in PAIR_ROLLOUT_PLAN.get("phase_1_candidates", [])],
             "expansion_ready": False,  # gate not yet evaluated live
         }
+        # CCS v2 intelligence summary (read-only, non-critical)
+        try:
+            from ccs_intelligence import get_health_summary
+            h["ccs_intelligence"] = get_health_summary()
+        except Exception:
+            h["ccs_intelligence"] = None
         return h
 
     def _load_htf_cache(self) -> None:

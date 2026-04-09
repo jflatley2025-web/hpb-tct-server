@@ -48,6 +48,8 @@ services:
         value: https://api.moondev.com
       - key: CCS_ENABLED
         value: "true"
+      - key: CCS_INTELLIGENCE_ENABLED
+        value: "false"
 
     autoDeploy: true
 
