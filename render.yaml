@@ -49,7 +49,7 @@ services:
       - key: CCS_ENABLED
         value: "true"
       - key: CCS_INTELLIGENCE_ENABLED
-        value: "false"
+        value: "true"
 
     autoDeploy: true
 
