@@ -3896,11 +3896,15 @@ async def schematics_5b_scan_debug():
 async def schematics_5b_live_health():
     """Return live trading health telemetry for dashboard."""
     try:
+        import json as _json
         from schematics_5b_trader import get_5b_trader
         trader = get_5b_trader()
-        return trader.get_live_health()
+        raw = trader.get_live_health()
+        # Safe serialization — convert numpy/non-JSON types
+        return _json.loads(_json.dumps(raw, default=str))
     except Exception as e:
-        return {"error": str(e)}
+        import traceback
+        return {"error": str(e), "traceback": traceback.format_exc()}
 
 @app.get("/api/price")
 async def live_price(symbol: Optional[str] = None):
@@ -16996,8 +17000,11 @@ setInterval(loadScanPerf, 15000);
 async function loadLiveHealth() {
   try {
     const h = await fetchJSON('/api/schematics-5b-trader/live-health');
+    if (h.error) throw new Error(h.error);
     const el = document.getElementById('liveHealthDetails');
     if (el) {
+      el._lastOk = true;
+      el._lastOkAt = Date.now();
       const sigColor = h.signals_seen > 0 ? '#00e676' : '#ff4444';
       const rigColor = h.after_rig > 0 ? '#00e676' : '#ff4444';
       const ordColor = h.orders_submitted > 0 ? '#00e676' : '#ff4444';
@@ -17069,7 +17076,15 @@ async function loadLiveHealth() {
     }
   } catch (e) {
     const el = document.getElementById('liveHealthDetails');
-    if (el) el.textContent = 'Error loading live health';
+    if (el && !el._lastOk) {
+      el.textContent = 'Error loading live health: ' + (e.message || 'fetch failed');
+    } else if (el && el._lastOk) {
+      // Keep showing last successful data with staleness warning
+      const ago = Math.round((Date.now() - el._lastOkAt) / 1000);
+      const warn = document.createElement('div');
+      warn.style.cssText = 'color:#ff9800;font-size:.6rem;margin-top:4px';
+      warn.textContent = 'Data stale (' + ago + 's ago) — fetch error: ' + (e.message || '');
+    }
   }
 }
 loadLiveHealth();
