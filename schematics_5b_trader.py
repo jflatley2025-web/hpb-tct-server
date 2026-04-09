@@ -3547,6 +3547,7 @@ class Schematics5BTrader:
                 for s in all_sch:
                     if not isinstance(s, dict):
                         continue
+                    s["symbol"] = symbol  # CCS: propagate symbol for context event refs
 
                     # NOTE: No caller-side HTF directional filter here.
                     # Phase 7 in the v2 pipeline handles HTF alignment,

@@ -28,9 +28,12 @@ Key differences vs v1:
 """
 
 import logging
+import time as _time
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional, Tuple
+
+from ccs_writer import emit_event as _ccs_emit
 from decision_trees.ranges_decision_tree import (
     RangeInputs, RangeEvaluation, Trend, TradeBias as RangeTradeBias,
     DeviationType, evaluate_range_setup,
@@ -1686,9 +1689,34 @@ def compute_composite_score_v2(
                                      skip_compression=l3_skip_compression)
     _l3_trace = getattr(_detect_l3_structure, "_last_trace", None) or {}
 
+    # ── CCS: BOS attempt event (always fires) ──
+    try:
+        _ccs_sym = schematic.get("symbol", "unknown")
+        _ccs_ts = int(_time.time())
+        _ccs_trace_flat = {
+            "compression_ok": _l3_trace.get("compression_ok"),
+            "micro_bos_ok": _l3_trace.get("micro_bos_ok"),
+            "df_post_len": (_l3_trace.get("anchor_audit") or {}).get("df_post_len"),
+        }
+        _ccs_emit(_ccs_sym, f"{_ccs_sym}_{_ccs_ts}", "BOS", "BOS_ATTEMPTED",
+                  {"direction": direction, "timeframe": schematic.get("timeframe", ""),
+                   "l3_valid": l3_valid, "tap3_idx": tap3.get("idx"),
+                   **_ccs_trace_flat},
+                  {"bos_attempt_id": f"{_ccs_sym}_{_ccs_ts}_{direction}"})
+    except Exception:
+        pass
+
     if not l3_valid:
         phase_results["l3"] = {"passed": False, "trace": _l3_trace}
         fail["failure_context"] = "L3"
+        # ── CCS: BOS failed event ──
+        try:
+            _ccs_emit(_ccs_sym, f"{_ccs_sym}_{_ccs_ts}", "BOS", "BOS_FAILED",
+                      {"direction": direction, "reason": "l3_structure_fail",
+                       **_ccs_trace_flat, "df_post_len": _ccs_trace_flat.get("df_post_len")},
+                      {"bos_attempt_id": f"{_ccs_sym}_{_ccs_ts}_{direction}"})
+        except Exception:
+            pass
         return {**fail,
                 "score": score,
                 "reasons": reasons + ["No L3 execution confirmation"],

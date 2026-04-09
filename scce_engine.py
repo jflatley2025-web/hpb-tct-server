@@ -20,6 +20,8 @@ import time
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
+from ccs_writer import emit_event as _ccs_emit
+
 logger = logging.getLogger(__name__)
 
 # ── Feature flags ────────────────────────────────────────────────
@@ -135,6 +137,18 @@ class SCCEEngine:
                 c["invalidation_reason"] = "aged_stale"
                 c["phase"] = "invalidated"
                 self._log_event(symbol, tf, "invalidated", "aged stale")
+                _cid = c.get("candidate_id", "")
+                _cycle = f"{symbol}_{int(time.time())}"
+                try:
+                    _ccs_emit(symbol, _cycle, "SCCE", "SCCE_CANDIDATE_INVALIDATED",
+                              {"reason": "aged_stale", "phase_at_invalidation": "invalidated",
+                               "age_bars": c["age_bars"]},
+                              {"candidate_id": _cid})
+                    _ccs_emit(symbol, _cycle, "RANGE", "RANGE_INVALIDATED",
+                              {"reason": "aged_stale", "final_age_bars": c["age_bars"]},
+                              {"range_id": _cid})
+                except Exception:
+                    pass
 
         # Process incoming schematics
         for s in schematics:
@@ -171,18 +185,50 @@ class SCCEEngine:
                     matched = c
                     break
 
+            _cycle = f"{symbol}_{int(time.time())}"
+
             if matched:
                 # Update existing candidate
+                _phase_before = matched.get("phase", "seed")
                 matched["age_bars"] = 0
                 matched["stale"] = False
                 matched["last_updated"] = datetime.now(timezone.utc).isoformat()
+                _cid = matched.get("candidate_id", "")
+                _phase_after = _advance_phase(matched)
+                if _phase_after != _phase_before:
+                    try:
+                        _ccs_emit(symbol, _cycle, "SCCE", "SCCE_CANDIDATE_UPDATED",
+                                  {"phase_before": _phase_before, "phase_after": _phase_after,
+                                   "age_bars": 0},
+                                  {"candidate_id": _cid})
+                        _ccs_emit(symbol, _cycle, "RANGE", "RANGE_UPDATED",
+                                  {"age_bars": 0, "range_high": matched.get("range_high"),
+                                   "range_low": matched.get("range_low")},
+                                  {"range_id": _cid})
+                    except Exception:
+                        pass
             else:
                 # Seed new candidate
                 c = _new_candidate(symbol, tf, family, r_high, r_low)
                 existing.append(c)
                 self._log_event(symbol, tf, "candidate_seeded", f"{family} range=[{r_low},{r_high}]")
+                _cid = c.get("candidate_id", "")
+                try:
+                    _ccs_emit(symbol, _cycle, "SCCE", "SCCE_CANDIDATE_CREATED",
+                              {"model_family": family, "timeframe": tf,
+                               "range_high": r_high, "range_low": r_low,
+                               "equilibrium": c.get("equilibrium"), "phase": "seed"},
+                              {"candidate_id": _cid})
+                    _ccs_emit(symbol, _cycle, "RANGE", "RANGE_CREATED",
+                              {"timeframe": tf, "direction": family,
+                               "range_high": r_high, "range_low": r_low,
+                               "equilibrium": c.get("equilibrium")},
+                              {"range_id": _cid})
+                except Exception:
+                    pass
 
             target = matched or existing[-1]
+            _cid = target.get("candidate_id", "")
 
             # Update tap progression
             tap1 = s.get("tap1")
@@ -194,12 +240,26 @@ class SCCEEngine:
                 target["tap1_price"] = tap1.get("price")
                 target["tap1_time"] = datetime.now(timezone.utc).isoformat()
                 self._log_event(symbol, tf, "tap1_detected", f"price={tap1.get('price')}")
+                try:
+                    _ccs_emit(symbol, _cycle, "TAP", "TAP_PROGRESS_UPDATED",
+                              {"tap_number": 1, "price": tap1.get("price"),
+                               "phase_after": _advance_phase(target)},
+                              {"candidate_id": _cid, "range_id": _cid})
+                except Exception:
+                    pass
 
             if tap2 and isinstance(tap2, dict) and not target["tap2_detected"]:
                 target["tap2_detected"] = True
                 target["tap2_price"] = tap2.get("price")
                 target["tap2_time"] = datetime.now(timezone.utc).isoformat()
                 self._log_event(symbol, tf, "tap2_detected", f"price={tap2.get('price')}")
+                try:
+                    _ccs_emit(symbol, _cycle, "TAP", "TAP_PROGRESS_UPDATED",
+                              {"tap_number": 2, "price": tap2.get("price"),
+                               "phase_after": _advance_phase(target)},
+                              {"candidate_id": _cid, "range_id": _cid})
+                except Exception:
+                    pass
 
             if tap3 and isinstance(tap3, dict) and not target["tap3_detected"]:
                 target["tap3_detected"] = True
@@ -207,6 +267,13 @@ class SCCEEngine:
                 target["tap3_time"] = datetime.now(timezone.utc).isoformat()
                 target["bos_pending"] = True
                 self._log_event(symbol, tf, "tap3_detected", f"price={tap3.get('price')}")
+                try:
+                    _ccs_emit(symbol, _cycle, "TAP", "TAP_PROGRESS_UPDATED",
+                              {"tap_number": 3, "price": tap3.get("price"),
+                               "phase_after": _advance_phase(target)},
+                              {"candidate_id": _cid, "range_id": _cid})
+                except Exception:
+                    pass
 
             # BOS detection
             bos = s.get("bos_confirmation") or {}
@@ -216,6 +283,14 @@ class SCCEEngine:
                 target["bos_time"] = datetime.now(timezone.utc).isoformat()
                 target["bos_pending"] = False
                 self._log_event(symbol, tf, "bos_detected", f"price={bos.get('bos_price')}")
+                try:
+                    _ccs_emit(symbol, _cycle, "BOS", "BOS_CONFIRMED",
+                              {"direction": target.get("model_family", "unknown"),
+                               "bos_price": bos.get("bos_price"),
+                               "phase_after": "qualified"},
+                              {"candidate_id": _cid, "range_id": _cid})
+                except Exception:
+                    pass
 
             # Update phase
             target["phase"] = _advance_phase(target)

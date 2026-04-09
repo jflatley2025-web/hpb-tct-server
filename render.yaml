@@ -46,6 +46,8 @@ services:
         sync: false
       - key: MOONDEV_BASE_URL
         value: https://api.moondev.com
+      - key: CCS_ENABLED
+        value: "true"
 
     autoDeploy: true
 
