@@ -331,6 +331,48 @@ def compute_po3_confluence(indices: dict) -> dict:
     }
 
 
+# ── F) Top Range Correlation ────────────────────────────────────
+
+def compute_top_range_correlation(indices: dict) -> dict:
+    """Compute in-range vs out-of-range distribution from CCS events.
+
+    Pure read of top_range_events index. No side effects.
+    """
+    events = indices.get("top_range_events", [])
+
+    if not events:
+        return {
+            "tagged_events": 0,
+            "in_range_count": 0,
+            "out_of_range_count": 0,
+            "in_range_pct": None,
+            "avg_range_strength_in": None,
+        }
+
+    in_range = 0
+    out_range = 0
+    strengths: list[float] = []
+
+    for e in events:
+        p = e.get("payload") or {}
+        if p.get("in_top_range"):
+            in_range += 1
+            s = p.get("range_strength")
+            if isinstance(s, (int, float)):
+                strengths.append(float(s))
+        else:
+            out_range += 1
+
+    total = in_range + out_range
+    return {
+        "tagged_events": len(events),
+        "in_range_count": in_range,
+        "out_of_range_count": out_range,
+        "in_range_pct": round(in_range / total * 100, 1) if total > 0 else None,
+        "avg_range_strength_in": round(sum(strengths) / len(strengths), 2) if strengths else None,
+    }
+
+
 def _parse_ts(ts_str: str | None) -> datetime | None:
     """Parse ISO timestamp string to datetime. Returns None on failure."""
     if not ts_str or not isinstance(ts_str, str):

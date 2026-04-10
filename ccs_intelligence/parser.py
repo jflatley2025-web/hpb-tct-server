@@ -9,7 +9,7 @@ from __future__ import annotations
 
 _REQUIRED_KEYS = {"event_id", "ts", "symbol", "stage", "event_type", "payload", "refs"}
 
-_VALID_STAGES = {"SCCE", "RANGE", "TAP", "BOS", "PO3"}
+_VALID_STAGES = {"SCCE", "RANGE", "TAP", "BOS", "PO3", "TOP_RANGE"}
 
 _STAGE_TYPES = {
     "SCCE": {"SCCE_CANDIDATE_CREATED", "SCCE_CANDIDATE_UPDATED", "SCCE_CANDIDATE_INVALIDATED"},
@@ -17,6 +17,7 @@ _STAGE_TYPES = {
     "TAP": {"TAP_PROGRESS_UPDATED"},
     "BOS": {"BOS_ATTEMPTED", "BOS_CONFIRMED", "BOS_FAILED"},
     "PO3": {"PO3_CONFLUENCE_TAGGED"},
+    "TOP_RANGE": {"TOP_RANGE_CONTEXT_TAGGED"},
 }
 
 
@@ -75,6 +76,7 @@ def build_indices(events: list[dict]) -> dict:
     tap3_events: list[dict] = []
     bos_timeline: list[dict] = []
     po3_events: list[dict] = []
+    top_range_events: list[dict] = []
 
     seen_event_ids: set[str] = set()
 
@@ -118,6 +120,10 @@ def build_indices(events: list[dict]) -> dict:
         if etype == "PO3_CONFLUENCE_TAGGED":
             po3_events.append(e)
 
+        # Top Range index
+        if etype == "TOP_RANGE_CONTEXT_TAGGED":
+            top_range_events.append(e)
+
         # TAP index
         if etype == "TAP_PROGRESS_UPDATED":
             cid = refs.get("candidate_id")
@@ -136,4 +142,5 @@ def build_indices(events: list[dict]) -> dict:
         "tap3_events": tap3_events,
         "bos_timeline": bos_timeline,
         "po3_events": po3_events,
+        "top_range_events": top_range_events,
     }

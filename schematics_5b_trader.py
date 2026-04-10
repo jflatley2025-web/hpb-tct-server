@@ -165,6 +165,14 @@ PO3_SHADOW_TAGGING = os.getenv("PO3_SHADOW_TAGGING", "true").lower() == "true"
 # Read-only context enrichment — zero execution impact.
 PO3_CCS_ANNOTATION = os.getenv("PO3_CCS_ANNOTATION", "false").lower() == "true"
 
+# ── Top Range Priority System (Phase 1: annotation only) ────────
+# Tag schematics/candidates with top-range context for later analysis.
+# ZERO execution impact. priority_weight is ALWAYS 1.0.
+TOP_RANGE_TAGGING_ENABLED = os.getenv("TOP_RANGE_TAGGING_ENABLED", "false").lower() == "true"
+# Execution influence flag — declared but NEVER READ in Phase 1.
+# Exists only as a structural placeholder for Phase 2 evaluation.
+TOP_RANGE_EXECUTION_INFLUENCE = os.getenv("TOP_RANGE_EXECUTION_INFLUENCE", "false").lower() == "true"
+
 # ── Staged pair expansion plan ───────────────────────────────────
 # Phase 1 candidates are NOT active. They are queued for rollout
 # after ETH-only live mode proves stable (readiness gate).
@@ -1509,7 +1517,23 @@ class Schematics5BTrader:
                 "by_timeframe": {},
                 "examples": [],
             },
+            # Top Range priority context — annotation only
+            # Tracks how many schematics fall within top-ranked ranges.
+            # ZERO execution influence. priority_weight is ALWAYS 1.0.
+            "top_range_stats": {
+                "snapshot_loaded": False,
+                "snapshot_age_sec": None,
+                "top_symbols": [],
+                "schematics_in_range": 0,
+                "schematics_outside_range": 0,
+            },
         }
+
+        # ── Top Range snapshot state ─────────────────────────────
+        self._top_ranges: List[Dict] = []
+        self._top_range_symbols: set = set()
+        self._top_range_file_mtime: float = 0.0
+
         # ── Per-symbol execution funnel (since boot) ─────────────
         self._symbol_funnels: Dict[str, Dict] = {}
         for _s in TRADING_SYMBOLS:
@@ -1783,6 +1807,60 @@ class Schematics5BTrader:
             debug = dict(self.last_debug)
             debug["state_summary"] = self.state.snapshot()
         return debug
+
+    # ── Top Range loader + matcher (annotation only) ──────────────
+
+    def _refresh_top_ranges(self) -> None:
+        """Reload top range snapshot if file changed. Fail-open."""
+        if not TOP_RANGE_TAGGING_ENABLED:
+            return
+        try:
+            from top_range_snapshot import _SNAPSHOT_PATH
+            if not os.path.exists(_SNAPSHOT_PATH):
+                return
+            mtime = os.path.getmtime(_SNAPSHOT_PATH)
+            if mtime == self._top_range_file_mtime:
+                return  # No change
+            from top_range_snapshot import load_top_range_snapshot
+            self._top_ranges = load_top_range_snapshot()
+            self._top_range_symbols = {r.get("symbol", "") for r in self._top_ranges}
+            self._top_range_file_mtime = mtime
+            # Update telemetry
+            trs = self._live_health["top_range_stats"]
+            trs["snapshot_loaded"] = bool(self._top_ranges)
+            trs["top_symbols"] = sorted(self._top_range_symbols)
+        except Exception:
+            pass  # Fail open — keep previous data or empty
+
+    @staticmethod
+    def _match_top_range(symbol: str, current_price: float, top_ranges: List[Dict]) -> Optional[Dict]:
+        """Check if symbol + price falls within a top range.
+
+        Returns match dict or None. Pure function — no side effects.
+        """
+        for r in top_ranges:
+            if r.get("symbol") != symbol:
+                continue
+            rh = r.get("range_high", 0)
+            rl = r.get("range_low", 0)
+            if not (rh and rl and rh > rl):
+                continue
+            range_size = rh - rl
+            # Price within range bounds (or within 10% deviation outside)
+            margin = range_size * 0.10
+            if rl - margin <= current_price <= rh + margin:
+                # Compute overlap (how centered price is in range)
+                if rl <= current_price <= rh:
+                    overlap_pct = 100.0
+                else:
+                    dist = min(abs(current_price - rh), abs(current_price - rl))
+                    overlap_pct = max(0.0, 100.0 - (dist / range_size * 100))
+                return {
+                    "range_strength": r.get("range_strength"),
+                    "overlap_pct": round(overlap_pct, 1),
+                    "timeframe": r.get("timeframe"),
+                }
+        return None
 
     def scan_and_trade(self, top_5_pairs=None) -> Dict:
         """Main cycle: fetch, detect, evaluate, trade.
@@ -3280,6 +3358,8 @@ class Schematics5BTrader:
 
         try:
             _t0 = time.time()
+            # Refresh top range snapshot if file changed (fail-open)
+            self._refresh_top_ranges()
             logger.info(f"[5B] _scan_single_symbol started for {symbol}")
             # Current price
             df_price = fetch_candles_sync(symbol, "1m", 10)
@@ -3558,6 +3638,58 @@ class Schematics5BTrader:
                 _pc["overlap_rate_pct"] = round(
                     _pc["po3_tct_overlap_total"] / max(_pc["tct_confirmed_total"], 1) * 100, 1
                 )
+
+            # ── Top Range context tagging (annotation only) ────────
+            # Tag confirmed schematics with top-range proximity context.
+            # ZERO execution impact. priority_weight is ALWAYS 1.0.
+            if TOP_RANGE_TAGGING_ENABLED and self._top_ranges:
+                try:
+                    _trs = self._live_health["top_range_stats"]
+                    _trs["snapshot_age_sec"] = round(
+                        time.time() - self._top_range_file_mtime
+                    ) if self._top_range_file_mtime else None
+
+                    for _tr_tf in active_mtf_tfs:
+                        _tr_schematics = all_schematics_by_tf.get(_tr_tf, [])
+                        for _tr_s in _tr_schematics:
+                            if not isinstance(_tr_s, dict) or not _tr_s.get("is_confirmed"):
+                                continue
+                            _tr_match = self._match_top_range(
+                                symbol, current_price, self._top_ranges
+                            )
+                            _tr_s["top_range_context"] = {
+                                "in_top_range": _tr_match is not None,
+                                "range_overlap_pct": _tr_match["overlap_pct"] if _tr_match else None,
+                                "range_strength": _tr_match["range_strength"] if _tr_match else None,
+                                "priority_weight": 1.0,  # ALWAYS 1.0 — annotation only
+                            }
+                            if _tr_match:
+                                _trs["schematics_in_range"] += 1
+                            else:
+                                _trs["schematics_outside_range"] += 1
+
+                            # Persist to CCS v1
+                            try:
+                                from ccs_writer import emit_event as _ccs_emit
+                                _ccs_emit(
+                                    symbol=symbol,
+                                    cycle_id=str(self._scan_cycle_id),
+                                    stage="TOP_RANGE",
+                                    event_type="TOP_RANGE_CONTEXT_TAGGED",
+                                    payload={
+                                        "in_top_range": _tr_match is not None,
+                                        "range_strength": _tr_match["range_strength"] if _tr_match else None,
+                                        "range_overlap_pct": _tr_match["overlap_pct"] if _tr_match else None,
+                                        "priority_weight": 1.0,
+                                        "snapshot_age_sec": _trs["snapshot_age_sec"],
+                                        "timeframe": _tr_tf,
+                                        "model_family": _tr_s.get("model"),
+                                    },
+                                )
+                            except Exception:
+                                pass
+                except Exception as _tr_err:
+                    logger.debug("[TOP_RANGE] Tagging error: %s", _tr_err)
 
             # Phase B: evaluate with HTF cascade (lowest → highest TF walk)
             logger.info(f"[5B] Phase A (detection) done ({time.time()-_t0:.1f}s)")

@@ -324,6 +324,11 @@ ENABLE_SCANNER = os.environ.get("ENABLE_SCANNER", "true").lower() in ("true", "1
 # Range scanner config (rebuilt using /ranges page detect_ranges logic)
 RANGE_MIN_RPS = 6.5                  # minimum quality score to qualify (0-10)
 
+# ── Top Range Snapshot (annotation only) ─────────────────────────
+# Daily snapshot of top-ranked ranges for context tagging.
+# ZERO execution impact. Runs independently from trading engine.
+TOP_RANGE_SNAPSHOT_ENABLED = os.environ.get("TOP_RANGE_SNAPSHOT_ENABLED", "false").lower() in ("true", "1", "yes")
+
 # Scan coordination lock — prevents tensor-trade and 5B auto-scan loops from
 # making MEXC API calls at the same instant.  Each loop acquires this lock
 # for the duration of its scan_and_trade() call so they take turns.
@@ -3746,6 +3751,16 @@ async def startup_event():
         pass
     logger.info("[5B-TRADE] Background auto-scan loop launched (supervised)")
 
+    # ── Top Range Snapshot (annotation only) ─────────────────────
+    if TOP_RANGE_SNAPSHOT_ENABLED:
+        try:
+            from top_range_snapshot import top_range_snapshot_loop
+            asyncio.create_task(_auto_scan_supervisor(top_range_snapshot_loop, "TOP-RANGE"))
+            logger.info("[TOP-RANGE] Snapshot loop launched (supervised, 12h interval)")
+        except Exception as _tr_err:
+            logger.error("[TOP-RANGE] Failed to launch snapshot loop: %s", _tr_err)
+    else:
+        logger.info("[TOP-RANGE] Snapshot disabled (TOP_RANGE_SNAPSHOT_ENABLED=false)")
 
     # PHEMEX-TCT disabled — page temporarily disabled to focus on 5B engine
     # asyncio.create_task(_auto_scan_supervisor(phemex_tct_auto_scan_loop, "PHEMEX-TCT"))
