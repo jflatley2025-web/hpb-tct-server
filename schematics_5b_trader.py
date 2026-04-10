@@ -159,6 +159,12 @@ _TAP3_EXPIRY_BARS = {
 # Dashboard + telemetry only — never gates entries.
 PO3_SHADOW_TAGGING = os.getenv("PO3_SHADOW_TAGGING", "true").lower() == "true"
 
+# ── PO3 → CCS annotation ─────────────────────────────────────────
+# Persist PO3 confluence events into CCS v1 for historical analysis.
+# Requires PO3_SHADOW_TAGGING=true and CCS_ENABLED=true.
+# Read-only context enrichment — zero execution impact.
+PO3_CCS_ANNOTATION = os.getenv("PO3_CCS_ANNOTATION", "false").lower() == "true"
+
 # ── Staged pair expansion plan ───────────────────────────────────
 # Phase 1 candidates are NOT active. They are queued for rollout
 # after ETH-only live mode proves stable (readiness gate).
@@ -3481,6 +3487,31 @@ class Schematics5BTrader:
                                 "po3_range_overlap_pct": round(_best_overlap, 1),
                             }
                             _pc["po3_tct_overlap_total"] += 1
+
+                            # ── PO3 → CCS v1 annotation ──────────
+                            # Persist PO3 confluence as structured CCS event.
+                            # Reads already-computed po3_shadow — no new work.
+                            if PO3_CCS_ANNOTATION:
+                                try:
+                                    from ccs_writer import emit_event as _ccs_emit
+                                    _ccs_emit(
+                                        symbol=symbol,
+                                        cycle_id=str(self._scan_cycle_id),
+                                        stage="PO3",
+                                        event_type="PO3_CONFLUENCE_TAGGED",
+                                        payload={
+                                            "po3_phase": _po3_phase,
+                                            "po3_detected": True,
+                                            "po3_match": True,
+                                            "po3_quality": _best_po3.get("quality_score"),
+                                            "po3_direction": _tct_dir,
+                                            "po3_range_overlap_pct": round(_best_overlap, 1),
+                                            "timeframe": _po3_tf,
+                                            "model_family": _tct_s.get("model"),
+                                        },
+                                    )
+                                except Exception:
+                                    pass
                             _pc["by_phase"][_po3_phase] = _pc["by_phase"].get(_po3_phase, 0) + 1
 
                             # Per-symbol

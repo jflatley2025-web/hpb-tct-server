@@ -17,6 +17,7 @@ from ccs_intelligence.metrics import (
     compute_candidate_funnel,
     compute_range_tap_density,
     compute_tap3_bos_latency,
+    compute_po3_confluence,
 )
 
 
@@ -112,6 +113,7 @@ def _compute(
             "funnel": compute_candidate_funnel(indices),
             "range": compute_range_tap_density(indices),
             "latency": compute_tap3_bos_latency(indices),
+            "po3": compute_po3_confluence(indices),
         }
 
     return {

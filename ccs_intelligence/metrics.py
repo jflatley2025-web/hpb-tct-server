@@ -282,6 +282,55 @@ def compute_tap3_bos_latency(indices: dict) -> dict:
     }
 
 
+# ── E) PO3 Confluence ───────────────────────────────────────────
+
+def compute_po3_confluence(indices: dict) -> dict:
+    """Compute PO3 confluence distribution from persisted CCS events.
+
+    Pure read of po3_events index. No side effects.
+    """
+    po3_events = indices.get("po3_events", [])
+
+    if not po3_events:
+        return {
+            "po3_events": 0,
+            "by_phase": {},
+            "by_direction": {},
+            "avg_quality": None,
+            "avg_range_overlap_pct": None,
+        }
+
+    by_phase: dict[str, int] = {}
+    by_direction: dict[str, int] = {}
+    qualities: list[float] = []
+    overlaps: list[float] = []
+
+    for e in po3_events:
+        p = e.get("payload") or {}
+
+        phase = p.get("po3_phase", "unknown")
+        by_phase[phase] = by_phase.get(phase, 0) + 1
+
+        direction = p.get("po3_direction", "unknown")
+        by_direction[direction] = by_direction.get(direction, 0) + 1
+
+        q = p.get("po3_quality")
+        if isinstance(q, (int, float)):
+            qualities.append(float(q))
+
+        o = p.get("po3_range_overlap_pct")
+        if isinstance(o, (int, float)):
+            overlaps.append(float(o))
+
+    return {
+        "po3_events": len(po3_events),
+        "by_phase": by_phase,
+        "by_direction": by_direction,
+        "avg_quality": round(sum(qualities) / len(qualities), 4) if qualities else None,
+        "avg_range_overlap_pct": round(sum(overlaps) / len(overlaps), 1) if overlaps else None,
+    }
+
+
 def _parse_ts(ts_str: str | None) -> datetime | None:
     """Parse ISO timestamp string to datetime. Returns None on failure."""
     if not ts_str or not isinstance(ts_str, str):
