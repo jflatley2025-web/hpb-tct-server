@@ -1,0 +1,35 @@
+# Local Chart Overlay — Configuration
+# All paths are relative to the local_chart_overlay/ directory unless absolute.
+
+# SQLite database path
+db_path: "data/overlay.db"
+
+# Pine Script export settings
+pine:
+  version: 6
+  output_dir: "exports"
+  max_trades_per_file: 50
+
+# CSV column mappings
+# Define named presets for different CSV formats.
+# Use with: import-csv --mapping <preset_file.yaml>
+csv_defaults:
+  symbol: "symbol"
+  direction: "direction"
+  timeframe: "timeframe"
+  model: "model"
+  entry_price: "entry_price"
+  stop_price: "stop_price"
+  target_price: "target_price"
+  tp1_price: "tp1_price"
+  opened_at: "opened_at"
+  closed_at: "closed_at"
+  exit_price: "exit_price"
+  pnl_pct: "pnl_pct"
+  pnl_dollars: "pnl_dollars"
+  is_win: "is_win"
+  exit_reason: "exit_reason"
+  entry_score: "entry_score"
+  rr: "rr"
+  leverage: "leverage"
+  htf_bias: "htf_bias"

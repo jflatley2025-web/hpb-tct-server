@@ -1,0 +1,214 @@
+// =============================================================================
+// TCT Frozen Schematic Overlay — {{ batch_name }}
+// Generated: {{ generated_at }}
+// Trades: {{ trade_count }}
+//
+// This script renders PRECOMPUTED schematic data.
+// It does NOT detect, calculate, or derive any structure.
+// All coordinates use xloc.bar_time (Unix ms) for timeframe stability.
+// =============================================================================
+
+//@version=6
+indicator("TCT Overlay — {{ batch_name }}", overlay=true,
+     max_lines_count=500, max_labels_count=500, max_boxes_count=500)
+
+// === Trade Selector =========================================================
+
+selected = input.int(1, "Trade #", minval=1, maxval={{ trade_count }},
+     tooltip="Select which trade to display")
+
+show_taps    = input.bool(true,  "Show Tap Points")
+show_range   = input.bool(true,  "Show Range (High/EQ/Low)")
+show_entry   = input.bool(true,  "Show Entry / Stop / Target")
+show_bos     = input.bool(true,  "Show BOS")
+show_info    = input.bool(true,  "Show Trade Info Label")
+
+// === Static Data Arrays =====================================================
+// 0 = not available / not applicable
+
+// -- Trade core --
+var float[] a_entry      = array.from({{ entry_prices_csv }})
+var float[] a_stop       = array.from({{ stop_prices_csv }})
+var float[] a_target     = array.from({{ target_prices_csv }})
+var float[] a_tp1        = array.from({{ tp1_prices_csv }})
+var int[]   a_dir        = array.from({{ directions_csv }})
+var int[]   a_entry_t    = array.from({{ entry_times_csv }})
+var int[]   a_exit_t     = array.from({{ exit_times_csv }})
+
+// -- Schematic taps --
+var float[] a_tap1_p     = array.from({{ tap1_prices_csv }})
+var int[]   a_tap1_t     = array.from({{ tap1_times_csv }})
+var float[] a_tap2_p     = array.from({{ tap2_prices_csv }})
+var int[]   a_tap2_t     = array.from({{ tap2_times_csv }})
+var float[] a_tap3_p     = array.from({{ tap3_prices_csv }})
+var int[]   a_tap3_t     = array.from({{ tap3_times_csv }})
+
+// -- Range --
+var float[] a_rng_hi_p   = array.from({{ range_high_prices_csv }})
+var int[]   a_rng_hi_t   = array.from({{ range_high_times_csv }})
+var float[] a_rng_lo_p   = array.from({{ range_low_prices_csv }})
+var int[]   a_rng_lo_t   = array.from({{ range_low_times_csv }})
+var float[] a_rng_eq     = array.from({{ range_eq_prices_csv }})
+
+// -- BOS --
+var float[] a_bos_p      = array.from({{ bos_prices_csv }})
+var int[]   a_bos_t      = array.from({{ bos_times_csv }})
+
+// -- Metadata --
+var float[] a_pnl        = array.from({{ pnl_pcts_csv }})
+var float[] a_rr         = array.from({{ rrs_csv }})
+var int[]   a_win        = array.from({{ win_flags_csv }})
+var string[] a_label     = array.from({{ labels_csv }})
+var string[] a_model     = array.from({{ models_csv }})
+var string[] a_sweep     = array.from({{ sweep_types_csv }})
+
+// === Drawing Logic (fires ONCE on last confirmed bar) =======================
+
+if barstate.islastconfirmedhistory
+    int idx = selected - 1
+
+    // -- Read values for selected trade --
+    float entry_p   = array.get(a_entry,    idx)
+    float stop_p    = array.get(a_stop,     idx)
+    float target_p  = array.get(a_target,   idx)
+    float tp1_p     = array.get(a_tp1,      idx)
+    int   dir       = array.get(a_dir,      idx)
+    int   t_entry   = array.get(a_entry_t,  idx)
+    int   t_exit    = array.get(a_exit_t,   idx)
+
+    float tap1_p    = array.get(a_tap1_p,   idx)
+    int   tap1_t    = array.get(a_tap1_t,   idx)
+    float tap2_p    = array.get(a_tap2_p,   idx)
+    int   tap2_t    = array.get(a_tap2_t,   idx)
+    float tap3_p    = array.get(a_tap3_p,   idx)
+    int   tap3_t    = array.get(a_tap3_t,   idx)
+
+    float rng_hi_p  = array.get(a_rng_hi_p, idx)
+    int   rng_hi_t  = array.get(a_rng_hi_t, idx)
+    float rng_lo_p  = array.get(a_rng_lo_p, idx)
+    int   rng_lo_t  = array.get(a_rng_lo_t, idx)
+    float rng_eq_p  = array.get(a_rng_eq,   idx)
+
+    float bos_p     = array.get(a_bos_p,    idx)
+    int   bos_t     = array.get(a_bos_t,    idx)
+
+    float pnl_val   = array.get(a_pnl,      idx)
+    float rr_val    = array.get(a_rr,       idx)
+    int   win_val   = array.get(a_win,      idx)
+    string lbl      = array.get(a_label,    idx)
+    string mdl      = array.get(a_model,    idx)
+    string swp      = array.get(a_sweep,    idx)
+
+    // -- Colors --
+    color c_long    = color.new(#26a69a, 0)   // green
+    color c_short   = color.new(#ef5350, 0)   // red
+    color c_dir     = dir == 1 ? c_long : c_short
+    color c_range   = color.new(#42a5f5, 30)  // blue
+    color c_eq      = color.new(#ffa726, 40)  // orange
+    color c_bos     = color.new(#ab47bc, 20)  // purple
+    color c_tap     = color.new(#ffee58, 0)   // yellow
+    color c_stop    = color.new(#ef5350, 20)
+    color c_target  = color.new(#26a69a, 20)
+
+    // Use entry time as fallback right edge if exit time is 0
+    int t_right = t_exit != 0 ? t_exit : t_entry
+
+    // ── Entry / Stop / Target ──────────────────────────────────────
+    if show_entry and t_entry != 0
+        // Entry line
+        line.new(t_entry, entry_p, t_right, entry_p,
+             xloc=xloc.bar_time, color=c_dir, width=2, style=line.style_solid)
+        label.new(t_entry, entry_p, "ENTRY " + str.tostring(entry_p, "#.##"),
+             xloc=xloc.bar_time, style=label.style_label_right,
+             color=c_dir, textcolor=color.white, size=size.small)
+
+        // Stop line
+        line.new(t_entry, stop_p, t_right, stop_p,
+             xloc=xloc.bar_time, color=c_stop, width=2, style=line.style_dashed)
+        label.new(t_right, stop_p, "SL " + str.tostring(stop_p, "#.##"),
+             xloc=xloc.bar_time, style=label.style_label_left,
+             color=c_stop, textcolor=color.white, size=size.tiny)
+
+        // Target line
+        line.new(t_entry, target_p, t_right, target_p,
+             xloc=xloc.bar_time, color=c_target, width=2, style=line.style_dashed)
+        label.new(t_right, target_p, "TP " + str.tostring(target_p, "#.##"),
+             xloc=xloc.bar_time, style=label.style_label_left,
+             color=c_target, textcolor=color.white, size=size.tiny)
+
+        // TP1 line (if available)
+        if tp1_p != 0
+            line.new(t_entry, tp1_p, t_right, tp1_p,
+                 xloc=xloc.bar_time, color=c_target, width=1, style=line.style_dotted)
+            label.new(t_right, tp1_p, "TP1",
+                 xloc=xloc.bar_time, style=label.style_label_left,
+                 color=c_target, textcolor=color.white, size=size.tiny)
+
+    // ── Range Box ──────────────────────────────────────────────────
+    if show_range and rng_hi_p != 0 and rng_lo_p != 0
+        int rng_left  = rng_hi_t != 0 ? rng_hi_t : t_entry
+        int rng_right = t_entry
+
+        // Range box
+        box.new(rng_left, rng_hi_p, rng_right, rng_lo_p,
+             xloc=xloc.bar_time, bgcolor=color.new(c_range, 85),
+             border_color=c_range, border_width=1)
+
+        // EQ line
+        if rng_eq_p != 0
+            line.new(rng_left, rng_eq_p, rng_right, rng_eq_p,
+                 xloc=xloc.bar_time, color=c_eq, width=1, style=line.style_dotted)
+            label.new(rng_left, rng_eq_p, "EQ",
+                 xloc=xloc.bar_time, style=label.style_label_right,
+                 color=c_eq, textcolor=color.white, size=size.tiny)
+
+        // Range labels
+        label.new(rng_left, rng_hi_p, "Range High",
+             xloc=xloc.bar_time, style=label.style_label_right,
+             color=c_range, textcolor=color.white, size=size.tiny)
+        label.new(rng_left, rng_lo_p, "Range Low",
+             xloc=xloc.bar_time, style=label.style_label_right,
+             color=c_range, textcolor=color.white, size=size.tiny)
+
+    // ── Tap Points ─────────────────────────────────────────────────
+    if show_taps
+        if tap1_p != 0 and tap1_t != 0
+            label.new(tap1_t, tap1_p, "T1",
+                 xloc=xloc.bar_time, style=label.style_diamond,
+                 color=c_tap, textcolor=color.black, size=size.small)
+
+        if tap2_p != 0 and tap2_t != 0
+            label.new(tap2_t, tap2_p, "T2",
+                 xloc=xloc.bar_time, style=label.style_diamond,
+                 color=c_tap, textcolor=color.black, size=size.small)
+
+        if tap3_p != 0 and tap3_t != 0
+            label.new(tap3_t, tap3_p, "T3",
+                 xloc=xloc.bar_time, style=label.style_diamond,
+                 color=c_tap, textcolor=color.black, size=size.small)
+
+    // ── BOS Line ───────────────────────────────────────────────────
+    if show_bos and bos_p != 0 and bos_t != 0
+        line.new(bos_t, bos_p, t_entry, bos_p,
+             xloc=xloc.bar_time, color=c_bos, width=2, style=line.style_arrow_right)
+        label.new(bos_t, bos_p, "BOS",
+             xloc=xloc.bar_time, style=label.style_label_right,
+             color=c_bos, textcolor=color.white, size=size.tiny)
+
+    // ── Trade Info Label ───────────────────────────────────────────
+    if show_info and t_entry != 0
+        string win_str = win_val == 1 ? "WIN" : "LOSS"
+        string info = lbl + "\n" +
+             mdl + " | " + win_str + "\n" +
+             "PnL: " + str.tostring(pnl_val, "#.##") + "%" + "\n" +
+             "R:R: " + str.tostring(rr_val, "#.##")
+        if swp != ""
+            info := info + "\nSweep: " + swp
+
+        color info_bg = win_val == 1 ? color.new(c_long, 20) : color.new(c_short, 20)
+        // Place info label above/below entry depending on direction
+        float info_y = dir == 1 ? target_p : stop_p
+        label.new(t_entry, info_y, info,
+             xloc=xloc.bar_time,
+             style=dir == 1 ? label.style_label_lower_left : label.style_label_upper_left,
+             color=info_bg, textcolor=color.white, size=size.normal)
