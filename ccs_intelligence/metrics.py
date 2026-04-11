@@ -373,6 +373,272 @@ def compute_top_range_correlation(indices: dict) -> dict:
     }
 
 
+# ── G) Structural Integrity Audit ──────────────────────────────
+
+_DIR_MAP = {"accumulation": "bullish", "distribution": "bearish"}
+
+
+def _check_tap_chronology(tap_events: list[dict]) -> list[tuple]:
+    """Verify tap1.ts < tap2.ts < tap3.ts."""
+    violations: list[tuple] = []
+    by_num: dict[int, str] = {}
+    for e in tap_events:
+        tn = (e.get("payload") or {}).get("tap_number")
+        ts = e.get("ts")
+        if isinstance(tn, int) and 1 <= tn <= 3 and ts:
+            if tn not in by_num:
+                by_num[tn] = ts
+
+    ordered = sorted(by_num.items())
+    for i in range(1, len(ordered)):
+        prev_num, prev_ts = ordered[i - 1]
+        curr_num, curr_ts = ordered[i]
+        if curr_ts < prev_ts:
+            violations.append((
+                "tap_chronology", "error",
+                f"tap{curr_num} ({curr_ts}) before tap{prev_num} ({prev_ts})"
+            ))
+    return violations
+
+
+def _check_range_validity(range_event: dict | None) -> list[tuple]:
+    """Verify range_high > range_low."""
+    if range_event is None:
+        return []
+    p = range_event.get("payload") or {}
+    rh = p.get("range_high")
+    rl = p.get("range_low")
+    if rh is None or rl is None:
+        return []
+    if not isinstance(rh, (int, float)) or not isinstance(rl, (int, float)):
+        return []
+    if rh <= rl:
+        return [("range_inversion", "error", f"range_high ({rh}) <= range_low ({rl})")]
+    return []
+
+
+def _check_tap_range_consistency(
+    tap_events: list[dict], range_high: float, range_low: float, direction: str
+) -> list[tuple]:
+    """Verify taps align with expected boundary for direction."""
+    violations: list[tuple] = []
+    eq = (range_high + range_low) / 2
+    rng_size = range_high - range_low
+    if rng_size <= 0:
+        return []
+
+    for e in tap_events:
+        p = e.get("payload") or {}
+        price = p.get("price")
+        tn = p.get("tap_number")
+        if not isinstance(price, (int, float)) or not isinstance(tn, int):
+            continue
+
+        if direction == "bullish":
+            # Taps should be near range_low (demand zone)
+            if price > range_high + rng_size * 0.1:
+                violations.append((
+                    "tap_range_inconsistency", "warning",
+                    f"tap{tn} price {price} far above range_high {range_high} for bullish"
+                ))
+        elif direction == "bearish":
+            # Taps should be near range_high (supply zone)
+            if price < range_low - rng_size * 0.1:
+                violations.append((
+                    "tap_range_inconsistency", "warning",
+                    f"tap{tn} price {price} far below range_low {range_low} for bearish"
+                ))
+    return violations
+
+
+def _check_bos_timing(bos_ts: str | None, last_tap_ts: str | None) -> list[tuple]:
+    """Verify BOS occurs after last tap."""
+    if bos_ts is None or last_tap_ts is None:
+        return []
+    bos_dt = _parse_ts(bos_ts)
+    tap_dt = _parse_ts(last_tap_ts)
+    if bos_dt is None or tap_dt is None:
+        return []
+    if bos_dt < tap_dt:
+        return [("bos_before_last_tap", "warning",
+                 f"BOS ({bos_ts}) before last tap ({last_tap_ts})")]
+    return []
+
+
+def _check_bos_price_direction(
+    bos_price: float, range_high: float, range_low: float, direction: str
+) -> list[tuple]:
+    """Verify BOS price is on correct side of range for direction."""
+    if direction == "bullish" and bos_price < range_low:
+        return [("bos_price_wrong_side", "error",
+                 f"bullish BOS price {bos_price} below range_low {range_low}")]
+    if direction == "bearish" and bos_price > range_high:
+        return [("bos_price_wrong_side", "error",
+                 f"bearish BOS price {bos_price} above range_high {range_high}")]
+    return []
+
+
+def _check_phase_progression(candidate_events: list[dict]) -> list[tuple]:
+    """Verify phase transitions are monotonically increasing."""
+    violations: list[tuple] = []
+    for e in candidate_events:
+        if e.get("event_type") != "SCCE_CANDIDATE_UPDATED":
+            continue
+        p = e.get("payload") or {}
+        pb = p.get("phase_before", "")
+        pa = p.get("phase_after", "")
+        order_b = _PHASE_ORDER.get(pb, -1)
+        order_a = _PHASE_ORDER.get(pa, -1)
+        if order_b >= 0 and order_a >= 0 and order_a < order_b:
+            violations.append((
+                "phase_regression", "warning",
+                f"phase regressed from {pb} to {pa}"
+            ))
+    return violations
+
+
+def compute_structure_integrity(indices: dict) -> dict:
+    """Validate structural integrity of SCCE candidates from CCS events.
+
+    Runs 6 rules against data available in JSONL indices.
+    Pure function. No I/O. No side effects.
+    """
+    candidates = indices.get("candidates", {})
+    ranges = indices.get("ranges", {})
+    bos_attempts = indices.get("bos_attempts", {})
+
+    # Pre-build BOS outcome lookup: candidate_id → BOS_CONFIRMED event
+    bos_by_cid: dict[str, dict] = {}
+    for bid, entry in bos_attempts.items():
+        out = entry.get("outcome")
+        if out and out.get("event_type") == "BOS_CONFIRMED":
+            cid = (out.get("refs") or {}).get("candidate_id")
+            if cid:
+                bos_by_cid[cid] = out
+
+    all_rules = [
+        "tap_chronology", "range_inversion", "tap_range_inconsistency",
+        "bos_before_last_tap", "bos_price_wrong_side", "phase_regression",
+    ]
+    rule_counts = {r: 0 for r in all_rules}
+    rule_examples: dict[str, list[str]] = {r: [] for r in all_rules}
+    sev_counts = {"error": 0, "warning": 0}
+
+    valid_count = 0
+    warning_count = 0
+    invalid_count = 0
+    valid_bos = 0
+    invalid_bos = 0
+    audited = 0
+
+    for cid, events in candidates.items():
+        # Must have a CREATED event to audit
+        created = None
+        for e in events:
+            if e.get("event_type") == "SCCE_CANDIDATE_CREATED":
+                created = e
+                break
+        if created is None:
+            continue
+
+        audited += 1
+        violations: list[tuple] = []
+
+        # Extract components
+        tap_events = [e for e in events if e.get("event_type") == "TAP_PROGRESS_UPDATED"]
+        model_family = (created.get("payload") or {}).get("model_family", "unknown")
+        direction = _DIR_MAP.get(model_family)
+
+        # Get range data (range_id == candidate_id)
+        range_evts = ranges.get(cid, [])
+        range_created = None
+        for e in range_evts:
+            if e.get("event_type") == "RANGE_CREATED":
+                range_created = e
+                break
+
+        rh, rl = None, None
+        if range_created:
+            p = range_created.get("payload") or {}
+            rh = p.get("range_high")
+            rl = p.get("range_low")
+
+        # Get BOS outcome for this candidate
+        bos_event = bos_by_cid.get(cid)
+
+        # ── Run rules ──
+
+        # 1. Tap chronology
+        if len(tap_events) >= 2:
+            violations.extend(_check_tap_chronology(tap_events))
+
+        # 2. Range validity
+        violations.extend(_check_range_validity(range_created))
+
+        # 3. Tap-range consistency (needs direction + range)
+        if direction and rh is not None and rl is not None and tap_events:
+            violations.extend(
+                _check_tap_range_consistency(tap_events, rh, rl, direction)
+            )
+
+        # 4. BOS timing (needs BOS + taps)
+        if bos_event and tap_events:
+            last_tap_ts = max(
+                (e.get("ts", "") for e in tap_events), default=None
+            )
+            violations.extend(_check_bos_timing(bos_event.get("ts"), last_tap_ts))
+
+        # 5. BOS price direction (needs BOS + range + direction)
+        if bos_event and direction and rh is not None and rl is not None:
+            bp = (bos_event.get("payload") or {}).get("bos_price")
+            if isinstance(bp, (int, float)):
+                violations.extend(
+                    _check_bos_price_direction(bp, rh, rl, direction)
+                )
+
+        # 6. Phase progression
+        violations.extend(_check_phase_progression(events))
+
+        # ── Classify ──
+        has_error = any(v[1] == "error" for v in violations)
+        has_warning = any(v[1] == "warning" for v in violations)
+        has_bos = cid in bos_by_cid
+
+        if has_error:
+            invalid_count += 1
+            if has_bos:
+                invalid_bos += 1
+        elif has_warning:
+            warning_count += 1
+        else:
+            valid_count += 1
+            if has_bos:
+                valid_bos += 1
+
+        # ── Aggregate ──
+        for rule, sev, _msg in violations:
+            if rule in rule_counts:
+                rule_counts[rule] += 1
+                if len(rule_examples[rule]) < 5:
+                    rule_examples[rule].append(cid)
+            if sev in sev_counts:
+                sev_counts[sev] += 1
+
+    return {
+        "candidates_audited": audited,
+        "valid": valid_count,
+        "warning": warning_count,
+        "invalid": invalid_count,
+        "valid_pct": round(valid_count / audited * 100, 1) if audited > 0 else None,
+        "invalid_pct": round(invalid_count / audited * 100, 1) if audited > 0 else None,
+        "by_rule": rule_counts,
+        "by_severity": sev_counts,
+        "valid_with_bos_confirmed": valid_bos,
+        "invalid_with_bos_confirmed": invalid_bos,
+        "examples": {r: ids for r, ids in rule_examples.items() if ids},
+    }
+
+
 def _parse_ts(ts_str: str | None) -> datetime | None:
     """Parse ISO timestamp string to datetime. Returns None on failure."""
     if not ts_str or not isinstance(ts_str, str):

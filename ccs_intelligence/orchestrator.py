@@ -19,6 +19,7 @@ from ccs_intelligence.metrics import (
     compute_tap3_bos_latency,
     compute_po3_confluence,
     compute_top_range_correlation,
+    compute_structure_integrity,
 )
 
 
@@ -116,6 +117,7 @@ def _compute(
             "latency": compute_tap3_bos_latency(indices),
             "po3": compute_po3_confluence(indices),
             "top_range": compute_top_range_correlation(indices),
+            "integrity": compute_structure_integrity(indices),
         }
 
     return {
