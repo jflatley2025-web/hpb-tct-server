@@ -529,7 +529,11 @@ def compute_structure_integrity(indices: dict) -> dict:
     invalid_count = 0
     valid_bos = 0
     invalid_bos = 0
+    warning_bos = 0
     audited = 0
+    invalid_bos_details: list[dict] = []
+    # Time bucket accumulators: hour_key → {invalid, warning, total}
+    _hour_buckets: dict[str, dict] = {}
 
     for cid, events in candidates.items():
         # Must have a CREATED event to audit
@@ -608,12 +612,34 @@ def compute_structure_integrity(indices: dict) -> dict:
             invalid_count += 1
             if has_bos:
                 invalid_bos += 1
+                _cp = created.get("payload") or {}
+                invalid_bos_details.append({
+                    "candidate_id": cid,
+                    "violated_rules": [v[0] for v in violations if v[1] == "error"],
+                    "symbol": created.get("symbol", "unknown"),
+                    "timeframe": _cp.get("timeframe", ""),
+                    "ts": created.get("ts", ""),
+                })
         elif has_warning:
             warning_count += 1
+            if has_bos:
+                warning_bos += 1
         else:
             valid_count += 1
             if has_bos:
                 valid_bos += 1
+
+        # ── Time bucket ──
+        _created_ts = created.get("ts", "")
+        if len(_created_ts) >= 13:
+            _hk = _created_ts[:13]  # "2026-04-10T10"
+            if _hk not in _hour_buckets:
+                _hour_buckets[_hk] = {"invalid": 0, "warning": 0, "total": 0}
+            _hour_buckets[_hk]["total"] += 1
+            if has_error:
+                _hour_buckets[_hk]["invalid"] += 1
+            elif has_warning:
+                _hour_buckets[_hk]["warning"] += 1
 
         # ── Aggregate ──
         for rule, sev, _msg in violations:
@@ -624,6 +650,23 @@ def compute_structure_integrity(indices: dict) -> dict:
             if sev in sev_counts:
                 sev_counts[sev] += 1
 
+    # ── Rule percentage share ──
+    total_violations = sum(rule_counts.values())
+    rule_pct = {
+        r: round(c / total_violations * 100, 1) if total_violations > 0 else 0.0
+        for r, c in rule_counts.items()
+    }
+
+    # ── Time buckets ──
+    time_buckets = {}
+    for hk, b in sorted(_hour_buckets.items()):
+        t = b["total"]
+        time_buckets[hk] = {
+            "candidates": t,
+            "invalid_rate": round(b["invalid"] / t, 4) if t > 0 else 0.0,
+            "warning_rate": round(b["warning"] / t, 4) if t > 0 else 0.0,
+        }
+
     return {
         "candidates_audited": audited,
         "valid": valid_count,
@@ -633,8 +676,12 @@ def compute_structure_integrity(indices: dict) -> dict:
         "invalid_pct": round(invalid_count / audited * 100, 1) if audited > 0 else None,
         "by_rule": rule_counts,
         "by_severity": sev_counts,
+        "rule_pct": rule_pct,
         "valid_with_bos_confirmed": valid_bos,
         "invalid_with_bos_confirmed": invalid_bos,
+        "warning_with_bos_confirmed": warning_bos,
+        "invalid_bos_details": invalid_bos_details,
+        "time_buckets": time_buckets,
         "examples": {r: ids for r, ids in rule_examples.items() if ids},
     }
 
